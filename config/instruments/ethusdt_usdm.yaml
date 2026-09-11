@@ -1,0 +1,14 @@
+symbol: "ETHUSDT"
+venue: "binance_global"
+market_type: "USDM_PERP"
+base_asset: "ETH"
+quote_asset: "USDT"
+price_precision: 2
+quantity_precision: 2
+tick_size: 0.01
+step_size: 0.01
+min_notional: 5.0
+max_effective_leverage: 2.0
+base_unit_size_usd: 1000.0
+is_active: true
+primary_research: true

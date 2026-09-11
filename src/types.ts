@@ -1,0 +1,125 @@
+export type BasketState =
+  | 'NEW'
+  | 'ACTIVE'
+  | 'GRID_EXPANDING'
+  | 'PROFITABLE'
+  | 'RECOVERY'
+  | 'NO_NEW_GRID'
+  | 'DELEVERAGING'
+  | 'CLOSING'
+  | 'CLOSED'
+  | 'EMERGENCY_EXIT';
+
+export type RiskState =
+  | 'NORMAL'
+  | 'CAUTION'
+  | 'NO_NEW_GRID'
+  | 'RECOVERY_ONLY'
+  | 'DELEVERAGE'
+  | 'EMERGENCY';
+
+export type MarketRegimeType =
+  | 'R0_STRONG_MEAN_REVERSION'
+  | 'R1_RANGE'
+  | 'R2_WEAK_TREND'
+  | 'R3_STRONG_TREND'
+  | 'R4_BREAKOUT'
+  | 'R5_VOLATILITY_SHOCK'
+  | 'R6_CRISIS';
+
+export interface GridLevelItem {
+  level: number;
+  price: number;
+  size: number;
+  status: 'FILLED' | 'PENDING' | 'CANCELLED';
+  filled_at?: string;
+}
+
+export interface BasketItem {
+  basket_id: string;
+  venue: string;
+  instrument: string;
+  direction: 'LONG' | 'SHORT';
+  state: BasketState;
+  grid_depth: number;
+  max_grid_levels: number;
+  total_size: number;
+  average_entry: number;
+  current_mark_price: number;
+  unrealized_pnl: number;
+  trading_fees: number;
+  funding_pnl: number;
+  slippage_cost: number;
+  net_pnl: number;
+  created_at: string;
+  last_updated: string;
+  grid_levels: GridLevelItem[];
+}
+
+export interface InstrumentData {
+  symbol: string;
+  spot_price: number;
+  perp_price: number;
+  basis: number;
+  basis_pct: number;
+  basis_zscore: number;
+  funding_rate: number;
+  funding_annualized_pct: number;
+  atr_1h: number;
+  realized_vol_24h_pct: number;
+  open_interest_usd: number;
+  open_interest_delta_24h_pct: number;
+  regime: MarketRegimeType;
+  regime_probabilities: Record<MarketRegimeType, number>;
+  grid_safety_score: number;
+  grid_status: string;
+  expected_recovery_time_hrs: number;
+  expected_mae_pct: number;
+  prob_basket_profit: number;
+}
+
+export interface AccountData {
+  equity: number;
+  balance: number;
+  margin_utilization_pct: number;
+  effective_leverage: number;
+  free_margin: number;
+  used_margin: number;
+  daily_pnl: number;
+  daily_pnl_pct: number;
+  portfolio_drawdown_pct: number;
+  kill_switch_active: boolean;
+  risk_state: RiskState;
+  realized_daily_pnl?: number;
+}
+
+export interface RiskRuleItem {
+  rule: string;
+  current: string;
+  status: 'PASS' | 'WARN' | 'FAIL';
+}
+
+export interface BacktestMetrics {
+  name: string;
+  total_bars: number;
+  total_baskets: number;
+  win_baskets: number;
+  failed_baskets: number;
+  net_profit: number;
+  roi_pct: number;
+  max_equity_drawdown_pct: number;
+  max_balance_drawdown_pct: number;
+  equity_balance_divergence_pct: number;
+  ulcer_index: number;
+  expected_shortfall_99_pct: number;
+  time_under_water_hrs: number;
+  worst_basket_pnl: number;
+  longest_recovery_hrs: number;
+  max_grid_depth_reached: number;
+  grid_depth_p95: number;
+  emergency_exits: number;
+  total_funding_cost: number;
+  total_trading_fees: number;
+  slippage_cost: number;
+  profit_to_floating_dd_ratio: number;
+}
