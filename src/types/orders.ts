@@ -3,7 +3,7 @@ export type OrderSide = 'BUY' | 'SELL';
 export type OrderType = 'LIMIT_MAKER' | 'MARKET' | 'STOP_MARKET';
 export type OrderStatus = 'NEW' | 'PARTIALLY_FILLED' | 'FILLED' | 'CANCELED' | 'REJECTED';
 
-export interface DerivedOrder {
+export interface ExecutionOrder {
   id: string;
   clientOrderId: string;
   basketId: string;

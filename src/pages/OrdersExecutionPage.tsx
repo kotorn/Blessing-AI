@@ -9,24 +9,22 @@ import {
   Zap,
   CheckCircle2,
 } from 'lucide-react';
-import { AccountData, BasketItem, InstrumentData } from '../types';
-import { DerivedOrder } from '../types/orders';
+import { AccountData } from '../types';
+import { ExecutionOrder } from '../types/orders';
 import { OrdersTable } from '../components/OrdersTable';
 import { ExecutionTraceViewer } from '../components/ExecutionTraceViewer';
 import { ExecutionQualityCard } from '../components/ExecutionQualityCard';
 
 interface OrdersExecutionPageProps {
-  baskets: BasketItem[];
-  instruments: Record<string, InstrumentData>;
   account: AccountData;
+  orders: ExecutionOrder[];
 }
 
 export const OrdersExecutionPage: React.FC<OrdersExecutionPageProps> = ({
-  baskets,
-  instruments,
   account,
+  orders,
 }) => {
-  const [selectedOrder, setSelectedOrder] = useState<DerivedOrder | null>(null);
+  const [selectedOrder, setSelectedOrder] = useState<ExecutionOrder | null>(null);
 
   return (
     <div className="space-y-6">
@@ -51,7 +49,7 @@ export const OrdersExecutionPage: React.FC<OrdersExecutionPageProps> = ({
 
       {/* Execution Quality & Fail-Closed Safeguards */}
       <ExecutionQualityCard
-        baskets={baskets}
+        orders={orders}
         riskState={account.risk_state}
         killSwitchActive={account.kill_switch_active}
       />
@@ -64,8 +62,7 @@ export const OrdersExecutionPage: React.FC<OrdersExecutionPageProps> = ({
 
       {/* Orders & Fills Table (UI-06A) */}
       <OrdersTable
-        baskets={baskets}
-        instruments={instruments}
+        orders={orders}
         selectedOrderId={selectedOrder?.id || null}
         onSelectOrder={(ord) => setSelectedOrder(ord)}
       />

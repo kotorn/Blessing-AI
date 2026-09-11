@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Layers, ArrowUpRight, ArrowDownRight, RefreshCw, XCircle, Shield, PlusCircle, FileSpreadsheet, ExternalLink } from 'lucide-react';
 import { BasketItem, BasketState } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { ConfirmationModal } from './ConfirmationModal';
 
 interface BasketManagerProps {
   baskets: BasketItem[];
@@ -21,6 +22,13 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
   const { user, signIn, exportToGoogleSheet } = useAuth();
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [lastExportUrl, setLastExportUrl] = useState<string | null>(null);
+
+  // Safety Confirmation State
+  const [pendingAction, setPendingAction] = useState<{
+    type: 'EXPAND' | 'RECOVERY' | 'CLOSE';
+    basketId: string;
+    instrument: string;
+  } | null>(null);
 
   const handleQuickExport = async () => {
     if (!user) {
@@ -213,7 +221,7 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
               <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-zinc-800/80">
                 {basket.state === 'ACTIVE' && basket.grid_depth < basket.max_grid_levels && (
                   <button
-                    onClick={() => onExpandGrid(basket.basket_id)}
+                    onClick={() => setPendingAction({ type: 'EXPAND', basketId: basket.basket_id, instrument: basket.instrument })}
                     disabled={isActionLoading}
                     className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition"
                   >
@@ -224,7 +232,7 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
 
                 {basket.state !== 'RECOVERY' && basket.state !== 'CLOSED' && (
                   <button
-                    onClick={() => onEnterRecovery(basket.basket_id)}
+                    onClick={() => setPendingAction({ type: 'RECOVERY', basketId: basket.basket_id, instrument: basket.instrument })}
                     disabled={isActionLoading}
                     className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition"
                   >
@@ -234,7 +242,7 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
                 )}
 
                 <button
-                  onClick={() => onCloseBasket(basket.basket_id)}
+                  onClick={() => setPendingAction({ type: 'CLOSE', basketId: basket.basket_id, instrument: basket.instrument })}
                   disabled={isActionLoading}
                   className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 transition"
                 >
@@ -246,6 +254,67 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
           );
         })}
       </div>
+
+      <ConfirmationModal
+        isOpen={pendingAction?.type === 'CLOSE'}
+        title="Close Basket (Market Order)"
+        message={
+          <>
+            You are about to issue a <strong>Market Order</strong> to flatten basket <span className="font-mono text-zinc-200">{pendingAction?.basketId}</span> for <span className="font-bold">{pendingAction?.instrument}</span>. This will realize all PnL and close open grid levels.
+          </>
+        }
+        confirmText="Execute Market Close"
+        isDestructive={true}
+        requireTypedConfirmation="CLOSE"
+        isLoading={isActionLoading}
+        onConfirm={() => {
+          if (pendingAction) {
+            onCloseBasket(pendingAction.basketId);
+            setPendingAction(null);
+          }
+        }}
+        onCancel={() => setPendingAction(null)}
+      />
+
+      <ConfirmationModal
+        isOpen={pendingAction?.type === 'RECOVERY'}
+        title="Trigger Soft Recovery"
+        message={
+          <>
+            You are moving <span className="font-bold">{pendingAction?.instrument}</span> to RECOVERY state. New grid entries will be paused, and the Exposure Recovery Engine will manage deleveraging.
+          </>
+        }
+        confirmText="Engage Recovery"
+        isDestructive={false}
+        isLoading={isActionLoading}
+        onConfirm={() => {
+          if (pendingAction) {
+            onEnterRecovery(pendingAction.basketId);
+            setPendingAction(null);
+          }
+        }}
+        onCancel={() => setPendingAction(null)}
+      />
+
+      <ConfirmationModal
+        isOpen={pendingAction?.type === 'EXPAND'}
+        title="Expand Grid Progression"
+        message={
+          <>
+            Manually overriding the Portfolio Risk Governor to force the next grid progression step for <span className="font-bold">{pendingAction?.instrument}</span>. This increases gross exposure.
+          </>
+        }
+        confirmText="Expand Grid"
+        isDestructive={false}
+        isLoading={isActionLoading}
+        onConfirm={() => {
+          if (pendingAction) {
+            onExpandGrid(pendingAction.basketId);
+            setPendingAction(null);
+          }
+        }}
+        onCancel={() => setPendingAction(null)}
+      />
     </div>
   );
 };

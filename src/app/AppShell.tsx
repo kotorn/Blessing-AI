@@ -3,6 +3,7 @@ import { AppRoute, SystemMode } from '../contracts/system';
 import { Sidebar } from './Sidebar';
 import { StatusBar } from './StatusBar';
 import { CopilotDrawer } from './CopilotDrawer';
+import { AlertsDrawer } from './AlertsDrawer';
 import { AppRoutes } from './Routes';
 import { useQuantState } from '../hooks/useQuantState';
 import { useAuth } from '../context/AuthContext';
@@ -10,17 +11,20 @@ import { BinanceProfileModal } from '../components/BinanceProfileModal';
 import { BalanceAllocationModal } from '../components/BalanceAllocationModal';
 import { GoogleCloudCenterModal } from '../components/GoogleCloudCenterModal';
 import { GoogleWorkspaceModal } from '../components/GoogleWorkspaceModal';
+import { StartTradingWizard } from '../components/StartTradingWizard';
 import { binanceApi, BinanceKeyStatus } from '../api/binance';
 import { AlertTriangle, Power } from 'lucide-react';
 
 export const AppShell: React.FC = () => {
-  const { cloudAudit } = useAuth();
+  const { cloudAudit, firestoreConnected } = useAuth();
 
   // Central Quant State Management
   const {
     account,
     baskets,
     instruments,
+    orders,
+    alerts,
     riskRules,
     correlationBtcEth,
     cryptoBetaExposurePct,
@@ -48,6 +52,8 @@ export const AppShell: React.FC = () => {
   // Layout states
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [copilotOpen, setCopilotOpen] = useState<boolean>(false);
+  const [alertsOpen, setAlertsOpen] = useState<boolean>(false);
+  const [dismissedAlerts, setDismissedAlerts] = useState<Set<string>>(new Set());
   const [pauseNewRisk, setPauseNewRisk] = useState<boolean>(false);
 
   // Modals
@@ -55,6 +61,7 @@ export const AppShell: React.FC = () => {
   const [showBalanceModal, setShowBalanceModal] = useState<boolean>(false);
   const [showGoogleCloudModal, setShowGoogleCloudModal] = useState<boolean>(false);
   const [showWorkspaceModal, setShowWorkspaceModal] = useState<boolean>(false);
+  const [showStartTradingWizard, setShowStartTradingWizard] = useState<boolean>(false);
 
   // Binance connection telemetry
   const [binanceStatus, setBinanceStatus] = useState<BinanceKeyStatus | null>(null);
@@ -133,6 +140,7 @@ export const AppShell: React.FC = () => {
           openBasketsCount={baskets.length}
           pauseNewRiskActive={pauseNewRisk}
           onTogglePauseNewRisk={() => setPauseNewRisk(!pauseNewRisk)}
+          onOpenStartTradingWizard={() => setShowStartTradingWizard(true)}
         />
 
         {/* Emergency Kill Switch Persistent Warning Banner */}
@@ -162,6 +170,7 @@ export const AppShell: React.FC = () => {
               onAccountUpdated={updateAccount}
               instruments={instruments}
               baskets={baskets}
+              orders={orders}
               riskRules={riskRules}
               correlationBtcEth={correlationBtcEth}
               cryptoBetaExposurePct={cryptoBetaExposurePct}
@@ -181,6 +190,15 @@ export const AppShell: React.FC = () => {
       </div>
 
       {/* 3. Global AI Quant Copilot Drawer */}
+      {/* 4. Global Alerts Drawer */}
+      <AlertsDrawer
+        isOpen={alertsOpen}
+        onClose={() => setAlertsOpen(false)}
+        alerts={alerts?.filter(a => !dismissedAlerts.has(a.id)) || []}
+        onDismiss={(id) => setDismissedAlerts(prev => new Set(prev).add(id))}
+        onClearAll={() => setDismissedAlerts(new Set(alerts?.map(a => a.id) || []))}
+      />
+
       <CopilotDrawer
         isOpen={copilotOpen}
         onClose={() => setCopilotOpen(false)}
@@ -219,6 +237,20 @@ export const AppShell: React.FC = () => {
         baskets={baskets}
         portfolioState={account}
       />
+
+      {showStartTradingWizard && (
+        <StartTradingWizard
+          binanceStatus={binanceStatus}
+          firestoreConnected={firestoreConnected}
+          onComplete={() => {
+            setShowStartTradingWizard(false);
+            if (account.kill_switch_active) {
+              toggleKillSwitch();
+            }
+          }}
+          onCancel={() => setShowStartTradingWizard(false)}
+        />
+      )}
     </div>
   );
 };

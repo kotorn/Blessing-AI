@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { GoogleDriveFile, SheetExportResult } from '../lib/workspace';
+import { ConfirmationModal } from './ConfirmationModal';
 
 interface GoogleWorkspaceModalProps {
   isOpen: boolean;
@@ -35,7 +36,7 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
     signIn,
     exportToGoogleSheet,
     fetchDriveFiles,
-    deleteDriveFileWithConfirm,
+    deleteDriveFile,
   } = useAuth();
 
   const [activeTab, setActiveTab] = useState<'export' | 'drive'>('export');
@@ -46,6 +47,9 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
   const [driveFiles, setDriveFiles] = useState<GoogleDriveFile[]>([]);
   const [isLoadingFiles, setIsLoadingFiles] = useState<boolean>(false);
   const [fileError, setFileError] = useState<string | null>(null);
+
+  const [fileToDelete, setFileToDelete] = useState<GoogleDriveFile | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Load drive files whenever modal opens or tab switches to 'drive'
   useEffect(() => {
@@ -61,7 +65,7 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
         onClose();
       }
     };
-    if (isOpen) {
+    if (isOpen && !fileToDelete) {
       window.addEventListener('keydown', handleKeyDown);
     }
     return () => window.removeEventListener('keydown', handleKeyDown);
@@ -100,14 +104,19 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
     }
   };
 
-  const handleDeleteFile = async (file: GoogleDriveFile) => {
+  const confirmDeleteFile = async () => {
+    if (!fileToDelete) return;
+    setIsDeleting(true);
     try {
-      const success = await deleteDriveFileWithConfirm(file.id, file.name);
+      const success = await deleteDriveFile(fileToDelete.id, fileToDelete.name);
       if (success) {
-        setDriveFiles((prev) => prev.filter((f) => f.id !== file.id));
+        setDriveFiles((prev) => prev.filter((f) => f.id !== fileToDelete.id));
       }
     } catch (err: any) {
       alert(`Error deleting file: ${err.message}`);
+    } finally {
+      setIsDeleting(false);
+      setFileToDelete(null);
     }
   };
 
@@ -371,7 +380,7 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
                         )}
                         <button
                           type="button"
-                          onClick={() => handleDeleteFile(file)}
+                          onClick={() => setFileToDelete(file)}
                           className="p-1.5 text-zinc-400 hover:text-rose-400 rounded hover:bg-rose-950/40 transition-colors"
                           title="Delete file from Google Drive"
                         >
@@ -400,6 +409,21 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
           </button>
         </div>
       </div>
+
+      <ConfirmationModal
+        isOpen={Boolean(fileToDelete)}
+        title="Delete Google Drive File"
+        message={
+          <>
+            Are you sure you want to permanently delete <strong>{fileToDelete?.name}</strong>? This will remove the file from your Google Drive and cannot be undone.
+          </>
+        }
+        confirmText="Delete File"
+        isDestructive={true}
+        isLoading={isDeleting}
+        onConfirm={confirmDeleteFile}
+        onCancel={() => setFileToDelete(null)}
+      />
     </div>
   );
 };

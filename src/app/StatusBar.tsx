@@ -19,8 +19,11 @@ import { RiskState } from '../types';
 import { SystemMode } from '../contracts/system';
 import { useAuth } from '../context/AuthContext';
 import { BinanceKeyStatus } from '../api/binance';
+import { ConfirmationModal } from '../components/ConfirmationModal';
 
 interface StatusBarProps {
+  activeAlertCount?: number;
+  onOpenAlerts?: () => void;
   riskState: RiskState;
   killSwitchActive: boolean;
   onToggleKillSwitch: () => void;
@@ -34,9 +37,12 @@ interface StatusBarProps {
   openBasketsCount?: number;
   pauseNewRiskActive?: boolean;
   onTogglePauseNewRisk?: () => void;
+  onOpenStartTradingWizard?: () => void;
 }
 
 export const StatusBar: React.FC<StatusBarProps> = ({
+  activeAlertCount = 0,
+  onOpenAlerts,
   riskState,
   killSwitchActive,
   onToggleKillSwitch,
@@ -50,17 +56,16 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   openBasketsCount = 0,
   pauseNewRiskActive = false,
   onTogglePauseNewRisk,
+  onOpenStartTradingWizard,
 }) => {
   const { user, signIn, signOut, firestoreConnected } = useAuth();
   const [showKillSwitchConfirm, setShowKillSwitchConfirm] = useState(false);
-  const [typedConfirm, setTypedConfirm] = useState('');
 
   const isEmergency = riskState === 'EMERGENCY' || killSwitchActive;
 
   const handleConfirmKillSwitch = () => {
     onToggleKillSwitch();
     setShowKillSwitchConfirm(false);
-    setTypedConfirm('');
   };
 
   const getModeBadgeClass = () => {
@@ -179,6 +184,19 @@ export const StatusBar: React.FC<StatusBarProps> = ({
             </button>
           )}
 
+          {/* Start Trading Wizard Trigger */}
+          {onOpenStartTradingWizard && (
+            <button
+              type="button"
+              onClick={onOpenStartTradingWizard}
+              className="flex items-center space-x-1.5 px-3 py-1 rounded text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-all cursor-pointer shadow-lg shadow-indigo-900/20"
+              title="Launch Start Trading Wizard"
+            >
+              <Power className="w-3.5 h-3.5" />
+              <span className="font-mono text-[11px]">START TRADING</span>
+            </button>
+          )}
+
           {/* Level 3 Safety: Kill Switch */}
           <button
             type="button"
@@ -201,6 +219,21 @@ export const StatusBar: React.FC<StatusBarProps> = ({
               {killSwitchActive ? 'KILL ENGAGED' : 'KILL SWITCH'}
             </span>
           </button>
+
+                    {/* Alerts Bell */}
+          {onOpenAlerts && (
+            <button
+              type="button"
+              onClick={onOpenAlerts}
+              className="relative p-1.5 text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+              title="View System Alerts"
+            >
+              <Bell className="w-4 h-4" />
+              {activeAlertCount > 0 && (
+                <span className="absolute top-0 right-0 w-2 h-2 rounded-full bg-rose-500 animate-pulse border border-zinc-900" />
+              )}
+            </button>
+          )}
 
           {/* Firestore Cloud Sync Badge */}
           <div
@@ -254,67 +287,26 @@ export const StatusBar: React.FC<StatusBarProps> = ({
       </header>
 
       {/* Kill Switch Safety Confirmation Modal */}
-      {showKillSwitchConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
-          <div className="bg-zinc-950 border border-rose-800/80 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
-            <div className="flex items-center space-x-3 text-rose-400">
-              <div className="p-2 rounded-xl bg-rose-950 border border-rose-800/80">
-                <AlertTriangle className="w-6 h-6" />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-zinc-100">CONFIRM EMERGENCY KILL SWITCH</h3>
-                <p className="text-xs text-rose-400">Level 3 Critical Safety Action</p>
-              </div>
-            </div>
-
-            <div className="text-xs text-zinc-300 space-y-2 bg-rose-950/20 border border-rose-900/40 p-3 rounded-lg">
-              <p>Triggering the Kill Switch will immediately:</p>
-              <ul className="list-disc pl-4 space-y-1 text-zinc-400">
-                <li>Halt all active strategy order generation loops</li>
-                <li>Request cancellation of all open limit and grid orders on Binance</li>
-                <li>Transition portfolio risk state to <strong className="text-rose-300">EMERGENCY</strong></li>
-                <li>{openBasketsCount} active basket(s) will be locked from grid expansion</li>
-              </ul>
-            </div>
-
-            {systemMode === 'LIVE' && (
-              <div className="space-y-1">
-                <label className="text-[11px] text-zinc-400">
-                  Type <strong className="text-rose-400 font-mono">KILL</strong> to confirm:
-                </label>
-                <input
-                  type="text"
-                  value={typedConfirm}
-                  onChange={(e) => setTypedConfirm(e.target.value)}
-                  placeholder="KILL"
-                  className="w-full px-3 py-1.5 bg-zinc-900 border border-zinc-700 rounded text-xs font-mono text-zinc-100 uppercase focus:border-rose-500 focus:outline-none"
-                />
-              </div>
-            )}
-
-            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-zinc-800">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowKillSwitchConfirm(false);
-                  setTypedConfirm('');
-                }}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmKillSwitch}
-                disabled={systemMode === 'LIVE' && typedConfirm !== 'KILL'}
-                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-50 transition-colors cursor-pointer"
-              >
-                ENGAGE KILL SWITCH
-              </button>
-            </div>
+      <ConfirmationModal
+        isOpen={showKillSwitchConfirm}
+        title="CONFIRM EMERGENCY KILL SWITCH"
+        message={
+          <div className="space-y-3">
+            <p>Triggering the Kill Switch will immediately:</p>
+            <ul className="list-disc pl-4 space-y-1 text-zinc-400">
+              <li>Halt all active strategy order generation loops</li>
+              <li>Request cancellation of all open limit and grid orders on Binance</li>
+              <li>Transition portfolio risk state to <strong className="text-rose-300">EMERGENCY</strong></li>
+              <li>{openBasketsCount} active basket(s) will be locked from grid expansion</li>
+            </ul>
           </div>
-        </div>
-      )}
+        }
+        confirmText="ENGAGE KILL SWITCH"
+        isDestructive={true}
+        requireTypedConfirmation={systemMode === 'LIVE' ? 'KILL' : undefined}
+        onConfirm={handleConfirmKillSwitch}
+        onCancel={() => setShowKillSwitchConfirm(false)}
+      />
     </>
   );
 };

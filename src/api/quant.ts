@@ -1,10 +1,13 @@
 import { apiClient } from './client';
-import { AccountData, BasketItem, InstrumentData, RiskRuleItem } from '../types';
+import { AccountData, BasketItem, InstrumentData, RiskRuleItem, SystemAlert } from '../types';
+import { ExecutionOrder } from '../types/orders';
 
 export interface QuantStateResponse {
   account: AccountData;
   baskets: BasketItem[];
   instruments: Record<string, InstrumentData>;
+  orders?: ExecutionOrder[];
+  alerts?: SystemAlert[];
   risk_rules?: RiskRuleItem[];
   correlation_btc_eth?: number;
   crypto_beta_exposure_pct?: number;

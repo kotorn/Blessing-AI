@@ -185,6 +185,145 @@ let quantEngineState = {
       ],
     },
   ] as SimulatedBasket[],
+  orders: [
+    {
+      id: 'ORD-BTC-001001',
+      clientOrderId: 'B-SYS-9122',
+      basketId: 'BSK-BTC-20260910-001',
+      venue: 'binance_usdm',
+      symbol: 'BTCUSDT',
+      strategy: 'Structural Grid',
+      side: 'BUY',
+      type: 'LIMIT_MAKER',
+      price: 92200.0,
+      size: 0.40,
+      valueUsd: 36880.0,
+      status: 'FILLED',
+      filledAt: '2026-09-10T08:15:00Z',
+      createdAt: '2026-09-10T08:14:58Z',
+      trace: {
+        strategyIntent: 'Layer 1 Base Grid Entry',
+        opportunityScore: 78.5,
+        metaBudgetFactor: 1.0,
+        riskGovernorCheck: 'PASS',
+        governorRule: 'Leverage within bounds (1.2x)',
+        executionRule: 'Post-Only (Maker Fee)',
+        feeTier: 'VIP-4 Maker',
+        slippageBps: 0,
+        sourceClassification: 'EXISTING'
+      }
+    },
+    {
+      id: 'ORD-BTC-001002',
+      clientOrderId: 'B-SYS-9123',
+      basketId: 'BSK-BTC-20260910-001',
+      venue: 'binance_usdm',
+      symbol: 'BTCUSDT',
+      strategy: 'Structural Grid',
+      side: 'BUY',
+      type: 'LIMIT_MAKER',
+      price: 91440.0,
+      size: 0.44,
+      valueUsd: 40233.6,
+      status: 'FILLED',
+      filledAt: '2026-09-10T09:40:00Z',
+      createdAt: '2026-09-10T09:35:12Z',
+      trace: {
+        strategyIntent: 'Layer 2 Grid Expansion',
+        opportunityScore: 74.2,
+        metaBudgetFactor: 1.1,
+        riskGovernorCheck: 'PASS',
+        governorRule: 'Drawdown limit OK',
+        executionRule: 'Post-Only (Maker Fee)',
+        feeTier: 'VIP-4 Maker',
+        slippageBps: 0,
+        sourceClassification: 'EXISTING'
+      }
+    },
+    {
+      id: 'ORD-BTC-001003',
+      clientOrderId: 'B-SYS-9124',
+      basketId: 'BSK-BTC-20260910-001',
+      venue: 'binance_usdm',
+      symbol: 'BTCUSDT',
+      strategy: 'Structural Grid',
+      side: 'BUY',
+      type: 'LIMIT_MAKER',
+      price: 90450.0,
+      size: 0.484,
+      valueUsd: 43777.8,
+      status: 'PENDING',
+      createdAt: '2026-09-10T09:40:05Z',
+      trace: {
+        strategyIntent: 'Layer 3 Grid Expansion',
+        opportunityScore: 68.9,
+        metaBudgetFactor: 1.1,
+        riskGovernorCheck: 'WARN',
+        governorRule: 'Margin utilization > 15%',
+        executionRule: 'Post-Only',
+        feeTier: 'VIP-4 Maker',
+        slippageBps: 0,
+        sourceClassification: 'EXISTING'
+      }
+    },
+    {
+      id: 'ORD-ETH-002001',
+      clientOrderId: 'E-SYS-5542',
+      basketId: 'BSK-ETH-20260910-002',
+      venue: 'binance_usdm',
+      symbol: 'ETHUSDT',
+      strategy: 'Trend / Breakout',
+      side: 'BUY',
+      type: 'MARKET',
+      price: 3315.0,
+      size: 12.0,
+      valueUsd: 39780.0,
+      status: 'FILLED',
+      filledAt: '2026-09-10T07:30:00Z',
+      createdAt: '2026-09-10T07:29:59Z',
+      trace: {
+        strategyIntent: 'Range Breakout Momentum Entry',
+        opportunityScore: 88.5,
+        metaBudgetFactor: 1.5,
+        riskGovernorCheck: 'PASS',
+        governorRule: 'Momentum confirmation ok',
+        executionRule: 'Taker (Aggressive)',
+        feeTier: 'VIP-4 Taker',
+        slippageBps: 1.2,
+        sourceClassification: 'EXISTING'
+      }
+    }
+  ],
+
+
+  alerts: [
+    {
+      id: 'ALT-1001',
+      type: 'SHOCK',
+      severity: 'WARNING',
+      title: 'Volatility Shock Detected',
+      message: 'BTCUSDT realized volatility spiked > 85th percentile (last 15m). Grid safety score reduced.',
+      timestamp: new Date(Date.now() - 1000 * 60 * 12).toISOString(),
+      symbol: 'BTCUSDT'
+    },
+    {
+      id: 'ALT-1002',
+      type: 'FUNDING',
+      severity: 'INFO',
+      title: 'Elevated Funding Rate',
+      message: 'ETHUSDT funding rate exceeded 0.03% per 8h. Bias shifted to Short carrying yield.',
+      timestamp: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
+      symbol: 'ETHUSDT'
+    },
+    {
+      id: 'ALT-1003',
+      type: 'RISK',
+      severity: 'CRITICAL',
+      title: 'Margin Utilization Alert',
+      message: 'System total margin utilization exceeded 30% stress limit momentarily during flash dip. Portfolio risk manager blocked new Grid expansions.',
+      timestamp: new Date(Date.now() - 1000 * 60 * 120).toISOString()
+    }
+  ],
   correlations: {
     btc_eth_rolling_corr: 0.84,
     aggregate_directional_exposure: 'LONG',

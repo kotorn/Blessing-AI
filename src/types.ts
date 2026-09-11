@@ -165,3 +165,13 @@ export interface BacktestMetrics {
   slippage_cost: number;
   profit_to_floating_dd_ratio: number;
 }
+
+export interface SystemAlert {
+  id: string;
+  type: 'SHOCK' | 'FUNDING' | 'MARGIN' | 'SYSTEM' | 'RISK';
+  severity: 'INFO' | 'WARNING' | 'CRITICAL';
+  title: string;
+  message: string;
+  timestamp: string;
+  symbol?: string;
+}

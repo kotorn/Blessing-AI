@@ -15,6 +15,8 @@ import { SettingsPage } from '../pages/SettingsPage';
 import { AccountData, BasketItem, InstrumentData, RiskRuleItem } from '../types';
 import { BinanceKeyStatus } from '../api/binance';
 
+import { ExecutionOrder } from '../types/orders';
+
 interface AppRoutesProps {
   currentRoute: AppRoute;
   onNavigate: (route: AppRoute) => void;
@@ -22,6 +24,7 @@ interface AppRoutesProps {
   onAccountUpdated: (account: AccountData) => void;
   instruments: Record<string, InstrumentData>;
   baskets: BasketItem[];
+  orders: ExecutionOrder[];
   riskRules: RiskRuleItem[];
   correlationBtcEth: number;
   cryptoBetaExposurePct: number;
@@ -44,6 +47,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
   onAccountUpdated,
   instruments,
   baskets,
+  orders,
   riskRules,
   correlationBtcEth,
   cryptoBetaExposurePct,
@@ -94,9 +98,8 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
     case '/orders':
       return (
         <OrdersExecutionPage
-          baskets={baskets}
-          instruments={instruments}
           account={account}
+          orders={orders}
         />
       );
 

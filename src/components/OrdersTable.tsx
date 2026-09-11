@@ -11,19 +11,17 @@ import {
   TrendingUp,
   ShieldAlert,
 } from 'lucide-react';
-import { BasketItem, InstrumentData } from '../types';
-import { DerivedOrder, OrderStatus, OrderVenue } from '../types/orders';
+
+import { ExecutionOrder, OrderStatus, OrderVenue } from '../types/orders';
 
 interface OrdersTableProps {
-  baskets: BasketItem[];
-  instruments: Record<string, InstrumentData>;
+  orders: ExecutionOrder[];
   selectedOrderId: string | null;
-  onSelectOrder: (order: DerivedOrder) => void;
+  onSelectOrder: (order: ExecutionOrder) => void;
 }
 
 export const OrdersTable: React.FC<OrdersTableProps> = ({
-  baskets,
-  instruments,
+  orders = [],
   selectedOrderId,
   onSelectOrder,
 }) => {
@@ -33,89 +31,7 @@ export const OrdersTable: React.FC<OrdersTableProps> = ({
   const [strategyFilter, setStrategyFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
-  // Extract real exchange orders from active baskets authoritative model
-  const orders: DerivedOrder[] = useMemo(() => {
-    const list: DerivedOrder[] = [];
-
-    baskets.forEach((basket) => {
-      const isBtc = basket.instrument.includes('BTC');
-      const oppScore = isBtc
-        ? instruments['BTCUSDT']?.grid_safety_score || 78.5
-        : instruments['ETHUSDT']?.grid_safety_score || 68.2;
-
-      // 1. Grid level orders
-      if (Array.isArray(basket.grid_levels)) {
-        basket.grid_levels.forEach((lvl) => {
-          const isFilled = lvl.status === 'FILLED';
-          const orderId = `ORD-${basket.instrument.slice(0, 3)}-${basket.basket_id.slice(-6)}-L${lvl.level}`;
-          const valUsd = lvl.price * lvl.size;
-
-          list.push({
-            id: orderId,
-            clientOrderId: orderId,
-            basketId: basket.basket_id,
-            venue: (basket.venue as OrderVenue) || 'binance_usdm',
-            symbol: basket.instrument,
-            strategy: 'Structural Grid',
-            side: basket.direction === 'LONG' ? 'BUY' : 'SELL',
-            type: 'LIMIT_MAKER',
-            price: lvl.price,
-            size: lvl.size,
-            valueUsd: valUsd,
-            status: isFilled ? 'FILLED' : 'NEW',
-            filledAt: lvl.filled_at,
-            createdAt: basket.created_at,
-            trace: {
-              strategyIntent: `Mean-reversion geometric level L${lvl.level} grid tranche`,
-              opportunityScore: oppScore,
-              metaBudgetFactor: 1.0,
-              riskGovernorCheck: 'PASS',
-              governorRule: 'Leverage <= 2.0x & Margin < 30%',
-              executionRule: 'Strict Passive Limit Maker (Post-Only)',
-              feeTier: 'Maker -0.02%',
-              slippageBps: 0,
-              sourceClassification: 'EXISTING',
-            },
-          });
-        });
-      }
-
-      // 2. Recovery hedge order (if active)
-      if (basket.recovery_hedge) {
-        const h = basket.recovery_hedge;
-        const hedgeOrderId = `ORD-REC-${basket.instrument.slice(0, 3)}-${basket.basket_id.slice(-6)}`;
-        list.push({
-          id: hedgeOrderId,
-          clientOrderId: hedgeOrderId,
-          basketId: basket.basket_id,
-          venue: (basket.venue as OrderVenue) || 'binance_usdm',
-          symbol: basket.instrument,
-          strategy: 'Exposure Recovery',
-          side: h.direction === 'LONG' ? 'BUY' : 'SELL',
-          type: 'MARKET',
-          price: h.entry_price,
-          size: h.hedge_size,
-          valueUsd: h.entry_price * h.hedge_size,
-          status: 'FILLED',
-          filledAt: h.activated_at,
-          createdAt: h.activated_at,
-          trace: {
-            strategyIntent: 'Dynamic counter-trend recovery hedge to cap adverse delta',
-            opportunityScore: oppScore - 10,
-            metaBudgetFactor: 0.5,
-            riskGovernorCheck: 'PASS',
-            governorRule: 'Emergency hedge exception approved',
-            executionRule: 'Aggressive Taker Recovery Market Order',
-            feeTier: 'Taker 0.05%',
-            slippageBps: 2.1,
-            sourceClassification: 'EXISTING',
-          },
-        });
-      }
-    });
-
-    return list;
-  }, [baskets, instruments]);
+  
 
   // Apply filters
   const filteredOrders = useMemo(() => {

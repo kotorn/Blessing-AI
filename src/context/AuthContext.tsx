@@ -11,7 +11,7 @@ import {
   OperationType,
   getGoogleAccessToken,
 } from '../lib/firebase';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, setDoc, query, collection, orderBy, limit, getDocs } from 'firebase/firestore';
 import {
   exportBasketsToGoogleSheet,
   listGoogleDriveFiles,
@@ -37,7 +37,8 @@ interface AuthContextType {
   }) => Promise<void>;
   exportToGoogleSheet: (baskets: any[], portfolio: any) => Promise<SheetExportResult>;
   fetchDriveFiles: () => Promise<GoogleDriveFile[]>;
-  deleteDriveFileWithConfirm: (fileId: string, fileName: string) => Promise<boolean>;
+  deleteDriveFile: (fileId: string, fileName: string) => Promise<boolean>;
+  fetchAuditLogs: () => Promise<any[]>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -107,17 +108,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return await listGoogleDriveFiles(currentToken);
   };
 
-  const deleteDriveFileWithConfirm = async (fileId: string, fileName: string): Promise<boolean> => {
+  const deleteDriveFileAction = async (fileId: string, fileName: string): Promise<boolean> => {
     const currentToken = getGoogleAccessToken() || tokenState;
     if (!currentToken) {
       throw new Error('Google Workspace authentication required.');
-    }
-    // Strict mandatory explicit user confirmation for destructive operation
-    const confirmed = window.confirm(
-      `Are you sure you want to permanently delete "${fileName}" from Google Drive? This action cannot be undone.`
-    );
-    if (!confirmed) {
-      return false;
     }
     const ok = await deleteDriveFile(currentToken, fileId);
     if (ok) {
@@ -180,6 +174,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const fetchAuditLogs = async () => {
+    if (!user) return [];
+    try {
+      const q = query(
+        collection(db, 'users', user.uid, 'audit_logs'),
+        orderBy('timestamp', 'desc'),
+        limit(100)
+      );
+      const snapshot = await getDocs(q);
+      return snapshot.docs.map(doc => doc.data());
+    } catch (err) {
+      console.warn('Failed to fetch audit logs:', err);
+      return [];
+    }
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -194,7 +204,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         saveRiskSettings,
         exportToGoogleSheet,
         fetchDriveFiles,
-        deleteDriveFileWithConfirm,
+        deleteDriveFile: deleteDriveFileAction,
+        fetchAuditLogs,
       }}
     >
       {children}

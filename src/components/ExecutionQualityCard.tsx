@@ -9,36 +9,31 @@ import {
   Layers,
   Info,
 } from 'lucide-react';
-import { BasketItem, RiskState } from '../types';
+import { RiskState } from '../types';
+import { ExecutionOrder } from '../types/orders';
 
 interface ExecutionQualityCardProps {
-  baskets: BasketItem[];
+  orders: ExecutionOrder[];
   riskState: RiskState;
   killSwitchActive: boolean;
 }
 
 export const ExecutionQualityCard: React.FC<ExecutionQualityCardProps> = ({
-  baskets,
+  orders = [],
   riskState,
   killSwitchActive,
 }) => {
-  // Compute maker vs taker counts from actual basket levels
-  let makerFills = 0;
-  let takerFills = 0;
-
-  baskets.forEach((b) => {
-    b.grid_levels?.forEach((lvl) => {
-      if (lvl.status === 'FILLED') {
-        makerFills += 1;
-      }
-    });
-    if (b.recovery_hedge) {
-      takerFills += 1;
-    }
-  });
-
+    // Compute maker vs taker counts from standalone orders
+  const makerFills = orders.filter((o) => o.type === 'LIMIT_MAKER' && o.status === 'FILLED').length;
+  const takerFills = orders.filter((o) => o.type !== 'LIMIT_MAKER' && o.status === 'FILLED').length;
   const totalFills = makerFills + takerFills;
   const makerRatio = totalFills > 0 ? (makerFills / totalFills) * 100 : 100;
+
+  // Calculate taker slippage
+  const takerOrders = orders.filter((o) => o.type !== 'LIMIT_MAKER' && o.status === 'FILLED');
+  const avgTakerSlippage = takerOrders.length > 0 
+    ? takerOrders.reduce((sum, o) => sum + (o.trace?.slippageBps || 0), 0) / takerOrders.length 
+    : 0;
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-xl shadow-black/20">
@@ -96,7 +91,7 @@ export const ExecutionQualityCard: React.FC<ExecutionQualityCardProps> = ({
             0.0 bps (Maker)
           </div>
           <div className="text-[10px] text-zinc-500">
-            Taker hedge slippage: 2.1 bps (Normal)
+            Taker hedge slippage: {avgTakerSlippage.toFixed(1)} bps (Normal)
           </div>
         </div>
 

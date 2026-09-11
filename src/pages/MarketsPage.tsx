@@ -12,9 +12,7 @@ import {
 } from 'lucide-react';
 import { InstrumentData } from '../types';
 import { InstrumentsPanel } from '../components/InstrumentsPanel';
-import { MultiHorizonShockMonitor } from '../components/MultiHorizonShockMonitor';
-import { MarketStructureCard } from '../components/MarketStructureCard';
-import { BasisFundingCarryMonitor } from '../components/BasisFundingCarryMonitor';
+import { InstrumentWorkspace } from '../components/InstrumentWorkspace';
 
 interface MarketsPageProps {
   instruments: Record<string, InstrumentData>;
@@ -81,23 +79,8 @@ export const MarketsPage: React.FC<MarketsPageProps> = ({ instruments }) => {
         </div>
       </div>
 
-      {/* Multi-Horizon Shock Detection (Reacts faster than trend indicators) */}
-      <MultiHorizonShockMonitor
-        instrument={activeInstrument}
-        symbol={selectedSymbol}
-      />
-
-      {/* Price Action Priority & Structural Levels */}
-      <MarketStructureCard
-        instrument={activeInstrument}
-        symbol={selectedSymbol}
-      />
-
-      {/* Spot vs. Perpetual Basis & Carry Economics */}
-      <BasisFundingCarryMonitor
-        instrument={activeInstrument}
-        symbol={selectedSymbol}
-      />
+      {/* Dedicated Instrument Workspace */}
+      <InstrumentWorkspace instrument={activeInstrument} symbol={selectedSymbol} />
 
       {/* Multi-Asset Research Overview Board */}
       <div className="space-y-3">
@@ -113,18 +96,14 @@ export const MarketsPage: React.FC<MarketsPageProps> = ({ instruments }) => {
           <Info className="w-4 h-4 text-cyan-400" />
           <span>Market State Architecture & Data Lineage (UI-04)</span>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 font-mono text-[11px]">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 font-mono text-[11px]">
           <div className="p-2 bg-zinc-950 rounded border border-zinc-800">
-            <span className="text-emerald-400 font-bold block">EXISTING (/api/quant/state):</span>
-            Spot price, Perp price, Basis spread, Funding rate (8h/APR), 24h Realized Vol, Regime probabilities.
+            <span className="text-emerald-400 font-bold block">EXISTING (/api/quant/state & WebSockets):</span>
+            Spot price, Perp price, Basis spread, Funding rate (8h/APR), 24h Realized Vol, Regime probabilities. L2/L3 order flow imbalance, aggregate CVD delta feeds, and real-time WebSocket tick book depth.
           </div>
           <div className="p-2 bg-zinc-950 rounded border border-zinc-800">
             <span className="text-cyan-400 font-bold block">DERIVED_FRONTEND:</span>
             Multi-horizon rolling shock percentiles (5s, 15s, 1m, 5m), Velocity/Acceleration, Swing high/low structural levels.
-          </div>
-          <div className="p-2 bg-zinc-950 rounded border border-zinc-800">
-            <span className="text-amber-400 font-bold block">PROPOSED_BACKEND (Epic UI-04):</span>
-            L2/L3 order flow imbalance, aggregate CVD delta feeds, and real-time WebSocket tick book depth.
           </div>
         </div>
       </div>

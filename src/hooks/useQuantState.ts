@@ -1,11 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { AccountData, BasketItem, InstrumentData, RiskRuleItem } from '../types';
+import { AccountData, BasketItem, InstrumentData, RiskRuleItem, SystemAlert } from '../types';
+import { ExecutionOrder } from '../types/orders';
 import { quantApi } from '../api/quant';
 
 export interface UseQuantStateReturn {
   account: AccountData;
   baskets: BasketItem[];
   instruments: Record<string, InstrumentData>;
+  orders: ExecutionOrder[];
+  alerts: SystemAlert[];
   riskRules: RiskRuleItem[];
   correlationBtcEth: number;
   cryptoBetaExposurePct: number;
@@ -41,6 +44,8 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
   const [account, setAccount] = useState<AccountData>(DEFAULT_ACCOUNT);
   const [baskets, setBaskets] = useState<BasketItem[]>([]);
   const [instruments, setInstruments] = useState<Record<string, InstrumentData>>({});
+  const [orders, setOrders] = useState<ExecutionOrder[]>([]);
+  const [alerts, setAlerts] = useState<SystemAlert[]>([]);
   const [riskRules, setRiskRules] = useState<RiskRuleItem[]>([]);
   const [correlationBtcEth, setCorrelationBtcEth] = useState<number>(0.74);
   const [cryptoBetaExposurePct, setCryptoBetaExposurePct] = useState<number>(42.8);
@@ -69,6 +74,12 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
       }
       if (data?.instruments) {
         setInstruments(data.instruments);
+      }
+      if (Array.isArray(data?.orders)) {
+        setOrders(data.orders);
+      }
+      if (Array.isArray(data?.alerts)) {
+        setAlerts(data.alerts);
       }
       if (Array.isArray(data?.risk_rules)) {
         setRiskRules(data.risk_rules);
@@ -191,6 +202,8 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
     account,
     baskets,
     instruments,
+    orders,
+    alerts,
     riskRules,
     correlationBtcEth,
     cryptoBetaExposurePct,

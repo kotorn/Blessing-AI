@@ -13,10 +13,10 @@ import {
   Cpu,
   Boxes,
 } from 'lucide-react';
-import { DerivedOrder } from '../types/orders';
+import { ExecutionOrder } from '../types/orders';
 
 interface ExecutionTraceViewerProps {
-  order: DerivedOrder | null;
+  order: ExecutionOrder | null;
   onClose?: () => void;
 }
 

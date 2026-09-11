@@ -28,7 +28,7 @@
 | `Spot/Perp Basis & Funding Carry` | `EXISTING` | Spot price, Perp mark, Basis z-score, 8h funding rate in `/api/quant/state` | Rendered in `BasisFundingCarryMonitor` with post-fee carry modeling |
 | `Multi-Horizon Shock Velocity/Acceleration` | `DERIVED_FRONTEND` | Calculated across 4 horizons (5s, 15s, 1m, 5m) normalized against rolling volatility distribution (sigma_roll) | Rendered in `MultiHorizonShockMonitor` |
 | `Measurable Structural Levels` | `DERIVED_FRONTEND` | 24h swing high/low, equilibrium pivot, liquidity sweep cluster | Rendered in `MarketStructureCard` with Acceptance/Rejection badges |
-| `spreadBps`, `bookImbalance`, `CVD` | `PROPOSED_BACKEND` | Requires real-time Binance WebSocket depth/orderbook stream | Labeled as proposed backend gap in UI-04 footer |
+| `spreadBps`, `bookImbalance`, `CVD` | `EXISTING` | Hooked up to real-time Binance WebSocket (`@depth10` and `@aggTrade`) in the browser. | Rendered in `MicrostructureMonitor` |
 
 ---
 
@@ -50,9 +50,9 @@
 | Field / Model | Status | Current Source / Notes | Temporary UI Behavior |
 |---|---|---|---|
 | `TargetExposureView.strategyAttribution` | `PROPOSED_BACKEND` | No attribution currently in `/api/quant/state` | Show actual exposure; mark intent decomposition pending |
-| `OrderView` / Fills Table | `DERIVED_FRONTEND` | Real active exchange orders derived from authoritative basket grid levels and recovery hedges in `/api/quant/state` | Implemented in `OrdersTable` (UI-06A) |
-| `ExecutionPipeline` (Correlation IDs) | `DERIVED_FRONTEND` | 6-stage deterministic trace (Intent -> Score -> Allocator -> Governor -> Target -> Binance Fill) | Implemented in `ExecutionTraceViewer` (UI-06C) |
-| `Dedicated GET /api/orders` | `PROPOSED_BACKEND` | Backend endpoint for historical fills and discrete order archive | Documented for future backend sprint |
+| `OrderView` / Fills Table | `EXISTING` | Dedicated `orders` array retrieved from `/api/quant/state` decoupled from active baskets | Implemented in `OrdersTable` (UI-06A) |
+| `ExecutionPipeline` (Correlation IDs) | `EXISTING` | 6-stage deterministic trace (Intent -> Score -> Allocator -> Governor -> Target -> Binance Fill) via standalone order objects | Implemented in `ExecutionTraceViewer` (UI-06C) |
+| `Dedicated GET /api/orders` | `PROPOSED_BACKEND` | Optional future backend endpoint for historical pagination (currently batched in state) | Documented for future backend sprint |
 
 ---
 
@@ -99,5 +99,38 @@
 | `ConservatismMetrics` (Zero-exposure time, rejected count, missed moves) | `DERIVED_FRONTEND` | Implements conservatism and excessive caution monitoring | Rendered in `ConservatismControlCard` |
 | `FilterEfficacyAudit` (Return forfeited vs tail-risk avoided) | `DERIVED_FRONTEND` | Measures if filters save capital or destroy return | Rendered in filter audit table |
 | `ScheduledAttributionPipeline` | `PROPOSED_BACKEND` | Nightly BigQuery scheduled query job for PnL reconciliation | Documented for future backend sprint |
+
+---
+
+## 9. Start Trading Wizard (UI-10)
+
+| Field / Model | Status | Current Source / Notes | Temporary UI Behavior |
+|---|---|---|---|
+| `StartTradingFlow` | `DERIVED_FRONTEND` | Orchestrates Pre-flight Checks, Risk Setup, Strategy Allocation, and Confirmation. | Rendered in `StartTradingWizard` modal |
+| `SystemCapabilityDiscovery` | `DERIVED_FRONTEND` | Verifies Binance Global API, Cloud Persistence, and NATS JetStream. | Displayed in Step 1 of Wizard |
+| `RiskGovernorConstraints` | `EXISTING` | Ties into `account.risk_state` max drawdown and leverage. | Input sliders in Step 2 of Wizard |
+| `StrategyEnablement` | `DERIVED_FRONTEND` | Enables/Disables Alpha Engines (Grid, Trend, Shock, Carry). | Checkboxes in Step 3 of Wizard |
+| `SafetyAcknowledgement` | `DERIVED_FRONTEND` | Forces explicit authorization before transitioning to LIVE mode. | Explicit checkbox in Step 4 of Wizard |
+
+---
+
+## 10. Audit Log & Compliance Telemetry (UI-11)
+
+| Field / Model | Status | Current Source / Notes | Temporary UI Behavior |
+|---|---|---|---|
+| `FirestoreAuditLogs` | `EXISTING` | Hooked up to `recordAuditLog` via `cloudAudit` wrapper. | Fetched dynamically in `AuditLogPage`. |
+| `UserAuthenticationState` | `EXISTING` | Tied to `useAuth` Firebase context. | Displays auth warning block if not signed in. |
+| `SystemOperationTelemetry` | `EXISTING` | `handleFirestoreError`, `BIGQUERY_QUERY_EXECUTE`, `GOOGLE_SHEETS_EXPORT`, etc. | Listed sequentially in feed. |
+| `SystemAlertsCenter` | `EXISTING` | Dedicated system notifications (Shock, Funding, Risk breaches) with severity filtering and dismissal tracking via `AlertsDrawer` | Fully functional in UI-11 Alerts Center Drawer |
+
+---
+
+## 11. Production UX & Safety Hardening (UI-14)
+
+| Field / Model | Status | Current Source / Notes | Temporary UI Behavior |
+|---|---|---|---|
+| `DestructiveActionInterceptor` | `DERIVED_FRONTEND` | Replaces `window.confirm` and inline prompt states with a unified modal. | Rendered via `ConfirmationModal` across app. |
+| `TypeToConfirmGuard` | `DERIVED_FRONTEND` | Forces explicit intent (e.g. typing "KILL" or "CLOSE") for irreversible market actions. | Required in `ConfirmationModal` when `requireTypedConfirmation` is set. |
+| `FailClosedNetworkSafety` | `EXISTING` | Disables destructive actions when API calls are in-flight. | Bound to `isActionLoading` loading states across buttons. |
 
 
