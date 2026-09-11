@@ -129,6 +129,8 @@ export const OrdersTable: React.FC<OrdersTableProps> = ({
               <th className="py-2.5 px-3 text-right">Size</th>
               <th className="py-2.5 px-3 text-right">Notional ($)</th>
               <th className="py-2.5 px-3 text-center">Lifecycle Status</th>
+              <th className="py-2.5 px-3 text-center">Source</th>
+              <th className="py-2.5 px-3 text-center">Source</th>
               <th className="py-2.5 px-3 text-center">Action</th>
             </tr>
           </thead>

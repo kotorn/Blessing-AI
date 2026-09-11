@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import { AccountData, BasketItem, InstrumentData, RiskRuleItem, SystemAlert } from '../types';
+import { AccountData, BasketItem, InstrumentData, RiskRuleItem, SystemAlert, TradingSystemState, PreflightResult } from '../types';
 import { ExecutionOrder } from '../types/orders';
 
 export interface QuantStateResponse {
@@ -15,6 +15,26 @@ export interface QuantStateResponse {
 }
 
 export const quantApi = {
+
+  getSystemState: async (): Promise<TradingSystemState> => {
+    return apiClient.get<TradingSystemState>('/api/system/state');
+  },
+  preflight: async (executionMode: string): Promise<PreflightResult> => {
+    return apiClient.get<PreflightResult>('/api/system/preflight?executionMode=' + executionMode);
+  },
+  arm: async (params: any): Promise<TradingSystemState> => {
+    return apiClient.post<TradingSystemState>('/api/system/arm', params);
+  },
+  disarm: async (): Promise<TradingSystemState> => {
+    return apiClient.post<TradingSystemState>('/api/system/disarm', {});
+  },
+  pauseNewRisk: async (active: boolean): Promise<TradingSystemState> => {
+    return apiClient.post<TradingSystemState>('/api/system/pause-new-risk', { active });
+  },
+  recoveryOnly: async (active: boolean): Promise<TradingSystemState> => {
+    return apiClient.post<TradingSystemState>('/api/system/recovery-only', { active });
+  },
+
   getState: async (): Promise<QuantStateResponse> => {
     return apiClient.get<QuantStateResponse>('/api/quant/state');
   },

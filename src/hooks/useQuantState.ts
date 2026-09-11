@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { AccountData, BasketItem, InstrumentData, RiskRuleItem, SystemAlert } from '../types';
+import { AccountData, BasketItem, InstrumentData, RiskRuleItem, SystemAlert, TradingSystemState } from '../types';
 import { ExecutionOrder } from '../types/orders';
 import { quantApi } from '../api/quant';
 
 export interface UseQuantStateReturn {
+  systemState: TradingSystemState | null;
   account: AccountData;
   baskets: BasketItem[];
   instruments: Record<string, InstrumentData>;
@@ -20,6 +21,10 @@ export interface UseQuantStateReturn {
   refresh: () => Promise<void>;
   updateAccount: (account: AccountData) => void;
   toggleKillSwitch: () => Promise<void>;
+  armEngine: (params: any) => Promise<void>;
+  disarmEngine: () => Promise<void>;
+  togglePauseNewRisk: (active: boolean) => Promise<void>;
+  toggleRecoveryOnly: (active: boolean) => Promise<void>;
   expandGrid: (basketId: string) => Promise<void>;
   enterRecovery: (basketId: string) => Promise<void>;
   closeBasket: (basketId: string) => Promise<void>;
@@ -41,6 +46,7 @@ const DEFAULT_ACCOUNT: AccountData = {
 };
 
 export function useQuantState(auditLogger?: (action: string, entityId: string, details: string) => void): UseQuantStateReturn {
+  const [systemState, setSystemState] = useState<TradingSystemState | null>(null);
   const [account, setAccount] = useState<AccountData>(DEFAULT_ACCOUNT);
   const [baskets, setBaskets] = useState<BasketItem[]>([]);
   const [instruments, setInstruments] = useState<Record<string, InstrumentData>>({});
@@ -60,9 +66,13 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
 
   const fetchState = useCallback(async () => {
     try {
-      const data = await quantApi.getState();
-      if (!isMountedRef.current) return;
 
+      if (!isMountedRef.current) return;
+      const [data, sysState] = await Promise.all([
+        quantApi.getState(),
+        quantApi.getSystemState()
+      ]);
+      setSystemState(sysState);
       if (data?.account) {
         setAccount((prev) => ({
           ...prev,
@@ -125,6 +135,59 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
   const updateAccount = useCallback((newAccount: AccountData) => {
     setAccount(newAccount);
   }, []);
+
+
+  const armEngine = useCallback(async (params: any) => {
+    setIsActionLoading(true);
+    if (auditLogger) {
+      auditLogger('ENGINE_ARMED', 'SYSTEM', 'Armed in ' + params.executionMode + ' mode');
+    }
+    try {
+      await quantApi.arm(params);
+      await fetchState();
+    } finally {
+      setIsActionLoading(false);
+    }
+  }, [auditLogger, fetchState]);
+
+  const disarmEngine = useCallback(async () => {
+    setIsActionLoading(true);
+    if (auditLogger) {
+      auditLogger('ENGINE_DISARMED', 'SYSTEM', 'Engine successfully disarmed');
+    }
+    try {
+      await quantApi.disarm();
+      await fetchState();
+    } finally {
+      setIsActionLoading(false);
+    }
+  }, [auditLogger, fetchState]);
+
+  const togglePauseNewRisk = useCallback(async (active: boolean) => {
+    setIsActionLoading(true);
+    if (auditLogger) {
+      auditLogger('PAUSE_NEW_RISK_CHANGED', 'SYSTEM', 'Pause new risk state: ' + active);
+    }
+    try {
+      await quantApi.pauseNewRisk(active);
+      await fetchState();
+    } finally {
+      setIsActionLoading(false);
+    }
+  }, [auditLogger, fetchState]);
+
+  const toggleRecoveryOnly = useCallback(async (active: boolean) => {
+    setIsActionLoading(true);
+    if (auditLogger) {
+      auditLogger('RECOVERY_ONLY_CHANGED', 'SYSTEM', 'Recovery only state: ' + active);
+    }
+    try {
+      await quantApi.recoveryOnly(active);
+      await fetchState();
+    } finally {
+      setIsActionLoading(false);
+    }
+  }, [auditLogger, fetchState]);
 
   const toggleKillSwitch = useCallback(async () => {
     const nextState = !account.kill_switch_active;
@@ -199,6 +262,7 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
   }, [auditLogger, fetchState]);
 
   return {
+    systemState,
     account,
     baskets,
     instruments,
@@ -215,6 +279,10 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
     refresh: fetchState,
     updateAccount,
     toggleKillSwitch,
+    armEngine,
+    disarmEngine,
+    togglePauseNewRisk,
+    toggleRecoveryOnly,
     expandGrid,
     enterRecovery,
     closeBasket,

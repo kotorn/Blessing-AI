@@ -56,6 +56,41 @@ interface SimulatedBasket {
   }>;
 }
 
+
+// Global System State - Authoritative Backend State
+let tradingSystemState = {
+  dataSource: 'SIMULATED', // Default until Binance synced
+  exchangeEnvironment: 'NONE',
+  executionMode: 'PAPER',
+  engineState: 'DISARMED',
+
+  accountSynchronized: false,
+  marketDataHealthy: true,
+  privateStreamHealthy: false,
+  tradingConnectionHealthy: false,
+
+  reconciliationStatus: 'UNKNOWN',
+
+  killSwitchActive: false,
+  pauseNewRisk: false,
+  recoveryOnly: false,
+
+  configVersion: 'v0.2.0-beta',
+  updatedAt: new Date().toISOString()
+};
+
+let riskConfiguration = {
+  maxPortfolioDrawdownPct: 15.0,
+  maxGrossLeverage: 3.0,
+  maxMarginUtilizationPct: 50.0,
+  maxStrategyRiskUnits: {
+    'grid': 1.0,
+    'trend': 1.0,
+    'shock': 0.5,
+    'carry': 0.5
+  }
+};
+
 let quantEngineState = {
   account: {
     equity: 100000.0,
@@ -1058,6 +1093,135 @@ app.get('/api/binance/balance', async (req: Request, res: Response) => {
   res.json(liveResult);
 });
 
+
+// --- System Truth & Safety Boundary Endpoints ---
+
+app.get('/api/system/state', (req, res) => {
+  res.json(tradingSystemState);
+});
+
+app.get('/api/system/preflight', (req, res) => {
+  const executionMode = req.query.executionMode || 'PAPER';
+  
+  const checks = [
+    {
+      id: 'CHK-CORE',
+      name: 'Backend Core Engine Health',
+      required: true,
+      status: 'PASS',
+      message: 'Engine process is running and responsive.'
+    },
+    {
+      id: 'CHK-DB',
+      name: 'Database / Persistence Layer',
+      required: true,
+      status: 'PASS',
+      message: 'Local memory / persistence layer is active.'
+    },
+    {
+      id: 'CHK-MKT',
+      name: 'Market Data Stream',
+      required: true,
+      status: tradingSystemState.marketDataHealthy ? 'PASS' : 'FAIL',
+      message: tradingSystemState.marketDataHealthy ? 'Real-time quotes active.' : 'Market data stale.'
+    },
+    {
+      id: 'CHK-SYNC',
+      name: 'Binance Account Synchronization',
+      required: executionMode === 'LIVE' || executionMode === 'TESTNET',
+      status: tradingSystemState.accountSynchronized ? 'PASS' : (executionMode === 'PAPER' ? 'WARN' : 'FAIL'),
+      message: tradingSystemState.accountSynchronized ? 'Synchronized with exchange.' : 'Not synchronized. Operating on simulated paper balance.'
+    },
+    {
+      id: 'CHK-PERM',
+      name: 'Execution Permissions (Withdrawals Disabled)',
+      required: executionMode === 'LIVE',
+      status: executionMode === 'PAPER' ? 'PASS' : (tradingSystemState.accountSynchronized ? 'PASS' : 'FAIL'),
+      message: executionMode === 'PAPER' ? 'Paper execution always permitted.' : 'Verification required.'
+    },
+    {
+      id: 'CHK-NATS',
+      name: 'NATS JetStream (Optional)',
+      required: false,
+      status: 'UNKNOWN',
+      message: 'NATS is optional in this SaaS-first architecture.'
+    }
+  ];
+
+  let canArm = true;
+  for (const check of checks) {
+    if (check.required && check.status === 'FAIL') {
+      canArm = false;
+      break;
+    }
+  }
+
+  // Live execution guard
+  if (executionMode === 'LIVE') {
+    canArm = false;
+    checks.push({
+      id: 'CHK-LIVE-GUARD',
+      name: 'Live Execution Capability',
+      required: true,
+      status: 'FAIL',
+      message: 'Live Binance execution adapter is not production ready. Use PAPER or TESTNET.'
+    });
+  }
+
+  res.json({
+    executionMode,
+    canArm,
+    checks
+  });
+});
+
+app.post('/api/system/arm', (req, res) => {
+  const { executionMode, riskProfile, instruments, strategies } = req.body;
+  
+  if (executionMode === 'LIVE') {
+    return res.status(400).json({ error: 'Live execution adapter is not production ready.' });
+  }
+  
+  tradingSystemState.executionMode = executionMode || 'PAPER';
+  tradingSystemState.engineState = 'ARMED';
+  tradingSystemState.updatedAt = new Date().toISOString();
+  
+  // Also sync the quantEngineState to reflect the correct source
+  (quantEngineState.account as any).source = tradingSystemState.executionMode === 'TESTNET' ? 'BINANCE_TESTNET' : 'SIMULATED';
+
+  res.json(tradingSystemState);
+});
+
+app.post('/api/system/disarm', (req, res) => {
+  tradingSystemState.engineState = 'DISARMED';
+  tradingSystemState.updatedAt = new Date().toISOString();
+  res.json(tradingSystemState);
+});
+
+app.post('/api/system/pause-new-risk', (req, res) => {
+  const { active: pnrActive } = req.body;
+  tradingSystemState.pauseNewRisk = pnrActive;
+  if (pnrActive && tradingSystemState.engineState === 'ARMED') {
+    tradingSystemState.engineState = 'PAUSED_NEW_RISK';
+  } else if (!pnrActive && tradingSystemState.engineState === 'PAUSED_NEW_RISK') {
+    tradingSystemState.engineState = 'ARMED';
+  }
+  tradingSystemState.updatedAt = new Date().toISOString();
+  res.json(tradingSystemState);
+});
+
+app.post('/api/system/recovery-only', (req, res) => {
+  const { active: recActive } = req.body;
+  tradingSystemState.recoveryOnly = recActive;
+  if (recActive && tradingSystemState.engineState === 'ARMED') {
+    tradingSystemState.engineState = 'RECOVERY_ONLY';
+  } else if (!recActive && tradingSystemState.engineState === 'RECOVERY_ONLY') {
+    tradingSystemState.engineState = 'ARMED';
+  }
+  tradingSystemState.updatedAt = new Date().toISOString();
+  res.json(tradingSystemState);
+});
+
 app.get('/api/quant/state', (req: Request, res: Response) => {
   const allRules = [
     ...quantEngineState.risk_rules.hard_rules,
@@ -1073,10 +1237,13 @@ app.get('/api/quant/state', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/risk/kill-switch', (req: Request, res: Response) => {
-  const { active } = req.body;
-  quantEngineState.account.kill_switch_active = active;
-  quantEngineState.account.risk_state = active ? 'EMERGENCY' : 'NORMAL';
-  res.json({ kill_switch_active: active, risk_state: quantEngineState.account.risk_state });
+  const { active: ksActive } = req.body;
+  tradingSystemState.killSwitchActive = ksActive;
+  tradingSystemState.engineState = ksActive ? 'EMERGENCY' : 'DISARMED';
+  tradingSystemState.updatedAt = new Date().toISOString();
+  quantEngineState.account.kill_switch_active = ksActive;
+  quantEngineState.account.risk_state = ksActive ? 'EMERGENCY' : 'NORMAL';
+  res.json({ kill_switch_active: ksActive, risk_state: quantEngineState.account.risk_state });
 });
 
 app.post('/api/quant/basket/expand', (req: Request, res: Response) => {

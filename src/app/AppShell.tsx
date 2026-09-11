@@ -20,6 +20,7 @@ export const AppShell: React.FC = () => {
 
   // Central Quant State Management
   const {
+    systemState,
     account,
     baskets,
     instruments,
@@ -35,6 +36,10 @@ export const AppShell: React.FC = () => {
     refresh,
     updateAccount,
     toggleKillSwitch,
+    armEngine,
+    disarmEngine,
+    togglePauseNewRisk,
+    toggleRecoveryOnly,
     expandGrid,
     enterRecovery,
     closeBasket,
@@ -103,12 +108,11 @@ export const AppShell: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Infer execution mode from account source
-  const systemMode: SystemMode = account.source === 'BINANCE_LIVE'
-    ? 'LIVE'
-    : account.source === 'BINANCE_TESTNET'
-    ? 'TESTNET'
-    : 'PAPER';
+  // Authoritative system execution mode
+  const systemMode: SystemMode = systemState?.executionMode || 'PAPER';
+  const pauseNewRiskActive = systemState?.pauseNewRisk || false;
+  const killSwitchActive = systemState?.killSwitchActive || false;
+  const engineState = systemState?.engineState || 'DISARMED';
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
@@ -128,8 +132,9 @@ export const AppShell: React.FC = () => {
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
         {/* Global Slim StatusBar */}
         <StatusBar
+            engineState={engineState}
           riskState={account.risk_state}
-          killSwitchActive={account.kill_switch_active}
+          killSwitchActive={killSwitchActive}
           onToggleKillSwitch={toggleKillSwitch}
           systemMode={systemMode}
           lastUpdated={lastUpdated}
@@ -138,8 +143,8 @@ export const AppShell: React.FC = () => {
           binanceStatus={binanceStatus}
           onOpenBinanceModal={() => setShowBinanceModal(true)}
           openBasketsCount={baskets.length}
-          pauseNewRiskActive={pauseNewRisk}
-          onTogglePauseNewRisk={() => setPauseNewRisk(!pauseNewRisk)}
+          pauseNewRiskActive={pauseNewRiskActive}
+          onTogglePauseNewRisk={() => togglePauseNewRisk(!pauseNewRiskActive)}
           onOpenStartTradingWizard={() => setShowStartTradingWizard(true)}
         />
 
@@ -240,13 +245,9 @@ export const AppShell: React.FC = () => {
 
       {showStartTradingWizard && (
         <StartTradingWizard
-          binanceStatus={binanceStatus}
-          firestoreConnected={firestoreConnected}
-          onComplete={() => {
+          onComplete={async (params) => {
+            await armEngine(params);
             setShowStartTradingWizard(false);
-            if (account.kill_switch_active) {
-              toggleKillSwitch();
-            }
           }}
           onCancel={() => setShowStartTradingWizard(false)}
         />

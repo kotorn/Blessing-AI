@@ -28,6 +28,7 @@ interface AppRoutesProps {
   riskRules: RiskRuleItem[];
   correlationBtcEth: number;
   cryptoBetaExposurePct: number;
+  onToggleKillSwitch: () => void;
   liquidationDistancePct: number;
   isActionLoading: boolean;
   onExpandGrid: (basketId: string) => Promise<void>;

@@ -28,6 +28,7 @@ interface StatusBarProps {
   killSwitchActive: boolean;
   onToggleKillSwitch: () => void;
   systemMode: SystemMode;
+  engineState?: string;
   lastUpdated: Date | null;
   onRefresh: () => void;
   isRefreshing: boolean;
@@ -47,6 +48,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   killSwitchActive,
   onToggleKillSwitch,
   systemMode,
+  engineState,
   lastUpdated,
   onRefresh,
   isRefreshing,
@@ -110,6 +112,17 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           >
             {systemMode}
           </div>
+          {engineState && (
+            <div className={`px-2 py-0.5 rounded text-[10px] tracking-wider font-bold uppercase border ${engineState === "ARMED" ? "bg-emerald-950 text-emerald-400 border-emerald-800" : engineState === "DISARMED" ? "bg-zinc-800 text-zinc-400 border-zinc-700" : engineState === "PAUSED_NEW_RISK" ? "bg-amber-950 text-amber-400 border-amber-800" : "bg-rose-950 text-rose-400 border-rose-800"}`}>
+              {engineState}
+            </div>
+          )}
+          {engineState && (
+            <div className={`px-2 py-0.5 rounded text-[10px] tracking-wider font-bold uppercase border ${engineState === "ARMED" ? "bg-emerald-950 text-emerald-400 border-emerald-800" : engineState === "DISARMED" ? "bg-zinc-800 text-zinc-400 border-zinc-700" : engineState === "PAUSED_NEW_RISK" ? "bg-amber-950 text-amber-400 border-amber-800" : "bg-rose-950 text-rose-400 border-rose-800"}`}>
+              {engineState}
+            </div>
+          )}
+
 
           {/* Binance Status Badge */}
           <button

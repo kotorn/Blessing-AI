@@ -53,6 +53,13 @@ export const ExecutionTraceViewer: React.FC<ExecutionTraceViewerProps> = ({
               <h3 className="text-xs font-bold text-zinc-100 uppercase tracking-wider font-mono">
                 {order.clientOrderId}
               </h3>
+              <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold font-mono border ${
+                order.source === 'SIMULATED' ? 'bg-zinc-800 text-zinc-400 border-zinc-700' :
+                order.source === 'BINANCE_TESTNET' ? 'bg-indigo-950 text-indigo-400 border-indigo-800' :
+                'bg-emerald-950 text-emerald-400 border-emerald-800'
+              }`}>
+                {order.source || 'SIMULATED'}
+              </span>
               <span
                 className={`px-1.5 py-0.2 rounded text-[9px] font-bold font-mono border ${
                   order.status === 'FILLED'

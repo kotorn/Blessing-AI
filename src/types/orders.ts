@@ -1,3 +1,6 @@
+
+export type ExecutionSource = 'SIMULATED' | 'BINANCE_TESTNET' | 'BINANCE_LIVE';
+
 export type OrderVenue = 'binance_usdm' | 'binance_spot';
 export type OrderSide = 'BUY' | 'SELL';
 export type OrderType = 'LIMIT_MAKER' | 'MARKET' | 'STOP_MARKET';
@@ -18,6 +21,14 @@ export interface ExecutionOrder {
   status: OrderStatus;
   filledAt?: string;
   createdAt: string;
+  source: ExecutionSource;
+  intentId?: string;
+  opportunityId?: string;
+  allocationDecisionId?: string;
+  riskDecisionId?: string;
+  targetExposureId?: string;
+  executionDecisionId?: string;
+  correlationId?: string;
   trace: {
     strategyIntent: string;
     opportunityScore: number;

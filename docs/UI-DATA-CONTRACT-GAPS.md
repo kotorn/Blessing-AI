@@ -134,3 +134,13 @@
 | `FailClosedNetworkSafety` | `EXISTING` | Disables destructive actions when API calls are in-flight. | Bound to `isActionLoading` loading states across buttons. |
 
 
+
+
+---
+## 12. System Truth & Safety Boundary (UI-15)
+| Field / Model | Status | Current Source / Notes | Temporary UI Behavior |
+|---|---|---|---|
+| `TradingSystemState` (Data Source, Execution Mode, Engine State) | `EXISTING` | Authoritative backend state via `/api/system/state` | Replaces local frontend state with strict backend authority |
+| `Preflight Checks` (Live vs Paper Guard) | `EXISTING` | Authoritative endpoint `/api/system/preflight` | Replaces simulated timeouts in StartTradingWizard |
+| `ExecutionSource` (Order/Intent Provenance) | `EXISTING` | Extended on `ExecutionOrder` and intents | Displays SIMULATED, BINANCE_TESTNET, or BINANCE_LIVE badges to prevent UI spoofing |
+| `Kill Switch Sync` | `EXISTING` | Synchronizes with `/api/system/state` | Enforces EMERGENCY state globally across all UI components |

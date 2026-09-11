@@ -13,6 +13,8 @@ interface RiskRecoveryPageProps {
   cryptoBetaExposurePct: number;
   liquidationDistancePct: number;
   baskets?: BasketItem[];
+  killSwitchActive: boolean;
+  onToggleKillSwitch: () => void;
 }
 
 export const RiskRecoveryPage: React.FC<RiskRecoveryPageProps> = ({
@@ -22,8 +24,9 @@ export const RiskRecoveryPage: React.FC<RiskRecoveryPageProps> = ({
   cryptoBetaExposurePct,
   liquidationDistancePct,
   baskets = [],
+  killSwitchActive,
+  onToggleKillSwitch,
 }) => {
-  const [killSwitchActive, setKillSwitchActive] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -41,7 +44,7 @@ export const RiskRecoveryPage: React.FC<RiskRecoveryPageProps> = ({
 
         <div className="flex items-center space-x-2.5">
           <button
-            onClick={() => setKillSwitchActive(!killSwitchActive)}
+            onClick={onToggleKillSwitch}
             className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold border transition-all flex items-center space-x-1.5 ${
               killSwitchActive
                 ? 'bg-rose-600 text-white border-rose-500 shadow-lg shadow-rose-900/40'
@@ -89,7 +92,7 @@ export const RiskRecoveryPage: React.FC<RiskRecoveryPageProps> = ({
       {/* 4. Fail-Closed Infrastructure Telemetry */}
       <FailClosedSafeguardsCard
         killSwitchActive={killSwitchActive}
-        onTriggerKillSwitch={() => setKillSwitchActive(!killSwitchActive)}
+        onTriggerKillSwitch={onToggleKillSwitch}
       />
 
       {/* Data Contract Lineage Footer */}

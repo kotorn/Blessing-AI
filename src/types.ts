@@ -1,3 +1,60 @@
+
+export type DataSource = 'SIMULATED' | 'BINANCE';
+export type ExchangeEnvironment = 'NONE' | 'BINANCE_TESTNET' | 'BINANCE_MAINNET';
+export type ExecutionMode = 'PAPER' | 'TESTNET' | 'LIVE';
+export type EngineState = 'DISARMED' | 'ARMING' | 'ARMED' | 'PAUSED_NEW_RISK' | 'RECOVERY_ONLY' | 'EMERGENCY';
+
+export interface ExecutionCapabilities {
+  paper: boolean;
+  testnet: boolean;
+  live: boolean;
+  spot: boolean;
+  usdmFutures: boolean;
+  hedgeMode: boolean;
+}
+
+export interface TradingSystemState {
+  dataSource: DataSource;
+  exchangeEnvironment: ExchangeEnvironment;
+  executionMode: ExecutionMode;
+  engineState: EngineState;
+
+  accountSynchronized: boolean;
+  marketDataHealthy: boolean;
+  privateStreamHealthy: boolean;
+  tradingConnectionHealthy: boolean;
+
+  reconciliationStatus: 'UNKNOWN' | 'IN_SYNC' | 'RECONCILING' | 'MISMATCH';
+
+  killSwitchActive: boolean;
+  pauseNewRisk: boolean;
+  recoveryOnly: boolean;
+
+  configVersion: string;
+  updatedAt: string;
+}
+
+export interface PreflightCheck {
+  id: string;
+  name: string;
+  required: boolean;
+  status: 'PASS' | 'WARN' | 'FAIL' | 'UNKNOWN';
+  message: string;
+}
+
+export interface PreflightResult {
+  executionMode: ExecutionMode;
+  canArm: boolean;
+  checks: PreflightCheck[];
+}
+
+export interface RiskConfiguration {
+  maxPortfolioDrawdownPct: number;
+  maxGrossLeverage: number;
+  maxMarginUtilizationPct: number;
+  maxStrategyRiskUnits: Record<string, number>;
+}
+
 export type BasketState =
   | 'NEW'
   | 'ACTIVE'
