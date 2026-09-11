@@ -1,6 +1,6 @@
 {
   "name": "Blessing AI v0.1",
-  "description": "Adaptive Basket Grid Trading System, Market Regime Engine, AI Grid Safety Score, and Portfolio Risk Governor for Binance Spot & USDⓈ-M Futures.",
+  "description": "Blessing AI v0.2: Adaptive Multi-Strategy Trading Platform (Grid, Trend, Shock, Carry) on Google SaaS-First Architecture (Cloud SQL, Cloud Run, Firebase, BigQuery) for Binance Global.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

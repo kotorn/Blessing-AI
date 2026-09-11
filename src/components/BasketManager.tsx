@@ -1,6 +1,7 @@
-import React from 'react';
-import { Layers, ArrowUpRight, ArrowDownRight, RefreshCw, XCircle, Shield, PlusCircle } from 'lucide-react';
+import React, { useState } from 'react';
+import { Layers, ArrowUpRight, ArrowDownRight, RefreshCw, XCircle, Shield, PlusCircle, FileSpreadsheet, ExternalLink } from 'lucide-react';
 import { BasketItem, BasketState } from '../types';
+import { useAuth } from '../context/AuthContext';
 
 interface BasketManagerProps {
   baskets: BasketItem[];
@@ -17,6 +18,26 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
   onCloseBasket,
   isActionLoading,
 }) => {
+  const { user, signIn, exportToGoogleSheet } = useAuth();
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [lastExportUrl, setLastExportUrl] = useState<string | null>(null);
+
+  const handleQuickExport = async () => {
+    if (!user) {
+      await signIn();
+      return;
+    }
+    setIsExporting(true);
+    try {
+      const res = await exportToGoogleSheet(baskets, {});
+      setLastExportUrl(res.spreadsheetUrl);
+    } catch (err: any) {
+      alert(`Google Sheets export error: ${err.message}`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const getStateBadge = (state: BasketState) => {
     switch (state) {
       case 'ACTIVE':
@@ -39,12 +60,35 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400 flex items-center space-x-2">
           <Layers className="w-4 h-4 text-emerald-400" />
           <span>Active Baskets (Recovery & Progression)</span>
         </h2>
-        <span className="text-xs text-zinc-400">Section 12 State Machine Guaranteed</span>
+        <div className="flex items-center space-x-2">
+          {lastExportUrl ? (
+            <a
+              href={lastExportUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center space-x-1 px-2.5 py-1 bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/60 rounded-lg text-xs font-medium transition-colors"
+              title="Open the generated Google Sheet"
+            >
+              <span>Sheet Created</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          ) : null}
+          <button
+            type="button"
+            onClick={handleQuickExport}
+            disabled={isExporting}
+            className="flex items-center space-x-1.5 px-2.5 py-1 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-emerald-400 border border-zinc-800 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+            title="Export active baskets to a newly created Google Sheet"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+            <span>{isExporting ? 'Exporting...' : 'Export to Sheets'}</span>
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4">

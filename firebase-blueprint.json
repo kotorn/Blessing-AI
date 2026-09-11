@@ -1,0 +1,202 @@
+{
+  "entities": {
+    "userProfile": {
+      "title": "UserProfile",
+      "description": "User account profile and display preferences",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Unique Firebase Auth UID",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address",
+          "maxLength": 256
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name",
+          "maxLength": 128
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile picture URL",
+          "maxLength": 1024
+        },
+        "preferredVenue": {
+          "type": "string",
+          "description": "Default selected venue",
+          "enum": ["binance_global", "binance_spot"],
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp of profile creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["uid", "email"]
+    },
+    "userBasket": {
+      "title": "UserBasket",
+      "description": "Active or historical multi-strategy trading basket",
+      "type": "object",
+      "properties": {
+        "basketId": {
+          "type": "string",
+          "description": "Unique basket identifier",
+          "maxLength": 64
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user ID",
+          "maxLength": 128
+        },
+        "instrument": {
+          "type": "string",
+          "description": "Trading pair e.g. BTCUSDT or ETHUSDT",
+          "maxLength": 32
+        },
+        "direction": {
+          "type": "string",
+          "description": "Basket position direction",
+          "enum": ["LONG", "SHORT"],
+          "maxLength": 16
+        },
+        "state": {
+          "type": "string",
+          "description": "Basket lifecycle state",
+          "maxLength": 32
+        },
+        "gridDepth": {
+          "type": "number",
+          "description": "Current filled grid depth"
+        },
+        "maxGridLevels": {
+          "type": "number",
+          "description": "Maximum allowable grid levels"
+        },
+        "totalSize": {
+          "type": "number",
+          "description": "Total executed size in base asset"
+        },
+        "averageEntry": {
+          "type": "number",
+          "description": "Average position entry price"
+        },
+        "netPnl": {
+          "type": "number",
+          "description": "Net realized plus unrealized PnL in USDT"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp"
+        }
+      },
+      "required": ["basketId", "userId", "instrument", "direction", "state"]
+    },
+    "riskSettings": {
+      "title": "RiskSettings",
+      "description": "User-defined risk parameters and thresholds",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner user ID",
+          "maxLength": 128
+        },
+        "maxPortfolioLeverage": {
+          "type": "number",
+          "description": "Maximum allowable portfolio leverage multiplier"
+        },
+        "emergencyDrawdownPct": {
+          "type": "number",
+          "description": "Circuit breaker emergency drawdown percentage"
+        },
+        "marginStressThresholdPct": {
+          "type": "number",
+          "description": "Margin stress warning percentage"
+        },
+        "killSwitchActive": {
+          "type": "boolean",
+          "description": "Master emergency kill switch status"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp"
+        }
+      },
+      "required": ["userId", "maxPortfolioLeverage", "emergencyDrawdownPct"]
+    },
+    "auditLog": {
+      "title": "AuditLog",
+      "description": "Audit trail of user commands, risk triggers, and basket actions",
+      "type": "object",
+      "properties": {
+        "logId": {
+          "type": "string",
+          "description": "Unique log entry ID",
+          "maxLength": 64
+        },
+        "userId": {
+          "type": "string",
+          "description": "Action performer user ID",
+          "maxLength": 128
+        },
+        "action": {
+          "type": "string",
+          "description": "Action performed e.g. EMERGENCY_FLATTEN or CREATE_BASKET",
+          "maxLength": 64
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Target symbol if applicable",
+          "maxLength": 32
+        },
+        "details": {
+          "type": "string",
+          "description": "Human-readable description or JSON payload summary",
+          "maxLength": 1024
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of action"
+        }
+      },
+      "required": ["logId", "userId", "action", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "userProfile",
+      "description": "Individual user profile, authorization, and preferences"
+    },
+    "/users/{userId}/baskets/{basketId}": {
+      "schema": "userBasket",
+      "description": "Persisted trading baskets belonging to the user"
+    },
+    "/users/{userId}/settings/{settingId}": {
+      "schema": "riskSettings",
+      "description": "User specific risk governor constraints and thresholds"
+    },
+    "/users/{userId}/audit_logs/{logId}": {
+      "schema": "auditLog",
+      "description": "Immutable audit entries of actions executed by the user"
+    }
+  }
+}

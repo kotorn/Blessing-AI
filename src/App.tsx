@@ -6,11 +6,17 @@ import { BasketManager } from './components/BasketManager';
 import { RiskGovernorMonitor } from './components/RiskGovernorMonitor';
 import { BacktestReplayStudio } from './components/BacktestReplayStudio';
 import { AIQuantCopilot } from './components/AIQuantCopilot';
+import { BigQueryLakehouse } from './components/BigQueryLakehouse';
 import { ArchitectureReviewViewer } from './components/ArchitectureReviewViewer';
+import { BalanceAllocation } from './components/BalanceAllocation';
+import { BalanceAllocationModal } from './components/BalanceAllocationModal';
 import { AccountData, BasketItem, InstrumentData, RiskRuleItem, RiskState } from './types';
+import { useAuth } from './context/AuthContext';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'cockpit' | 'backtest' | 'copilot' | 'architecture'>('cockpit');
+  const { user, cloudAudit, saveCloudBasket } = useAuth();
+  const [activeTab, setActiveTab] = useState<'cockpit' | 'wallet' | 'backtest' | 'copilot' | 'bigquery' | 'architecture'>('cockpit');
+  const [showBalanceModal, setShowBalanceModal] = useState<boolean>(false);
   const [account, setAccount] = useState<AccountData>({
     equity: 50720.50,
     balance: 50000.00,
@@ -97,11 +103,13 @@ export default function App() {
   }, []);
 
   const handleToggleKillSwitch = async () => {
+    const nextState = !account.kill_switch_active;
+    cloudAudit(nextState ? 'KILL_SWITCH_ENGAGED' : 'KILL_SWITCH_DISENGAGED', 'PORTFOLIO', 'User toggled master kill switch');
     try {
       const resp = await fetch('/api/quant/risk/kill-switch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ active: !account.kill_switch_active }),
+        body: JSON.stringify({ active: nextState }),
       });
       if (resp.ok) {
         await fetchState();
@@ -123,6 +131,7 @@ export default function App() {
 
   const handleExpandGrid = async (basketId: string) => {
     setIsActionLoading(true);
+    cloudAudit('EXPAND_GRID', basketId, 'Manual grid level expansion requested');
     try {
       const resp = await fetch('/api/quant/basket/expand', {
         method: 'POST',
@@ -141,6 +150,7 @@ export default function App() {
 
   const handleEnterRecovery = async (basketId: string) => {
     setIsActionLoading(true);
+    cloudAudit('ENTER_RECOVERY', basketId, 'Initiated dynamic counter-trend exposure recovery');
     try {
       const resp = await fetch('/api/quant/basket/recovery', {
         method: 'POST',
@@ -159,6 +169,7 @@ export default function App() {
 
   const handleCloseBasket = async (basketId: string) => {
     setIsActionLoading(true);
+    cloudAudit('CLOSE_BASKET', basketId, 'Market flatten and close basket requested');
     try {
       const resp = await fetch('/api/quant/basket/close', {
         method: 'POST',
@@ -183,11 +194,21 @@ export default function App() {
         onToggleKillSwitch={handleToggleKillSwitch}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
+        onOpenWalletModal={() => setShowBalanceModal(true)}
+        baskets={baskets}
+        portfolioState={account}
       />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Top Account Overview always visible */}
-        <AccountOverview account={account} />
+        {/* Account Overview on top of Cockpit and analytical tabs */}
+        {activeTab !== 'wallet' && (
+          <AccountOverview
+            account={account}
+            onAccountUpdated={setAccount}
+            onOpenBalanceModal={() => setShowBalanceModal(true)}
+            onNavigateTab={setActiveTab}
+          />
+        )}
 
         {/* Tab-driven workspaces */}
         {activeTab === 'cockpit' && (
@@ -216,12 +237,31 @@ export default function App() {
           </div>
         )}
 
+        {activeTab === 'wallet' && (
+          <BalanceAllocation
+            account={account}
+            onAccountUpdated={setAccount}
+            onNavigateTab={setActiveTab}
+          />
+        )}
+
         {activeTab === 'backtest' && <BacktestReplayStudio />}
 
         {activeTab === 'copilot' && <AIQuantCopilot />}
 
+        {activeTab === 'bigquery' && <BigQueryLakehouse />}
+
         {activeTab === 'architecture' && <ArchitectureReviewViewer />}
       </main>
+
+      {/* Pop-up Modal for Balance & Sub-Wallet Allocation */}
+      <BalanceAllocationModal
+        isOpen={showBalanceModal}
+        onClose={() => setShowBalanceModal(false)}
+        account={account}
+        onAccountUpdated={setAccount}
+        onNavigateTab={setActiveTab}
+      />
     </div>
   );
 }

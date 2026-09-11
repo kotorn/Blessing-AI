@@ -78,6 +78,39 @@ export interface InstrumentData {
   prob_basket_profit: number;
 }
 
+export interface AccountHolding {
+  asset: string;
+  qty: number;
+  unitPrice: number;
+  usdVal: number;
+}
+
+export interface AssetAllocationItem {
+  location: string;
+  category: 'TRADING_BOT' | 'PORTFOLIO_MARGIN' | 'EARN' | 'SPOT' | 'FUNDING';
+  qty: number;
+  usdVal: number;
+  pctOfAsset: number;
+  detail?: string;
+}
+
+export interface TwoLayerAsset {
+  asset: string;
+  totalQty: number;
+  totalUsdVal: number;
+  unitPrice: number;
+  pctOfPortfolio: number;
+  allocations: AssetAllocationItem[];
+}
+
+export interface SubWalletSummary {
+  walletName: string;
+  category: 'TRADING_BOT' | 'PORTFOLIO_MARGIN' | 'EARN' | 'SPOT' | 'FUNDING';
+  btcVal: number;
+  usdVal: number;
+  pctOfTotal: number;
+}
+
 export interface AccountData {
   equity: number;
   balance: number;
@@ -91,6 +124,15 @@ export interface AccountData {
   kill_switch_active: boolean;
   risk_state: RiskState;
   realized_daily_pnl?: number;
+  source?: 'BINANCE_LIVE' | 'BINANCE_TESTNET' | 'SIMULATED';
+  spot_balance?: number;
+  futures_wallet_balance?: number;
+  futures_unrealized_pnl?: number;
+  last_sync_time?: string;
+  account_alias?: string;
+  holdings?: AccountHolding[];
+  two_layer_assets?: TwoLayerAsset[];
+  sub_wallets?: SubWalletSummary[];
 }
 
 export interface RiskRuleItem {
