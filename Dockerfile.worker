@@ -1,0 +1,31 @@
+# Phase 5: Cloud Run Deployment for Blessing AI Trading Worker
+FROM python:3.13-slim
+
+# Prevent python from writing pyc files to disc and buffering stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+WORKDIR /app
+
+# System dependencies for scientific packages if necessary (not heavily required for this MVP logic)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Assuming requirements are mounted or we install them explicitly
+# We'll install the required packages dynamically since there isn't a dedicated worker requirements.txt
+RUN pip install --no-cache-dir \
+    httpx \
+    pydantic \
+    numpy \
+    pandas
+
+# Copy domain models and worker codebase
+COPY domain/ ./domain/
+COPY apps/trading_worker/ ./apps/trading_worker/
+
+# In Cloud Run, the container must bind to $PORT for health checks, 
+# but for a background worker, Cloud Run Jobs or standalone execution is used.
+# If running as a service, we'd add a simple FastAPI health endpoint.
+CMD ["python", "-m", "apps.trading_worker.main"]

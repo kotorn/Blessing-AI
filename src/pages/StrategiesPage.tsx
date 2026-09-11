@@ -28,6 +28,8 @@ export const StrategiesPage: React.FC<StrategiesPageProps> = ({
   baskets = [],
   instruments = {},
   account,
+  strategyIntents,
+  metaAllocations,
 }) => {
   const strategies = [
     {
@@ -93,10 +95,10 @@ export const StrategiesPage: React.FC<StrategiesPageProps> = ({
       <ConservatismControlCard />
 
       {/* Live Strategy Intent Stream */}
-      <StrategyIntentStream baskets={baskets} instruments={instruments} />
+      <StrategyIntentStream baskets={baskets} instruments={instruments} intentsData={strategyIntents} />
 
       {/* Meta Allocation Continuous Budgeting Matrix */}
-      <MetaAllocationMatrix />
+      <MetaAllocationMatrix allocationsData={metaAllocations} />
 
       {/* Target Exposure & Conflict Resolution Panel */}
       <StrategyConflictResolver />

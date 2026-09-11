@@ -8,6 +8,9 @@ export interface QuantStateResponse {
   instruments: Record<string, InstrumentData>;
   orders?: ExecutionOrder[];
   alerts?: SystemAlert[];
+  strategy_intents?: any[];
+  meta_allocations?: any[];
+  exposure_recovery?: any;
   risk_rules?: RiskRuleItem[];
   correlation_btc_eth?: number;
   crypto_beta_exposure_pct?: number;

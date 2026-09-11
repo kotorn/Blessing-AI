@@ -16,6 +16,7 @@ import { StrategyIntentItem } from '../types/strategy';
 import { BasketItem, InstrumentData } from '../types';
 
 interface StrategyIntentStreamProps {
+  intentsData?: StrategyIntentItem[];
   baskets: BasketItem[];
   instruments: Record<string, InstrumentData>;
 }
@@ -23,12 +24,13 @@ interface StrategyIntentStreamProps {
 export const StrategyIntentStream: React.FC<StrategyIntentStreamProps> = ({
   baskets,
   instruments,
+  intentsData,
 }) => {
   const btcPerp = instruments['BTCUSDT']?.perp_price || 64250;
   const ethPerp = instruments['ETHUSDT']?.perp_price || 3480;
 
   // Authoritative Strategy Intents emitted by independent alpha engines
-  const intents: StrategyIntentItem[] = [
+  const intents: StrategyIntentItem[] = intentsData || [
     {
       id: 'INT-GRID-BTC-01',
       engineId: 'structural_grid',
@@ -101,7 +103,7 @@ export const StrategyIntentStream: React.FC<StrategyIntentStreamProps> = ({
           </div>
           <div>
             <h3 className="text-xs font-bold text-zinc-100 uppercase tracking-wider">
-              Strategy Intent Stream (Continuous Alpha Production)
+              Strategy Intent Stream (ML Calibrated)
             </h3>
             <p className="text-[11px] text-zinc-400">
               Strategies emit unconstrained economic intents. Strategies never place exchange orders directly.
@@ -172,7 +174,7 @@ export const StrategyIntentStream: React.FC<StrategyIntentStreamProps> = ({
               {/* Quantitative Metrics Bar */}
               <div className="bg-zinc-900/90 p-2.5 rounded-lg border border-zinc-800/60 grid grid-cols-3 gap-2 text-center font-mono text-[11px]">
                 <div>
-                  <div className="text-[10px] text-zinc-500 font-sans">Opp Score</div>
+                  <div className="text-[10px] text-zinc-500 font-sans flex items-center justify-center gap-1"><Cpu className="w-3 h-3 text-cyan-500/70" /> ML Score</div>
                   <div className="text-cyan-300 font-bold mt-0.5">
                     {intent.opportunityScore.toFixed(1)}/100
                   </div>

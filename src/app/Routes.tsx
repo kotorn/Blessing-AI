@@ -90,6 +90,8 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
     case '/strategies':
       return (
         <StrategiesPage
+          strategyIntents={(quantState as any)?.strategy_intents}
+          metaAllocations={(quantState as any)?.meta_allocations}
           baskets={baskets}
           instruments={instruments}
           account={account}

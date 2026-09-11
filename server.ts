@@ -4,6 +4,10 @@ import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import { TradingSystemState, RiskConfiguration } from './src/backend/types.js';
+import { evaluatePreflight, validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES } from './src/backend/system.js';
+import { auditRepository } from './src/backend/audit.js';
+import { executionManager } from './src/backend/execution/manager.js';
 
 dotenv.config();
 
@@ -58,8 +62,8 @@ interface SimulatedBasket {
 
 
 // Global System State - Authoritative Backend State
-let tradingSystemState = {
-  dataSource: 'SIMULATED', // Default until Binance synced
+let tradingSystemState: TradingSystemState = {
+  dataSource: 'SIMULATED',
   exchangeEnvironment: 'NONE',
   executionMode: 'PAPER',
   engineState: 'DISARMED',
@@ -68,7 +72,6 @@ let tradingSystemState = {
   marketDataHealthy: true,
   privateStreamHealthy: false,
   tradingConnectionHealthy: false,
-
   reconciliationStatus: 'UNKNOWN',
 
   killSwitchActive: false,
@@ -79,17 +82,7 @@ let tradingSystemState = {
   updatedAt: new Date().toISOString()
 };
 
-let riskConfiguration = {
-  maxPortfolioDrawdownPct: 15.0,
-  maxGrossLeverage: 3.0,
-  maxMarginUtilizationPct: 50.0,
-  maxStrategyRiskUnits: {
-    'grid': 1.0,
-    'trend': 1.0,
-    'shock': 0.5,
-    'carry': 0.5
-  }
-};
+let riskConfiguration: RiskConfiguration = RISK_PROFILES.BALANCED;
 
 let quantEngineState = {
   account: {
@@ -107,6 +100,94 @@ let quantEngineState = {
     risk_state: 'NORMAL' as 'NORMAL' | 'CAUTION' | 'NO_NEW_GRID' | 'RECOVERY_ONLY' | 'DELEVERAGE' | 'EMERGENCY',
   },
   instruments: {
+    ZECUSDT: {
+      symbol: 'ZECUSDT',
+      spot_price: 42.15,
+      perp_price: 42.20,
+      basis: 0.05,
+      basis_pct: 0.11,
+      basis_zscore: 1.2,
+      funding_rate: 0.0002,
+      funding_annualized_pct: 21.9,
+      atr_1h: 1.2,
+      realized_vol_24h_pct: 88.5,
+      open_interest_usd: 120000000,
+      open_interest_delta_24h_pct: 12.5,
+      regime: 'R4_BREAKOUT',
+      regime_probabilities: {
+        R0_STRONG_MEAN_REVERSION: 0.05,
+        R1_RANGE: 0.10,
+        R2_WEAK_TREND: 0.15,
+        R3_STRONG_TREND: 0.20,
+        R4_BREAKOUT: 0.45,
+        R5_VOLATILITY_SHOCK: 0.05,
+        R6_CRISIS: 0.0,
+      },
+      grid_safety_score: 18.5,
+      grid_status: 'PAUSED_NEW_RISK',
+      expected_recovery_time_hrs: 48,
+      expected_mae_pct: 12.0,
+      prob_basket_profit: 0.22,
+    },
+    SOLUSDT: {
+      symbol: 'SOLUSDT',
+      spot_price: 154.20,
+      perp_price: 154.35,
+      basis: 0.15,
+      basis_pct: 0.09,
+      basis_zscore: 0.8,
+      funding_rate: 0.0001,
+      funding_annualized_pct: 10.95,
+      atr_1h: 4.5,
+      realized_vol_24h_pct: 75.2,
+      open_interest_usd: 850000000,
+      open_interest_delta_24h_pct: 4.5,
+      regime: 'R3_STRONG_TREND',
+      regime_probabilities: {
+        R0_STRONG_MEAN_REVERSION: 0.05,
+        R1_RANGE: 0.15,
+        R2_WEAK_TREND: 0.20,
+        R3_STRONG_TREND: 0.50,
+        R4_BREAKOUT: 0.10,
+        R5_VOLATILITY_SHOCK: 0.0,
+        R6_CRISIS: 0.0,
+      },
+      grid_safety_score: 25.0,
+      grid_status: 'PAUSED_NEW_RISK',
+      expected_recovery_time_hrs: 24,
+      expected_mae_pct: 8.5,
+      prob_basket_profit: 0.35,
+    },
+    BNBUSDT: {
+      symbol: 'BNBUSDT',
+      spot_price: 580.40,
+      perp_price: 580.90,
+      basis: 0.50,
+      basis_pct: 0.08,
+      basis_zscore: 0.2,
+      funding_rate: 0.00005,
+      funding_annualized_pct: 5.47,
+      atr_1h: 8.2,
+      realized_vol_24h_pct: 42.5,
+      open_interest_usd: 620000000,
+      open_interest_delta_24h_pct: -1.2,
+      regime: 'R1_RANGE',
+      regime_probabilities: {
+        R0_STRONG_MEAN_REVERSION: 0.10,
+        R1_RANGE: 0.60,
+        R2_WEAK_TREND: 0.20,
+        R3_STRONG_TREND: 0.05,
+        R4_BREAKOUT: 0.05,
+        R5_VOLATILITY_SHOCK: 0.0,
+        R6_CRISIS: 0.0,
+      },
+      grid_safety_score: 82.5,
+      grid_status: 'ALLOWED',
+      expected_recovery_time_hrs: 4,
+      expected_mae_pct: 1.2,
+      prob_basket_profit: 0.88,
+    },
+
     'BTCUSDT': {
       symbol: 'BTCUSDT',
       spot_price: 91450.0,
@@ -227,6 +308,7 @@ let quantEngineState = {
       basketId: 'BSK-BTC-20260910-001',
       venue: 'binance_usdm',
       symbol: 'BTCUSDT',
+      source: 'SIMULATED',
       strategy: 'Structural Grid',
       side: 'BUY',
       type: 'LIMIT_MAKER',
@@ -254,6 +336,7 @@ let quantEngineState = {
       basketId: 'BSK-BTC-20260910-001',
       venue: 'binance_usdm',
       symbol: 'BTCUSDT',
+      source: 'SIMULATED',
       strategy: 'Structural Grid',
       side: 'BUY',
       type: 'LIMIT_MAKER',
@@ -281,6 +364,7 @@ let quantEngineState = {
       basketId: 'BSK-BTC-20260910-001',
       venue: 'binance_usdm',
       symbol: 'BTCUSDT',
+      source: 'SIMULATED',
       strategy: 'Structural Grid',
       side: 'BUY',
       type: 'LIMIT_MAKER',
@@ -365,6 +449,94 @@ let quantEngineState = {
     crypto_beta_exposure_pct: 68.5,
     common_factor_status: 'NORMAL',
   },
+  strategy_intents: [
+    {
+      id: 'INT-GRID-BTC-01',
+      engineId: 'structural_grid',
+      strategyName: 'Structural Mean-Reversion Grid',
+      symbol: 'BTCUSDT',
+      direction: 'LONG',
+      rawTargetDelta: 0.10,
+      opportunityScore: 90.0,
+      confidence: 0.90,
+      urgency: 'LOW',
+      timeHorizon: '12h - 48h',
+      hypothesis: 'Price reclaiming prior 24h low; accumulate passive tranches at swing base.',
+      regimeFit: 'R0_STRONG_MEAN_REVERSION',
+      proposedMaxNotionalUsd: 15000,
+    },
+    {
+      id: 'INT-TREND-BTC-01',
+      engineId: 'trend_breakout',
+      strategyName: 'Trend / Breakout Following',
+      symbol: 'BTCUSDT',
+      direction: 'SHORT',
+      rawTargetDelta: 0,
+      opportunityScore: 0,
+      confidence: 0,
+      urgency: 'LOW',
+      timeHorizon: '4h - 12h',
+      hypothesis: 'Awaiting R3/R4 structural confirmation. No current displacement.',
+      regimeFit: 'R1_RANGE',
+      proposedMaxNotionalUsd: 0,
+    },
+    {
+      id: 'INT-SHOCK-ETH-01',
+      engineId: 'shock_momentum',
+      strategyName: 'Shock Momentum',
+      symbol: 'ETHUSDT',
+      direction: 'LONG',
+      rawTargetDelta: 0.30,
+      opportunityScore: 90.0,
+      confidence: 0.60,
+      urgency: 'HIGH',
+      timeHorizon: '5m - 30m',
+      hypothesis: 'Fast liquidity sweep below support reclaimed; targeting mean reversion.',
+      regimeFit: 'R5_VOLATILITY_SHOCK',
+      proposedMaxNotionalUsd: 6500,
+    }
+  ],
+  meta_allocations: [
+    {
+      engineId: 'structural_grid',
+      strategyName: 'Structural Mean-Reversion Grid',
+      baseWeightPct: 35,
+      expectedEdgeBps: 45,
+      confidence: 0.90,
+      regimeFitFactor: 1.15,
+      executionQualityFactor: 1.0,
+      cryptoBetaDiscount: 0.88,
+      finalBudgetFactor: 1.15,
+      virtualNotionalCapUsd: 25000,
+      status: 'ACTIVE',
+    },
+    {
+      engineId: 'trend_breakout',
+      strategyName: 'Trend / Breakout Following',
+      baseWeightPct: 25,
+      expectedEdgeBps: 0,
+      confidence: 0.0,
+      regimeFitFactor: 0.0,
+      executionQualityFactor: 0.95,
+      cryptoBetaDiscount: 0.82,
+      finalBudgetFactor: 0.0,
+      virtualNotionalCapUsd: 15000,
+      status: 'PAUSED',
+    },
+    {
+      engineId: 'shock_momentum',
+      strategyName: 'Shock Momentum',
+      baseWeightPct: 15,
+      expectedEdgeBps: 80,
+      confidence: 0.60,
+      regimeFitFactor: 1.50,
+      executionQualityFactor: 0.90,
+      cryptoBetaDiscount: 0.95,
+      finalBudgetFactor: 1.45,
+      virtualNotionalCapUsd: 8500,
+      status: 'ACTIVE',
+    }
+  ],
   risk_rules: {
     hard_rules: [
       { rule: 'Max Effective Leverage <= 2.0x', current: '1.42x', status: 'PASS' },
@@ -1070,6 +1242,14 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     (quantEngineState.account as any).two_layer_assets = liveResult.two_layer_assets;
     (quantEngineState.account as any).sub_wallets = liveResult.sub_wallets;
 
+    // Update global trading system state to pass preflight checks
+    tradingSystemState.accountSynchronized = true;
+    tradingSystemState.dataSource = 'BINANCE';
+    tradingSystemState.exchangeEnvironment = active.isTestnet ? 'BINANCE_TESTNET' : 'BINANCE_MAINNET';
+    tradingSystemState.updatedAt = new Date().toISOString();
+
+    tradingSystemState.reconciliationStatus = 'IN_SYNC';
+    
     return res.json({
       success: true,
       message: `Successfully synchronized funds from Binance (${active.name})`,
@@ -1077,6 +1257,9 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
       liveResult,
     });
   } else {
+    tradingSystemState.accountSynchronized = false;
+    tradingSystemState.reconciliationStatus = 'UNKNOWN';
+    tradingSystemState.updatedAt = new Date().toISOString();
     // If not configured or API call rejected, return current state with diagnostic details
     return res.json({
       success: false,
@@ -1097,127 +1280,129 @@ app.get('/api/binance/balance', async (req: Request, res: Response) => {
 // --- System Truth & Safety Boundary Endpoints ---
 
 app.get('/api/system/state', (req, res) => {
-  res.json(tradingSystemState);
+  res.json({
+    ...tradingSystemState,
+    capabilities: EXECUTION_CAPABILITIES,
+  });
 });
 
 app.get('/api/system/preflight', (req, res) => {
-  const executionMode = req.query.executionMode || 'PAPER';
-  
-  const checks = [
-    {
-      id: 'CHK-CORE',
-      name: 'Backend Core Engine Health',
-      required: true,
-      status: 'PASS',
-      message: 'Engine process is running and responsive.'
-    },
-    {
-      id: 'CHK-DB',
-      name: 'Database / Persistence Layer',
-      required: true,
-      status: 'PASS',
-      message: 'Local memory / persistence layer is active.'
-    },
-    {
-      id: 'CHK-MKT',
-      name: 'Market Data Stream',
-      required: true,
-      status: tradingSystemState.marketDataHealthy ? 'PASS' : 'FAIL',
-      message: tradingSystemState.marketDataHealthy ? 'Real-time quotes active.' : 'Market data stale.'
-    },
-    {
-      id: 'CHK-SYNC',
-      name: 'Binance Account Synchronization',
-      required: executionMode === 'LIVE' || executionMode === 'TESTNET',
-      status: tradingSystemState.accountSynchronized ? 'PASS' : (executionMode === 'PAPER' ? 'WARN' : 'FAIL'),
-      message: tradingSystemState.accountSynchronized ? 'Synchronized with exchange.' : 'Not synchronized. Operating on simulated paper balance.'
-    },
-    {
-      id: 'CHK-PERM',
-      name: 'Execution Permissions (Withdrawals Disabled)',
-      required: executionMode === 'LIVE',
-      status: executionMode === 'PAPER' ? 'PASS' : (tradingSystemState.accountSynchronized ? 'PASS' : 'FAIL'),
-      message: executionMode === 'PAPER' ? 'Paper execution always permitted.' : 'Verification required.'
-    },
-    {
-      id: 'CHK-NATS',
-      name: 'NATS JetStream (Optional)',
-      required: false,
-      status: 'UNKNOWN',
-      message: 'NATS is optional in this SaaS-first architecture.'
-    }
-  ];
-
-  let canArm = true;
-  for (const check of checks) {
-    if (check.required && check.status === 'FAIL') {
-      canArm = false;
-      break;
-    }
-  }
-
-  // Live execution guard
-  if (executionMode === 'LIVE') {
-    canArm = false;
-    checks.push({
-      id: 'CHK-LIVE-GUARD',
-      name: 'Live Execution Capability',
-      required: true,
-      status: 'FAIL',
-      message: 'Live Binance execution adapter is not production ready. Use PAPER or TESTNET.'
-    });
-  }
-
+  const requestedConfig = {
+    executionMode: req.query.executionMode || 'PAPER'
+  };
+  const preflight = evaluatePreflight(tradingSystemState, requestedConfig);
   res.json({
-    executionMode,
-    canArm,
-    checks
+    ...preflight,
+    capabilities: EXECUTION_CAPABILITIES
   });
 });
 
 app.post('/api/system/arm', (req, res) => {
   const { executionMode, riskProfile, instruments, strategies } = req.body;
   
-  if (executionMode === 'LIVE') {
-    return res.status(400).json({ error: 'Live execution adapter is not production ready.' });
+  const requestedConfig = {
+    executionMode: executionMode || 'PAPER',
+    instruments: instruments || [],
+    strategies: strategies || { grid: false, trend: false, shock: false, carry: false },
+    riskProfile: riskProfile || 'BALANCED'
+  };
+
+  const preflight = evaluatePreflight(tradingSystemState, requestedConfig);
+
+  if (!preflight.canArm) {
+    return res.status(409).json({
+      error: 'PRECHECK_FAILED',
+      preflight
+    });
   }
-  
-  tradingSystemState.executionMode = executionMode || 'PAPER';
+
+  if (!validateStateTransition(tradingSystemState.engineState, 'ARMED')) {
+    return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: 'ARMED' });
+  }
+
+  const prevState = tradingSystemState.engineState;
+  tradingSystemState.executionMode = requestedConfig.executionMode as any;
   tradingSystemState.engineState = 'ARMED';
+
+  // Initialize testnet adapter if we are going into testnet mode
+  if (tradingSystemState.executionMode === 'TESTNET') {
+    try {
+      const active = getActiveBinanceCredentials();
+      if (active && active.isTestnet) {
+        executionManager.setTestnetCredentials(active.apiKey, active.apiSecret);
+      }
+    } catch (err) {
+      console.warn("No active testnet credentials found during arm.");
+    }
+  }
+  auditRepository.logEvent({
+    eventType: 'ENGINE_ARMED',
+    previousState: prevState,
+    newState: 'ARMED',
+    executionMode: tradingSystemState.executionMode,
+    reason: 'ARM requested by user and preflight passed',
+    metadata: { requestedConfig }
+  });
+  
+  // Pick risk profile
+  const profileKey = requestedConfig.riskProfile as keyof typeof RISK_PROFILES;
+  riskConfiguration = RISK_PROFILES[profileKey] || RISK_PROFILES.BALANCED;
+
+  tradingSystemState.activeConfiguration = {
+    executionMode: requestedConfig.executionMode as any,
+    instruments: requestedConfig.instruments,
+    strategies: requestedConfig.strategies,
+    riskProfile: requestedConfig.riskProfile as any,
+    riskConfiguration,
+    configVersion: tradingSystemState.configVersion,
+    armedAt: new Date().toISOString()
+  };
+
   tradingSystemState.updatedAt = new Date().toISOString();
   
-  // Also sync the quantEngineState to reflect the correct source
-  (quantEngineState.account as any).source = tradingSystemState.executionMode === 'TESTNET' ? 'BINANCE_TESTNET' : 'SIMULATED';
+  (quantEngineState.account as any).source = tradingSystemState.executionMode === 'PAPER' ? 'SIMULATED' : (tradingSystemState.executionMode === 'TESTNET' ? 'BINANCE_TESTNET' : 'BINANCE_MAINNET');
 
   res.json(tradingSystemState);
 });
 
 app.post('/api/system/disarm', (req, res) => {
+  if (!validateStateTransition(tradingSystemState.engineState, 'DISARMED')) {
+    return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: 'DISARMED' });
+  }
+  const prevState = tradingSystemState.engineState;
   tradingSystemState.engineState = 'DISARMED';
+  tradingSystemState.killSwitchActive = false;
+  auditRepository.logEvent({
+    eventType: 'ENGINE_DISARMED',
+    previousState: prevState,
+    newState: 'DISARMED',
+    executionMode: tradingSystemState.executionMode,
+    reason: 'Manual DISARM requested'
+  });
   tradingSystemState.updatedAt = new Date().toISOString();
   res.json(tradingSystemState);
 });
 
 app.post('/api/system/pause-new-risk', (req, res) => {
   const { active: pnrActive } = req.body;
-  tradingSystemState.pauseNewRisk = pnrActive;
-  if (pnrActive && tradingSystemState.engineState === 'ARMED') {
-    tradingSystemState.engineState = 'PAUSED_NEW_RISK';
-  } else if (!pnrActive && tradingSystemState.engineState === 'PAUSED_NEW_RISK') {
-    tradingSystemState.engineState = 'ARMED';
+  const targetState = pnrActive ? 'PAUSED_NEW_RISK' : 'ARMED';
+  if (!validateStateTransition(tradingSystemState.engineState, targetState)) {
+    return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: targetState });
   }
+  tradingSystemState.pauseNewRisk = pnrActive;
+  tradingSystemState.engineState = targetState as any;
   tradingSystemState.updatedAt = new Date().toISOString();
   res.json(tradingSystemState);
 });
 
 app.post('/api/system/recovery-only', (req, res) => {
   const { active: recActive } = req.body;
-  tradingSystemState.recoveryOnly = recActive;
-  if (recActive && tradingSystemState.engineState === 'ARMED') {
-    tradingSystemState.engineState = 'RECOVERY_ONLY';
-  } else if (!recActive && tradingSystemState.engineState === 'RECOVERY_ONLY') {
-    tradingSystemState.engineState = 'ARMED';
+  const targetState = recActive ? 'RECOVERY_ONLY' : 'ARMED';
+  if (!validateStateTransition(tradingSystemState.engineState, targetState)) {
+    return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: targetState });
   }
+  tradingSystemState.recoveryOnly = recActive;
+  tradingSystemState.engineState = targetState as any;
   tradingSystemState.updatedAt = new Date().toISOString();
   res.json(tradingSystemState);
 });
@@ -1230,6 +1415,16 @@ app.get('/api/quant/state', (req: Request, res: Response) => {
   res.json({
     ...quantEngineState,
     risk_rules: allRules,
+    strategy_intents: quantEngineState.strategy_intents,
+    meta_allocations: quantEngineState.meta_allocations,
+    exposure_recovery: {
+      status: 'ACTIVE_GRID_BRAKE',
+      current_drawdown_pct: 3.12,
+      trigger_threshold_pct: 2.50,
+      toxic_inventory_symbol: 'BTCUSDT',
+      action_taken: 'Blocked +0.10 BTC Grid intent. Enforcing exposure reduction.',
+      recommended_hedge_ratio: 0.15
+    },
     correlation_btc_eth: quantEngineState.correlations.btc_eth_rolling_corr,
     crypto_beta_exposure_pct: quantEngineState.correlations.crypto_beta_exposure_pct,
     liquidation_distance_pct: 48.2,
@@ -1247,6 +1442,9 @@ app.post('/api/quant/risk/kill-switch', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/expand', (req: Request, res: Response) => {
+  if (!canExecuteAction(tradingSystemState.engineState, 'INCREASE_RISK')) {
+    return res.status(403).json({ error: 'ACTION_BLOCKED_BY_SYSTEM_STATE', engineState: tradingSystemState.engineState, action: 'INCREASE_RISK' });
+  }
   const { basket_id } = req.body;
   const basket = quantEngineState.baskets.find((b) => b.basket_id === basket_id);
   if (!basket) {
@@ -1268,6 +1466,9 @@ app.post('/api/quant/basket/expand', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/recovery', (req: Request, res: Response) => {
+  if (!canExecuteAction(tradingSystemState.engineState, 'RECOVERY')) {
+    return res.status(403).json({ error: 'ACTION_BLOCKED_BY_SYSTEM_STATE', engineState: tradingSystemState.engineState, action: 'RECOVERY' });
+  }
   const { basket_id } = req.body;
   const basket = quantEngineState.baskets.find((b) => b.basket_id === basket_id);
   if (!basket) {
@@ -1279,6 +1480,9 @@ app.post('/api/quant/basket/recovery', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/close', (req: Request, res: Response) => {
+  if (!canExecuteAction(tradingSystemState.engineState, 'CLOSE')) {
+    return res.status(403).json({ error: 'ACTION_BLOCKED_BY_SYSTEM_STATE', engineState: tradingSystemState.engineState, action: 'CLOSE' });
+  }
   const { basket_id } = req.body;
   const basket = quantEngineState.baskets.find((b) => b.basket_id === basket_id);
   if (!basket) {
@@ -1293,6 +1497,13 @@ app.post('/api/quant/basket/close', (req: Request, res: Response) => {
 
 app.post('/api/quant/basket/action', (req: Request, res: Response) => {
   const { basket_id, action } = req.body;
+  
+  let riskClass = 'NEW_RISK';
+  if (action === 'CLOSE_ALL') riskClass = 'CLOSE';
+  if (action === 'ENABLE_AUTO_RECOVERY') riskClass = 'RECOVERY';
+  if (!canExecuteAction(tradingSystemState.engineState, riskClass as any)) {
+    return res.status(403).json({ error: 'ACTION_BLOCKED_BY_SYSTEM_STATE', engineState: tradingSystemState.engineState, action: riskClass });
+  }
   const basket = quantEngineState.baskets.find((b) => b.basket_id === basket_id);
   if (!basket) {
     return res.status(404).json({ error: 'Basket not found' });
@@ -1328,10 +1539,27 @@ app.post('/api/quant/basket/action', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/killswitch', (req: Request, res: Response) => {
-  const { active } = req.body;
-  quantEngineState.account.kill_switch_active = active;
-  quantEngineState.account.risk_state = active ? 'EMERGENCY' : 'NORMAL';
-  res.json({ kill_switch_active: active, risk_state: quantEngineState.account.risk_state });
+  // Alias for backward compatibility
+  const { active: ksActive } = req.body;
+  const targetState = ksActive ? 'EMERGENCY' : 'DISARMED';
+  if (!validateStateTransition(tradingSystemState.engineState, targetState)) {
+    return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: targetState });
+  }
+  const prevState = tradingSystemState.engineState;
+  tradingSystemState.killSwitchActive = ksActive;
+  tradingSystemState.engineState = targetState as any;
+  auditRepository.logEvent({
+    eventType: ksActive ? 'KILL_SWITCH_ENGAGED' : 'KILL_SWITCH_RELEASED',
+    previousState: prevState,
+    newState: targetState as any,
+    executionMode: tradingSystemState.executionMode,
+    reason: ksActive ? 'Kill switch engaged' : 'Kill switch released'
+  });
+  tradingSystemState.updatedAt = new Date().toISOString();
+  
+  quantEngineState.account.kill_switch_active = ksActive;
+  quantEngineState.account.risk_state = ksActive ? 'EMERGENCY' : 'NORMAL';
+  res.json({ kill_switch_active: ksActive, risk_state: quantEngineState.account.risk_state });
 });
 
 // Event-driven Historical Replay / Stress Scenario Simulation

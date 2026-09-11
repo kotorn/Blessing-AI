@@ -78,7 +78,7 @@ export const RiskRecoveryPage: React.FC<RiskRecoveryPageProps> = ({
       />
 
       {/* 2. Dynamic Exposure Recovery Decision Engine */}
-      <ExposureRecoveryEngineCard baskets={baskets} />
+      <ExposureRecoveryEngineCard baskets={baskets} recoveryData={(quantState as any)?.exposure_recovery} />
 
       {/* 3. Cross-Instrument Correlation & Beta Exposure Monitor */}
       <RiskGovernorMonitor

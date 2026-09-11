@@ -11,8 +11,8 @@ import {
 } from 'lucide-react';
 import { MetaAllocationWeight } from '../types/strategy';
 
-export const MetaAllocationMatrix: React.FC = () => {
-  const allocations: MetaAllocationWeight[] = [
+export const MetaAllocationMatrix: React.FC<{ allocationsData?: MetaAllocationWeight[] }> = ({ allocationsData }) => {
+  const allocations: MetaAllocationWeight[] = allocationsData || [
     {
       engineId: 'structural_grid',
       strategyName: 'Structural Mean-Reversion Grid',

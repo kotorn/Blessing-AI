@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 from decimal import Decimal
-from typing import Callable, Coroutine, Any, List
+from typing import Callable, Coroutine, Any, List, Optional
 from datetime import datetime, timezone
 
 from domain.models import MarketEvent, MarketType

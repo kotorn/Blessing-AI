@@ -15,11 +15,13 @@ import { ExposureRecoveryAssessment } from '../types/risk';
 import { BasketItem } from '../types';
 
 interface ExposureRecoveryEngineCardProps {
+  recoveryData?: any;
   baskets: BasketItem[];
 }
 
 export const ExposureRecoveryEngineCard: React.FC<ExposureRecoveryEngineCardProps> = ({
   baskets,
+  recoveryData,
 }) => {
   // Find basket with highest drawdown or recovery active
   const candidateBasket = baskets.find((b) => b.recovery_hedge) || baskets[0];
@@ -44,6 +46,12 @@ export const ExposureRecoveryEngineCard: React.FC<ExposureRecoveryEngineCardProp
     },
     toxicLevelsToHarvest: [4, 5],
   };
+
+  if (recoveryData?.status === 'ACTIVE_GRID_BRAKE') {
+    assessment.currentDrawdownPct = recoveryData.current_drawdown_pct;
+    assessment.recommendedAction = 'BLOCK_GRID_EXPANSION';
+    assessment.actionComparison.decisionRationale = recoveryData.action_taken;
+  }
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">
