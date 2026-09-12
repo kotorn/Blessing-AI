@@ -29,6 +29,16 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -e ".[dev]"
+
+    - name: Verify Testnet credentials are configured
+      env:
+        BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
+        BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
+      run: |
+        if [ -z "$BINANCE_TESTNET_API_KEY" ] || [ -z "$BINANCE_TESTNET_API_SECRET" ]; then
+          echo "::error::Binance Testnet credentials are not configured for this workflow"
+          exit 1
+        fi
         
     - name: Run Read-Only Contract Tests
       env:
