@@ -1281,6 +1281,48 @@ app.get('/api/binance/balance', async (req: Request, res: Response) => {
 // The worker url is typically http://127.0.0.1:8080
 const WORKER_URL = 'http://127.0.0.1:8080';
 
+async function forwardWorkerRequest(
+  pathName: string,
+  init?: RequestInit,
+): Promise<{ response: globalThis.Response; data: any }> {
+  const response = await fetch(WORKER_URL + pathName, init);
+  const bodyText = await response.text();
+  let data: any = {};
+  if (bodyText) {
+    try {
+      data = JSON.parse(bodyText);
+    } catch {
+      data = { detail: bodyText };
+    }
+  }
+  return { response, data };
+}
+
+function projectWorkerState(workerState: any): void {
+  if (!workerState || typeof workerState !== 'object') return;
+  if (typeof workerState.execution_mode === 'string') {
+    tradingSystemState.executionMode = workerState.execution_mode;
+    tradingSystemState.exchangeEnvironment =
+      workerState.execution_mode === 'TESTNET' ? 'BINANCE_TESTNET' : 'NONE';
+    tradingSystemState.dataSource =
+      workerState.execution_mode === 'TESTNET' ? 'BINANCE' : 'SIMULATED';
+  }
+  if (typeof workerState.engine_state === 'string') tradingSystemState.engineState = workerState.engine_state;
+  if (typeof workerState.market_data_healthy === 'boolean') tradingSystemState.marketDataHealthy = workerState.market_data_healthy;
+  if (typeof workerState.private_stream_healthy === 'boolean') tradingSystemState.privateStreamHealthy = workerState.private_stream_healthy;
+  if (typeof workerState.trading_connection_healthy === 'boolean') tradingSystemState.tradingConnectionHealthy = workerState.trading_connection_healthy;
+  if (typeof workerState.account_synchronized === 'boolean') tradingSystemState.accountSynchronized = workerState.account_synchronized;
+  if (typeof workerState.reconciliation_status === 'string') tradingSystemState.reconciliationStatus = workerState.reconciliation_status;
+  if (typeof workerState.kill_switch_active === 'boolean') tradingSystemState.killSwitchActive = workerState.kill_switch_active;
+  if (typeof workerState.pause_new_risk === 'boolean') tradingSystemState.pauseNewRisk = workerState.pause_new_risk;
+  if (typeof workerState.recovery_only === 'boolean') tradingSystemState.recoveryOnly = workerState.recovery_only;
+  if (typeof workerState.updated_at === 'string') tradingSystemState.updatedAt = workerState.updated_at;
+}
+
+function requireWorkerBoolean(data: any, field: string): boolean | null {
+  return typeof data?.[field] === 'boolean' ? data[field] : null;
+}
+
 app.get('/api/system/state', async (req, res) => {
   try {
     const workerStateResp = await fetch(WORKER_URL + '/state');
@@ -1306,8 +1348,6 @@ app.get('/api/system/state', async (req, res) => {
     }
     if (typeof workerState.account_synchronized === 'boolean') {
       tradingSystemState.accountSynchronized = workerState.account_synchronized;
-    } else if (typeof workerState.authenticated === 'boolean') {
-      tradingSystemState.accountSynchronized = workerState.authenticated;
     }
     if (workerState.reconciliation_status) {
       tradingSystemState.reconciliationStatus = workerState.reconciliation_status;
@@ -1392,21 +1432,22 @@ app.post('/api/system/arm', async (req, res) => {
   };
 
   try {
-    const armResp = await fetch(WORKER_URL + '/arm', {
+    const previousState = tradingSystemState.engineState;
+    const forwarded = await forwardWorkerRequest('/arm', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestedConfig)
     });
-    
-    if (!armResp.ok) {
-      const errData = await armResp.json();
-      return res.status(409).json({ error: 'WORKER_REJECTED_ARM', detail: errData });
+
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_ARM', detail: forwarded.data });
     }
-    
+
+    projectWorkerState(forwarded.data);
     // Pick risk profile
     const profileKey = requestedConfig.riskProfile as keyof typeof RISK_PROFILES;
     riskConfiguration = RISK_PROFILES[profileKey] || RISK_PROFILES.BALANCED;
-    tradingSystemState.engineState = 'ARMED';
+    tradingSystemState.engineState = forwarded.data.engine_state || 'ARMED';
     tradingSystemState.executionMode = requestedConfig.executionMode as any;
     tradingSystemState.activeConfiguration = {
       executionMode: requestedConfig.executionMode as any,
@@ -1420,14 +1461,14 @@ app.post('/api/system/arm', async (req, res) => {
     
     auditRepository.logEvent({
       eventType: 'ENGINE_ARMED',
-      previousState: tradingSystemState.engineState,
+      previousState,
       newState: 'ARMED',
       executionMode: requestedConfig.executionMode,
       reason: 'ARM requested by user and worker accepted',
       metadata: { requestedConfig }
     });
     
-    res.json({ status: 'ARMED' });
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
@@ -1435,18 +1476,22 @@ app.post('/api/system/arm', async (req, res) => {
 
 app.post('/api/system/disarm', async (req, res) => {
   try {
-    await fetch(WORKER_URL + '/disarm', { method: 'POST' });
+    const previousState = tradingSystemState.engineState;
+    const forwarded = await forwardWorkerRequest('/disarm', { method: 'POST' });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_DISARM', detail: forwarded.data });
+    }
     tradingSystemState.engineState = 'DISARMED';
     
     auditRepository.logEvent({
       eventType: 'ENGINE_DISARMED',
-      previousState: tradingSystemState.engineState,
+      previousState,
       newState: 'DISARMED',
       executionMode: tradingSystemState.executionMode,
       reason: 'Manual DISARM requested and worker accepted'
     });
     
-    res.json({ status: 'DISARMED' });
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
@@ -1454,18 +1499,19 @@ app.post('/api/system/disarm', async (req, res) => {
 
 app.post('/api/system/pause-new-risk', async (req, res) => {
   try {
-    await fetch(WORKER_URL + '/pause-new-risk', {
+    const forwarded = await forwardWorkerRequest('/pause-new-risk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
-    tradingSystemState.pauseNewRisk = !!req.body?.active;
-    if (req.body?.active) {
-      tradingSystemState.engineState = 'PAUSED_NEW_RISK';
-    } else {
-      tradingSystemState.engineState = tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED';
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_PAUSE', detail: forwarded.data });
     }
-    res.json({ status: 'ok' });
+    const active = requireWorkerBoolean(forwarded.data, 'active');
+    if (active === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    tradingSystemState.pauseNewRisk = active;
+    tradingSystemState.engineState = active ? 'PAUSED_NEW_RISK' : (tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED');
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
@@ -1473,34 +1519,43 @@ app.post('/api/system/pause-new-risk', async (req, res) => {
 
 app.post('/api/system/recovery-only', async (req, res) => {
   try {
-    await fetch(WORKER_URL + '/recovery-only', {
+    const forwarded = await forwardWorkerRequest('/recovery-only', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
-    tradingSystemState.recoveryOnly = !!req.body?.active;
-    if (req.body?.active) {
-      tradingSystemState.engineState = 'RECOVERY_ONLY';
-    } else {
-      tradingSystemState.engineState = tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED';
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_RECOVERY', detail: forwarded.data });
     }
-    res.json({ status: 'ok' });
+    const active = requireWorkerBoolean(forwarded.data, 'active');
+    if (active === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    tradingSystemState.recoveryOnly = active;
+    tradingSystemState.engineState = active ? 'RECOVERY_ONLY' : (tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED');
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
 });
 
 app.post('/api/system/kill-switch', async (req, res) => {
+  if (typeof req.body?.active !== 'boolean') {
+    return res.status(400).json({ error: 'INVALID_KILL_SWITCH_REQUEST', message: 'active must be a boolean' });
+  }
   try {
-    await fetch(WORKER_URL + '/kill-switch', {
+    const forwarded = await forwardWorkerRequest('/kill-switch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
-    const isActive = !!req.body?.active;
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_KILL_SWITCH', detail: forwarded.data });
+    }
+    const isActive = requireWorkerBoolean(forwarded.data, 'kill_switch_active');
+    if (isActive === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
     tradingSystemState.killSwitchActive = isActive;
-    tradingSystemState.engineState = isActive ? 'EMERGENCY' : 'DISARMED';
-    res.json({ status: 'ok' });
+    if (isActive) tradingSystemState.engineState = 'EMERGENCY';
+    else if (forwarded.data.status === 'CONFIRMED') tradingSystemState.engineState = 'DISARMED';
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
@@ -1508,8 +1563,11 @@ app.post('/api/system/kill-switch', async (req, res) => {
 
 app.post('/api/system/reconcile', async (req, res) => {
   try {
-    const rResp = await fetch(WORKER_URL + '/reconcile', { method: 'POST' });
-    const data = await rResp.json();
+    const forwarded = await forwardWorkerRequest('/reconcile', { method: 'POST' });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_RECONCILE', detail: forwarded.data });
+    }
+    const data = forwarded.data;
     tradingSystemState.reconciliationStatus = data.status;
     tradingSystemState.accountSynchronized = data.status === 'IN_SYNC';
     res.json(data);
@@ -1543,22 +1601,31 @@ app.get('/api/quant/state', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/risk/kill-switch', async (req: Request, res: Response) => {
-  const { active: ksActive } = req.body;
+  if (typeof req.body?.active !== 'boolean') {
+    return res.status(400).json({ error: 'INVALID_KILL_SWITCH_REQUEST', message: 'active must be a boolean' });
+  }
+  const ksActive = req.body.active;
   try {
-    await fetch(WORKER_URL + '/kill-switch', {
+    const forwarded = await forwardWorkerRequest('/kill-switch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ active: ksActive })
+      body: JSON.stringify({ active: ksActive }),
     });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_KILL_SWITCH', detail: forwarded.data });
+    }
+    const actualActive = requireWorkerBoolean(forwarded.data, 'kill_switch_active');
+    if (actualActive === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    tradingSystemState.killSwitchActive = actualActive;
+    if (actualActive) tradingSystemState.engineState = 'EMERGENCY';
+    else if (forwarded.data.status === 'CONFIRMED') tradingSystemState.engineState = 'DISARMED';
+    tradingSystemState.updatedAt = new Date().toISOString();
+    quantEngineState.account.kill_switch_active = actualActive;
+    quantEngineState.account.risk_state = actualActive ? 'EMERGENCY' : 'NORMAL';
+    return res.json({ ...forwarded.data, risk_state: quantEngineState.account.risk_state });
   } catch (err) {
-    console.warn('Could not forward kill switch to worker:', err);
+    return res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
-  tradingSystemState.killSwitchActive = ksActive;
-  tradingSystemState.engineState = ksActive ? 'EMERGENCY' : 'DISARMED';
-  tradingSystemState.updatedAt = new Date().toISOString();
-  quantEngineState.account.kill_switch_active = ksActive;
-  quantEngineState.account.risk_state = ksActive ? 'EMERGENCY' : 'NORMAL';
-  res.json({ kill_switch_active: ksActive, risk_state: quantEngineState.account.risk_state });
 });
 
 app.post('/api/quant/basket/expand', (req: Request, res: Response) => {
@@ -1684,35 +1751,43 @@ app.post('/api/quant/basket/action', (req: Request, res: Response) => {
 
 app.post('/api/quant/killswitch', async (req: Request, res: Response) => {
   // Alias for backward compatibility
-  const { active: ksActive } = req.body;
+  if (typeof req.body?.active !== 'boolean') {
+    return res.status(400).json({ error: 'INVALID_KILL_SWITCH_REQUEST', message: 'active must be a boolean' });
+  }
+  const ksActive = req.body.active;
   const targetState = ksActive ? 'EMERGENCY' : 'DISARMED';
   if (!validateStateTransition(tradingSystemState.engineState, targetState)) {
     return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: targetState });
   }
   try {
-    await fetch(WORKER_URL + '/kill-switch', {
+    const forwarded = await forwardWorkerRequest('/kill-switch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ active: ksActive })
+      body: JSON.stringify({ active: ksActive }),
     });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_KILL_SWITCH', detail: forwarded.data });
+    }
+    const actualActive = requireWorkerBoolean(forwarded.data, 'kill_switch_active');
+    if (actualActive === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    const prevState = tradingSystemState.engineState;
+    tradingSystemState.killSwitchActive = actualActive;
+    if (actualActive) tradingSystemState.engineState = 'EMERGENCY';
+    else if (forwarded.data.status === 'CONFIRMED') tradingSystemState.engineState = 'DISARMED';
+    auditRepository.logEvent({
+      eventType: actualActive ? 'KILL_SWITCH_ENGAGED' : 'KILL_SWITCH_RELEASED',
+      previousState: prevState,
+      newState: tradingSystemState.engineState,
+      executionMode: tradingSystemState.executionMode,
+      reason: actualActive ? 'Kill switch engaged' : 'Kill switch release verified by worker',
+    });
+    tradingSystemState.updatedAt = new Date().toISOString();
+    quantEngineState.account.kill_switch_active = actualActive;
+    quantEngineState.account.risk_state = actualActive ? 'EMERGENCY' : 'NORMAL';
+    return res.json({ ...forwarded.data, risk_state: quantEngineState.account.risk_state });
   } catch (err) {
-    console.warn('Could not forward kill switch to worker:', err);
+    return res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
-  const prevState = tradingSystemState.engineState;
-  tradingSystemState.killSwitchActive = ksActive;
-  tradingSystemState.engineState = targetState as any;
-  auditRepository.logEvent({
-    eventType: ksActive ? 'KILL_SWITCH_ENGAGED' : 'KILL_SWITCH_RELEASED',
-    previousState: prevState,
-    newState: targetState as any,
-    executionMode: tradingSystemState.executionMode,
-    reason: ksActive ? 'Kill switch engaged' : 'Kill switch released'
-  });
-  tradingSystemState.updatedAt = new Date().toISOString();
-  
-  quantEngineState.account.kill_switch_active = ksActive;
-  quantEngineState.account.risk_state = ksActive ? 'EMERGENCY' : 'NORMAL';
-  res.json({ kill_switch_active: ksActive, risk_state: quantEngineState.account.risk_state });
 });
 
 // Event-driven Historical Replay / Stress Scenario Simulation

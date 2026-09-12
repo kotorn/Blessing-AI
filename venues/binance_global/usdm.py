@@ -30,10 +30,16 @@ logger = structlog.get_logger()
 
 class BinanceGlobalUSDMAdapter(DerivativesVenueAdapter):
     """
-    Native Binance USDⓈ-M Futures implementation.
+    Read-only compatibility adapter for legacy data consumers.
+
+    Mutable exchange authority belongs exclusively to
+    ``apps.trading_worker.venues.binance.BinanceExecutionAdapter``.  Keeping
+    this legacy interface read-only prevents a caller from bypassing the
+    Worker decision and order gates.
+
     Endpoints:
-      REST: https://fapi.binance.com (Production) or https://testnet.binancefuture.com
-      WSS:  wss://fstream.binance.com/ws
+      REST: https://testnet.binancefuture.com
+      WSS:  wss://stream.binancefuture.com/ws
     """
 
     def __init__(
@@ -43,6 +49,8 @@ class BinanceGlobalUSDMAdapter(DerivativesVenueAdapter):
         testnet: bool = True,
         recv_window: int = 5000,
     ):
+        if not testnet:
+            raise ValueError("LIVE/Mainnet mutable execution is permanently blocked.")
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
@@ -70,6 +78,13 @@ class BinanceGlobalUSDMAdapter(DerivativesVenueAdapter):
             hashlib.sha256,
         ).hexdigest()
         return f"{query_string}&signature={signature}"
+
+    @staticmethod
+    def _mutable_execution_is_worker_only() -> None:
+        raise RuntimeError(
+            "Legacy BinanceGlobalUSDMAdapter is read-only; route mutations "
+            "through the Python Trading Worker execution adapter."
+        )
 
     async def connect(self) -> None:
         if self._session is None or self._session.closed:
@@ -239,104 +254,20 @@ class BinanceGlobalUSDMAdapter(DerivativesVenueAdapter):
             return res
 
     async def place_order(self, order: OrderRequest) -> OrderResponse:
-        assert self._session is not None
-        params: Dict[str, Any] = {
-            "symbol": order.symbol,
-            "side": order.side,
-            "type": order.order_type,
-            "quantity": str(order.quantity),
-            "newClientOrderId": order.client_order_id,
-            "timestamp": int(time.time() * 1000),
-            "recvWindow": self.recv_window,
-        }
-        if order.order_type == "LIMIT":
-            assert order.price is not None, "LIMIT order must specify price"
-            params["price"] = str(order.price)
-            params["timeInForce"] = order.time_in_force
-
-        if order.reduce_only:
-            params["reduceOnly"] = "true"
-
-        signed_qs = self._sign(params)
-        url = f"{self.rest_base}/fapi/v1/order"
-        async with self._session.post(url, data=signed_qs, headers={"Content-Type": "application/x-www-form-urlencoded"}) as resp:
-            data = await resp.json()
-            if "code" in data and data["code"] != 200:
-                logger.error("binance_order_rejected", error=data, client_order_id=order.client_order_id)
-                raise RuntimeError(f"Order submission failed: {data.get('msg')} (Code: {data.get('code')})")
-
-            return OrderResponse(
-                client_order_id=data["clientOrderId"],
-                exchange_order_id=str(data["orderId"]),
-                symbol=data["symbol"],
-                status=data["status"],
-                price=Decimal(data["price"]) if Decimal(data.get("price", "0")) > 0 else None,
-                quantity=Decimal(data["origQty"]),
-                filled_quantity=Decimal(data["executedQty"]),
-                avg_fill_price=Decimal(data["avgPrice"]) if Decimal(data.get("avgPrice", "0")) > 0 else None,
-                transact_time=datetime.fromtimestamp(data["updateTime"] / 1000, tz=timezone.utc),
-            )
+        self._mutable_execution_is_worker_only()
+        raise AssertionError("unreachable")
 
     async def cancel_order(self, symbol: str, client_order_id: str) -> bool:
-        assert self._session is not None
-        params = {
-            "symbol": symbol,
-            "origClientOrderId": client_order_id,
-            "timestamp": int(time.time() * 1000),
-            "recvWindow": self.recv_window,
-        }
-        signed_qs = self._sign(params)
-        url = f"{self.rest_base}/fapi/v1/order?{signed_qs}"
-        async with self._session.delete(url) as resp:
-            data = await resp.json()
-            return data.get("status") == "CANCELED"
+        self._mutable_execution_is_worker_only()
+        raise AssertionError("unreachable")
 
     async def amend_order(self, symbol: str, client_order_id: str, new_price: Decimal, new_quantity: Decimal) -> OrderResponse:
-        # Binance Futures supports cancel-replace
-        await self.cancel_order(symbol, client_order_id)
-        return await self.place_order(
-            OrderRequest(
-                client_order_id=f"{client_order_id}_amd",
-                symbol=symbol,
-                side="BUY",
-                order_type="LIMIT",
-                quantity=new_quantity,
-                price=new_price,
-            )
-        )
+        self._mutable_execution_is_worker_only()
+        raise AssertionError("unreachable")
 
     async def emergency_flatten(self, symbol: Optional[str] = None) -> List[OrderResponse]:
-        assert self._session is not None
-        logger.warn("EMERGENCY_FLATTEN_TRIGGERED", symbol=symbol)
-        # 1. Cancel all open orders
-        params: Dict[str, Any] = {"timestamp": int(time.time() * 1000), "recvWindow": self.recv_window}
-        if symbol:
-            params["symbol"] = symbol
-            signed_qs = self._sign(params)
-            url = f"{self.rest_base}/fapi/v1/allOpenOrders?{signed_qs}"
-            async with self._session.delete(url):
-                pass
-
-        # 2. Market close positions
-        responses: List[OrderResponse] = []
-        positions = await self.get_positions()
-        for p in positions:
-            if symbol and p.symbol != symbol:
-                continue
-            if p.quantity > 0:
-                close_side = "SELL" if p.direction == "LONG" else "BUY"
-                resp = await self.place_order(
-                    OrderRequest(
-                        client_order_id=f"EMERG_{p.symbol}_{int(time.time())}",
-                        symbol=p.symbol,
-                        side=close_side,
-                        order_type="MARKET",
-                        quantity=p.quantity,
-                        reduce_only=True,
-                    )
-                )
-                responses.append(resp)
-        return responses
+        self._mutable_execution_is_worker_only()
+        raise AssertionError("unreachable")
 
     async def get_funding_rate(self, symbol: str) -> FundingInfo:
         assert self._session is not None

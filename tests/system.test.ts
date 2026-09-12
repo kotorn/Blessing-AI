@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { evaluatePreflight } from '../src/backend/system';
+import { canExecuteAction, evaluatePreflight } from '../src/backend/system';
 import { TradingSystemState } from '../src/backend/types';
 
 describe('System Preflight Execution Enforcements', () => {
@@ -52,5 +52,16 @@ describe('System Preflight Execution Enforcements', () => {
     const result = evaluatePreflight(mockState, requestedConfig);
     
     expect(result.canArm).toBe(false);
+  });
+
+  it('keeps UI action policy aligned with the worker risk classes', () => {
+    expect(canExecuteAction('ARMED', 'NEW_RISK')).toBe(true);
+    expect(canExecuteAction('PAUSED_NEW_RISK', 'NEW_RISK')).toBe(false);
+    expect(canExecuteAction('PAUSED_NEW_RISK', 'REDUCE_RISK')).toBe(true);
+    expect(canExecuteAction('RECOVERY_ONLY', 'INCREASE_RISK')).toBe(false);
+    expect(canExecuteAction('RECOVERY_ONLY', 'RECOVERY')).toBe(true);
+    expect(canExecuteAction('EMERGENCY', 'RECOVERY')).toBe(false);
+    expect(canExecuteAction('EMERGENCY', 'EMERGENCY')).toBe(true);
+    expect(canExecuteAction('DISARMED', 'CLOSE')).toBe(false);
   });
 });

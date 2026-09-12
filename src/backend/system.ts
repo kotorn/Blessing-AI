@@ -55,5 +55,13 @@ export function validateStateTransition(currentState: EngineState, nextState: En
 }
 
 export function canExecuteAction(engineState: EngineState, actionRiskClass: ActionRiskClass): boolean {
-  return true; // Validated via worker
+  const reducingRisk = ['REDUCE_RISK', 'RECOVERY', 'CLOSE', 'EMERGENCY'].includes(actionRiskClass);
+  if (engineState === 'EMERGENCY') {
+    return ['REDUCE_RISK', 'CLOSE', 'EMERGENCY'].includes(actionRiskClass);
+  }
+  if (engineState === 'PAUSED_NEW_RISK' || engineState === 'RECOVERY_ONLY') {
+    return reducingRisk;
+  }
+  if (engineState !== 'ARMED') return false;
+  return ['NEW_RISK', 'INCREASE_RISK', 'REDUCE_RISK', 'RECOVERY', 'CLOSE', 'EMERGENCY'].includes(actionRiskClass);
 }

@@ -66,6 +66,18 @@ class RiskState(str, Enum):
     EMERGENCY = "EMERGENCY"
 
 
+class EconomicRiskClass(str, Enum):
+    """Economic effect of an execution decision, independent of its command."""
+
+    NOOP = "NOOP"
+    NEW_RISK = "NEW_RISK"
+    INCREASE_RISK = "INCREASE_RISK"
+    REDUCE_RISK = "REDUCE_RISK"
+    RECOVERY = "RECOVERY"
+    CLOSE = "CLOSE"
+    EMERGENCY = "EMERGENCY"
+
+
 class BasketState(str, Enum):
     NEW = "NEW"
     ACTIVE = "ACTIVE"

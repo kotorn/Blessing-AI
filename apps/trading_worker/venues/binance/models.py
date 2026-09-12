@@ -1,8 +1,11 @@
+import os
+from decimal import Decimal, InvalidOperation
 from enum import Enum
-from decimal import Decimal
 from typing import Set
 from datetime import datetime
 from pydantic import BaseModel, Field
+
+from domain.models import utc_now
 
 class ExchangeAccountSnapshot(BaseModel):
     wallet_balance: Decimal
@@ -19,11 +22,16 @@ class ExchangeAccountSnapshot(BaseModel):
 
     effective_leverage: Decimal
     margin_utilization_pct: Decimal
-    
-    min_liquidation_distance_pct: Decimal = Decimal("100.0")
-    liquidation_safety: str = "KNOWN"
 
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    # None means not applicable for a flat account or unavailable for an active
+    # position. It is deliberately not represented as an invented 100 percent.
+    min_liquidation_distance_pct: Decimal | None = None
+    liquidation_safety: str = "UNKNOWN"
+    exchange_environment: str = "UNKNOWN"
+    valid: bool = False
+    invalid_reason: str | None = None
+
+    timestamp: datetime = Field(default_factory=utc_now)
 
 class ConnectionState(str, Enum):
     DISCONNECTED = "DISCONNECTED"
@@ -37,10 +45,62 @@ class ConnectionState(str, Enum):
     RECONCILING = "RECONCILING"
 
 class TestnetSafetyLimits(BaseModel):
-    allowed_symbols: Set[str] = Field(default_factory=lambda: {"BTCUSDT", "ETHUSDT"})
-    max_single_order_notional: Decimal = Decimal("500.0")
-    max_total_open_notional: Decimal = Decimal("2000.0")
-    max_open_orders: int = 5
+    allowed_symbols: Set[str] = Field(default_factory=lambda: {"BTCUSDT"})
+    max_single_order_notional: Decimal = Decimal("25.0")
+    max_total_open_notional: Decimal = Decimal("50.0")
+    max_open_orders: int = 1
+    max_active_exposure_chains: int = 1
+
+    @classmethod
+    def from_environment(cls) -> "TestnetSafetyLimits":
+        """Load bounded overrides without allowing malformed values to disable caps."""
+
+        defaults = cls()
+
+        raw_symbols = os.getenv("TESTNET_ALLOWED_SYMBOLS")
+        if raw_symbols is None:
+            symbols = defaults.allowed_symbols
+        else:
+            parsed_symbols = {
+                symbol.strip().upper()
+                for symbol in raw_symbols.split(",")
+                if symbol.strip()
+            }
+            symbols = parsed_symbols or defaults.allowed_symbols
+
+        def positive_decimal(name: str, fallback: Decimal) -> Decimal:
+            raw = os.getenv(name)
+            if raw is None or not raw.strip():
+                return fallback
+            try:
+                value = Decimal(raw)
+            except (InvalidOperation, ValueError):
+                return fallback
+            return value if value.is_finite() and value > 0 else fallback
+
+        def positive_int(name: str, fallback: int) -> int:
+            raw = os.getenv(name)
+            if raw is None or not raw.strip():
+                return fallback
+            try:
+                value = int(raw)
+            except ValueError:
+                return fallback
+            return value if value > 0 else fallback
+
+        return cls(
+            allowed_symbols=symbols,
+            max_single_order_notional=positive_decimal(
+                "TESTNET_MAX_SINGLE_ORDER_NOTIONAL", defaults.max_single_order_notional
+            ),
+            max_total_open_notional=positive_decimal(
+                "TESTNET_MAX_TOTAL_OPEN_NOTIONAL", defaults.max_total_open_notional
+            ),
+            max_open_orders=positive_int("TESTNET_MAX_OPEN_ORDERS", defaults.max_open_orders),
+            max_active_exposure_chains=positive_int(
+                "TESTNET_MAX_ACTIVE_EXPOSURE_CHAINS", defaults.max_active_exposure_chains
+            ),
+        )
 
 class BinanceExecutionError(Exception):
     """Base exception for Binance execution errors."""
@@ -66,10 +126,11 @@ class BinanceAuthenticationError(BinanceExecutionError):
 
 class BinanceRateLimitError(BinanceExecutionError):
     """Rate limit breach / IP ban (-1003, -1015, HTTP 429)."""
-    def __init__(self, code: int, msg: str):
+    def __init__(self, code: int, msg: str, headers: dict[str, str] | None = None):
         super().__init__(f"Binance rate limit ({code}): {msg}")
         self.code = code
         self.msg = msg
+        self.headers = headers or {}
 
 class BinanceTimestampError(BinanceExecutionError):
     """Timestamp outside recvWindow (-1021)."""

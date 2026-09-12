@@ -33,6 +33,7 @@ jobs:
     - name: Run Read-Only Contract Tests
       env:
         PYTHONPATH: .
+        BINANCE_TESTNET: 'true'
         BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
         BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
       run: |
@@ -42,6 +43,8 @@ jobs:
       if: github.event.inputs.allow_mutation == 'true'
       env:
         PYTHONPATH: .
+        BINANCE_TESTNET: 'true'
+        TESTNET_MANUAL_TRIAL_APPROVED: ${{ github.event.inputs.allow_mutation == 'true' }}
         BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
         BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
       run: |

@@ -44,6 +44,7 @@ from domain.enums import (
     RiskState,
     BasketState,
     RecoveryActionType,
+    EconomicRiskClass,
 )
 
 
@@ -230,7 +231,7 @@ class RiskSnapshot(BaseModel):
     margin_utilization_pct: Decimal
     effective_leverage: Decimal
     current_drawdown_pct: Decimal
-    liquidation_distance_pct: Decimal
+    liquidation_distance_pct: Optional[Decimal]
     risk_state: RiskState
     hard_violations: List[str] = Field(default_factory=list)
     soft_violations: List[str] = Field(default_factory=list)
@@ -290,6 +291,9 @@ class ExecutionDecision(BaseModel):
     decision_id: str
     symbol: str
     action: str                         # "SUBMIT_ORDER" | "REDUCE_POSITION" | "NOOP"
+    # An omitted economic classification is non-executable.  Callers that
+    # intend to mutate exposure must state the policy explicitly.
+    risk_class: EconomicRiskClass = EconomicRiskClass.NOOP
     orders: List[OrderIntent] = Field(default_factory=list)
     rational: str = ""
     net_exposure_delta: Decimal = Decimal("0.0")
@@ -307,6 +311,10 @@ class ExecutionOrder(BaseModel):
     status: str
     exchange_order_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=utc_now)
+    market_type: MarketType = MarketType.USDM_FUTURES
+    position_side: PositionSide = PositionSide.BOTH
+    reduce_only: bool = False
+    time_in_force: TimeInForce = TimeInForce.GTC
 
 class ExchangeFill(BaseModel):
     if PYDANTIC_AVAILABLE:
@@ -341,6 +349,8 @@ class ExchangePosition(BaseModel):
     entry_price: Decimal = Decimal("0.0")
     mark_price: Optional[Decimal] = None
     unrealized_pnl: Decimal = Decimal("0.0")
+    liquidation_price: Optional[Decimal] = None
+    leverage: Decimal = Decimal("0.0")
     margin_type: str = "cross"
     event_time: Optional[Any] = None
     source: str = "BINANCE_TESTNET"
@@ -352,6 +362,10 @@ class ExchangePosition(BaseModel):
             "entryPrice": str(self.entry_price),
             "unRealizedProfit": str(self.unrealized_pnl),
             "marginType": self.margin_type,
+            "liquidationPrice": (
+                str(self.liquidation_price) if self.liquidation_price is not None else None
+            ),
+            "leverage": str(self.leverage),
         }
         if item in mapping:
             return mapping[item]

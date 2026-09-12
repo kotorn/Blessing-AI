@@ -48,14 +48,21 @@ async def test_worker_state_transitions_and_health():
     assert state["market_data_healthy"] is False
     assert state["health_indicators"]["active_symbols_count"] == 2
     
-    # Arming worker in TESTNET mode
-    arm_resp = client.post("/arm", json={"executionMode": "TESTNET"})
+    # Paper arming remains available with an explicit instrument and strategy.
+    arm_resp = client.post(
+        "/arm",
+        json={
+            "executionMode": "PAPER",
+            "instruments": ["BTCUSDT"],
+            "strategies": {"grid": True},
+        },
+    )
     assert arm_resp.status_code == 200
     
     resp = client.get("/state")
     state = resp.json()
     assert state["engine_state"] == "ARMED"
-    assert state["execution_mode"] == "TESTNET"
+    assert state["execution_mode"] == "PAPER"
     
     # Update health indicators
     worker.market_data_healthy = True
@@ -281,32 +288,29 @@ def test_worker_preflight_and_live_blocking():
     assert testnet_data["canArm"] is False
 
     # 4. Strict arming in TESTNET fails if preflight fails
-    arm_testnet_strict = client.post("/arm", json={"executionMode": "TESTNET", "enforcePreflight": True})
+    arm_testnet_strict = client.post(
+        "/arm",
+        json={
+            "executionMode": "TESTNET",
+            "instruments": ["BTCUSDT"],
+            "strategies": {"grid": True},
+            "enforcePreflight": True,
+        },
+    )
     assert arm_testnet_strict.status_code == 400
-    assert "TESTNET preflight failed" in arm_testnet_strict.json()["detail"]
+    assert "Configuration Preflight Failed" in arm_testnet_strict.json()["detail"]
 
-    # 5. When prerequisites are met, preflight passes
+    # 5. Local flags and hand-written health fields cannot manufacture Testnet
+    # readiness without a real adapter, account snapshot, rules, and market data.
     worker.authenticated = True
     worker.connection_state = "READY"
     worker.reconciliation_status = "IN_SYNC"
     worker.private_stream_healthy = True
     
-    # Mock credentials in environment for the test check
-    import os
-    os.environ["BINANCE_TESTNET_API_KEY"] = "mock_key"
-    os.environ["BINANCE_TESTNET_API_SECRET"] = "mock_secret"
-    try:
-        ready_preflight = client.get("/preflight?execution_mode=TESTNET")
-        assert ready_preflight.status_code == 200
-        assert ready_preflight.json()["canArm"] is True
-
-        arm_success = client.post("/arm", json={"executionMode": "TESTNET", "enforcePreflight": True})
-        assert arm_success.status_code == 200
-        assert arm_success.json()["status"] == "ARMED"
-    finally:
-        os.environ.pop("BINANCE_TESTNET_API_KEY", None)
-        os.environ.pop("BINANCE_TESTNET_API_SECRET", None)
-        set_worker_engine(None)
+    ready_preflight = client.get("/preflight?execution_mode=TESTNET")
+    assert ready_preflight.status_code == 200
+    assert ready_preflight.json()["canArm"] is False
+    set_worker_engine(None)
 
 
 def test_reconcile_endpoint_integration():
@@ -317,12 +321,12 @@ def test_reconcile_endpoint_integration():
     worker.reconciliation_status = "UNKNOWN"
     rec_resp = client.post("/reconcile")
     assert rec_resp.status_code == 200
-    assert rec_resp.json()["status"] == "IN_SYNC"
+    assert rec_resp.json()["status"] == "SIMULATED_SYNC"
 
     state_resp = client.get("/state")
     assert state_resp.status_code == 200
-    assert state_resp.json()["reconciliation_status"] == "IN_SYNC"
-    assert state_resp.json()["account_synchronized"] is True
+    assert state_resp.json()["reconciliation_status"] == "SIMULATED_SYNC"
+    assert state_resp.json()["account_synchronized"] is False
 
     set_worker_engine(None)
 

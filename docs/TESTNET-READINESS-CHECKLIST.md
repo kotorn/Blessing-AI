@@ -1,33 +1,50 @@
-# Binance Testnet Readiness Checklist
+# Binance USDⓈ-M Testnet readiness
 
-This document tracks the capabilities required before live Binance Testnet order execution can be enabled.
-
-## 1. Safety Enforcements
-- [x] Backend-authoritative `TradingSystemState`
-- [x] Preflight checks re-run server-side on ARM
-- [x] Testnet capability explicitly declared as `false` until adapter exists
-- [x] Successful sync correctly sets `dataSource = BINANCE` and `accountSynchronized = true`
-- [x] `executionMode` does not silently become `LIVE` after account sync
-- [x] State-transition rules enforced (`EMERGENCY` -> `ARMED` blocked, etc)
-- [x] Pause New Risk / Recovery Only correctly block backend actions
-- [x] Mock execution orders are truthfully labeled with `source = SIMULATED`
-- [x] Backend audit events repository implemented
-- [x] Automated state-machine tests added
-
-## 2. Binance Testnet Execution Adapter (Native)
-- [x] Single execution authority established (Python Trading Worker)
-- [x] Native Binance REST Client implemented (`aiohttp`)
-- [x] Capability Discovery implemented (`Hedge Mode`, `Rules`)
-- [x] Clock Synchronization implemented
-- [x] Decimal-safe normalization implemented (`normalize_quantity`, `normalize_price`)
-- [x] Signed Testnet order submission via `/fapi/order` implemented
-- [x] Deterministic client order IDs mapping implemented (`BAI-<context>-<attempt>`)
-- [x] Handle partial fills gracefully (ExchangeFill vs ExchangeOrder split designed)
-- [x] Implement user/private WebSocket stream for updates
-- [x] REST reconciliation fallback on stream disconnect (Required invariant)
-- [x] Handle timeout ambiguity (STATE_UNKNOWN logic designed)
-- [x] Real position reconciliation logic
-- [x] CI unit and integration tests passing (9 passed, 2 contract suites ready for live credentials)
+This checklist is evidence-based. `LOCAL_VERIFIED` means the command was run
+in the current local working tree; it does not mean GitHub CI or Binance
+Testnet has been verified.
 
 ## Status
-**READY FOR TESTNET TRIAL**. The native execution adapter, user stream recovery, conflict-resolution meta allocator, risk governor, and exposure recovery engines are fully implemented and verified with a passing test suite (`pytest`).
+
+| Gate | Status | Evidence boundary |
+|---|---|---|
+| Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED` | Local checkout only |
+| Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED` | Local checkout only |
+| Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
+| Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
+| Account snapshot and liquidation math | `UNIT_TESTED` | Uses Binance account/position-risk fields; liquidation is `UNKNOWN` when unusable |
+| Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
+| Read-only Binance Testnet contract | `NOT_RUN` | No local Testnet credentials were configured in this session |
+| Controlled manual Testnet mutation | `NOT_RUN` | Requires explicit `TESTNET_MANUAL_TRIAL_APPROVED=true` and read-only evidence |
+| GitHub CI | `NOT_VERIFIED` | Requires a pushed feature branch and workflow result |
+| Autonomous Testnet execution | `LOCKED` | Requires current-SHA evidence, approval, and runtime readiness; default is false |
+| Mainnet execution | `DISABLED` | LIVE ARM and mutable Mainnet adapter construction are rejected |
+
+## Required runtime formula
+
+`testnetExecutionReady` is true only when all of these are true:
+
+```text
+Testnet configured
+AND signed account authentication succeeded
+AND adapter READY
+AND active symbol rules are complete and TRADING
+AND private user stream is connected
+AND reconciliation is IN_SYNC
+AND the account snapshot is valid, Testnet-owned, complete, and fresh
+AND market data is fresh for every active symbol
+AND the local kill switch is inactive
+```
+
+Infrastructure readiness does not depend on `engine_state == ARMED`.
+
+## First-launch Testnet limits
+
+The safe defaults are BTCUSDT only, 25 USDT maximum single-order notional,
+50 USDT maximum total open notional, one open order, and one active exposure
+chain. Positive environment overrides are supported; empty, malformed, or
+non-positive values fall back to these defaults.
+
+All orders pass both the worker decision gate and an individual order gate.
+Market orders require a fresh Testnet market price. No synthetic price is
+used.

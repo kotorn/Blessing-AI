@@ -4,6 +4,7 @@ from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
 from apps.trading_worker.venues.binance.models import ConnectionState
+from apps.trading_worker.venues.binance.models import BinanceAuthenticationError
 
 pytestmark = pytest.mark.asyncio
 
@@ -45,12 +46,9 @@ async def test_user_stream_disconnect_recovery_insync(adapter):
     # Trigger disconnect
     await adapter.user_stream.trigger_disconnect()
     
-    # State should have transitioned immediately, but since it awaits reconciliation,
-    # and reconciliation returns IN_SYNC, it should be READY again eventually.
-    # In a real event loop, it will run _on_user_stream_disconnect as a task.
-    # We await it manually since we triggered it.
-    
-    assert adapter.state == ConnectionState.READY
+    # A disconnect is degraded. Reconciliation alone cannot claim the private
+    # stream invariant has recovered.
+    assert adapter.state == ConnectionState.DEGRADED
 
 async def test_user_stream_disconnect_recovery_mismatch(adapter):
     adapter.state = ConnectionState.READY
@@ -59,3 +57,32 @@ async def test_user_stream_disconnect_recovery_mismatch(adapter):
     await adapter.user_stream.trigger_disconnect()
     
     assert adapter.state == ConnectionState.DEGRADED
+
+async def test_user_stream_reconnect_requires_stream_auth_and_sync(adapter):
+    adapter.state = ConnectionState.DEGRADED
+    adapter.capabilities.account_request_succeeded = True
+    adapter.capabilities.authenticated = True
+    adapter.user_stream.is_connected = True
+    adapter.user_stream.on_reconnected = adapter._on_user_stream_reconnected
+
+    await adapter._on_user_stream_reconnected()
+
+    assert adapter.state == ConnectionState.READY
+
+
+async def test_user_stream_authentication_failure_clears_adapter_truth():
+    class AuthFailureRest:
+        async def request(self, method, path, **kwargs):
+            raise BinanceAuthenticationError(-2015, "Invalid API key")
+
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET)
+    adapter.capabilities.account_request_succeeded = True
+    adapter.capabilities.authenticated = True
+    adapter.state = ConnectionState.READY
+    adapter.user_stream.rest_client = AuthFailureRest()
+
+    await adapter.user_stream._get_listen_key()
+
+    assert adapter.authenticated is False
+    assert adapter.state == ConnectionState.DEGRADED
+    assert adapter.user_stream.listen_key is None

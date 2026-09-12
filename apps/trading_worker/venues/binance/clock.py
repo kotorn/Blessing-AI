@@ -16,8 +16,10 @@ class BinanceClock:
         try:
             local_before = int(time.time() * 1000)
             async with session.get(f"{self.rest_url}/fapi/v1/time") as resp:
+                if resp.status >= 400:
+                    raise RuntimeError(f"Binance time endpoint returned HTTP {resp.status}")
                 data = await resp.json()
-                server_time = data["serverTime"]
+                server_time = int(data["serverTime"])
             local_after = int(time.time() * 1000)
             rtt = local_after - local_before
             

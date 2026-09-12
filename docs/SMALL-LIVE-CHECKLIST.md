@@ -1,40 +1,37 @@
-# Small-Live Mainnet Execution Checklist
+# Small-Live Mainnet checklist
 
-## Executive Summary
-This document serves as the absolute checklist before authorizing `LIVE` mode (Mainnet) for Blessing AI v0.2. The system must operate flawlessly in autonomous `TESTNET` before any of these gates are passed.
+Status for this sprint: `DISABLED` / `NOT_IMPLEMENTED`. This repository does
+not authorize Mainnet execution, and no shortcut or approval flag can enable
+it. `LIVE` ARM and mutable Mainnet adapter construction are rejected.
 
-## Pre-Requisite
-- [ ] 72-Hour Autonomous Testnet Soak completed with ZERO unhandled exceptions.
-- [ ] Portfolio risk governance effectively managed a simulated volatility shock (e.g., using a manual script to mutate positions).
+The following is a future-only checklist. Each item must become
+`LOCAL_VERIFIED`, then `CI_VERIFIED`, and finally receive independent
+operational approval before any Mainnet implementation is considered.
 
-## 1. Network & Infrastructure
-- [ ] Environment variables configured correctly (no TESTNET keys in LIVE config).
-- [ ] Exchange domain endpoints correctly toggle to Mainnet per `BinanceEnvironment`.
-- [ ] REST API and WebSocket rate limiters tuned to Mainnet thresholds (which are typically stricter).
-- [ ] NATS JetStream / PostgreSQL persistence layer active for disaster recovery (not just in-memory ledger).
+## Required future evidence
 
-## 2. Order Execution & Ledger
-- [ ] Ledger durability verified. If the process crashes mid-order, NATS/Postgres captures the intent and reconciliation syncs it.
-- [ ] Idempotency confirmed via `newClientOrderId` using deterministic hashing.
-- [ ] Reconciliation tested against actual LIVE latency.
-- [ ] Account snapshot updates (Margin, Equity) rely purely on User Stream `ACCOUNT_UPDATE` and background `/fapi/v2/account` sync.
+- [ ] Current-SHA Testnet read-only contract: `CONTRACT_TESTED`.
+- [ ] Current-SHA controlled Testnet mutation and sanitized artifact:
+      `MANUAL_TESTNET_VERIFIED`.
+- [ ] Long-duration Testnet soak with zero unhandled execution exceptions.
+- [ ] Independent risk and operations sign-off.
+- [ ] Durable operational persistence on **Cloud SQL PostgreSQL** for orders,
+      fills, positions, risk state, and reconciliation evidence.
+- [ ] Crash/restart and ambiguous-response recovery proven against durable
+      state.
+- [ ] Mainnet-specific adapter and endpoint audit, implemented in a separate
+      approved change.
 
-## 3. Risk & Safety Limits
-- [ ] **Hard Coded Ceiling:** Max single order notional capped at a very conservative value for Small-Live (e.g., $100).
-- [ ] **Max Open Orders:** Limit total open orders globally to < 5.
-- [ ] **Drawdown Governor:** Hard kill switch if drawdown exceeds Small-Live budget (e.g., 2%).
-- [ ] **Kill Switch:** Validated that activating the kill switch securely cancels all LIVE open orders and blocks new risk.
+## MVP infrastructure boundary
 
-## 4. Strategy & Meta Allocator
-- [ ] `MarketScannerEngine` strictly limited to high liquidity pairs (e.g., `BTCUSDT`, `ETHUSDT`) for the first 30 days.
-- [ ] Grid spacing widened for Mainnet execution.
-- [ ] Trend / Shock strategies disabled or set to simulated-only for the first week to isolate Grid evaluation.
+NATS is not mandatory for the MVP execution gate. It may be added for event
+distribution after the Python worker’s durable state and reconciliation
+contracts are independently correct.
 
-## 5. Operations
-- [ ] Logging aggregated and searchable.
-- [ ] Real-time alerts (e.g., Telegram, Slack) configured for Kill Switch activation, Reconciliation failure, and Drawdown breaches.
-- [ ] Runbook established for manual intervention.
+## Non-negotiable future controls
 
-## Authorization
-- [ ] Engineering Lead Sign-off
-- [ ] Risk Lead Sign-off
+- [ ] Per-order decision and order gates remain fail-closed.
+- [ ] Account and position-risk math uses authoritative exchange fields.
+- [ ] No synthetic market price or inferred liquidation distance.
+- [ ] Kill switch cancellation is verified before reporting success.
+- [ ] Secrets remain outside logs, artifacts, screenshots, and Git.

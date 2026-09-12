@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import os
 from typing import List, Dict, Any
 from decimal import Decimal
 
@@ -14,7 +15,12 @@ class MarketScannerEngine:
         self.top_n = top_n
         self.min_volume_usd = min_volume_usd
         self.refresh_interval_sec = refresh_interval_sec
-        self.base_url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        self.base_url = (
+            "https://testnet.binancefuture.com/fapi/v1/ticker/24hr"
+            if os.getenv("BINANCE_TESTNET", "true").strip().lower()
+            in {"1", "true", "yes", "on"}
+            else "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        )
         self.active_symbols = ["BTCUSDT", "ETHUSDT"] # Always start with core pairs
         
     async def scan_active_symbols(self) -> List[str]:
