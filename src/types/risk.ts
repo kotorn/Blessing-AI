@@ -19,7 +19,7 @@ export interface ExposureRecoveryAssessment {
   currentDrawdownPct: number;
   volatilityRegime: string;
   trendContinuationProb: number;
-  recommendedAction: 'REDUCE_INVENTORY' | 'OPEN_COUNTER_HEDGE' | 'HOLD_RECOVERY';
+  recommendedAction: 'REDUCE_INVENTORY' | 'OPEN_COUNTER_HEDGE' | 'HOLD_RECOVERY' | 'BLOCK_GRID_EXPANSION';
   actionComparison: {
     reduceExposureScore: number;
     reduceExposureGrossImpact: string;
