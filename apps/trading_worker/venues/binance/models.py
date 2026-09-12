@@ -1,7 +1,26 @@
 from enum import Enum
 from decimal import Decimal
 from typing import Set
+from datetime import datetime
 from pydantic import BaseModel, Field
+
+class ExchangeAccountSnapshot(BaseModel):
+    wallet_balance: Decimal
+    margin_balance: Decimal
+    available_balance: Decimal
+
+    unrealized_pnl: Decimal
+
+    total_initial_margin: Decimal
+    total_maint_margin: Decimal
+    position_initial_margin: Decimal
+
+    total_position_notional: Decimal
+
+    effective_leverage: Decimal
+    margin_utilization_pct: Decimal
+
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 class ConnectionState(str, Enum):
     DISCONNECTED = "DISCONNECTED"

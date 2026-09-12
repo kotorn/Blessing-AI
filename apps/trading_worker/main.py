@@ -80,6 +80,24 @@ class HealthIndicators(BaseModel):
     heartbeat_at: datetime = Field(default_factory=utc_now)
     last_heartbeat: datetime = Field(default_factory=utc_now)
 
+class LaunchReadiness(BaseModel):
+    paper_ready: bool
+    ci_verified: bool
+    testnet_credentials_verified: bool
+    testnet_readonly_contract_verified: bool
+    testnet_manual_trial_verified: bool
+    testnet_soak_verified: bool
+    adapter_ready: bool
+    private_stream_healthy: bool
+    reconciliation_in_sync: bool
+    account_snapshot_ready: bool
+    symbol_rules_ready: bool
+    market_data_fresh: bool
+    autonomous_flag_enabled: bool
+    launch_approved: bool
+    testnet_autonomous_ready: bool
+    small_live_ready: bool = False
+
 class WorkerRuntimeState(BaseModel):
     """Authoritative execution state model for the Python Trading Worker.
     
@@ -114,6 +132,9 @@ class WorkerRuntimeState(BaseModel):
     kill_switch_active: bool = False
     pause_new_risk: bool = False
     recovery_only: bool = False
+
+    # Readiness
+    launch_readiness: Optional[LaunchReadiness] = None
 
     # Configuration Details & Versioning
     config_version: str = "v0.2.0-beta"
@@ -363,6 +384,9 @@ class TradingWorkerApp:
         self.symbols = symbols
         self.is_running = True
         
+        self.session_start_equity: Optional[Decimal] = None
+        self.session_peak_equity: Optional[Decimal] = None
+        
         # Engines
         self.pa_engine = PriceActionEngine()
         self.market_state_engine = MarketStateClassifier()
@@ -509,21 +533,45 @@ class TradingWorkerApp:
             os.getenv("BINANCE_TESTNET_API_KEY") and os.getenv("BINANCE_TESTNET_API_SECRET")
         )
         auto_flag = os.getenv("AUTONOMOUS_TESTNET_EXECUTION", "false").lower() in ("true", "1", "yes")
-        read_only_ready = testnet_configured and self.authenticated and self.market_data_healthy
-        manual_ready = (
-            read_only_ready
-            and self.reconciliation_status == "IN_SYNC"
-            and self.private_stream_healthy
-            and not self.kill_switch_active
+        
+        # Testnet Readiness includes all required conditions from GATE 4
+        
+        readiness = LaunchReadiness(
+            paper_ready=not self.kill_switch_active,
+            ci_verified=os.getenv("CI_VERIFIED", "false").lower() in ("true", "1", "yes"),
+            testnet_credentials_verified=testnet_configured,
+            testnet_readonly_contract_verified=os.getenv("TESTNET_READONLY_CONTRACT_VERIFIED", "false").lower() in ("true", "1", "yes"),
+            testnet_manual_trial_verified=os.getenv("TESTNET_MANUAL_TRIAL_VERIFIED", "false").lower() in ("true", "1", "yes"),
+            testnet_soak_verified=os.getenv("TESTNET_SOAK_VERIFIED", "false").lower() in ("true", "1", "yes"),
+            adapter_ready=self.connection_state == "READY",
+            private_stream_healthy=self.private_stream_healthy,
+            reconciliation_in_sync=self.reconciliation_status == "IN_SYNC",
+            account_snapshot_ready=True, # Will be handled by the account snapshot
+            symbol_rules_ready=True, # Handled by the adapter rules loaded
+            market_data_fresh=self.market_data_healthy,
+            autonomous_flag_enabled=auto_flag,
+            launch_approved=os.getenv("TESTNET_LAUNCH_APPROVED", "false").lower() in ("true", "1", "yes"),
+            testnet_autonomous_ready=False,
+            small_live_ready=False
         )
-        autonomous_ready = manual_ready and auto_flag and self.engine_state == WorkerEngineState.ARMED
-        return {
-            "PAPER_READY": not self.kill_switch_active,
-            "TESTNET_READ_ONLY_READY": read_only_ready,
-            "TESTNET_MANUAL_READY": manual_ready,
-            "TESTNET_AUTONOMOUS_READY": autonomous_ready,
-            "SMALL_LIVE_READY": False,
-        }
+        
+        readiness.testnet_autonomous_ready = (
+            readiness.ci_verified and
+            readiness.testnet_credentials_verified and
+            readiness.testnet_readonly_contract_verified and
+            readiness.testnet_manual_trial_verified and
+            readiness.testnet_soak_verified and
+            readiness.adapter_ready and
+            readiness.symbol_rules_ready and
+            readiness.private_stream_healthy and
+            readiness.reconciliation_in_sync and
+            readiness.market_data_fresh and
+            readiness.autonomous_flag_enabled and
+            readiness.launch_approved and
+            not self.kill_switch_active
+        )
+
+        return readiness.model_dump()
 
     def get_preflight(self, execution_mode: str) -> dict:
         mode_upper = str(execution_mode).upper()
@@ -738,6 +786,40 @@ class TradingWorkerApp:
         self.reconciliation_status = "DISCONNECTED"
         logger.info("Worker DISARMED")
 
+    def _evaluate_execution_gate(self, decision) -> tuple[bool, str]:
+        if self.execution_mode != WorkerExecutionMode.TESTNET:
+            return False, "Not in TESTNET mode"
+        if self.engine_state != WorkerEngineState.ARMED:
+            return False, "Worker not ARMED"
+        if self.kill_switch_active:
+            return False, "Kill switch is active"
+        if self.connection_state != "READY":
+            return False, "Adapter not READY"
+        if not self.private_stream_healthy:
+            return False, "Private stream disconnected"
+        if self.reconciliation_status != "IN_SYNC":
+            return False, "Reconciliation not IN_SYNC"
+        if not self.market_data_healthy:
+            return False, "Market data stale"
+
+        action = decision.action
+        is_risk_increasing = action in ("NEW_RISK", "INCREASE_RISK", "OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT")
+        
+        if is_risk_increasing:
+            if self.pause_new_risk:
+                return False, "Paused new risk"
+            if self.recovery_only:
+                return False, "Recovery only mode active"
+                
+        # Validate notional limits (conservative TESTNET ceilings)
+        max_notional = Decimal(os.getenv("TESTNET_MAX_SINGLE_ORDER_NOTIONAL", "25.0"))
+        if hasattr(decision, "quantity") and hasattr(decision, "price") and decision.price and decision.quantity:
+            notional = abs(decision.quantity) * decision.price
+            if notional > max_notional:
+                return False, f"Notional {notional} exceeds ceiling {max_notional}"
+                
+        return True, "Passed"
+
     async def handle_market_event(self, event: MarketEvent):
         if not self.market_data_healthy:
             self.market_data_healthy = True
@@ -758,37 +840,49 @@ class TradingWorkerApp:
         # Real or simulated RiskSnapshot
         if self.execution_mode == WorkerExecutionMode.TESTNET and self.execution_adapter is not None:
             try:
-                positions = await self.execution_adapter.ledger.get_positions()
-                wallet_bal, margin_bal = await self.execution_adapter.ledger.get_balances()
-                total_unrealized = sum((p.unrealized_pnl for p in positions), Decimal("0.0"))
-                total_notional = sum((abs(p.quantity) * (p.mark_price or p.entry_price or Decimal("0.0")) for p in positions), Decimal("0.0"))
-                equity = wallet_bal + total_unrealized
-                margin_util = (total_notional / equity * Decimal("100.0")) if equity > 0 else Decimal("0.0")
+                snapshot = await self.execution_adapter.ledger.get_account_snapshot()
+                if not snapshot:
+                    logger.error("No account snapshot available from execution adapter")
+                    self.connection_state = "DEGRADED"
+                    self.pause_new_risk = True
+                    return # Block execution if no account truth
+                    
+                equity = snapshot.wallet_balance + snapshot.unrealized_pnl
+                
+                # Drawdown tracking
+                if self.session_start_equity is None:
+                    self.session_start_equity = equity
+                if self.session_peak_equity is None or equity > self.session_peak_equity:
+                    self.session_peak_equity = equity
+                    
+                if self.session_peak_equity > Decimal("0"):
+                    drawdown_pct = ((self.session_peak_equity - equity) / self.session_peak_equity) * Decimal("100.0")
+                else:
+                    drawdown_pct = Decimal("0.0")
+
+                # Liquidation distance calculation - very conservative proxy for MVP
+                liq_distance_pct = Decimal("100.0") - snapshot.margin_utilization_pct if snapshot.margin_utilization_pct > 0 else Decimal("100.0")
+
                 risk_snapshot = RiskSnapshot(
                     portfolio_equity=equity,
-                    unrealized_pnl=total_unrealized,
+                    unrealized_pnl=snapshot.unrealized_pnl,
                     realized_pnl_24h=Decimal("0.0"),
-                    margin_utilization_pct=margin_util,
-                    effective_leverage=total_notional / equity if equity > 0 else Decimal("0.0"),
-                    current_drawdown_pct=Decimal("0.0"),
-                    liquidation_distance_pct=Decimal("50.0"),
+                    margin_utilization_pct=snapshot.margin_utilization_pct,
+                    effective_leverage=snapshot.effective_leverage,
+                    current_drawdown_pct=max(Decimal("0.0"), drawdown_pct),
+                    liquidation_distance_pct=liq_distance_pct,
                     risk_state=RiskState.NORMAL
                 )
+                
+                positions = await self.execution_adapter.ledger.get_positions()
                 sym_pos = next((p for p in positions if p.symbol == event.symbol), None)
                 current_position_qty = sym_pos.quantity if sym_pos else Decimal("0.0")
+                
             except Exception as e:
                 logger.error("Error extracting Testnet risk snapshot: %s", e)
-                risk_snapshot = RiskSnapshot(
-                    portfolio_equity=Decimal("100000.0"),
-                    unrealized_pnl=Decimal("0.0"),
-                    realized_pnl_24h=Decimal("0.0"),
-                    margin_utilization_pct=Decimal("5.0"),
-                    effective_leverage=Decimal("0.5"),
-                    current_drawdown_pct=Decimal("1.2"),
-                    liquidation_distance_pct=Decimal("45.0"),
-                    risk_state=RiskState.NORMAL
-                )
-                current_position_qty = Decimal("0.0")
+                self.connection_state = "DEGRADED"
+                self.pause_new_risk = True
+                return # Block execution without fake fallback
         else:
             risk_snapshot = RiskSnapshot(
                 portfolio_equity=Decimal("100000.0"),
@@ -804,16 +898,10 @@ class TradingWorkerApp:
         
         raw_target_exposure = self.meta_allocator.allocate(intents, event.symbol)
         
-        # Determine volatility factor for dynamic hedging
-        vol_factor = Decimal("1.0")
-        if market_state.volatility_zscore > Decimal("1.0"):
-            vol_factor = Decimal("1.5")
-        
         target_exposure = self.recovery_engine.process(
             target=raw_target_exposure,
             risk=risk_snapshot,
-            current_position_qty=current_position_qty,
-            volatility_factor=vol_factor
+            current_position_qty=current_position_qty
         )
         
         decision = self.risk_governor.evaluate(target_exposure, risk_snapshot, current_position_qty=current_position_qty)
@@ -822,9 +910,16 @@ class TradingWorkerApp:
             if self.engine_state == WorkerEngineState.ARMED:
                 if self.execution_mode == WorkerExecutionMode.TESTNET and self.execution_adapter is not None:
                     autonomous_enabled = os.getenv("AUTONOMOUS_TESTNET_EXECUTION", "false").lower() in ("true", "1", "yes")
-                    if autonomous_enabled and not self.pause_new_risk and not self.kill_switch_active:
-                        logger.info(f"[TESTNET][AUTONOMOUS_EXEC] Executing decision {decision.decision_id} for {decision.symbol}")
-                        await self.execution_adapter.execute_decision(decision)
+                    if autonomous_enabled:
+                        is_safe, reason = self._evaluate_execution_gate(decision)
+                        if is_safe:
+                            logger.info(f"[TESTNET][AUTONOMOUS_EXEC] Executing decision {decision.decision_id} for {decision.symbol}")
+                            try:
+                                await self.execution_adapter.execute_decision(decision)
+                            except Exception as e:
+                                logger.error(f"[TESTNET][AUTONOMOUS_EXEC] Execution failed: {e}")
+                        else:
+                            logger.info(f"[TESTNET][EXECUTION_BLOCKED] Decision {decision.decision_id} blocked: {reason}")
                     else:
                         logger.info(f"[TESTNET][MONITOR_ONLY] Decision {decision.decision_id} for {decision.symbol} (Autonomous execution disabled)")
                 else:

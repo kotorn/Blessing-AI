@@ -5,6 +5,8 @@ import logging
 
 logger = logging.getLogger("blessing.binance.ledger")
 
+from .models import ExchangeAccountSnapshot
+
 class ExecutionLedger(Protocol):
     async def upsert_order(self, order: ExecutionOrder) -> None: ...
     async def upsert_raw_exchange_order(self, raw_order: dict) -> None: ...
@@ -19,6 +21,8 @@ class ExecutionLedger(Protocol):
     async def has_fill(self, deduplication_key: str) -> bool: ...
     async def update_balances(self, wallet_balance: Decimal, margin_balance: Decimal) -> None: ...
     async def get_balances(self) -> tuple[Decimal, Decimal]: ...
+    async def set_account_snapshot(self, snapshot: ExchangeAccountSnapshot) -> None: ...
+    async def get_account_snapshot(self) -> Optional[ExchangeAccountSnapshot]: ...
 
 class InMemoryLedger:
     def __init__(self):
@@ -29,6 +33,13 @@ class InMemoryLedger:
         self._initialized = False
         self.wallet_balance: Decimal = Decimal("0")
         self.margin_balance: Decimal = Decimal("0")
+        self.account_snapshot: Optional[ExchangeAccountSnapshot] = None
+
+    async def set_account_snapshot(self, snapshot: ExchangeAccountSnapshot) -> None:
+        self.account_snapshot = snapshot
+
+    async def get_account_snapshot(self) -> Optional[ExchangeAccountSnapshot]:
+        return self.account_snapshot
 
     async def update_balances(self, wallet_balance: Decimal, margin_balance: Decimal) -> None:
         self.wallet_balance = wallet_balance

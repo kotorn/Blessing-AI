@@ -120,7 +120,46 @@ class BinanceReconciliation:
 
                         order_status = await self.rest_client.request("GET", "/fapi/v1/order", signed=True, params=query_params)
                         status = order_status.get("status")
-                        if status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
+                        
+                        if status in ("FILLED", "PARTIALLY_FILLED"):
+                            local_order.status = status
+                            
+                            # GATE 20: MUST recover execution details for FILLED orders
+                            try:
+                                trades = await self.rest_client.request(
+                                    "GET", 
+                                    "/fapi/v1/userTrades", 
+                                    signed=True, 
+                                    params={"symbol": local_order.symbol}
+                                )
+                                from .models import ExchangeFill
+                                for t in trades:
+                                    # match by orderId
+                                    if str(t.get("orderId")) == str(order_status.get("orderId")):
+                                        fill = ExchangeFill(
+                                            symbol=local_order.symbol,
+                                            exchange_trade_id=str(t.get("id", "")),
+                                            exchange_order_id=str(t.get("orderId", "")),
+                                            client_order_id=local_order.client_order_id,
+                                            price=Decimal(str(t.get("price", "0"))),
+                                            quantity=Decimal(str(t.get("qty", "0"))),
+                                            commission=Decimal(str(t.get("commission", "0"))),
+                                            commission_asset=t.get("commissionAsset", ""),
+                                            is_maker=t.get("maker", False),
+                                            event_time=t.get("time", 0),
+                                            transaction_time=t.get("time", 0),
+                                            source="BINANCE_TESTNET_RECOVERY"
+                                        )
+                                        await self.ledger.append_fill(fill)
+                                logger.info("Recovered fills for order %s", local_order.client_order_id)
+                            except Exception as t_err:
+                                logger.warning("Failed to fetch userTrades for recovery of %s: %s", local_order.client_order_id, t_err)
+                            
+                            await self.ledger.upsert_order(local_order)
+                            logger.info("Resolved local order %s status to terminal state: %s", local_order.client_order_id, status)
+                            resolved = True
+                            
+                        elif status in ("CANCELED", "EXPIRED", "REJECTED"):
                             local_order.status = status
                             await self.ledger.upsert_order(local_order)
                             logger.info("Resolved local order %s status to terminal state: %s", local_order.client_order_id, status)
@@ -213,12 +252,39 @@ class BinanceReconciliation:
 
             # Re-sync balances as part of IN_SYNC
             try:
+                from .models import ExchangeAccountSnapshot
+                from datetime import datetime, timezone
                 account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
                 wb = Decimal(str(account.get("totalWalletBalance", "0")))
                 mb = Decimal(str(account.get("totalMarginBalance", "0")))
                 await self.ledger.update_balances(wb, mb)
+                
+                snap = ExchangeAccountSnapshot(
+                    wallet_balance=wb,
+                    margin_balance=mb,
+                    available_balance=Decimal(str(account.get("availableBalance", "0"))),
+                    unrealized_pnl=Decimal(str(account.get("totalUnrealizedProfit", "0"))),
+                    total_initial_margin=Decimal(str(account.get("totalInitialMargin", "0"))),
+                    total_maint_margin=Decimal(str(account.get("totalMaintMargin", "0"))),
+                    position_initial_margin=Decimal(str(account.get("totalPositionInitialMargin", "0"))),
+                    total_position_notional=Decimal("0.0"),
+                    effective_leverage=Decimal("0.0"),
+                    margin_utilization_pct=Decimal("0.0"),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                
+                equity = snap.wallet_balance + snap.unrealized_pnl
+                if equity > 0:
+                    tot_notional = Decimal("0.0")
+                    for p in account.get("positions", []):
+                        tot_notional += abs(Decimal(str(p.get("positionAmt", "0")))) * Decimal(str(p.get("markPrice", "0")))
+                    snap.total_position_notional = tot_notional
+                    snap.effective_leverage = snap.total_position_notional / equity
+                    snap.margin_utilization_pct = (snap.total_maint_margin / equity) * Decimal("100")
+                    
+                await self.ledger.set_account_snapshot(snap)
             except Exception as e:
-                logger.warning("Failed to update balances during reconciliation: %s", e)
+                logger.warning("Failed to update balances and account snapshot during reconciliation: %s", e)
 
             logger.info(
                 "Reconciliation successful: %d exchange positions, %d open orders. State: IN_SYNC",

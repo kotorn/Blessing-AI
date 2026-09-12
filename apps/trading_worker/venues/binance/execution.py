@@ -49,13 +49,10 @@ class BinanceExecutionAdapter:
         self.state = ConnectionState.DISCONNECTED
 
     async def _on_user_stream_disconnect(self):
-        logger.warning("[%s] User stream disconnected. Pausing execution and reconciling.", self.env)
-        self.state = ConnectionState.SYNCING
-        sync_result = await self.reconciliation.reconcile()
-        if sync_result == "IN_SYNC":
-            self.state = ConnectionState.READY
-        else:
-            self.state = ConnectionState.DEGRADED
+        logger.warning("[%s] User stream disconnected. Adapter transitioning to DEGRADED.", self.env)
+        self.state = ConnectionState.DEGRADED
+        # Reconcile for diagnostics, but do not become READY while disconnected
+        await self.reconciliation.reconcile()
 
     async def _on_user_stream_reconnected(self):
         logger.info("[%s] User stream reconnected. Initiating reconciliation.", self.env)
