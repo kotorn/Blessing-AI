@@ -27,6 +27,9 @@ export const AppShell: React.FC = () => {
     orders,
     alerts,
     riskRules,
+    strategyIntents,
+    metaAllocations,
+    exposureRecovery,
     correlationBtcEth,
     cryptoBetaExposurePct,
     liquidationDistancePct,
@@ -177,6 +180,11 @@ export const AppShell: React.FC = () => {
               baskets={baskets}
               orders={orders}
               riskRules={riskRules}
+              strategyIntents={strategyIntents}
+              metaAllocations={metaAllocations}
+              exposureRecovery={exposureRecovery}
+              killSwitchActive={killSwitchActive}
+              onToggleKillSwitch={toggleKillSwitch}
               correlationBtcEth={correlationBtcEth}
               cryptoBetaExposurePct={cryptoBetaExposurePct}
               liquidationDistancePct={liquidationDistancePct}

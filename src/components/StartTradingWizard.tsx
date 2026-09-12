@@ -70,6 +70,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
         instruments: Object.keys(instruments).filter((k) => (instruments as any)[k]),
         strategies,
         riskProfile,
+        enforcePreflight: true,
       });
     } catch (err: any) {
       setError(err.message || 'Failed to arm engine.');
@@ -90,16 +91,26 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
           {(['PAPER', 'TESTNET', 'LIVE'] as const).map((mode) => (
             <button
               key={mode}
+              type="button"
               onClick={() => setExecutionMode(mode)}
-              className={`p-3 border rounded-xl text-left transition-all ${
+              className={`p-3 border rounded-xl text-left transition-all relative ${
                 executionMode === mode
-                  ? 'bg-indigo-900/30 border-indigo-500 text-indigo-300'
+                  ? mode === 'LIVE'
+                    ? 'bg-rose-950/40 border-rose-600 text-rose-300'
+                    : 'bg-indigo-900/30 border-indigo-500 text-indigo-300'
                   : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:border-zinc-700'
               }`}
             >
-              <div className="font-bold text-sm">{mode}</div>
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-sm">{mode}</span>
+                {mode === 'LIVE' && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-900/60 border border-rose-700 text-rose-300 font-mono font-bold">
+                    BLOCKED
+                  </span>
+                )}
+              </div>
               <div className="text-[10px] mt-1 opacity-80">
-                {mode === 'PAPER' ? 'Simulated execution' : mode === 'TESTNET' ? 'Binance Testnet' : 'Real capital risk'}
+                {mode === 'PAPER' ? 'Simulated execution' : mode === 'TESTNET' ? 'Binance Testnet' : 'Blocked in this sprint'}
               </div>
             </button>
           ))}

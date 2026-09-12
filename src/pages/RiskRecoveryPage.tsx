@@ -13,6 +13,7 @@ interface RiskRecoveryPageProps {
   cryptoBetaExposurePct: number;
   liquidationDistancePct: number;
   baskets?: BasketItem[];
+  recoveryData?: any;
   killSwitchActive: boolean;
   onToggleKillSwitch: () => void;
 }
@@ -24,6 +25,7 @@ export const RiskRecoveryPage: React.FC<RiskRecoveryPageProps> = ({
   cryptoBetaExposurePct,
   liquidationDistancePct,
   baskets = [],
+  recoveryData,
   killSwitchActive,
   onToggleKillSwitch,
 }) => {
@@ -78,7 +80,7 @@ export const RiskRecoveryPage: React.FC<RiskRecoveryPageProps> = ({
       />
 
       {/* 2. Dynamic Exposure Recovery Decision Engine */}
-      <ExposureRecoveryEngineCard baskets={baskets} recoveryData={((window as any).quantState as any)?.exposure_recovery} />
+      <ExposureRecoveryEngineCard baskets={baskets} recoveryData={recoveryData || ((window as any).quantState as any)?.exposure_recovery} />
 
       {/* 3. Cross-Instrument Correlation & Beta Exposure Monitor */}
       <RiskGovernorMonitor

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import signal
 import sys
 from contextlib import asynccontextmanager
@@ -427,7 +428,7 @@ class TradingWorkerApp:
             private_stream_healthy=self.private_stream_healthy,
             trading_connection_healthy=trading_healthy,
             authenticated=self.authenticated,
-            account_synchronized=self.authenticated,
+            account_synchronized=self.reconciliation_status == "IN_SYNC",
             reconciliation_status=self.reconciliation_status,
             kill_switch_status=self.kill_switch_active,
             kill_switch_active=self.kill_switch_active,
@@ -442,11 +443,24 @@ class TradingWorkerApp:
         )
         
     def get_capabilities(self) -> dict:
+        testnet_configured = bool(
+            os.getenv("BINANCE_TESTNET_API_KEY") and os.getenv("BINANCE_TESTNET_API_SECRET")
+        )
+        testnet_ready = (
+            testnet_configured
+            and self.authenticated
+            and self.connection_state == "READY"
+            and self.private_stream_healthy
+            and self.reconciliation_status == "IN_SYNC"
+            and not self.kill_switch_active
+        )
         return {
             "paper": True,
-            "testnetConfigured": True, # TODO actual env check
+            "testnetConfigured": testnet_configured,
             "testnetAuthenticated": self.authenticated,
-            "testnetExecutionReady": self.engine_state == WorkerEngineState.ARMED,
+            "testnetPrivateStreamHealthy": self.private_stream_healthy,
+            "testnetReconciliationInSync": self.reconciliation_status == "IN_SYNC",
+            "testnetExecutionReady": testnet_ready,
             "liveConfigured": False,
             "liveExecutionReady": False,
             "spotSupported": False,
@@ -455,22 +469,97 @@ class TradingWorkerApp:
         }
 
     def get_preflight(self, execution_mode: str) -> dict:
-        can_arm = True
-        checks = []
-        if execution_mode == "TESTNET":
-            if not self.authenticated:
-                can_arm = False
-                checks.append({"id": "CHK-AUTH", "name": "Authentication", "required": True, "status": "FAIL", "message": "Not authenticated"})
-            if self.reconciliation_status != "IN_SYNC":
-                can_arm = False
-                checks.append({"id": "CHK-SYNC", "name": "Reconciliation", "required": True, "status": "FAIL", "message": "Not in sync"})
-            if not self.private_stream_healthy:
-                can_arm = False
-                checks.append({"id": "CHK-STREAM", "name": "Private Stream", "required": True, "status": "FAIL", "message": "Stream offline"})
+        mode_upper = str(execution_mode).upper()
+        if mode_upper == "LIVE":
+            return {
+                "executionMode": "LIVE",
+                "canArm": False,
+                "checks": [
+                    {
+                        "id": "CHK-LIVE-BLOCKED",
+                        "name": "Live Execution Mode",
+                        "required": True,
+                        "status": "FAIL",
+                        "message": "LIVE execution mode is permanently blocked in this sprint."
+                    }
+                ]
+            }
+
+        if mode_upper == "TESTNET":
+            testnet_configured = bool(
+                os.getenv("BINANCE_TESTNET_API_KEY") and os.getenv("BINANCE_TESTNET_API_SECRET")
+            )
+            checks = [
+                {
+                    "id": "CHK-CREDS",
+                    "name": "Testnet Credentials",
+                    "required": True,
+                    "status": "PASS" if testnet_configured else "FAIL",
+                    "message": "Configured in environment" if testnet_configured else "BINANCE_TESTNET_API_KEY / SECRET missing"
+                },
+                {
+                    "id": "CHK-AUTH",
+                    "name": "Authentication",
+                    "required": True,
+                    "status": "PASS" if self.authenticated else "FAIL",
+                    "message": "Authenticated with Binance Testnet" if self.authenticated else "Not authenticated"
+                },
+                {
+                    "id": "CHK-CONN",
+                    "name": "Trading Connection",
+                    "required": True,
+                    "status": "PASS" if self.connection_state == "READY" else "FAIL",
+                    "message": f"Connection state: {self.connection_state}"
+                },
+                {
+                    "id": "CHK-SYNC",
+                    "name": "Reconciliation",
+                    "required": True,
+                    "status": "PASS" if self.reconciliation_status == "IN_SYNC" else "FAIL",
+                    "message": f"Reconciliation status: {self.reconciliation_status}"
+                },
+                {
+                    "id": "CHK-STREAM",
+                    "name": "Private User Stream",
+                    "required": True,
+                    "status": "PASS" if self.private_stream_healthy else "FAIL",
+                    "message": "Private user stream active" if self.private_stream_healthy else "Stream offline"
+                },
+                {
+                    "id": "CHK-KILL",
+                    "name": "Kill Switch",
+                    "required": True,
+                    "status": "FAIL" if self.kill_switch_active else "PASS",
+                    "message": "Kill switch is active" if self.kill_switch_active else "Kill switch inactive"
+                }
+            ]
+            can_arm = all(c["status"] == "PASS" for c in checks if c["required"])
+            return {
+                "executionMode": "TESTNET",
+                "canArm": can_arm,
+                "checks": checks
+            }
+
+        # Default PAPER mode
         return {
-            "executionMode": execution_mode,
-            "canArm": can_arm,
-            "checks": checks
+            "executionMode": "PAPER",
+            "canArm": not self.kill_switch_active,
+            "checks": [
+                {
+                    "id": "CHK-SIMULATION",
+                    "name": "Paper Simulation Engine",
+                    "required": True,
+                    "status": "PASS",
+                    "message": "Local simulation ready"
+                },
+                {
+                    "id": "CHK-KILL",
+                    "name": "Kill Switch",
+                    "required": True,
+                    "status": "FAIL" if self.kill_switch_active else "PASS",
+                    "message": "Kill switch is active" if self.kill_switch_active else "Kill switch inactive"
+                }
+            ]
         }
 
     async def set_pause_new_risk(self, active: bool):
@@ -495,7 +584,13 @@ class TradingWorkerApp:
             self.engine_state = WorkerEngineState.DISARMED
             
     async def trigger_reconciliation(self) -> str:
-        # Mocking reconciliation
+        if hasattr(self, "execution_adapter") and self.execution_adapter is not None:
+            res = await self.execution_adapter.reconciliation.reconcile()
+            self.reconciliation_status = res
+            if res == "IN_SYNC":
+                self.connection_state = "READY"
+            return res
+            
         self.reconciliation_status = "IN_SYNC"
         self.connection_state = "READY"
         self.private_stream_healthy = True
@@ -503,8 +598,20 @@ class TradingWorkerApp:
         return self.reconciliation_status
 
     async def arm(self, config: dict):
+        if self.kill_switch_active:
+            return False, "Cannot arm: Kill switch is active"
+
+        mode = str(config.get("executionMode", "PAPER")).upper()
+        if mode == "LIVE":
+            return False, "LIVE execution mode is permanently blocked in this sprint."
+
+        if config.get("enforcePreflight", False) and mode == "TESTNET":
+            preflight = self.get_preflight("TESTNET")
+            if not preflight["canArm"]:
+                failures = [c["message"] for c in preflight["checks"] if c["status"] == "FAIL"]
+                return False, f"TESTNET preflight failed: {'; '.join(failures)}"
+
         self.active_configuration = config
-        mode = config.get("executionMode", "PAPER")
         if mode == "TESTNET":
             self.execution_mode = WorkerExecutionMode.TESTNET
         else:

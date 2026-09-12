@@ -12,9 +12,17 @@
   "tests/python/test_worker_engines.py::test_risk_governor_veto",
   "tests/python/test_worker_state_api.py::test_default_worker_state_endpoint",
   "tests/python/test_worker_state_api.py::test_global_heartbeat_background_updater",
+  "tests/python/test_worker_state_api.py::test_reconcile_endpoint_integration",
   "tests/python/test_worker_state_api.py::test_state_endpoint_serialization_contract",
   "tests/python/test_worker_state_api.py::test_worker_heartbeat_background_task",
+  "tests/python/test_worker_state_api.py::test_worker_preflight_and_live_blocking",
   "tests/python/test_worker_state_api.py::test_worker_runtime_state_model_contract",
   "tests/python/test_worker_state_api.py::test_worker_start_heartbeat_lifecycle",
-  "tests/python/test_worker_state_api.py::test_worker_state_transitions_and_health"
+  "tests/python/test_worker_state_api.py::test_worker_state_transitions_and_health",
+  "tests/unit/test_capability_discovery.py::TestBinanceCapabilityDiscovery::test_mock_exchange_info_filter_parsing",
+  "tests/unit/test_domain_models.py::TestDomainModels::test_basket_lifecycle_levels",
+  "tests/unit/test_domain_models.py::TestDomainModels::test_decimal_precision_preservation",
+  "tests/unit/test_domain_models.py::TestDomainModels::test_strategy_intent_signed_delta",
+  "tests/unit/test_domain_models.py::TestDomainModels::test_target_exposure_strategy_attribution",
+  "venues/binance/test_api_key.py::test_binance_connectivity"
 ]

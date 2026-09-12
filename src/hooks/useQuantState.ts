@@ -11,6 +11,9 @@ export interface UseQuantStateReturn {
   orders: ExecutionOrder[];
   alerts: SystemAlert[];
   riskRules: RiskRuleItem[];
+  strategyIntents: any[];
+  metaAllocations: Record<string, any> | null;
+  exposureRecovery: any | null;
   correlationBtcEth: number;
   cryptoBetaExposurePct: number;
   liquidationDistancePct: number;
@@ -53,6 +56,9 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
   const [orders, setOrders] = useState<ExecutionOrder[]>([]);
   const [alerts, setAlerts] = useState<SystemAlert[]>([]);
   const [riskRules, setRiskRules] = useState<RiskRuleItem[]>([]);
+  const [strategyIntents, setStrategyIntents] = useState<any[]>([]);
+  const [metaAllocations, setMetaAllocations] = useState<Record<string, any> | null>(null);
+  const [exposureRecovery, setExposureRecovery] = useState<any | null>(null);
   const [correlationBtcEth, setCorrelationBtcEth] = useState<number>(0.74);
   const [cryptoBetaExposurePct, setCryptoBetaExposurePct] = useState<number>(42.8);
   const [liquidationDistancePct, setLiquidationDistancePct] = useState<number>(38.5);
@@ -93,6 +99,15 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
       }
       if (Array.isArray(data?.risk_rules)) {
         setRiskRules(data.risk_rules);
+      }
+      if (Array.isArray(data?.strategy_intents)) {
+        setStrategyIntents(data.strategy_intents);
+      }
+      if (data?.meta_allocations) {
+        setMetaAllocations(data.meta_allocations);
+      }
+      if (data?.exposure_recovery) {
+        setExposureRecovery(data.exposure_recovery);
       }
       if (typeof data?.correlation_btc_eth === 'number') {
         setCorrelationBtcEth(data.correlation_btc_eth);
@@ -269,6 +284,9 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
     orders,
     alerts,
     riskRules,
+    strategyIntents,
+    metaAllocations,
+    exposureRecovery,
     correlationBtcEth,
     cryptoBetaExposurePct,
     liquidationDistancePct,

@@ -1,5 +1,6 @@
+from decimal import Decimal
 from typing import Protocol, List, Optional
-from domain.models import ExecutionOrder, ExchangeFill
+from domain.models import ExecutionOrder, ExchangeFill, OrderSide, utc_now
 import logging
 
 logger = logging.getLogger("blessing.binance.ledger")
@@ -9,6 +10,7 @@ class ExecutionLedger(Protocol):
     async def upsert_raw_exchange_order(self, raw_order: dict) -> None: ...
     async def append_fill(self, fill: ExchangeFill) -> None: ...
     async def get_order_by_client_id(self, client_order_id: str) -> Optional[ExecutionOrder]: ...
+    async def get_order_by_exchange_id(self, exchange_order_id: str) -> Optional[ExecutionOrder]: ...
     async def replace_positions(self, raw_positions: List[dict]) -> None: ...
     async def upsert_position(self, raw_position: dict) -> None: ...
     async def get_open_orders(self) -> List[ExecutionOrder]: ...
@@ -30,8 +32,24 @@ class InMemoryLedger:
         self.orders[order.client_order_id] = order
 
     async def upsert_raw_exchange_order(self, raw_order: dict) -> None:
-        # Mock conversion from raw binance dict
-        pass
+        client_oid = raw_order.get("clientOrderId", "")
+        status = raw_order.get("status", "NEW")
+        try:
+            side = OrderSide(raw_order.get("side", "BUY"))
+        except Exception:
+            side = OrderSide.BUY
+        order = ExecutionOrder(
+            symbol=raw_order.get("symbol", ""),
+            side=side,
+            quantity=Decimal(str(raw_order.get("origQty", "0"))),
+            price=Decimal(str(raw_order.get("price", "0"))),
+            order_type=raw_order.get("type", "LIMIT"),
+            client_order_id=client_oid,
+            status=status,
+            exchange_order_id=str(raw_order.get("orderId", "")),
+            timestamp=utc_now()
+        )
+        self.orders[client_oid] = order
 
     async def append_fill(self, fill: ExchangeFill) -> None:
         if await self.has_fill(fill.exchange_trade_id):
@@ -43,6 +61,12 @@ class InMemoryLedger:
 
     async def get_order_by_client_id(self, client_order_id: str) -> Optional[ExecutionOrder]:
         return self.orders.get(client_order_id)
+
+    async def get_order_by_exchange_id(self, exchange_order_id: str) -> Optional[ExecutionOrder]:
+        for o in self.orders.values():
+            if str(o.exchange_order_id) == str(exchange_order_id):
+                return o
+        return None
         
     async def replace_positions(self, raw_positions: List[dict]) -> None:
         self.positions = raw_positions

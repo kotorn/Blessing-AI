@@ -257,4 +257,74 @@ async def test_global_heartbeat_background_updater():
         await asyncio.sleep(0.01)
 
 
+def test_worker_preflight_and_live_blocking():
+    """Verify preflight rejects LIVE mode unconditionally and validates TESTNET readiness."""
+    worker = TradingWorkerApp(symbols=["BTCUSDT", "ETHUSDT"])
+    set_worker_engine(worker)
+
+    # 1. LIVE mode preflight must fail
+    live_resp = client.get("/preflight?execution_mode=LIVE")
+    assert live_resp.status_code == 200
+    live_data = live_resp.json()
+    assert live_data["canArm"] is False
+    assert any("permanently blocked" in c["message"] for c in live_data["checks"])
+
+    # 2. Arming in LIVE mode must be hard-blocked with HTTP 400
+    arm_live = client.post("/arm", json={"executionMode": "LIVE"})
+    assert arm_live.status_code == 400
+    assert "permanently blocked" in arm_live.json()["detail"]
+
+    # 3. TESTNET preflight when unconfigured / unauthenticated
+    testnet_resp = client.get("/preflight?execution_mode=TESTNET")
+    assert testnet_resp.status_code == 200
+    testnet_data = testnet_resp.json()
+    assert testnet_data["canArm"] is False
+
+    # 4. Strict arming in TESTNET fails if preflight fails
+    arm_testnet_strict = client.post("/arm", json={"executionMode": "TESTNET", "enforcePreflight": True})
+    assert arm_testnet_strict.status_code == 400
+    assert "TESTNET preflight failed" in arm_testnet_strict.json()["detail"]
+
+    # 5. When prerequisites are met, preflight passes
+    worker.authenticated = True
+    worker.connection_state = "READY"
+    worker.reconciliation_status = "IN_SYNC"
+    worker.private_stream_healthy = True
+    
+    # Mock credentials in environment for the test check
+    import os
+    os.environ["BINANCE_TESTNET_API_KEY"] = "mock_key"
+    os.environ["BINANCE_TESTNET_API_SECRET"] = "mock_secret"
+    try:
+        ready_preflight = client.get("/preflight?execution_mode=TESTNET")
+        assert ready_preflight.status_code == 200
+        assert ready_preflight.json()["canArm"] is True
+
+        arm_success = client.post("/arm", json={"executionMode": "TESTNET", "enforcePreflight": True})
+        assert arm_success.status_code == 200
+        assert arm_success.json()["status"] == "ARMED"
+    finally:
+        os.environ.pop("BINANCE_TESTNET_API_KEY", None)
+        os.environ.pop("BINANCE_TESTNET_API_SECRET", None)
+        set_worker_engine(None)
+
+
+def test_reconcile_endpoint_integration():
+    """Verify that POST /reconcile triggers reconciliation and updates state."""
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+    set_worker_engine(worker)
+
+    worker.reconciliation_status = "UNKNOWN"
+    rec_resp = client.post("/reconcile")
+    assert rec_resp.status_code == 200
+    assert rec_resp.json()["status"] == "IN_SYNC"
+
+    state_resp = client.get("/state")
+    assert state_resp.status_code == 200
+    assert state_resp.json()["reconciliation_status"] == "IN_SYNC"
+    assert state_resp.json()["account_synchronized"] is True
+
+    set_worker_engine(None)
+
+
 

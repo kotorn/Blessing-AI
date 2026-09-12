@@ -10,6 +10,14 @@ from .clock import BinanceClock
 
 logger = logging.getLogger("blessing.binance.rest_client")
 
+class BinanceAPIError(Exception):
+    def __init__(self, status: int, code: Optional[int], message: str, raw_data: Any):
+        super().__init__(f"Binance API Error {status} (code {code}): {message}")
+        self.status = status
+        self.code = code
+        self.error_message = message
+        self.raw_data = raw_data
+
 class BinanceRestClient:
     def __init__(self, api_key: str, api_secret: str, env: BinanceEnvironment):
         self.api_key = api_key
@@ -59,5 +67,5 @@ class BinanceRestClient:
                 if data.get("code") == -1021:
                     logger.warning("Timestamp error. Resyncing clock.")
                     await self.clock.synchronize(self.session)
-                raise ValueError(f"Binance API Error {resp.status}: {data}")
+                raise BinanceAPIError(status=resp.status, code=data.get("code"), message=data.get("msg", str(data)), raw_data=data)
             return data

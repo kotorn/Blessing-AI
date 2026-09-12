@@ -18,7 +18,6 @@ import { BinanceKeyStatus } from '../api/binance';
 import { ExecutionOrder } from '../types/orders';
 
 interface AppRoutesProps {
-
   currentRoute: AppRoute;
   onNavigate: (route: AppRoute) => void;
   account: AccountData;
@@ -27,8 +26,12 @@ interface AppRoutesProps {
   baskets: BasketItem[];
   orders: ExecutionOrder[];
   riskRules: RiskRuleItem[];
+  strategyIntents?: any[];
+  metaAllocations?: Record<string, any> | null;
+  exposureRecovery?: any | null;
   correlationBtcEth: number;
   cryptoBetaExposurePct: number;
+  killSwitchActive?: boolean;
   onToggleKillSwitch: () => void;
   liquidationDistancePct: number;
   isActionLoading: boolean;
@@ -51,8 +54,13 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
   baskets,
   orders,
   riskRules,
+  strategyIntents,
+  metaAllocations,
+  exposureRecovery,
   correlationBtcEth,
   cryptoBetaExposurePct,
+  killSwitchActive = false,
+  onToggleKillSwitch,
   liquidationDistancePct,
   isActionLoading,
   onExpandGrid,
@@ -91,8 +99,8 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
     case '/strategies':
       return (
         <StrategiesPage
-          strategyIntents={((window as any).quantState as any)?.strategy_intents}
-          metaAllocations={((window as any).quantState as any)?.meta_allocations}
+          strategyIntents={strategyIntents || ((window as any).quantState as any)?.strategy_intents}
+          metaAllocations={metaAllocations || ((window as any).quantState as any)?.meta_allocations}
           baskets={baskets}
           instruments={instruments}
           account={account}
@@ -127,6 +135,9 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
           cryptoBetaExposurePct={cryptoBetaExposurePct}
           liquidationDistancePct={liquidationDistancePct}
           baskets={baskets}
+          recoveryData={exposureRecovery || ((window as any).quantState as any)?.exposure_recovery}
+          killSwitchActive={killSwitchActive}
+          onToggleKillSwitch={onToggleKillSwitch}
         />
       );
 

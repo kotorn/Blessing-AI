@@ -1299,14 +1299,16 @@ app.get('/api/system/state', async (req, res) => {
     tradingSystemState.recoveryOnly = workerState.recovery_only;
     tradingSystemState.killSwitchActive = workerState.kill_switch_active;
     tradingSystemState.updatedAt = workerState.updated_at;
-    tradingSystemState.tradingConnectionHealthy = workerState.connection_state === 'READY';
+    tradingSystemState.tradingConnectionHealthy = workerState.connection_state === 'READY' || workerState.trading_connection_healthy === true;
     if (typeof workerState.market_data_healthy === 'boolean') {
       tradingSystemState.marketDataHealthy = workerState.market_data_healthy;
     }
     if (typeof workerState.private_stream_healthy === 'boolean') {
       tradingSystemState.privateStreamHealthy = workerState.private_stream_healthy;
     }
-    if (typeof workerState.authenticated === 'boolean') {
+    if (typeof workerState.account_synchronized === 'boolean') {
+      tradingSystemState.accountSynchronized = workerState.account_synchronized;
+    } else if (typeof workerState.authenticated === 'boolean') {
       tradingSystemState.accountSynchronized = workerState.authenticated;
     }
     if (workerState.reconciliation_status) {
@@ -1364,6 +1366,10 @@ app.get('/api/system/preflight', async (req, res) => {
 
 app.post('/api/system/arm', async (req, res) => {
   const { executionMode, riskProfile, instruments, strategies } = req.body;
+  if (executionMode === 'LIVE') {
+    return res.status(400).json({ error: 'LIVE_BLOCKED', message: 'LIVE execution mode is permanently blocked in this sprint.' });
+  }
+
   const requestedConfig = {
     executionMode: executionMode || 'PAPER',
     instruments: instruments || [],
@@ -1386,6 +1392,8 @@ app.post('/api/system/arm', async (req, res) => {
     // Pick risk profile
     const profileKey = requestedConfig.riskProfile as keyof typeof RISK_PROFILES;
     riskConfiguration = RISK_PROFILES[profileKey] || RISK_PROFILES.BALANCED;
+    tradingSystemState.engineState = 'ARMED';
+    tradingSystemState.executionMode = requestedConfig.executionMode as any;
     tradingSystemState.activeConfiguration = {
       executionMode: requestedConfig.executionMode as any,
       instruments: requestedConfig.instruments,
@@ -1414,6 +1422,7 @@ app.post('/api/system/arm', async (req, res) => {
 app.post('/api/system/disarm', async (req, res) => {
   try {
     await fetch(WORKER_URL + '/disarm', { method: 'POST' });
+    tradingSystemState.engineState = 'DISARMED';
     
     auditRepository.logEvent({
       eventType: 'ENGINE_DISARMED',
@@ -1436,6 +1445,12 @@ app.post('/api/system/pause-new-risk', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
+    tradingSystemState.pauseNewRisk = !!req.body?.active;
+    if (req.body?.active) {
+      tradingSystemState.engineState = 'PAUSED_NEW_RISK';
+    } else {
+      tradingSystemState.engineState = tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED';
+    }
     res.json({ status: 'ok' });
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
@@ -1449,6 +1464,12 @@ app.post('/api/system/recovery-only', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
+    tradingSystemState.recoveryOnly = !!req.body?.active;
+    if (req.body?.active) {
+      tradingSystemState.engineState = 'RECOVERY_ONLY';
+    } else {
+      tradingSystemState.engineState = tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED';
+    }
     res.json({ status: 'ok' });
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
@@ -1462,7 +1483,22 @@ app.post('/api/system/kill-switch', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
+    const isActive = !!req.body?.active;
+    tradingSystemState.killSwitchActive = isActive;
+    tradingSystemState.engineState = isActive ? 'EMERGENCY' : 'DISARMED';
     res.json({ status: 'ok' });
+  } catch (err) {
+    res.status(503).json({ error: 'WORKER_UNREACHABLE' });
+  }
+});
+
+app.post('/api/system/reconcile', async (req, res) => {
+  try {
+    const rResp = await fetch(WORKER_URL + '/reconcile', { method: 'POST' });
+    const data = await rResp.json();
+    tradingSystemState.reconciliationStatus = data.status;
+    tradingSystemState.accountSynchronized = data.status === 'IN_SYNC';
+    res.json(data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }

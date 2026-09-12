@@ -5,7 +5,7 @@ from typing import List, Optional, Any
 
 from domain.models import ExecutionDecision, ExecutionOrder, OrderSide, PositionSide, ExchangeFill, utc_now
 from .config import BinanceEnvironment
-from .rest_client import BinanceRestClient
+from .rest_client import BinanceRestClient, BinanceAPIError
 from .capabilities import BinanceCapabilities
 from .user_stream import BinanceUserStream
 from .reconciliation import BinanceReconciliation
@@ -64,6 +64,10 @@ class BinanceExecutionAdapter:
         else:
             self.state = ConnectionState.DEGRADED
             return False
+
+    async def arm(self) -> bool:
+        """Alias for connect() to establish session, discover capabilities, start stream, and reconcile."""
+        return await self.connect()
 
     async def _on_ws_event(self, event: Any):
         event_type = event.get("e")
@@ -127,14 +131,14 @@ class BinanceExecutionAdapter:
                     "marginType": p.get("mt", "cross")
                 })
 
-    def _generate_client_order_id(self, context_id: str, symbol: str, attempt: int = 1) -> str:
+    def _generate_client_order_id(self, context_id: str, symbol: str, order_index: int = 0, attempt: int = 1) -> str:
         """
         Deterministic Client Order ID.
-        Format: BAI-<context_hash>-<attempt>
+        Format: BAI-<context_hash>-<order_index>-<attempt>
         """
         raw_str = f"{context_id}-{symbol}"
-        hash_str = hashlib.md5(raw_str.encode()).hexdigest()[:10]
-        return f"BAI-{hash_str}-{attempt}"
+        hash_str = hashlib.md5(raw_str.encode()).hexdigest()[:8]
+        return f"BAI-{hash_str}-{order_index}-{attempt}"
 
     async def execute_decision(self, decision: ExecutionDecision) -> List[ExecutionOrder]:
         if self.state != ConnectionState.READY:
@@ -161,8 +165,17 @@ class BinanceExecutionAdapter:
             if order_intent.limit_price:
                 rounded_price = rules.normalize_price(order_intent.limit_price)
                 price_str = str(rounded_price)
+
+            # Notional check against min_notional
+            est_price = rounded_price if price_str else (rules.min_price or Decimal("1"))
+            if rules.min_notional and (rounded_qty * est_price) < rules.min_notional:
+                logger.error(
+                    "Order notional %s below min_notional %s for %s. Skipping.",
+                    rounded_qty * est_price, rules.min_notional, symbol
+                )
+                continue
                 
-            client_oid = self._generate_client_order_id(str(decision.decision_id), symbol, attempt=1)
+            client_oid = self._generate_client_order_id(str(decision.decision_id), symbol, order_index=i, attempt=1)
             
             params = {
                 "symbol": symbol,
@@ -178,8 +191,7 @@ class BinanceExecutionAdapter:
             if self.capabilities.hedge_mode:
                 params["positionSide"] = order_intent.position_side.name
                 if order_intent.reduce_only:
-                    # In hedge mode, reduceOnly must not be sent if it conflicts or is handled implicitly by side.
-                    # Actually Binance docs say: "reduceOnly cannot be sent in Hedge Mode".
+                    # In hedge mode, reduceOnly cannot be sent per Binance futures documentation
                     pass 
             else:
                 if order_intent.reduce_only:
@@ -195,10 +207,26 @@ class BinanceExecutionAdapter:
                     symbol=symbol,
                     side=order_intent.side,
                     quantity=rounded_qty,
-                    price=Decimal(resp.get("price", "0")),
+                    price=Decimal(str(resp.get("price", "0"))),
                     order_type=params["type"],
                     client_order_id=client_oid,
                     status=resp.get("status", "NEW"),
+                    exchange_order_id=str(resp.get("orderId", "")),
+                    timestamp=utc_now()
+                )
+                await self.ledger.upsert_order(executed_order)
+                executed_orders.append(executed_order)
+            except BinanceAPIError as api_err:
+                # Definitive rejection from exchange (invalid params, min notional, margin, etc.)
+                logger.error("Order %s definitively rejected by Binance API (code %s): %s", client_oid, api_err.code, api_err)
+                executed_order = ExecutionOrder(
+                    symbol=symbol,
+                    side=order_intent.side,
+                    quantity=rounded_qty,
+                    price=Decimal(price_str or "0"),
+                    order_type=params["type"],
+                    client_order_id=client_oid,
+                    status="REJECTED",
                     timestamp=utc_now()
                 )
                 await self.ledger.upsert_order(executed_order)
@@ -216,10 +244,11 @@ class BinanceExecutionAdapter:
                         symbol=symbol,
                         side=order_intent.side,
                         quantity=rounded_qty,
-                        price=Decimal(status_resp.get("price", "0")),
+                        price=Decimal(str(status_resp.get("price", "0"))),
                         order_type=params["type"],
                         client_order_id=client_oid,
                         status=status_resp.get("status", "NEW"),
+                        exchange_order_id=str(status_resp.get("orderId", "")),
                         timestamp=utc_now()
                     )
                     await self.ledger.upsert_order(executed_order)
@@ -277,12 +306,13 @@ class BinanceExecutionAdapter:
             
             new_order = ExecutionOrder(
                 symbol=symbol,
-                side=side,
+                side=OrderSide(side) if isinstance(side, str) else side,
                 quantity=rounded_qty,
                 price=rounded_price,
                 order_type="LIMIT",
                 client_order_id=resp.get("clientOrderId", orig_client_order_id),
                 status=resp.get("status", "NEW"),
+                exchange_order_id=str(resp.get("orderId", "")),
                 timestamp=utc_now()
             )
             await self.ledger.upsert_order(new_order)

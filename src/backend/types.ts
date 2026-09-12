@@ -1,4 +1,4 @@
-export type EngineState = 'DISARMED' | 'ARMING' | 'ARMED' | 'PAUSED_NEW_RISK' | 'RECOVERY_ONLY' | 'EMERGENCY';
+export type EngineState = 'DISARMED' | 'ARMING' | 'ARMED' | 'PAUSED_NEW_RISK' | 'RECOVERY_ONLY' | 'EMERGENCY' | 'DEGRADED';
 export type ExecutionMode = 'PAPER' | 'TESTNET' | 'LIVE';
 export type ActionRiskClass = 'NEW_RISK' | 'INCREASE_RISK' | 'REDUCE_RISK' | 'RECOVERY' | 'CLOSE' | 'EMERGENCY';
 
@@ -6,13 +6,16 @@ export interface ExecutionCapabilities {
   paper: boolean;
   testnetConfigured: boolean;
   testnetAuthenticated: boolean;
+  testnetPrivateStreamHealthy?: boolean;
+  testnetReconciliationInSync?: boolean;
+  testnetSymbolRulesLoaded?: boolean;
+  testnetExecutionAdapterReady?: boolean;
   testnetExecutionReady: boolean;
   liveConfigured: boolean;
   liveExecutionReady: boolean;
   spotSupported: boolean;
   usdmFuturesSupported: boolean;
   hedgeModeSupported: boolean;
-
 }
 
 export interface ActiveTradingConfiguration {

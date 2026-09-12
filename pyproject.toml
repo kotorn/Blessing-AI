@@ -70,3 +70,7 @@ target-version = "py313"
 python_version = "3.13"
 strict = true
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests/python"]
