@@ -11,7 +11,7 @@ interface RiskRecoveryPageProps {
   rules: RiskRuleItem[];
   correlationBtcEth: number;
   cryptoBetaExposurePct: number;
-  liquidationDistancePct: number;
+  liquidationDistancePct: number | null;
   baskets?: BasketItem[];
   recoveryData?: any;
   killSwitchActive: boolean;

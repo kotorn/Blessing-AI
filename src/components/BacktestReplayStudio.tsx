@@ -139,6 +139,18 @@ export const BacktestReplayStudio: React.FC = () => {
             </div>
           </div>
 
+          {results.evidence_status === 'ILLUSTRATIVE_ONLY' && (
+            <div className="flex items-start gap-2 rounded-xl border border-amber-800/70 bg-amber-950/30 p-3 text-xs text-amber-200">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+              <div>
+                <strong className="font-semibold">SIMULATED / NOT VERIFIED EVIDENCE.</strong>{' '}
+                These scenario figures are UI research fixtures. They do not prove net
+                economic PnL after all execution costs, cannot unlock Testnet execution,
+                and cannot support Small Live capital decisions.
+              </div>
+            </div>
+          )}
+
           {/* Core Quant Metrics Table */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono">
             {/* ROI */}

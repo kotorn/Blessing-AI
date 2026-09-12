@@ -15,7 +15,7 @@ interface ExposureAttributionCardProps {
   baskets: BasketItem[];
   correlationBtcEth: number;
   cryptoBetaExposurePct: number;
-  liquidationDistancePct: number;
+  liquidationDistancePct: number | null;
   onOpenBalanceModal: () => void;
   onNavigate: (route: AppRoute) => void;
 }
@@ -127,13 +127,13 @@ export const ExposureAttributionCard: React.FC<ExposureAttributionCardProps> = (
         <div className="p-3 bg-zinc-950/70 border border-zinc-800/80 rounded-xl space-y-1">
           <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400 uppercase">
             <span>Liquidation Distance</span>
-            <Shield className="w-3.5 h-3.5 text-emerald-400" />
+            <Shield className={`w-3.5 h-3.5 ${liquidationDistancePct == null ? 'text-amber-400' : 'text-emerald-400'}`} />
           </div>
-          <div className="text-sm font-mono font-bold text-emerald-400">
-            +{liquidationDistancePct.toFixed(1)}%
+          <div className={`text-sm font-mono font-bold ${liquidationDistancePct == null ? 'text-amber-400' : 'text-emerald-400'}`}>
+            {liquidationDistancePct == null ? 'UNKNOWN' : `+${liquidationDistancePct.toFixed(1)}%`}
           </div>
           <div className="text-[10px] text-zinc-500">
-            Survival threshold: &gt; 15.0% required
+            {liquidationDistancePct == null ? 'Authoritative position risk data unavailable' : 'Survival threshold: &gt; 15.0% required'}
           </div>
         </div>
 

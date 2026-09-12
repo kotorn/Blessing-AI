@@ -33,7 +33,7 @@ interface AppRoutesProps {
   cryptoBetaExposurePct: number;
   killSwitchActive?: boolean;
   onToggleKillSwitch: () => void;
-  liquidationDistancePct: number;
+  liquidationDistancePct: number | null;
   isActionLoading: boolean;
   onExpandGrid: (basketId: string) => Promise<void>;
   onEnterRecovery: (basketId: string) => Promise<void>;

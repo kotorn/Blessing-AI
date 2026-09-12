@@ -14,7 +14,7 @@ export interface QuantStateResponse {
   risk_rules?: RiskRuleItem[];
   correlation_btc_eth?: number;
   crypto_beta_exposure_pct?: number;
-  liquidation_distance_pct?: number;
+  liquidation_distance_pct?: number | null;
 }
 
 export const quantApi = {

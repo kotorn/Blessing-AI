@@ -15,7 +15,7 @@ import { RiskState, RiskRuleItem } from '../types';
 interface HardRiskBoundsCardProps {
   riskState: RiskState;
   rules: RiskRuleItem[];
-  liquidationDistancePct: number;
+  liquidationDistancePct: number | null;
 }
 
 export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
@@ -103,16 +103,23 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
         <div className="p-3.5 bg-zinc-950/80 border border-zinc-800/80 rounded-xl space-y-1.5">
           <div className="flex items-center justify-between text-[10px] text-zinc-400 uppercase">
             <span>Liquidation Buffer</span>
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            {liquidationDistancePct == null ? (
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+            ) : (
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            )}
           </div>
-          <div className="text-lg font-bold text-emerald-400">
-            +{liquidationDistancePct.toFixed(1)}%
+          <div className={`text-lg font-bold ${liquidationDistancePct == null ? 'text-amber-400' : 'text-emerald-400'}`}>
+            {liquidationDistancePct == null ? 'UNKNOWN' : `+${liquidationDistancePct.toFixed(1)}%`}
           </div>
           <div className="w-full bg-zinc-800 rounded-full h-1.5">
-            <div className="bg-emerald-500 h-1.5 rounded-full" style={{ width: '100%' }} />
+            <div
+              className={`${liquidationDistancePct == null ? 'bg-amber-500/50' : 'bg-emerald-500'} h-1.5 rounded-full`}
+              style={{ width: liquidationDistancePct == null ? '0%' : '100%' }}
+            />
           </div>
           <div className="flex justify-between text-[10px] text-zinc-500 pt-0.5">
-            <span>Current Distance</span>
+            <span>{liquidationDistancePct == null ? 'No verified distance' : 'Current Distance'}</span>
             <span>Hard Floor: +25.0%</span>
           </div>
         </div>
@@ -127,6 +134,7 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
           {rules.map((rule, idx) => {
             const isPass = rule.status === 'PASS';
             const isWarn = rule.status === 'WARN';
+            const isUnknown = rule.status === 'UNKNOWN';
             return (
               <div
                 key={idx}
@@ -135,7 +143,7 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
                 <div className="flex items-center space-x-2">
                   {isPass ? (
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  ) : isWarn ? (
+                  ) : isWarn || isUnknown ? (
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                   ) : (
                     <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
@@ -148,8 +156,8 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
                     className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
                       isPass
                         ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
-                        : isWarn
-                        ? 'bg-amber-950 text-amber-300 border-amber-800'
+                        : isWarn || isUnknown
+                          ? 'bg-amber-950 text-amber-300 border-amber-800'
                         : 'bg-rose-950 text-rose-300 border-rose-800'
                     }`}
                   >

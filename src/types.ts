@@ -2,7 +2,7 @@
 export type DataSource = 'SIMULATED' | 'BINANCE';
 export type ExchangeEnvironment = 'NONE' | 'BINANCE_TESTNET' | 'BINANCE_MAINNET';
 export type ExecutionMode = 'PAPER' | 'TESTNET' | 'LIVE';
-export type EngineState = 'DISARMED' | 'ARMING' | 'ARMED' | 'PAUSED_NEW_RISK' | 'RECOVERY_ONLY' | 'EMERGENCY';
+export type EngineState = 'DISARMED' | 'ARMING' | 'ARMED' | 'PAUSED_NEW_RISK' | 'RECOVERY_ONLY' | 'DEGRADED' | 'EMERGENCY';
 
 export interface ExecutionCapabilities {
   paper: boolean;
@@ -195,7 +195,7 @@ export interface AccountData {
 export interface RiskRuleItem {
   rule: string;
   current: string;
-  status: 'PASS' | 'WARN' | 'FAIL';
+  status: 'PASS' | 'WARN' | 'FAIL' | 'UNKNOWN';
 }
 
 export interface BacktestMetrics {
@@ -221,6 +221,12 @@ export interface BacktestMetrics {
   total_trading_fees: number;
   slippage_cost: number;
   profit_to_floating_dd_ratio: number;
+  data_source?: 'SIMULATED' | 'HISTORICAL_DATASET';
+  evidence_status?: 'ILLUSTRATIVE_ONLY' | 'UNVERIFIED' | 'VERIFIED';
+  verified?: boolean;
+  net_economic_pnl_verified?: boolean;
+  execution_cost_model_status?: 'NOT_VERIFIED' | 'MODELED' | 'VERIFIED';
+  launch_eligible?: boolean;
 }
 
 export interface SystemAlert {

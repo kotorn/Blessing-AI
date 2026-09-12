@@ -21,7 +21,7 @@ interface CommandDecisionFlowProps {
   instruments: Record<string, InstrumentData>;
   baskets: BasketItem[];
   riskRules: RiskRuleItem[];
-  liquidationDistancePct: number;
+  liquidationDistancePct: number | null;
   onNavigate: (route: AppRoute) => void;
 }
 
@@ -147,7 +147,10 @@ export const CommandDecisionFlow: React.FC<CommandDecisionFlowProps> = ({
             Margin: <span className="text-zinc-200">{account.margin_utilization_pct.toFixed(1)}%</span> / 25% max
           </div>
           <div className="text-[10px] text-zinc-500 truncate">
-            Liq Buffer: <span className="text-emerald-400 font-mono">+{liquidationDistancePct.toFixed(1)}%</span>
+            Liq Buffer:{' '}
+            <span className={`${liquidationDistancePct == null ? 'text-amber-400' : 'text-emerald-400'} font-mono`}>
+              {liquidationDistancePct == null ? 'UNKNOWN' : `+${liquidationDistancePct.toFixed(1)}%`}
+            </span>
           </div>
         </button>
 

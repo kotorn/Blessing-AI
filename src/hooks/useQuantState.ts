@@ -16,7 +16,7 @@ export interface UseQuantStateReturn {
   exposureRecovery: any | null;
   correlationBtcEth: number;
   cryptoBetaExposurePct: number;
-  liquidationDistancePct: number;
+  liquidationDistancePct: number | null;
   isLoading: boolean;
   isActionLoading: boolean;
   lastUpdated: Date | null;
@@ -61,7 +61,7 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
   const [exposureRecovery, setExposureRecovery] = useState<any | null>(null);
   const [correlationBtcEth, setCorrelationBtcEth] = useState<number>(0.74);
   const [cryptoBetaExposurePct, setCryptoBetaExposurePct] = useState<number>(42.8);
-  const [liquidationDistancePct, setLiquidationDistancePct] = useState<number>(38.5);
+  const [liquidationDistancePct, setLiquidationDistancePct] = useState<number | null>(null);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isActionLoading, setIsActionLoading] = useState<boolean>(false);
@@ -115,7 +115,9 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
       if (typeof data?.crypto_beta_exposure_pct === 'number') {
         setCryptoBetaExposurePct(data.crypto_beta_exposure_pct);
       }
-      if (typeof data?.liquidation_distance_pct === 'number') {
+      if (data?.liquidation_distance_pct === null) {
+        setLiquidationDistancePct(null);
+      } else if (typeof data?.liquidation_distance_pct === 'number') {
         setLiquidationDistancePct(data.liquidation_distance_pct);
       }
 

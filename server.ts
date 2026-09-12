@@ -69,7 +69,7 @@ let tradingSystemState: TradingSystemState = {
   engineState: 'DISARMED',
 
   accountSynchronized: false,
-  marketDataHealthy: true,
+  marketDataHealthy: false,
   privateStreamHealthy: false,
   tradingConnectionHealthy: false,
   reconciliationStatus: 'UNKNOWN',
@@ -542,7 +542,7 @@ let quantEngineState = {
       { rule: 'Max Effective Leverage <= 2.0x', current: '1.42x', status: 'PASS' },
       { rule: 'Margin Utilization < 30% Stress Limit', current: '16.4%', status: 'PASS' },
       { rule: 'Hard Drawdown Stop < 8.0%', current: '1.85%', status: 'PASS' },
-      { rule: 'Liquidation Distance > 35%', current: '48.2%', status: 'PASS' },
+      { rule: 'Liquidation Distance > 35%', current: 'UNKNOWN', status: 'UNKNOWN' },
       { rule: 'Private WebSocket Heartbeat < 5s', current: '0.8s', status: 'PASS' },
     ],
     soft_rules: [
@@ -1596,7 +1596,8 @@ app.get('/api/quant/state', (req: Request, res: Response) => {
     },
     correlation_btc_eth: quantEngineState.correlations.btc_eth_rolling_corr,
     crypto_beta_exposure_pct: quantEngineState.correlations.crypto_beta_exposure_pct,
-    liquidation_distance_pct: 48.2,
+    liquidation_distance_pct: null,
+    liquidation_safety: 'UNKNOWN',
   });
 });
 
@@ -1790,7 +1791,9 @@ app.post('/api/quant/killswitch', async (req: Request, res: Response) => {
   }
 });
 
-// Event-driven Historical Replay / Stress Scenario Simulation
+// Event-driven Historical Replay / Stress Scenario Simulation.  The current
+// endpoint is a deterministic UI fixture, not a data-backed backtest runner;
+// its metrics must never be treated as launch or profitability evidence.
 app.post('/api/quant/backtest/run', (req: Request, res: Response) => {
   const { scenario = 'COVID_CRASH_2020', initial_capital = 100000, max_grid_levels = 5, regime_filter = true } = req.body;
 
@@ -1902,13 +1905,23 @@ app.post('/api/quant/backtest/run', (req: Request, res: Response) => {
     (normKey.includes('BULL') ? scenarios['BULL_EXPANSION_2024'] : null) ||
     scenarios['COVID_CRASH_2020'];
 
+  const evidence = {
+    data_source: 'SIMULATED',
+    evidence_status: 'ILLUSTRATIVE_ONLY',
+    verified: false,
+    net_economic_pnl_verified: false,
+    execution_cost_model_status: 'NOT_VERIFIED',
+    launch_eligible: false,
+  };
+  const metrics = { ...resData, ...evidence };
+
   res.json({
-    ...resData,
+    ...metrics,
     scenario,
     initial_capital,
     max_grid_levels,
     regime_filter,
-    metrics: resData,
+    metrics,
   });
 });
 
