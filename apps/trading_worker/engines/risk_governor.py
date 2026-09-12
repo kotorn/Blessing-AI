@@ -12,9 +12,11 @@ class RiskGovernor:
         max_leverage: Decimal = Decimal("2.0"),
         max_drawdown_pct: Decimal = Decimal("6.0"),
         hedge_mode: bool = False,
+        max_margin_utilization_pct: Decimal = Decimal("70.0"),
     ):
         self.max_leverage = max_leverage
         self.max_drawdown_pct = max_drawdown_pct
+        self.max_margin_utilization_pct = max_margin_utilization_pct
         self.hedge_mode = hedge_mode
 
     def evaluate(self, target: TargetExposure, risk_snapshot: RiskSnapshot, current_position_qty: Decimal) -> ExecutionDecision:
@@ -37,6 +39,15 @@ class RiskGovernor:
         if risk_snapshot.effective_leverage >= self.max_leverage:
             if not is_reducing:
                 return self._reject(target, f"Leverage ({risk_snapshot.effective_leverage}x) exceeds limit ({self.max_leverage}x). Cannot increase exposure.")
+
+        if risk_snapshot.margin_utilization_pct >= self.max_margin_utilization_pct:
+            if not is_reducing:
+                return self._reject(
+                    target,
+                    "Margin utilization "
+                    f"({risk_snapshot.margin_utilization_pct}%) exceeds limit "
+                    f"({self.max_margin_utilization_pct}%). Cannot increase exposure.",
+                )
                 
         # 3. Calculate required order to reach target delta
         # Simplified: target_net_delta_qty represents the ABSOLUTE target exposure we want.

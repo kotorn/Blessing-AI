@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import math
+import os
 from typing import Any, Optional
 
 from domain.enums import EconomicRiskClass, MarketType, OrderSide, OrderType, PositionSide, TimeInForce
@@ -66,6 +67,33 @@ def _liquidation_safety_is_known_and_positive(snapshot: Any) -> bool:
     except (InvalidOperation, TypeError, ValueError):
         return False
     return parsed.is_finite() and parsed > 0
+
+
+def _available_balance_is_positive(snapshot: Any) -> bool:
+    try:
+        available = Decimal(str(getattr(snapshot, "available_balance", "")))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return available.is_finite() and available > 0
+
+
+def _margin_utilization_is_safe(snapshot: Any) -> bool:
+    try:
+        utilization = Decimal(str(getattr(snapshot, "margin_utilization_pct", "")))
+        configured_limit = Decimal(os.getenv("MAX_MARGIN_UTILIZATION_PCT", "70"))
+    except (InvalidOperation, TypeError, ValueError):
+        configured_limit = Decimal("70")
+        try:
+            utilization = Decimal(str(getattr(snapshot, "margin_utilization_pct", "")))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+    if (
+        not configured_limit.is_finite()
+        or configured_limit <= 0
+        or configured_limit > 100
+    ):
+        configured_limit = Decimal("70")
+    return utilization.is_finite() and utilization >= 0 and utilization < configured_limit
 
 
 def _positive_float(name: str, fallback: float) -> float:
@@ -145,6 +173,10 @@ class DecisionExecutionGate:
         snapshot = getattr(adapter, "account_snapshot", None)
         if snapshot is None:
             snapshot = getattr(getattr(adapter, "ledger", None), "account_snapshot", None)
+        if _is_risk_increasing(risk_class) and not _available_balance_is_positive(snapshot):
+            return GateResult(False, "Available Testnet balance is not positive")
+        if _is_risk_increasing(risk_class) and not _margin_utilization_is_safe(snapshot):
+            return GateResult(False, "Margin utilization is at or above the Testnet safety limit")
         if _is_risk_increasing(risk_class) and not _liquidation_safety_is_known_and_positive(snapshot):
             return GateResult(False, "Liquidation safety is UNKNOWN")
 
@@ -213,6 +245,10 @@ class OrderExecutionGate:
             snapshot = getattr(self.adapter, "account_snapshot", None)
             if snapshot is None:
                 snapshot = getattr(getattr(self.adapter, "ledger", None), "account_snapshot", None)
+            if not _available_balance_is_positive(snapshot):
+                return GateResult(False, "Available Testnet balance is not positive")
+            if not _margin_utilization_is_safe(snapshot):
+                return GateResult(False, "Margin utilization is at or above the Testnet safety limit")
             if not _liquidation_safety_is_known_and_positive(snapshot):
                 return GateResult(False, "Liquidation safety is UNKNOWN")
 

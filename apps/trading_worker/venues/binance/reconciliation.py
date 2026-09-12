@@ -105,6 +105,16 @@ def build_account_snapshot(
     total_maint_margin = _required_decimal(account, "totalMaintMargin")
     position_initial_margin = _required_decimal(account, "totalPositionInitialMargin")
 
+    for field, value in (
+        ("totalWalletBalance", wallet_balance),
+        ("totalMarginBalance", margin_balance),
+        ("totalInitialMargin", total_initial_margin),
+        ("totalMaintMargin", total_maint_margin),
+        ("totalPositionInitialMargin", position_initial_margin),
+    ):
+        if value < 0:
+            raise ValueError(f"Binance account field cannot be negative: {field}")
+
     total_notional = Decimal("0")
     liquidation_distances: List[Decimal] = []
     liquidation_known = True

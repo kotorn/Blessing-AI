@@ -539,11 +539,25 @@ class TradingWorkerApp:
             "margin_utilization_pct",
         )
         try:
-            return all(
+            finite = all(
                 getattr(snapshot, field, None) is not None
                 and Decimal(str(getattr(snapshot, field))).is_finite()
                 for field in required
             )
+            nonnegative = all(
+                Decimal(str(getattr(snapshot, field))) >= 0
+                for field in (
+                    "wallet_balance",
+                    "margin_balance",
+                    "total_initial_margin",
+                    "total_maint_margin",
+                    "position_initial_margin",
+                    "total_position_notional",
+                    "effective_leverage",
+                    "margin_utilization_pct",
+                )
+            )
+            return finite and nonnegative
         except (InvalidOperation, TypeError, ValueError):
             return False
 

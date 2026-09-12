@@ -335,6 +335,40 @@ async def test_stale_account_snapshot_blocks_risk_increase(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_non_positive_available_balance_blocks_risk_increase(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    worker.execution_adapter.ledger.account_snapshot.available_balance = Decimal("0")
+    decision = make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
+
+    decision_result = worker.decision_execution_gate.check(decision)
+    order_result = await worker.execution_adapter.order_gate.check(
+        decision.orders[0], EconomicRiskClass.NEW_RISK
+    )
+
+    assert decision_result.allowed is False
+    assert "available" in decision_result.reason.lower()
+    assert order_result.allowed is False
+    assert "available" in order_result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_high_margin_utilization_blocks_risk_increase(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    worker.execution_adapter.ledger.account_snapshot.margin_utilization_pct = Decimal("70")
+    decision = make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
+
+    decision_result = worker.decision_execution_gate.check(decision)
+    order_result = await worker.execution_adapter.order_gate.check(
+        decision.orders[0], EconomicRiskClass.NEW_RISK
+    )
+
+    assert decision_result.allowed is False
+    assert "margin" in decision_result.reason.lower()
+    assert order_result.allowed is False
+    assert "margin" in order_result.reason.lower()
+
+
+@pytest.mark.asyncio
 async def test_decision_gate_requires_explicit_testnet_configuration(monkeypatch):
     worker = await make_ready_worker(monkeypatch)
     monkeypatch.setenv("BINANCE_TESTNET", "false")
@@ -912,6 +946,14 @@ def test_account_snapshot_uses_position_risk_and_real_liquidation_distance():
     assert snapshot.margin_utilization_pct == Decimal("10")
     assert snapshot.min_liquidation_distance_pct == Decimal("10")
     assert snapshot.liquidation_safety == "KNOWN"
+
+
+def test_negative_account_margin_is_rejected():
+    payload = account_payload()
+    payload["totalMarginBalance"] = "-1"
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        build_account_snapshot(payload, [])
 
 
 def test_missing_mark_price_invalidates_active_account_snapshot():

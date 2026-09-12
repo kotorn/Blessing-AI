@@ -119,6 +119,34 @@ def test_risk_governor_allows_deleveraging_during_hard_stop():
     assert decision.risk_class.value == "REDUCE_RISK"
     assert decision.orders[0].reduce_only is True
 
+
+def test_risk_governor_vetoes_high_margin_utilization():
+    governor = RiskGovernor()
+    target = TargetExposure(
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        target_net_delta_qty=Decimal("0.1"),
+        target_gross_limit_qty=Decimal("0.1"),
+        strategy_attributions={"grid": Decimal("0.1")},
+        expires_at=datetime.now(timezone.utc),
+    )
+    risk = RiskSnapshot(
+        portfolio_equity=Decimal("100"),
+        unrealized_pnl=Decimal("0"),
+        realized_pnl_24h=Decimal("0"),
+        margin_utilization_pct=Decimal("70"),
+        effective_leverage=Decimal("0.5"),
+        current_drawdown_pct=Decimal("0"),
+        liquidation_distance_pct=None,
+        risk_state=RiskState.NORMAL,
+    )
+
+    decision = governor.evaluate(target, risk, Decimal("0"))
+
+    assert decision.action == "NOOP"
+    assert "margin" in decision.rational.lower()
+
+
 def test_exposure_recovery_grid_brake():
     recovery = ExposureRecoveryEngine(drawdown_trigger_pct=Decimal("2.5"))
     
@@ -141,6 +169,94 @@ def test_exposure_recovery_grid_brake():
     
     # The Grid Brake should have zeroed the grid delta, leaving 0 net addition.
     assert adjusted_target.desired_delta_qty <= Decimal("0.0")
+
+
+def _grid_price_action(*, reclaiming: bool = True) -> PriceActionState:
+    return PriceActionState(
+        symbol="BTCUSDT",
+        timestamp=datetime.now(timezone.utc),
+        swing_high=Decimal("101"),
+        swing_low=Decimal("99"),
+        prior_24h_high=Decimal("101"),
+        prior_24h_low=Decimal("99"),
+        displacement_velocity_pct=Decimal("0"),
+        displacement_acceleration=Decimal("0"),
+        range_expansion_ratio=Decimal("0"),
+        is_reclaiming=reclaiming,
+    )
+
+
+def _grid_market_state(regime: RegimeType, *, shock_active: bool = False):
+    return type(
+        "GridMarketStateStub",
+        (),
+        {
+            "symbol": "BTCUSDT",
+            "timestamp": datetime.now(timezone.utc),
+            "primary_regime": regime,
+            "regime_probabilities": {},
+            "atr_1h": Decimal("100"),
+            "volatility_zscore": Decimal("0"),
+            "shock_active": shock_active,
+        },
+    )()
+
+
+@pytest.mark.parametrize(
+    "regime",
+    [
+        RegimeType.R2_WEAK_TREND,
+        RegimeType.R3_STRONG_TREND,
+        RegimeType.R4_BREAKOUT,
+        RegimeType.R5_VOLATILITY_SHOCK,
+        RegimeType.R6_CRISIS,
+        RegimeType.TREND,
+        RegimeType.BREAKOUT,
+        RegimeType.SHOCK,
+    ],
+)
+def test_grid_brakes_before_expansion_in_directional_or_shock_regimes(regime):
+    intent = GridStrategyEngine().evaluate(
+        _grid_price_action(), _grid_market_state(regime), grid_depth=0
+    )
+
+    assert intent is not None
+    assert intent.desired_delta_qty == Decimal("0")
+    assert "disabled" in intent.evidence["brake_reason"]
+
+
+def test_grid_depth_is_bounded_and_decelerates_without_martingale():
+    engine = GridStrategyEngine(max_grid_levels=5)
+    state = _grid_price_action()
+    level_one = engine.evaluate(state, _grid_market_state(RegimeType.R1_RANGE), grid_depth=0)
+    level_two = engine.evaluate(state, _grid_market_state(RegimeType.R1_RANGE), grid_depth=1)
+    level_five = engine.evaluate(state, _grid_market_state(RegimeType.R1_RANGE), grid_depth=4)
+    capped = engine.evaluate(state, _grid_market_state(RegimeType.R1_RANGE), grid_depth=5)
+
+    assert level_one.desired_delta_qty == Decimal("0.1")
+    assert Decimal("0") < level_two.desired_delta_qty < level_one.desired_delta_qty
+    assert Decimal("0") < level_five.desired_delta_qty < level_two.desired_delta_qty
+    assert capped.desired_delta_qty == Decimal("0")
+
+
+def test_grid_does_not_add_to_non_reclaiming_inventory():
+    intent = GridStrategyEngine().evaluate(
+        _grid_price_action(reclaiming=False), _grid_market_state(RegimeType.R1_RANGE)
+    )
+
+    assert intent is not None
+    assert intent.desired_delta_qty == Decimal("0")
+
+
+def test_grid_brakes_when_shock_flag_is_active_even_in_range():
+    intent = GridStrategyEngine().evaluate(
+        _grid_price_action(),
+        _grid_market_state(RegimeType.R1_RANGE, shock_active=True),
+    )
+
+    assert intent is not None
+    assert intent.desired_delta_qty == Decimal("0")
+
 
 def test_decimal_precision():
     # Verify no float mutation loss in core allocations
