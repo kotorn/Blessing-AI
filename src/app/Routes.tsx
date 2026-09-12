@@ -18,6 +18,7 @@ import { BinanceKeyStatus } from '../api/binance';
 import { ExecutionOrder } from '../types/orders';
 
 interface AppRoutesProps {
+
   currentRoute: AppRoute;
   onNavigate: (route: AppRoute) => void;
   account: AccountData;
@@ -90,8 +91,8 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
     case '/strategies':
       return (
         <StrategiesPage
-          strategyIntents={(quantState as any)?.strategy_intents}
-          metaAllocations={(quantState as any)?.meta_allocations}
+          strategyIntents={((window as any).quantState as any)?.strategy_intents}
+          metaAllocations={((window as any).quantState as any)?.meta_allocations}
           baskets={baskets}
           instruments={instruments}
           account={account}

@@ -28,8 +28,8 @@ class BinanceExecutionAdapter:
         
         self.rest_client = BinanceRestClient(api_key, api_secret, env)
         self.capabilities = BinanceCapabilities()
-        self.user_stream = BinanceUserStream(self.rest_client, env)
-        self.reconciliation = BinanceReconciliation(self.rest_client)
+        self.user_stream = BinanceUserStream(self.rest_client, env, on_disconnect=self._on_user_stream_disconnect)
+        self.reconciliation = BinanceReconciliation(self.rest_client, self.ledger)
         self.ledger = ledger or InMemoryLedger()
         
         self.state = ConnectionState.DISCONNECTED
@@ -56,13 +56,67 @@ class BinanceExecutionAdapter:
             self.state = ConnectionState.DEGRADED
             return False
 
-    async def _on_ws_event(self, event: Any):
+async def _on_ws_event(self, event: Any):
         event_type = event.get("e")
         if event_type == "ORDER_TRADE_UPDATE":
             logger.info("WS Order Update: %s", event)
-            # Parse fill and update ledger
+            order_info = event.get("o", {})
+            symbol = order_info.get("s")
+            client_order_id = order_info.get("c")
+            status = order_info.get("X")
+            
+            existing_order = await self.ledger.get_order_by_client_id(client_order_id)
+            if existing_order:
+                existing_order.status = status
+                await self.ledger.upsert_order(existing_order)
+            else:
+                # Create a minimal tracking representation if absent locally
+                new_order = ExecutionOrder(
+                    symbol=symbol,
+                    side=OrderSide(order_info.get("S")),
+                    quantity=Decimal(str(order_info.get("q", "0"))),
+                    price=Decimal(str(order_info.get("p", "0"))),
+                    order_type=order_info.get("o"),
+                    client_order_id=client_order_id,
+                    status=status,
+                    timestamp=utc_now()
+                )
+                new_order.exchange_order_id = str(order_info.get("i"))
+                await self.ledger.upsert_order(new_order)
+                
+            exec_type = order_info.get("x")
+            if exec_type == "TRADE":
+                fill = ExchangeFill(
+                    exchange_trade_id=str(order_info.get("t")),
+                    exchange_order_id=str(order_info.get("i")),
+                    client_order_id=client_order_id,
+                    symbol=symbol,
+                    side=OrderSide(order_info.get("S")),
+                    position_side=PositionSide(order_info.get("ps")),
+                    quantity=Decimal(str(order_info.get("l"))),
+                    price=Decimal(str(order_info.get("L"))),
+                    commission=Decimal(str(order_info.get("n", "0"))),
+                    commission_asset=order_info.get("N"),
+                    realized_pnl=Decimal(str(order_info.get("rp", "0"))),
+                    maker=order_info.get("m", False),
+                    event_time=event.get("E", 0),
+                    transaction_time=order_info.get("T", 0),
+                    source="BINANCE_TESTNET" if self.env == BinanceEnvironment.TESTNET else "BINANCE_MAINNET"
+                )
+                await self.ledger.append_fill(fill)
         elif event_type == "ACCOUNT_UPDATE":
             logger.info("WS Account Update: %s", event)
+            update_data = event.get("a", {})
+            positions = update_data.get("P", [])
+            for p in positions:
+                await self.ledger.upsert_position({
+                    "symbol": p.get("s"),
+                    "positionSide": p.get("ps"),
+                    "positionAmt": p.get("pa"),
+                    "entryPrice": p.get("ep"),
+                    "unRealizedProfit": p.get("up"),
+                    "marginType": p.get("mt", "cross")
+                })
 
     def _generate_client_order_id(self, context_id: str, symbol: str, attempt: int = 1) -> str:
         """
@@ -123,7 +177,7 @@ class BinanceExecutionAdapter:
                     params["reduceOnly"] = "true"
             
             logger.info("[%s] Submitting order: %s", self.env, params)
-            try:
+try:
                 resp = await self.rest_client.request("POST", "/fapi/v1/order", signed=True, params=params)
                 logger.info("Order success: %s", resp)
                 
@@ -141,8 +195,35 @@ class BinanceExecutionAdapter:
                 await self.ledger.upsert_order(executed_order)
                 executed_orders.append(executed_order)
             except Exception as e:
-                logger.error("Order execution failed: %s", e)
+                logger.error("Order execution failed, ambiguity triggered: %s", e)
                 # Implement timeout ambiguity handling here: QUERY order state.
+                self.state = ConnectionState.RECONCILING
+                try:
+                    logger.info("Querying ambiguous order by client ID: %s", client_oid)
+                    query_params = {"symbol": symbol, "origClientOrderId": client_oid}
+                    status_resp = await self.rest_client.request("GET", "/fapi/v1/order", signed=True, params=query_params)
+                    logger.info("Ambiguous order found on exchange: %s", status_resp)
+                    executed_order = ExecutionOrder(
+                        symbol=symbol,
+                        side=order_intent.side,
+                        quantity=rounded_qty,
+                        price=Decimal(status_resp.get("price", "0")),
+                        order_type=params["type"],
+                        client_order_id=client_oid,
+                        status=status_resp.get("status", "NEW"),
+                        timestamp=utc_now()
+                    )
+                    await self.ledger.upsert_order(executed_order)
+                    executed_orders.append(executed_order)
+                    self.state = ConnectionState.READY # Recovered
+                except Exception as query_err:
+                    err_msg = str(query_err)
+                    if "Order does not exist" in err_msg or "-2013" in err_msg:
+                        logger.warning("Order %s confirmed absent. It was not placed.", client_oid)
+                        self.state = ConnectionState.READY # Safe to resume
+                    else:
+                        logger.error("Order %s status STILL UNKNOWN. Blocking new risk. Error: %s", client_oid, query_err)
+                        self.state = ConnectionState.DEGRADED
                 
         return executed_orders
 
@@ -184,7 +265,20 @@ class BinanceExecutionAdapter:
             logger.info("[%s] Modifying order (PUT): %s", self.env, params)
             resp = await self.rest_client.request("PUT", "/fapi/v1/order", signed=True, params=params)
             logger.info("Modify success: %s", resp)
-            return None # Should return new ExecutionOrder in full implementation
+            
+            new_order = ExecutionOrder(
+                symbol=symbol,
+                side=side,
+                quantity=rounded_qty,
+                price=rounded_price,
+                order_type="LIMIT",
+                client_order_id=resp.get("clientOrderId", orig_client_order_id),
+                status=resp.get("status", "NEW"),
+                timestamp=utc_now()
+            )
+            await self.ledger.upsert_order(new_order)
+            return new_order
+
         except Exception as e:
             logger.error("Failed to modify order: %s", e)
             return None

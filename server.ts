@@ -1279,27 +1279,68 @@ app.get('/api/binance/balance', async (req: Request, res: Response) => {
 
 // --- System Truth & Safety Boundary Endpoints ---
 
-app.get('/api/system/state', (req, res) => {
-  res.json({
-    ...tradingSystemState,
-    capabilities: EXECUTION_CAPABILITIES,
-  });
+
+// The worker url is typically http://127.0.0.1:8080
+const WORKER_URL = 'http://127.0.0.1:8080';
+
+app.get('/api/system/state', async (req, res) => {
+  try {
+    const workerStateResp = await fetch(WORKER_URL + '/state');
+    if (!workerStateResp.ok) throw new Error('Worker not OK');
+    const workerState = await workerStateResp.json();
+    
+    const workerCapsResp = await fetch(WORKER_URL + '/capabilities');
+    const workerCaps = await workerCapsResp.json();
+    
+    // Sync to local state
+    tradingSystemState.engineState = workerState.engine_state;
+    tradingSystemState.executionMode = workerState.execution_mode;
+    tradingSystemState.pauseNewRisk = workerState.pause_new_risk;
+    tradingSystemState.recoveryOnly = workerState.recovery_only;
+    tradingSystemState.killSwitchActive = workerState.kill_switch_active;
+    tradingSystemState.updatedAt = workerState.updated_at;
+    tradingSystemState.tradingConnectionHealthy = workerState.connection_state === 'READY';
+    
+    res.json({
+      ...tradingSystemState,
+      capabilities: workerCaps,
+      workerState, // pass raw state to frontend for debug if needed
+    });
+  } catch (err) {
+    res.json({
+      ...tradingSystemState,
+      engineState: 'DEGRADED',
+      capabilities: EXECUTION_CAPABILITIES,
+      error: 'Worker unreachable'
+    });
+  }
 });
 
-app.get('/api/system/preflight', (req, res) => {
-  const requestedConfig = {
-    executionMode: req.query.executionMode || 'PAPER'
-  };
-  const preflight = evaluatePreflight(tradingSystemState, requestedConfig);
-  res.json({
-    ...preflight,
-    capabilities: EXECUTION_CAPABILITIES
-  });
+app.get('/api/system/preflight', async (req, res) => {
+  const mode = req.query.executionMode || 'PAPER';
+  try {
+    const resp = await fetch(WORKER_URL + '/preflight?execution_mode=' + mode);
+    const preflight = await resp.json();
+    
+    const capsResp = await fetch(WORKER_URL + '/capabilities');
+    const caps = await capsResp.json();
+    
+    res.json({
+      ...preflight,
+      capabilities: caps
+    });
+  } catch (err) {
+    res.json({
+      executionMode: mode,
+      canArm: false,
+      checks: [{ id: 'CHK-WORKER', name: 'Worker Connectivity', required: true, status: 'FAIL', message: 'Unreachable' }],
+      capabilities: EXECUTION_CAPABILITIES
+    });
+  }
 });
 
-app.post('/api/system/arm', (req, res) => {
+app.post('/api/system/arm', async (req, res) => {
   const { executionMode, riskProfile, instruments, strategies } = req.body;
-  
   const requestedConfig = {
     executionMode: executionMode || 'PAPER',
     instruments: instruments || [],
@@ -1307,104 +1348,101 @@ app.post('/api/system/arm', (req, res) => {
     riskProfile: riskProfile || 'BALANCED'
   };
 
-  const preflight = evaluatePreflight(tradingSystemState, requestedConfig);
-
-  if (!preflight.canArm) {
-    return res.status(409).json({
-      error: 'PRECHECK_FAILED',
-      preflight
+  try {
+    const armResp = await fetch(WORKER_URL + '/arm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestedConfig)
     });
-  }
-
-  if (!validateStateTransition(tradingSystemState.engineState, 'ARMED')) {
-    return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: 'ARMED' });
-  }
-
-  const prevState = tradingSystemState.engineState;
-  tradingSystemState.executionMode = requestedConfig.executionMode as any;
-  tradingSystemState.engineState = 'ARMED';
-
-  // Initialize testnet adapter if we are going into testnet mode
-  if (tradingSystemState.executionMode === 'TESTNET') {
-    try {
-      const active = getActiveBinanceCredentials();
-      if (active && active.isTestnet) {
-        // pass credentials to python worker or store securely
-      }
-    } catch (err) {
-      console.warn("No active testnet credentials found during arm.");
+    
+    if (!armResp.ok) {
+      const errData = await armResp.json();
+      return res.status(409).json({ error: 'WORKER_REJECTED_ARM', detail: errData });
     }
+    
+    // Pick risk profile
+    const profileKey = requestedConfig.riskProfile as keyof typeof RISK_PROFILES;
+    riskConfiguration = RISK_PROFILES[profileKey] || RISK_PROFILES.BALANCED;
+    tradingSystemState.activeConfiguration = {
+      executionMode: requestedConfig.executionMode as any,
+      instruments: requestedConfig.instruments,
+      strategies: requestedConfig.strategies,
+      riskProfile: requestedConfig.riskProfile as any,
+      riskConfiguration,
+      configVersion: tradingSystemState.configVersion,
+      armedAt: new Date().toISOString()
+    };
+    
+    auditRepository.logEvent({
+      eventType: 'ENGINE_ARMED',
+      previousState: tradingSystemState.engineState,
+      newState: 'ARMED',
+      executionMode: requestedConfig.executionMode,
+      reason: 'ARM requested by user and worker accepted',
+      metadata: { requestedConfig }
+    });
+    
+    res.json({ status: 'ARMED' });
+  } catch (err) {
+    res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
-  auditRepository.logEvent({
-    eventType: 'ENGINE_ARMED',
-    previousState: prevState,
-    newState: 'ARMED',
-    executionMode: tradingSystemState.executionMode,
-    reason: 'ARM requested by user and preflight passed',
-    metadata: { requestedConfig }
-  });
-  
-  // Pick risk profile
-  const profileKey = requestedConfig.riskProfile as keyof typeof RISK_PROFILES;
-  riskConfiguration = RISK_PROFILES[profileKey] || RISK_PROFILES.BALANCED;
-
-  tradingSystemState.activeConfiguration = {
-    executionMode: requestedConfig.executionMode as any,
-    instruments: requestedConfig.instruments,
-    strategies: requestedConfig.strategies,
-    riskProfile: requestedConfig.riskProfile as any,
-    riskConfiguration,
-    configVersion: tradingSystemState.configVersion,
-    armedAt: new Date().toISOString()
-  };
-
-  tradingSystemState.updatedAt = new Date().toISOString();
-  
-  (quantEngineState.account as any).source = tradingSystemState.executionMode === 'PAPER' ? 'SIMULATED' : (tradingSystemState.executionMode === 'TESTNET' ? 'BINANCE_TESTNET' : 'BINANCE_MAINNET');
-
-  res.json(tradingSystemState);
 });
 
-app.post('/api/system/disarm', (req, res) => {
-  if (!validateStateTransition(tradingSystemState.engineState, 'DISARMED')) {
-    return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: 'DISARMED' });
+app.post('/api/system/disarm', async (req, res) => {
+  try {
+    await fetch(WORKER_URL + '/disarm', { method: 'POST' });
+    
+    auditRepository.logEvent({
+      eventType: 'ENGINE_DISARMED',
+      previousState: tradingSystemState.engineState,
+      newState: 'DISARMED',
+      executionMode: tradingSystemState.executionMode,
+      reason: 'Manual DISARM requested and worker accepted'
+    });
+    
+    res.json({ status: 'DISARMED' });
+  } catch (err) {
+    res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
-  const prevState = tradingSystemState.engineState;
-  tradingSystemState.engineState = 'DISARMED';
-  tradingSystemState.killSwitchActive = false;
-  auditRepository.logEvent({
-    eventType: 'ENGINE_DISARMED',
-    previousState: prevState,
-    newState: 'DISARMED',
-    executionMode: tradingSystemState.executionMode,
-    reason: 'Manual DISARM requested'
-  });
-  tradingSystemState.updatedAt = new Date().toISOString();
-  res.json(tradingSystemState);
 });
 
-app.post('/api/system/pause-new-risk', (req, res) => {
-  const { active: pnrActive } = req.body;
-  const targetState = pnrActive ? 'PAUSED_NEW_RISK' : 'ARMED';
-  if (!validateStateTransition(tradingSystemState.engineState, targetState)) {
-    return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: targetState });
+app.post('/api/system/pause-new-risk', async (req, res) => {
+  try {
+    await fetch(WORKER_URL + '/pause-new-risk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    res.json({ status: 'ok' });
+  } catch (err) {
+    res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
-  tradingSystemState.pauseNewRisk = pnrActive;
-  tradingSystemState.engineState = targetState as any;
-  tradingSystemState.updatedAt = new Date().toISOString();
-  res.json(tradingSystemState);
 });
 
-app.post('/api/system/recovery-only', (req, res) => {
-  const { active: recActive } = req.body;
-  const targetState = recActive ? 'RECOVERY_ONLY' : 'ARMED';
-  if (!validateStateTransition(tradingSystemState.engineState, targetState)) {
-    return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: targetState });
+app.post('/api/system/recovery-only', async (req, res) => {
+  try {
+    await fetch(WORKER_URL + '/recovery-only', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    res.json({ status: 'ok' });
+  } catch (err) {
+    res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
-  tradingSystemState.recoveryOnly = recActive;
-  tradingSystemState.engineState = targetState as any;
-  tradingSystemState.updatedAt = new Date().toISOString();
-  res.json(tradingSystemState);
+});
+
+app.post('/api/system/kill-switch', async (req, res) => {
+  try {
+    await fetch(WORKER_URL + '/kill-switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+    res.json({ status: 'ok' });
+  } catch (err) {
+    res.status(503).json({ error: 'WORKER_UNREACHABLE' });
+  }
 });
 
 app.get('/api/quant/state', (req: Request, res: Response) => {

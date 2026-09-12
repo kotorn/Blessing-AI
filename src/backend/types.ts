@@ -12,7 +12,6 @@ export interface ExecutionCapabilities {
   spotSupported: boolean;
   usdmFuturesSupported: boolean;
   hedgeModeSupported: boolean;
-  paper: boolean;
 
 }
 
