@@ -55,6 +55,8 @@ export interface TradingSystemState {
 
   configVersion: string;
   updatedAt: string;
+  heartbeatAt?: string;
+  workerResponsive?: boolean;
   activeConfiguration?: ActiveTradingConfiguration;
 }
 

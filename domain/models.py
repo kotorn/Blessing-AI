@@ -168,6 +168,14 @@ class TargetExposure(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     expires_at: datetime
 
+    @property
+    def desired_delta_qty(self) -> Decimal:
+        return self.target_net_delta_qty
+
+    @property
+    def strategy_allocations(self) -> Dict[str, Decimal]:
+        return self.strategy_attributions
+
 
 class GridLevel(BaseModel):
     level: int
@@ -256,6 +264,10 @@ class OrderIntent(BaseModel):
     strategy_id: str = "portfolio"
     created_at: datetime = Field(default_factory=utc_now)
 
+    @property
+    def limit_price(self) -> Optional[Decimal]:
+        return self.price
+
 
 class Fill(BaseModel):
     if PYDANTIC_AVAILABLE:
@@ -285,14 +297,15 @@ class ExecutionDecision(BaseModel):
 
 class ExecutionOrder(BaseModel):
     if PYDANTIC_AVAILABLE:
-        model_config = ConfigDict(frozen=True)
+        model_config = ConfigDict(frozen=False)
     symbol: str
     side: OrderSide
     quantity: Decimal
     price: Decimal
-    order_type: str
+    order_type: str = "LIMIT"
     client_order_id: str
     status: str
+    exchange_order_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=utc_now)
 
 class ExchangeFill(BaseModel):
@@ -310,6 +323,6 @@ class ExchangeFill(BaseModel):
     commission_asset: str
     realized_pnl: Decimal
     maker: bool
-    event_time: datetime
-    transaction_time: datetime
+    event_time: Any
+    transaction_time: Any
     source: str

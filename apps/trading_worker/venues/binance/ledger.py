@@ -9,16 +9,6 @@ class ExecutionLedger(Protocol):
     async def upsert_raw_exchange_order(self, raw_order: dict) -> None: ...
     async def append_fill(self, fill: ExchangeFill) -> None: ...
     async def get_order_by_client_id(self, client_order_id: str) -> Optional[ExecutionOrder]: ...
-async def upsert_position(self, raw_position: dict) -> None:
-        sym = raw_position.get("symbol")
-        ps = raw_position.get("positionSide")
-        # Replace existing or append
-        for i, p in enumerate(self.positions):
-            if p.get("symbol") == sym and p.get("positionSide") == ps:
-                self.positions[i] = raw_position
-                return
-        self.positions.append(raw_position)
-
     async def replace_positions(self, raw_positions: List[dict]) -> None: ...
     async def upsert_position(self, raw_position: dict) -> None: ...
     async def get_open_orders(self) -> List[ExecutionOrder]: ...
@@ -57,6 +47,16 @@ class InMemoryLedger:
     async def replace_positions(self, raw_positions: List[dict]) -> None:
         self.positions = raw_positions
         self._initialized = True
+
+    async def upsert_position(self, raw_position: dict) -> None:
+        sym = raw_position.get("symbol")
+        ps = raw_position.get("positionSide")
+        # Replace existing or append
+        for i, p in enumerate(self.positions):
+            if p.get("symbol") == sym and p.get("positionSide") == ps:
+                self.positions[i] = raw_position
+                return
+        self.positions.append(raw_position)
         
     async def get_open_orders(self) -> List[ExecutionOrder]:
         return [o for o in self.orders.values() if o.status in ("NEW", "PARTIALLY_FILLED")]

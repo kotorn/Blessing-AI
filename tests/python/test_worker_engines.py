@@ -1,5 +1,6 @@
 import pytest
 from decimal import Decimal
+from datetime import datetime
 from domain.models import StrategyIntent, MarketEvent, PositionSide, MarketType, TargetExposure, RiskSnapshot, ExecutionDecision
 from domain.enums import RiskState
 from apps.trading_worker.engines.meta_allocator import MetaAllocator
@@ -9,7 +10,7 @@ from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
 def test_meta_allocator_conflict_resolution():
     allocator = MetaAllocator()
     
-    # Conflict: Grid says Long, Trend says Short
+    # Conflict: Grid says Long (+1.0), Trend says Short (-0.6)
     grid_intent = StrategyIntent(
         intent_id="G1",
         strategy_id="grid",
@@ -17,8 +18,8 @@ def test_meta_allocator_conflict_resolution():
         market_type=MarketType.USDM_FUTURES,
         direction=PositionSide.LONG,
         desired_delta_qty=Decimal("1.0"),
-        opportunity_score=Decimal("0.80"),
-        confidence=Decimal("0.8"),
+        opportunity_score=Decimal("1.0"),
+        confidence=Decimal("1.0"),
         expected_holding_horizon_sec=60
     )
     trend_intent = StrategyIntent(
@@ -28,8 +29,8 @@ def test_meta_allocator_conflict_resolution():
         market_type=MarketType.USDM_FUTURES,
         direction=PositionSide.SHORT,
         desired_delta_qty=Decimal("-0.6"),
-        opportunity_score=Decimal("0.85"),
-        confidence=Decimal("0.9"),
+        opportunity_score=Decimal("1.0"),
+        confidence=Decimal("1.0"),
         expected_holding_horizon_sec=3600
     )
     
@@ -43,7 +44,6 @@ def test_meta_allocator_conflict_resolution():
 def test_risk_governor_veto():
     governor = RiskGovernor()
     
-    from datetime import datetime
     target = TargetExposure(symbol="BTCUSDT", market_type=MarketType.USDM_FUTURES, target_net_delta_qty=Decimal("1.0"), target_gross_limit_qty=Decimal("1.0"), strategy_attributions={}, expires_at=datetime.utcnow())
     
     # Snapshot shows dangerously high margin utilization

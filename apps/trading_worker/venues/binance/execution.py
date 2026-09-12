@@ -3,7 +3,7 @@ import hashlib
 from decimal import Decimal
 from typing import List, Optional, Any
 
-from domain.models import ExecutionDecision, ExecutionOrder, OrderSide, utc_now
+from domain.models import ExecutionDecision, ExecutionOrder, OrderSide, PositionSide, ExchangeFill, utc_now
 from .config import BinanceEnvironment
 from .rest_client import BinanceRestClient
 from .capabilities import BinanceCapabilities
@@ -25,14 +25,23 @@ class BinanceExecutionAdapter:
         self.env = env
         self.api_key = api_key
         self.api_secret = api_secret
+        self.ledger = ledger or InMemoryLedger()
         
         self.rest_client = BinanceRestClient(api_key, api_secret, env)
         self.capabilities = BinanceCapabilities()
         self.user_stream = BinanceUserStream(self.rest_client, env, on_disconnect=self._on_user_stream_disconnect)
         self.reconciliation = BinanceReconciliation(self.rest_client, self.ledger)
-        self.ledger = ledger or InMemoryLedger()
         
         self.state = ConnectionState.DISCONNECTED
+
+    async def _on_user_stream_disconnect(self):
+        logger.warning("[%s] User stream disconnected. Pausing execution and reconciling.", self.env)
+        self.state = ConnectionState.SYNCING
+        sync_result = await self.reconciliation.reconcile()
+        if sync_result == "IN_SYNC":
+            self.state = ConnectionState.READY
+        else:
+            self.state = ConnectionState.DEGRADED
 
     async def connect(self):
         self.state = ConnectionState.CONNECTING
@@ -56,7 +65,7 @@ class BinanceExecutionAdapter:
             self.state = ConnectionState.DEGRADED
             return False
 
-async def _on_ws_event(self, event: Any):
+    async def _on_ws_event(self, event: Any):
         event_type = event.get("e")
         if event_type == "ORDER_TRADE_UPDATE":
             logger.info("WS Order Update: %s", event)
@@ -76,7 +85,7 @@ async def _on_ws_event(self, event: Any):
                     side=OrderSide(order_info.get("S")),
                     quantity=Decimal(str(order_info.get("q", "0"))),
                     price=Decimal(str(order_info.get("p", "0"))),
-                    order_type=order_info.get("o"),
+                    order_type=str(order_info.get("ot") or order_info.get("o") or "LIMIT"),
                     client_order_id=client_order_id,
                     status=status,
                     timestamp=utc_now()
@@ -177,7 +186,7 @@ async def _on_ws_event(self, event: Any):
                     params["reduceOnly"] = "true"
             
             logger.info("[%s] Submitting order: %s", self.env, params)
-try:
+            try:
                 resp = await self.rest_client.request("POST", "/fapi/v1/order", signed=True, params=params)
                 logger.info("Order success: %s", resp)
                 

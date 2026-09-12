@@ -1,0 +1,20 @@
+[
+  "tests/python/contract/test_testnet_mutating.py::test_bounded_mutation_place_order",
+  "tests/python/contract/test_testnet_readonly.py::test_capabilities_discovery",
+  "tests/python/test_binance_adapter.py::test_timeout_ambiguity_handling",
+  "tests/python/test_execution_events.py::test_account_update_positions",
+  "tests/python/test_execution_events.py::test_duplicate_fills_idempotency",
+  "tests/python/test_user_stream_recovery.py::test_user_stream_disconnect_recovery_insync",
+  "tests/python/test_user_stream_recovery.py::test_user_stream_disconnect_recovery_mismatch",
+  "tests/python/test_worker_engines.py::test_decimal_precision",
+  "tests/python/test_worker_engines.py::test_exposure_recovery_grid_brake",
+  "tests/python/test_worker_engines.py::test_meta_allocator_conflict_resolution",
+  "tests/python/test_worker_engines.py::test_risk_governor_veto",
+  "tests/python/test_worker_state_api.py::test_default_worker_state_endpoint",
+  "tests/python/test_worker_state_api.py::test_global_heartbeat_background_updater",
+  "tests/python/test_worker_state_api.py::test_state_endpoint_serialization_contract",
+  "tests/python/test_worker_state_api.py::test_worker_heartbeat_background_task",
+  "tests/python/test_worker_state_api.py::test_worker_runtime_state_model_contract",
+  "tests/python/test_worker_state_api.py::test_worker_start_heartbeat_lifecycle",
+  "tests/python/test_worker_state_api.py::test_worker_state_transitions_and_health"
+]

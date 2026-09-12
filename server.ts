@@ -1300,6 +1300,27 @@ app.get('/api/system/state', async (req, res) => {
     tradingSystemState.killSwitchActive = workerState.kill_switch_active;
     tradingSystemState.updatedAt = workerState.updated_at;
     tradingSystemState.tradingConnectionHealthy = workerState.connection_state === 'READY';
+    if (typeof workerState.market_data_healthy === 'boolean') {
+      tradingSystemState.marketDataHealthy = workerState.market_data_healthy;
+    }
+    if (typeof workerState.private_stream_healthy === 'boolean') {
+      tradingSystemState.privateStreamHealthy = workerState.private_stream_healthy;
+    }
+    if (typeof workerState.authenticated === 'boolean') {
+      tradingSystemState.accountSynchronized = workerState.authenticated;
+    }
+    if (workerState.reconciliation_status) {
+      tradingSystemState.reconciliationStatus = workerState.reconciliation_status;
+    }
+    if (workerState.heartbeat_at) {
+      tradingSystemState.heartbeatAt = workerState.heartbeat_at;
+      const hbTime = new Date(workerState.heartbeat_at).getTime();
+      const ageMs = Date.now() - hbTime;
+      // Worker is considered responsive if heartbeat was recorded within the last 10 seconds
+      tradingSystemState.workerResponsive = !isNaN(hbTime) && ageMs < 10000;
+    } else {
+      tradingSystemState.workerResponsive = false;
+    }
     
     res.json({
       ...tradingSystemState,
@@ -1307,11 +1328,13 @@ app.get('/api/system/state', async (req, res) => {
       workerState, // pass raw state to frontend for debug if needed
     });
   } catch (err) {
+    tradingSystemState.workerResponsive = false;
     res.json({
       ...tradingSystemState,
       engineState: 'DEGRADED',
       capabilities: EXECUTION_CAPABILITIES,
-      error: 'Worker unreachable'
+      error: 'Worker unreachable',
+      workerResponsive: false,
     });
   }
 });
