@@ -16,7 +16,7 @@ Testnet has been verified.
 | Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
 | Read-only Binance Testnet contract | `NOT_RUN` | No local Testnet credentials were configured in this session |
 | Controlled manual Testnet mutation | `NOT_RUN` | Requires explicit `TESTNET_MANUAL_TRIAL_APPROVED=true` and read-only evidence |
-| GitHub CI | `CI_VERIFIED` | Run 34721957946 passed for SHA `00573b419ba20e0d9e721c559a4b264f9da60301` |
+| GitHub CI | `CI_VERIFIED` | Run 34725398641 passed for SHA `e6e80343b03d8eef9a0d8faea618e0e7363d310e` |
 | Autonomous Testnet execution | `LOCKED` | Requires current-SHA evidence, approval, and runtime readiness; default is false |
 | Mainnet execution | `DISABLED` | LIVE ARM and mutable Mainnet adapter construction are rejected |
 
