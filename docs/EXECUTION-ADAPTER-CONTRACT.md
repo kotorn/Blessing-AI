@@ -1,50 +1,42 @@
 # Execution Adapter Contract
 
-To ensure safety and decouple strategy logic from specific exchanges, all execution must be routed through an `ExecutionAdapter`.
+To ensure safety and decouple strategy logic from specific exchanges, all execution is routed through the Python `BinanceExecutionAdapter`. The TypeScript backend only acts as a gateway and does not have an execution adapter of its own.
 
-## Adapter Interface
+## Adapter Responsibilities
 
-```typescript
-export interface ExecutionCapabilities {
-  paper: boolean;
-  testnet: boolean;
-  live: boolean;
-  spot: boolean;
-  usdmFutures: boolean;
-  hedgeModeSupported: boolean;
-  liveExecutionReady: boolean;
-}
+1. **Symbol Normalization:** Fetches exchange symbol rules (stepSize, minQty, tickSize) and rigorously formats target quantities/prices.
+2. **Order Placement:** Sends `ExecutionDecision`s to the exchange.
+3. **Deterministic Identity:** Must generate deterministic `clientOrderId`s to prevent duplicate execution during timeout ambiguity.
+4. **Reconciliation:** Maintains synchronization between exchange positions, open orders, and internal `BasketState`.
 
-export interface ExecutionAdapter {
-  getCapabilities(): Promise<ExecutionCapabilities>;
-  
-  reconcile(): Promise<ReconciliationResult>;
-  
-  getOpenOrders(): Promise<ExchangeOrder[]>;
-  
-  getPositions(): Promise<ExchangePosition[]>;
-  
-  placeOrder(request: OrderPlacementRequest): Promise<OrderPlacementResult>;
-  
-  cancelOrder(request: OrderCancellationRequest): Promise<OrderCancellationResult>;
-}
-```
+## Fill Ledger Contract
+
+An Order is not a Fill. The system maintains separate records:
+- `ExchangeOrder`: The intent placed on the exchange (e.g., LIMIT 1.0 BTC @ 64,000).
+- `ExchangeFill`: An actual trade execution record. Can be partial. Contains commission, realized PnL, maker/taker flag.
+
+## Timeout Ambiguity Invariant
+
+If an order placement request times out (`REQUEST_SENT` -> `RESPONSE_UNKNOWN`), the system transitions to `STATE_UNKNOWN` and blocks new risk until a query by `origClientOrderId` determines if the order was placed. 
+
+## Capability Checks
+
+The frontend `capabilities` map must reflect true runtime status:
+- `testnetAuthenticated`: Are credentials configured and valid?
+- `testnetExecutionReady`: Is the private stream active and reconciled?
 
 ## Supported Implementations
 
-1. **`PaperExecutionAdapter` (Current)**:
-   - Owns simulated orders and mock fills.
+1. **`PAPER`**:
+   - Owns simulated orders and mock fills locally.
    - Used for research, historical replay, and UI testing.
-   - Appends `source: 'SIMULATED'` to all executions.
+   - Logs `[PAPER][SIMULATED] EXECUTION DECISION`.
 
-2. **`BinanceTestnetExecutionAdapter` (Next Sprint)**:
-   - Interfaces directly with Binance Testnet API.
+2. **`TESTNET`**:
+   - Interfaces directly with Binance Testnet API via `ccxt`.
    - Enforces deterministic client IDs and handles WebSocket user streams.
-   - Appends `source: 'BINANCE_TESTNET'` to all executions.
+   - Logs `[TESTNET][AUTHORITATIVE] EXECUTION DECISION`.
 
-3. **`BinanceLiveExecutionAdapter` (Future)**:
-   - Interfaces with Binance Mainnet.
-   - Requires full compliance with production live-readiness constraints.
-   - Appends `source: 'BINANCE_LIVE'` to all executions.
-
-Strategies must **never** call Binance HTTP endpoints or CCXT functions directly.
+3. **`LIVE`**:
+   - Currently hard-blocked.
+   - Appends `source: 'BINANCE_LIVE'` when eventually implemented.

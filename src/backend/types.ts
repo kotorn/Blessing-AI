@@ -4,12 +4,16 @@ export type ActionRiskClass = 'NEW_RISK' | 'INCREASE_RISK' | 'REDUCE_RISK' | 'RE
 
 export interface ExecutionCapabilities {
   paper: boolean;
-  testnet: boolean;
-  live: boolean;
-  spot: boolean;
-  usdmFutures: boolean;
-  hedgeModeSupported: boolean;
+  testnetConfigured: boolean;
+  testnetAuthenticated: boolean;
+  testnetExecutionReady: boolean;
+  liveConfigured: boolean;
   liveExecutionReady: boolean;
+  spotSupported: boolean;
+  usdmFuturesSupported: boolean;
+  hedgeModeSupported: boolean;
+  paper: boolean;
+
 }
 
 export interface ActiveTradingConfiguration {

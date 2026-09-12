@@ -7,7 +7,7 @@ import { GoogleGenAI } from '@google/genai';
 import { TradingSystemState, RiskConfiguration } from './src/backend/types.js';
 import { evaluatePreflight, validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES } from './src/backend/system.js';
 import { auditRepository } from './src/backend/audit.js';
-import { executionManager } from './src/backend/execution/manager.js';
+
 
 dotenv.config();
 
@@ -1329,7 +1329,7 @@ app.post('/api/system/arm', (req, res) => {
     try {
       const active = getActiveBinanceCredentials();
       if (active && active.isTestnet) {
-        executionManager.setTestnetCredentials(active.apiKey, active.apiSecret);
+        // pass credentials to python worker or store securely
       }
     } catch (err) {
       console.warn("No active testnet credentials found during arm.");

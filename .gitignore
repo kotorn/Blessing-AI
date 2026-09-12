@@ -6,3 +6,19 @@ coverage/
 *.log
 .env*
 !.env.example
+# Temporary AI patch scripts
+patch_*.cjs
+patch_*.js
+fix_*.cjs
+fix_*.py
+update_*.cjs
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/

@@ -282,3 +282,34 @@ class ExecutionDecision(BaseModel):
     rational: str = ""
     net_exposure_delta: Decimal = Decimal("0.0")
     timestamp: datetime = Field(default_factory=utc_now)
+
+class ExecutionOrder(BaseModel):
+    if PYDANTIC_AVAILABLE:
+        model_config = ConfigDict(frozen=True)
+    symbol: str
+    side: OrderSide
+    quantity: Decimal
+    price: Decimal
+    order_type: str
+    client_order_id: str
+    status: str
+    timestamp: datetime = Field(default_factory=utc_now)
+
+class ExchangeFill(BaseModel):
+    if PYDANTIC_AVAILABLE:
+        model_config = ConfigDict(frozen=True)
+    exchange_trade_id: str
+    exchange_order_id: str
+    client_order_id: str
+    symbol: str
+    side: OrderSide
+    position_side: PositionSide
+    quantity: Decimal
+    price: Decimal
+    commission: Decimal
+    commission_asset: str
+    realized_pnl: Decimal
+    maker: bool
+    event_time: datetime
+    transaction_time: datetime
+    source: str

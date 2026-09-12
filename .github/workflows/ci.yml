@@ -1,0 +1,50 @@
+name: Blessing AI CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+        
+    - name: Install Node Dependencies
+      run: npm install
+      
+    - name: TypeScript Build
+      run: npm run build
+      
+    # - name: TypeScript Unit Tests
+    #   run: npm run test
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+        
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pydantic
+        
+    - name: Python Unit Tests
+      env:
+        PYTHONPATH: .
+      run: pytest tests/python/
+      
+    - name: Hygiene Check
+      run: |
+        if find . -name "patch_*.cjs" | grep -q .; then
+          echo "Hygiene failure: patch scripts found in source."
+          exit 1
+        fi

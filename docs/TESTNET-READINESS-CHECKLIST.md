@@ -2,7 +2,7 @@
 
 This document tracks the capabilities required before live Binance Testnet order execution can be enabled.
 
-## 1. Safety Enforcements (This Sprint)
+## 1. Safety Enforcements
 - [x] Backend-authoritative `TradingSystemState`
 - [x] Preflight checks re-run server-side on ARM
 - [x] Testnet capability explicitly declared as `false` until adapter exists
@@ -14,16 +14,17 @@ This document tracks the capabilities required before live Binance Testnet order
 - [x] Backend audit events repository implemented
 - [x] Automated state-machine tests added
 
-## 2. Binance Testnet Execution Adapter (Next Sprint)
-- [x] Implement `BinanceTestnetExecutionAdapter` abstraction
-- [x] Signed Testnet order submission via `/fapi/`
-- [x] Deterministic client order IDs mapping
-- [x] Handle partial fills gracefully
-- [x] Handle cancel / replace
-- [x] Implement user/private WebSocket stream for updates
-- [x] REST reconciliation fallback on stream disconnect
-- [x] Handle timeout ambiguity (idempotency guarantees)
-- [x] Real position reconciliation logic
+## 2. Binance Testnet Execution Adapter
+- [x] Single execution authority established (Python Trading Worker)
+- [x] Signed Testnet order submission via `/fapi/` scaffolding implemented
+- [x] Deterministic client order IDs mapping implemented
+- [x] Handle partial fills gracefully (ExchangeFill vs ExchangeOrder split designed)
+- [x] Handle cancel / replace (Audited)
+- [ ] Implement user/private WebSocket stream for updates
+- [ ] REST reconciliation fallback on stream disconnect (Required invariant)
+- [x] Handle timeout ambiguity (STATE_UNKNOWN logic designed)
+- [ ] Real position reconciliation logic
+- [ ] CI Contract tests implemented and passing
 
 ## Status
-**UNBLOCKED**. Binance Testnet Execution Ledger & Reconciliation implemented.
+**IMPLEMENTATION PRESENT — CONTRACT VALIDATION REQUIRED**. The adapter exists in Python but lacks final CI contract test validation, WebSocket stream implementations, and robust reconciliation before it can be considered production ready for Testnet.

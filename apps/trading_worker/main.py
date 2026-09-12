@@ -79,6 +79,7 @@ class TradingWorkerApp:
 
         # 4. Meta Allocation
                 # In a real environment, RiskSnapshot is maintained continuously by an account sync task
+        # [RESEARCH] Mock risk snapshot
         mock_risk = RiskSnapshot(
             portfolio_equity=Decimal("100000.0"),
             unrealized_pnl=Decimal("0.0"),
@@ -93,7 +94,7 @@ class TradingWorkerApp:
         raw_target_exposure = self.meta_allocator.allocate(intents, event.symbol)
         
         # 4b. Exposure Recovery & Grid Brake (Phase 3)
-        current_position_qty = Decimal("1.2") # Mock existing long position inventory
+        current_position_qty = Decimal("1.2") # [RESEARCH] Mock existing long position inventory
         
         target_exposure = self.recovery_engine.process(
             target=raw_target_exposure,
@@ -106,7 +107,7 @@ class TradingWorkerApp:
         decision = self.risk_governor.evaluate(target_exposure, mock_risk, current_position_qty=Decimal("0.0"))
         
         if decision.action != "NOOP":
-            logger.info("EXECUTION DECISION: %s | Action: %s | Qty: %s", 
+            logger.info("[PAPER][SIMULATED] EXECUTION DECISION: %s | Action: %s | Qty: %s", 
                         decision.symbol, decision.action, decision.orders[0].quantity if decision.orders else 0)
 
     async def start(self):
