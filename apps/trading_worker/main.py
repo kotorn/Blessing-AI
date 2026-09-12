@@ -7,7 +7,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Literal
+
+class StrategyEnablement(BaseModel):
+    grid: bool = False
+    trend: bool = False
+    shock: bool = False
+    carry: bool = False
+
+class ArmRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    executionMode: Literal["PAPER", "TESTNET"] = "PAPER"
+    instruments: List[str] = Field(default_factory=list)
+    strategies: StrategyEnablement = Field(default_factory=StrategyEnablement)
+    riskProfile: Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"] = "CONSERVATIVE"
+
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, model_validator, ConfigDict
@@ -623,6 +637,14 @@ class TradingWorkerApp:
         self.kill_switch_active = active
         if active:
             self.engine_state = WorkerEngineState.EMERGENCY
+            if getattr(self, "execution_adapter", None) and self.execution_adapter.state == ConnectionState.READY:
+                try:
+                    open_orders = await self.execution_adapter.ledger.get_open_orders()
+                    for o in open_orders:
+                        if o.client_order_id:
+                            await self.execution_adapter.cancel_order(o.symbol, o.client_order_id)
+                except Exception as e:
+                    logger.error("Failed to cancel open orders on Kill Switch: %s", e)
         else:
             self.engine_state = WorkerEngineState.DISARMED
             
@@ -645,23 +667,23 @@ class TradingWorkerApp:
     async def arm(self, config: dict):
         if self.kill_switch_active:
             return False, "Cannot arm: Kill switch is active"
+            
+        req = ArmRequest(**config) if isinstance(config, dict) else config
 
-        mode = str(config.get("executionMode") or config.get("execution_mode") or "PAPER").upper()
+        mode = req.executionMode
         if mode == "LIVE":
             return False, "LIVE execution mode is permanently blocked in this sprint."
 
-        enforce = config.get("enforcePreflight", config.get("enforce_preflight", False))
         if mode == "TESTNET":
-            preflight = self.get_preflight("TESTNET")
-            if enforce and not preflight["canArm"]:
-                failures = [c["message"] for c in preflight["checks"] if c["status"] == "FAIL"]
-                return False, f"TESTNET preflight failed: {'; '.join(failures)}"
+            # Configuration Preflight
+            testnet_configured = bool(os.getenv("BINANCE_TESTNET_API_KEY") and os.getenv("BINANCE_TESTNET_API_SECRET"))
+            if not testnet_configured:
+                return False, "Configuration Preflight Failed: BINANCE_TESTNET_API_KEY / SECRET missing."
 
             self.engine_state = WorkerEngineState.ARMING
             api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
             api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
             
-            # If not yet authenticated and real credentials exist, connect execution adapter
             if not self.authenticated and api_key and api_secret:
                 try:
                     if self.execution_adapter is None:
@@ -683,15 +705,22 @@ class TradingWorkerApp:
                     self.engine_state = WorkerEngineState.DISARMED
                     return False, f"Adapter connection failed: {e}"
 
+            # Runtime Preflight
+            preflight = self.get_preflight("TESTNET")
+            if not preflight["canArm"]:
+                failures = [c["message"] for c in preflight["checks"] if c["status"] == "FAIL"]
+                self.engine_state = WorkerEngineState.DISARMED
+                return False, f"TESTNET runtime preflight failed: {'; '.join(failures)}"
+
             self.execution_mode = WorkerExecutionMode.TESTNET
             self.engine_state = WorkerEngineState.ARMED
-            self.active_configuration = config
+            self.active_configuration = req.model_dump()
             logger.info("Worker ARMED in TESTNET mode")
             return True, ""
         else:
             self.execution_mode = WorkerExecutionMode.PAPER
             self.engine_state = WorkerEngineState.ARMED
-            self.active_configuration = config
+            self.active_configuration = req.model_dump()
             logger.info("Worker ARMED in PAPER mode")
             return True, ""
 
@@ -730,9 +759,10 @@ class TradingWorkerApp:
         if self.execution_mode == WorkerExecutionMode.TESTNET and self.execution_adapter is not None:
             try:
                 positions = await self.execution_adapter.ledger.get_positions()
+                wallet_bal, margin_bal = await self.execution_adapter.ledger.get_balances()
                 total_unrealized = sum((p.unrealized_pnl for p in positions), Decimal("0.0"))
                 total_notional = sum((abs(p.quantity) * (p.mark_price or p.entry_price or Decimal("0.0")) for p in positions), Decimal("0.0"))
-                equity = Decimal("100000.0") + total_unrealized
+                equity = wallet_bal + total_unrealized
                 margin_util = (total_notional / equity * Decimal("100.0")) if equity > 0 else Decimal("0.0")
                 risk_snapshot = RiskSnapshot(
                     portfolio_equity=equity,
@@ -774,10 +804,16 @@ class TradingWorkerApp:
         
         raw_target_exposure = self.meta_allocator.allocate(intents, event.symbol)
         
+        # Determine volatility factor for dynamic hedging
+        vol_factor = Decimal("1.0")
+        if market_state.volatility_zscore > Decimal("1.0"):
+            vol_factor = Decimal("1.5")
+        
         target_exposure = self.recovery_engine.process(
             target=raw_target_exposure,
             risk=risk_snapshot,
-            current_position_qty=current_position_qty
+            current_position_qty=current_position_qty,
+            volatility_factor=vol_factor
         )
         
         decision = self.risk_governor.evaluate(target_exposure, risk_snapshot, current_position_qty=current_position_qty)

@@ -17,6 +17,8 @@ class ExecutionLedger(Protocol):
     async def get_positions(self) -> List[ExchangePosition]: ...
     async def is_initialized(self) -> bool: ...
     async def has_fill(self, deduplication_key: str) -> bool: ...
+    async def update_balances(self, wallet_balance: Decimal, margin_balance: Decimal) -> None: ...
+    async def get_balances(self) -> tuple[Decimal, Decimal]: ...
 
 class InMemoryLedger:
     def __init__(self):
@@ -25,7 +27,16 @@ class InMemoryLedger:
         self._fill_keys: set[str] = set()
         self.positions: list[ExchangePosition] = []
         self._initialized = False
-        
+        self.wallet_balance: Decimal = Decimal("0")
+        self.margin_balance: Decimal = Decimal("0")
+
+    async def update_balances(self, wallet_balance: Decimal, margin_balance: Decimal) -> None:
+        self.wallet_balance = wallet_balance
+        self.margin_balance = margin_balance
+
+    async def get_balances(self) -> tuple[Decimal, Decimal]:
+        return self.wallet_balance, self.margin_balance
+
     async def is_initialized(self) -> bool:
         return self._initialized
 

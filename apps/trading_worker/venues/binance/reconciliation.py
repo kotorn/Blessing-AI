@@ -31,9 +31,46 @@ class BinanceReconciliation:
             
             open_orders = await self.rest_client.request("GET", "/fapi/v1/openOrders", signed=True)
             
+            account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
+            
             await self.ledger.replace_positions(active_positions)
             for order_data in open_orders:
                 await self.ledger.upsert_raw_exchange_order(order_data)
+                
+            wb = Decimal(str(account.get("totalWalletBalance", "0")))
+            mb = Decimal(str(account.get("totalMarginBalance", "0")))
+            await self.ledger.update_balances(wb, mb)
+            
+            # Reconcile recent fills for active symbols
+            active_symbols = set(p.get("symbol") for p in active_positions)
+            for sym in active_symbols:
+                try:
+                    trades = await self.rest_client.request("GET", "/fapi/v1/userTrades", signed=True, params={"symbol": sym, "limit": 20})
+                    for t in trades:
+                        # minimal fill representation for bootstrap
+                        from domain.models import ExchangeFill, OrderSide, PositionSide, utc_now
+                        side = OrderSide(t.get("side", "BUY"))
+                        ps = PositionSide(t.get("positionSide", "BOTH"))
+                        fill = ExchangeFill(
+                            exchange_trade_id=str(t.get("id")),
+                            exchange_order_id=str(t.get("orderId")),
+                            client_order_id="",
+                            symbol=sym,
+                            side=side,
+                            position_side=ps,
+                            quantity=Decimal(str(t.get("qty", "0"))),
+                            price=Decimal(str(t.get("price", "0"))),
+                            commission=Decimal(str(t.get("commission", "0"))),
+                            commission_asset=t.get("commissionAsset"),
+                            realized_pnl=Decimal(str(t.get("realizedPnl", "0"))),
+                            maker=t.get("maker", False),
+                            event_time=t.get("time", 0),
+                            transaction_time=t.get("time", 0),
+                            source="BINANCE_TESTNET"
+                        )
+                        await self.ledger.append_fill(fill)
+                except Exception as t_err:
+                    logger.warning("Failed to fetch recent trades for %s: %s", sym, t_err)
                 
             logger.info("Bootstrap complete: %d active positions, %d open orders", len(active_positions), len(open_orders))
             return True
@@ -173,6 +210,15 @@ class BinanceReconciliation:
             if len(diffs) > 0:
                 logger.warning("Reconciliation MISMATCH detected with %d differences: %s", len(diffs), diffs)
                 return "MISMATCH"
+
+            # Re-sync balances as part of IN_SYNC
+            try:
+                account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
+                wb = Decimal(str(account.get("totalWalletBalance", "0")))
+                mb = Decimal(str(account.get("totalMarginBalance", "0")))
+                await self.ledger.update_balances(wb, mb)
+            except Exception as e:
+                logger.warning("Failed to update balances during reconciliation: %s", e)
 
             logger.info(
                 "Reconciliation successful: %d exchange positions, %d open orders. State: IN_SYNC",

@@ -159,6 +159,13 @@ class BinanceExecutionAdapter:
                     "unRealizedProfit": p.get("up"),
                     "marginType": p.get("mt", "cross")
                 })
+            balances = update_data.get("B", [])
+            for b in balances:
+                if b.get("a") == "USDT":
+                    wb = Decimal(str(b.get("wb", "0")))
+                    cw = Decimal(str(b.get("cw", "0")))
+                    # Approx margin balance can be cw or we just store wb
+                    await self.ledger.update_balances(wb, cw)
 
     def _generate_client_order_id(self, context_id: str, symbol: str, order_index: int = 0, attempt: int = 1) -> str:
         """
@@ -199,11 +206,20 @@ class BinanceExecutionAdapter:
                 rounded_price = rules.normalize_price(order_intent.limit_price)
                 price_str = str(rounded_price)
 
-            est_price = rounded_price if price_str else (rules.min_price or Decimal("1"))
+            est_price = rounded_price
+            if not price_str:
+                # Fallback to mark price from ledger for market order notional check
+                positions = await self.ledger.get_positions()
+                sym_pos = next((p for p in positions if p.symbol == symbol), None)
+                if sym_pos and (sym_pos.mark_price or sym_pos.entry_price):
+                    est_price = sym_pos.mark_price or sym_pos.entry_price or Decimal("1")
+                else:
+                    est_price = Decimal("100000") # Prevents min_notional failure, exchange will validate real notional
+                    
             order_notional = rounded_qty * est_price
 
-            # Check min notional rule
-            if rules.min_notional and order_notional < rules.min_notional:
+            # Check min notional rule only if we have a real est_price, or for limit orders
+            if rules.min_notional and order_notional < rules.min_notional and price_str:
                 logger.error(
                     "Order notional %s below min_notional %s for %s. Skipping.",
                     order_notional, rules.min_notional, symbol

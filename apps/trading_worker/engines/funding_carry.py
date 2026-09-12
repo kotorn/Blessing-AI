@@ -12,13 +12,27 @@ class FundingCarryEngine:
         
     def evaluate(self, event: MarketEvent, market_state: MarketState) -> Optional[StrategyIntent]:
         # Funding rate may be parsed from event. funding_rate defaults to 0.0 if not present.
-        # Approximated simulation: For MVP, assume Binance USDs-M standard 8h funding (3x per day)
         funding_rate = event.funding_rate or Decimal("0.0001") # Mock 0.01% if missing to test logic
         
-        annualized_pct = funding_rate * 3 * 365 * 100
+        # 1. Gross Annualized Basis
+        gross_annualized_pct = funding_rate * 3 * 365 * 100
         
-        if abs(annualized_pct) < self.min_annualized_yield:
-            return None # Insufficient yield to justify carry
+        # 2. Costs (Taker/Maker fees, round-trip spread, slippage, financing cost)
+        # Using typical Binance USD-M metrics:
+        # Maker fee: 0.02%, Taker fee: 0.05%
+        # Assumed round-trip execution (1 maker, 1 taker) = 0.07%
+        # Slippage + Spread impact = ~0.05%
+        # Capital financing (opportunity cost) = ~5.0% annually
+        round_trip_friction_pct = Decimal("0.12")
+        capital_financing_pct = Decimal("5.0")
+        
+        # We assume 1 trade per week (52 trades/year) to maintain the carry position
+        annual_friction_pct = round_trip_friction_pct * Decimal("52.0")
+        
+        net_annualized_pct = abs(gross_annualized_pct) - annual_friction_pct - capital_financing_pct
+        
+        if net_annualized_pct < self.min_annualized_yield:
+            return None # Insufficient net yield to justify carry after costs
             
         direction = PositionSide.SHORT if funding_rate > 0 else PositionSide.LONG
         
@@ -29,8 +43,12 @@ class FundingCarryEngine:
             market_type=MarketType.USDM_FUTURES,
             direction=direction,
             desired_delta_qty=Decimal("-0.1") if direction == PositionSide.SHORT else Decimal("0.1"),
-            opportunity_score=Decimal("85.0"),
-            confidence=Decimal("0.90"),
-            expected_holding_horizon_sec=86400 * 3, # 3 days holding horizon
-            evidence={"annualized_funding_pct": str(annualized_pct), "raw_funding": str(funding_rate)}
+            opportunity_score=Decimal("80.0"),
+            confidence=Decimal("0.85"),
+            expected_holding_horizon_sec=86400 * 7, # 7 days holding horizon expected
+            evidence={
+                "gross_annualized_pct": str(gross_annualized_pct),
+                "net_annualized_pct": str(net_annualized_pct),
+                "raw_funding": str(funding_rate)
+            }
         )

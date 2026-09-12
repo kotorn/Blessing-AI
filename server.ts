@@ -1248,8 +1248,6 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     tradingSystemState.exchangeEnvironment = active.isTestnet ? 'BINANCE_TESTNET' : 'BINANCE_MAINNET';
     tradingSystemState.updatedAt = new Date().toISOString();
 
-    tradingSystemState.reconciliationStatus = 'IN_SYNC';
-    
     return res.json({
       success: true,
       message: `Successfully synchronized funds from Binance (${active.name})`,
