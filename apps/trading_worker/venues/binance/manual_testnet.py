@@ -20,7 +20,7 @@ from domain.enums import (
 )
 from domain.models import ExecutionDecision, OrderIntent, utc_now
 
-from apps.trading_worker.evidence import TestnetTrialArtifact
+from apps.trading_worker.evidence import BuildEvidence, TestnetTrialArtifact
 from apps.trading_worker.main import ArmRequest, TradingWorkerApp
 
 
@@ -77,6 +77,34 @@ def _sanitized_positions(positions: List[dict]) -> List[dict]:
             }
         )
     return result
+
+
+def _require_current_readonly_evidence(build_sha: str) -> BuildEvidence:
+    """Require local and read-only evidence for this exact source revision."""
+
+    for evidence_path in (
+        Path("build_metadata.json"),
+        Path("artifacts") / "build-evidence.json",
+    ):
+        if not evidence_path.exists():
+            continue
+        try:
+            evidence = BuildEvidence.model_validate(
+                json.loads(evidence_path.read_text(encoding="utf-8"))
+            )
+        except Exception as exc:
+            logger.warning("Ignoring invalid build evidence at %s: %s", evidence_path, exc)
+            continue
+        if (
+            evidence.build_sha == build_sha
+            and evidence.local_non_secret_tests_verified
+            and evidence.readonly_contract_verified
+        ):
+            return evidence
+    raise RuntimeError(
+        "ABORT: current-SHA local and read-only Testnet evidence is required "
+        "before the manual mutation trial"
+    )
 
 
 async def _exchange_positions(adapter) -> List[dict]:
@@ -178,6 +206,7 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
         raise RuntimeError("ABORT: Testnet credentials are not configured")
 
     build_sha = _current_sha()
+    _require_current_readonly_evidence(build_sha)
     worker = TradingWorkerApp(symbols=["BTCUSDT"])
     artifact: Dict[str, Any] = {
         "build_sha": build_sha,

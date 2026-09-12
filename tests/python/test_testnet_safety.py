@@ -15,7 +15,10 @@ from apps.trading_worker.main import (
 from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
-from apps.trading_worker.venues.binance.manual_testnet import _passive_order
+from apps.trading_worker.venues.binance.manual_testnet import (
+    _passive_order,
+    _require_current_readonly_evidence,
+)
 from apps.trading_worker.venues.binance.models import (
     BinanceDefinitiveRejection,
     BinanceAuthenticationError,
@@ -290,6 +293,25 @@ def test_testnet_limits_have_bounded_defaults_and_safe_invalid_overrides(monkeyp
 
     monkeypatch.setenv("TESTNET_MAX_SINGLE_ORDER_NOTIONAL", "not-a-number")
     assert SafetyLimits.from_environment().max_single_order_notional == Decimal("25.0")
+
+
+def test_manual_trial_requires_matching_readonly_build_evidence(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(RuntimeError, match="read-only Testnet evidence"):
+        _require_current_readonly_evidence("build-123")
+
+    evidence_path = tmp_path / "artifacts" / "build-evidence.json"
+    evidence_path.parent.mkdir()
+    evidence_path.write_text(
+        '{"build_sha":"build-123",'
+        '"local_non_secret_tests_verified":true,'
+        '"readonly_contract_verified":true}',
+        encoding="utf-8",
+    )
+
+    evidence = _require_current_readonly_evidence("build-123")
+
+    assert evidence.readonly_contract_verified is True
 
 
 @pytest.mark.asyncio
