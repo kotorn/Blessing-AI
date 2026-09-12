@@ -2,7 +2,7 @@
 
 **Adaptive Basket Grid Trading System, Market Regime Engine, AI Grid Safety Score, and Portfolio Risk Governor for Binance Spot & USDⓈ-M Futures**
 
-Blessing AI transforms the legacy MT4 Blessing EA basket-recovery philosophy into an institutionally robust, event-driven quantitative trading architecture. It replaces aggressive Martingale doubling with controlled anti-martingale progression, dynamic ATR volatility spacing, probabilistic regime classification, machine learning safety scoring, and a deterministic fail-closed Risk Governor.
+Blessing AI transforms the legacy MT4 Blessing EA basket-recovery philosophy into an institutionally robust, event-driven quantitative trading architecture. It replaces aggressive Martingale doubling with bounded deterministic grid guardrails, dynamic ATR volatility spacing, probabilistic regime classification, research-only safety scoring, and a deterministic fail-closed Risk Governor. Research or AI diagnostics never have live order authority.
 
 ---
 

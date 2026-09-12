@@ -44,6 +44,8 @@ the ledger with the exchange, and only then reports `IN_SYNC`.
 Liquidation distance is calculated from position-side-aware mark and
 liquidation prices. Missing or unusable liquidation information is
 `UNKNOWN`, not an invented percentage; risk-increasing decisions fail closed.
+Risk-increasing decisions also require positive available Testnet balance and
+margin utilization below the 70% safety limit.
 
 ## Execution gates
 
@@ -55,6 +57,11 @@ safer fallback; the order gate still requires reduce-only semantics and
 known/authoritative exposure where applicable. The order gate independently checks every `OrderIntent`
 for symbol status, USDⓈ-M market type, supported order type, quantity/price
 normalization, exchange filters, Testnet caps, and reduce-only semantics.
+
+The structural grid is an intent-only component. It brakes in trend, breakout,
+transition, and shock regimes, refuses depths at or above its five-level cap,
+and decreases the next delta as depth grows; it never uses a martingale size
+progression.
 
 Economic classes are explicit and separate from command strings:
 `NEW_RISK`, `INCREASE_RISK`, `REDUCE_RISK`, `RECOVERY`, `CLOSE`, and
