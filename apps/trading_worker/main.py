@@ -148,7 +148,7 @@ class WorkerRuntimeState(BaseModel):
     is_execution_authority: bool = True
     execution_mode: WorkerExecutionMode = WorkerExecutionMode.PAPER
     provenance: str = "SIMULATED"
-    data_source: str = "BINANCE"
+    data_source: str = "SIMULATED"
     exchange_environment: str = "NONE"
 
     # Engine Operational State
@@ -218,12 +218,15 @@ class WorkerRuntimeState(BaseModel):
                 mode = data["execution_mode"]
                 if mode in (WorkerExecutionMode.TESTNET, "TESTNET"):
                     data.setdefault("provenance", "BINANCE_TESTNET")
+                    data.setdefault("data_source", "BINANCE")
                     data.setdefault("exchange_environment", "BINANCE_TESTNET")
                 elif mode in (WorkerExecutionMode.LIVE, "LIVE"):
                     data.setdefault("provenance", "BINANCE_LIVE")
+                    data.setdefault("data_source", "BINANCE")
                     data.setdefault("exchange_environment", "BINANCE_MAINNET")
                 else:
                     data.setdefault("provenance", "SIMULATED")
+                    data.setdefault("data_source", "SIMULATED")
                     data.setdefault("exchange_environment", "NONE")
         return data
 
@@ -296,7 +299,7 @@ def get_default_state() -> WorkerRuntimeState:
         is_execution_authority=True,
         execution_mode=WorkerExecutionMode.PAPER,
         provenance="SIMULATED",
-        data_source="BINANCE",
+        data_source="SIMULATED",
         exchange_environment="NONE",
         engine_state=WorkerEngineState.DISARMED,
         engine_status=WorkerEngineState.DISARMED,
@@ -617,12 +620,14 @@ class TradingWorkerApp:
             provenance = "BINANCE_LIVE"
             exchange_env = "BINANCE_MAINNET"
 
+        data_source = "BINANCE" if self.execution_mode != WorkerExecutionMode.PAPER else "SIMULATED"
+
         return WorkerRuntimeState(
             execution_authority="PYTHON_TRADING_WORKER",
             is_execution_authority=True,
             execution_mode=self.execution_mode,
             provenance=provenance,
-            data_source="BINANCE",
+            data_source=data_source,
             exchange_environment=exchange_env,
             engine_state=self.engine_state,
             connection_state=self.connection_state,

@@ -24,6 +24,7 @@ def test_default_worker_state_endpoint():
     data = response.json()
     
     assert data["execution_mode"] == "PAPER"
+    assert data["data_source"] == "SIMULATED"
     assert data["engine_state"] == "DISARMED"
     assert data["connection_state"] == "DISCONNECTED"
     assert data["market_data_healthy"] is False
@@ -45,6 +46,7 @@ async def test_worker_state_transitions_and_health():
     state = resp.json()
     assert state["engine_state"] == "DISARMED"
     assert state["execution_mode"] == "PAPER"
+    assert state["data_source"] == "SIMULATED"
     assert state["market_data_healthy"] is False
     assert state["health_indicators"]["active_symbols_count"] == 2
     
@@ -63,6 +65,7 @@ async def test_worker_state_transitions_and_health():
     state = resp.json()
     assert state["engine_state"] == "ARMED"
     assert state["execution_mode"] == "PAPER"
+    assert state["data_source"] == "SIMULATED"
     
     # Update health indicators
     worker.market_data_healthy = True
