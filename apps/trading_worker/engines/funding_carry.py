@@ -11,8 +11,13 @@ class FundingCarryEngine:
         self.min_annualized_yield = min_annualized_yield
         
     def evaluate(self, event: MarketEvent, market_state: MarketState) -> Optional[StrategyIntent]:
-        # Funding rate may be parsed from event. funding_rate defaults to 0.0 if not present.
-        funding_rate = event.funding_rate or Decimal("0.0001") # Mock 0.01% if missing to test logic
+        # Funding is an economic input, not a value that can be safely inferred.
+        # Without a current exchange funding event there is no carry edge to
+        # evaluate, so fail closed and emit no intent.
+        funding_rate = event.funding_rate
+        if funding_rate is None or not funding_rate.is_finite():
+            logger.info("Skipping carry intent for %s: funding rate is unavailable.", event.symbol)
+            return None
         
         # 1. Gross Annualized Basis
         gross_annualized_pct = funding_rate * 3 * 365 * 100
@@ -43,7 +48,7 @@ class FundingCarryEngine:
             market_type=MarketType.USDM_FUTURES,
             direction=direction,
             desired_delta_qty=Decimal("-0.1") if direction == PositionSide.SHORT else Decimal("0.1"),
-            opportunity_score=Decimal("80.0"),
+            opportunity_score=Decimal("0.8"),
             confidence=Decimal("0.85"),
             expected_holding_horizon_sec=86400 * 7, # 7 days holding horizon expected
             evidence={

@@ -322,28 +322,59 @@ class BinanceExecutionAdapter:
                     ),
                 )
                 await self.ledger.upsert_order(new_order)
+                existing_order = new_order
 
             if order_info.get("x") != "TRADE":
                 return
             try:
+                required_fill_fields = ("t", "i", "l", "L", "n", "N", "rp", "m", "T")
+                missing_fill_fields = [
+                    field
+                    for field in required_fill_fields
+                    if order_info.get(field) in (None, "")
+                ]
+                if missing_fill_fields:
+                    raise ValueError(
+                        "Trade update is missing required fields: "
+                        + ", ".join(missing_fill_fields)
+                    )
                 side = OrderSide(str(order_info.get("S")))
                 position_side = PositionSide(str(order_info.get("ps", "BOTH")))
+                quantity = Decimal(str(order_info["l"]))
+                price = Decimal(str(order_info["L"]))
+                commission = Decimal(str(order_info["n"]))
+                realized_pnl = Decimal(str(order_info["rp"]))
+                if any(
+                    not value.is_finite()
+                    for value in (quantity, price, commission, realized_pnl)
+                ):
+                    raise ValueError("Trade update contains non-finite economics")
+                if quantity <= 0 or price <= 0 or commission < 0:
+                    raise ValueError("Trade update contains unusable economics")
                 fill = ExchangeFill(
-                    exchange_trade_id=str(order_info.get("t")),
-                    exchange_order_id=str(order_info.get("i")),
+                    exchange_trade_id=str(order_info["t"]),
+                    exchange_order_id=str(order_info["i"]),
                     client_order_id=client_order_id,
                     symbol=symbol,
                     side=side,
                     position_side=position_side,
-                    quantity=Decimal(str(order_info.get("l"))),
-                    price=Decimal(str(order_info.get("L"))),
-                    commission=Decimal(str(order_info.get("n", "0"))),
-                    commission_asset=str(order_info.get("N", "")),
-                    realized_pnl=Decimal(str(order_info.get("rp", "0"))),
+                    quantity=quantity,
+                    price=price,
+                    commission=commission,
+                    commission_asset=str(order_info["N"]),
+                    realized_pnl=realized_pnl,
                     maker=bool(order_info.get("m", False)),
                     event_time=event.get("E", 0),
                     transaction_time=order_info.get("T", event.get("E", 0)),
                     source="BINANCE_TESTNET",
+                    strategy_id=(existing_order.strategy_id if existing_order else "portfolio"),
+                    decision_id=(existing_order.decision_id if existing_order else None),
+                    target_exposure_id=(
+                        existing_order.target_exposure_id if existing_order else None
+                    ),
+                    source_intent_ids=(
+                        list(existing_order.source_intent_ids) if existing_order else []
+                    ),
                 )
                 await self.ledger.append_fill(fill)
             except (InvalidOperation, ValueError, TypeError) as exc:
@@ -383,6 +414,7 @@ class BinanceExecutionAdapter:
         response: Dict[str, Any],
         prepared,
         client_order_id: str,
+        decision: Optional[ExecutionDecision] = None,
     ) -> ExecutionOrder:
         order_id = response.get("orderId")
         status = response.get("status")
@@ -408,6 +440,13 @@ class BinanceExecutionAdapter:
             position_side=intent.position_side,
             reduce_only=intent.reduce_only,
             time_in_force=intent.time_in_force,
+            strategy_id=intent.strategy_id,
+            decision_id=decision.decision_id if decision else None,
+            target_exposure_id=decision.target_exposure_id if decision else None,
+            source_intent_ids=list(
+                decision.source_intent_ids if decision else intent.source_intent_ids
+            ),
+            risk_class=(decision.risk_class if decision else EconomicRiskClass.NOOP),
         )
 
     async def _resolve_ambiguous_order(
@@ -415,6 +454,7 @@ class BinanceExecutionAdapter:
         intent: OrderIntent,
         prepared,
         client_order_id: str,
+        decision: Optional[ExecutionDecision] = None,
     ) -> Optional[ExecutionOrder]:
         self.state = ConnectionState.RECONCILING
         recovered_order: Optional[ExecutionOrder] = None
@@ -427,7 +467,7 @@ class BinanceExecutionAdapter:
                 params={"symbol": prepared.symbol, "origClientOrderId": client_order_id},
             )
             recovered_order = self._order_from_response(
-                intent, status_response, prepared, client_order_id
+                intent, status_response, prepared, client_order_id, decision
             )
             await self.ledger.upsert_order(recovered_order)
             order_status_known = True
@@ -508,7 +548,9 @@ class BinanceExecutionAdapter:
                 )
                 if not isinstance(response, dict):
                     raise BinanceTransportAmbiguity("Binance order response is invalid")
-                order = self._order_from_response(intent, response, prepared, client_order_id)
+                order = self._order_from_response(
+                    intent, response, prepared, client_order_id, decision
+                )
                 await self.ledger.upsert_order(order)
                 executed_orders.append(order)
                 if order.status in ("NEW", "PARTIALLY_FILLED"):
@@ -531,12 +573,19 @@ class BinanceExecutionAdapter:
                         client_order_id=client_order_id,
                         status="REJECTED",
                         timestamp=utc_now(),
+                        strategy_id=intent.strategy_id,
+                        decision_id=decision.decision_id,
+                        target_exposure_id=decision.target_exposure_id,
+                        source_intent_ids=list(
+                            decision.source_intent_ids or intent.source_intent_ids
+                        ),
+                        risk_class=decision.risk_class,
                     )
                 )
             except (BinanceTransportAmbiguity, BinanceAPIError) as exc:
                 logger.error("Testnet order response is ambiguous: %s", exc)
                 recovered = await self._resolve_ambiguous_order(
-                    intent, prepared, client_order_id
+                    intent, prepared, client_order_id, decision
                 )
                 if recovered is not None:
                     executed_orders.append(recovered)
@@ -636,13 +685,50 @@ class BinanceExecutionAdapter:
         if self.state != ConnectionState.READY:
             return None
         existing = await self.ledger.get_order_by_client_id(orig_client_order_id)
-        if existing is None:
+        if existing is None or str(existing.status).upper() not in {"NEW", "PARTIALLY_FILLED"}:
             return None
         try:
             amendment_side = OrderSide(side)
         except (TypeError, ValueError):
             logger.warning("Order amendment has an invalid side: %s", side)
             return None
+        if amendment_side != existing.side:
+            logger.warning(
+                "Order amendment cannot change side for %s: %s -> %s",
+                orig_client_order_id,
+                existing.side,
+                amendment_side,
+            )
+            return None
+        try:
+            requested_qty = Decimal(str(new_qty))
+            requested_price = Decimal(str(new_price))
+            existing_qty = Decimal(str(existing.quantity))
+            existing_price = Decimal(str(existing.price))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if (
+            not requested_qty.is_finite()
+            or not requested_price.is_finite()
+            or requested_qty <= 0
+            or requested_price <= 0
+            or not existing_qty.is_finite()
+            or not existing_price.is_finite()
+            or existing_qty <= 0
+            or existing_price <= 0
+        ):
+            return None
+
+        # An amendment can increase economic exposure even though it is not a
+        # new client order.  Classify the delta from the current exchange
+        # working order so the same account/liquidation/cap gates apply.
+        existing_notional = existing_qty * existing_price
+        requested_notional = requested_qty * requested_price
+        amendment_risk = (
+            EconomicRiskClass.INCREASE_RISK
+            if requested_notional > existing_notional
+            else EconomicRiskClass.RECOVERY
+        )
         intent = OrderIntent(
             client_order_id=orig_client_order_id,
             symbol=symbol.upper(),
@@ -654,16 +740,31 @@ class BinanceExecutionAdapter:
             quantity=new_qty,
             price=new_price,
             reduce_only=existing.reduce_only,
+            strategy_id=existing.strategy_id,
+            source_intent_ids=list(existing.source_intent_ids),
         )
         gate_result = await self.order_gate.check(
             intent,
-            EconomicRiskClass.RECOVERY,
+            amendment_risk,
             exclude_client_order_id=orig_client_order_id,
+            # A lower-notional amendment reduces resting order risk but is not
+            # a position-closing order. Preserve reduceOnly for genuine
+            # position reductions while retaining entry-order semantics here.
+            require_reduce_only_for_risk_reduction=existing.reduce_only,
         )
         if not gate_result.allowed or gate_result.prepared is None:
             logger.warning("Order amendment blocked: %s", gate_result.reason)
             return None
         prepared = gate_result.prepared
+        amendment_decision = ExecutionDecision(
+            decision_id=existing.decision_id or f"AMEND-{orig_client_order_id}",
+            symbol=prepared.symbol,
+            action="AMEND_ORDER",
+            risk_class=amendment_risk,
+            orders=[intent],
+            target_exposure_id=existing.target_exposure_id,
+            source_intent_ids=list(existing.source_intent_ids),
+        )
         try:
             params: Dict[str, Any] = {
                 "symbol": prepared.symbol,
@@ -689,7 +790,9 @@ class BinanceExecutionAdapter:
             )
             if not isinstance(response, dict):
                 raise BinanceTransportAmbiguity("Binance amendment response is invalid")
-            amended = self._order_from_response(intent, response, prepared, orig_client_order_id)
+            amended = self._order_from_response(
+                intent, response, prepared, orig_client_order_id, amendment_decision
+            )
             await self.ledger.upsert_order(amended)
             return amended
         except BinanceAuthenticationError:
@@ -704,7 +807,7 @@ class BinanceExecutionAdapter:
         except BinanceTransportAmbiguity as exc:
             logger.error("Testnet amendment response is ambiguous: %s", exc)
             return await self._resolve_ambiguous_order(
-                intent, prepared, orig_client_order_id
+                intent, prepared, orig_client_order_id, amendment_decision
             )
         except Exception as exc:
             logger.error("Order amendment is not verified: %s", exc)
@@ -755,6 +858,15 @@ class BinanceExecutionAdapter:
         positions = await self.rest_client.request(
             "GET", "/fapi/v2/positionRisk", signed=True
         )
+        if not isinstance(positions, list):
+            raise BinanceTransportAmbiguity(
+                "Authoritative Testnet positionRisk response is invalid"
+            )
+        # The emergency source is authoritative.  Refresh the ledger before
+        # each generated reduce-only intent so the final per-order gate can
+        # prove that its side and quantity reduce a real signed position even
+        # when a private ACCOUNT_UPDATE event is delayed.
+        await self.ledger.replace_positions(positions, mark_initialized=False)
         flattened: List[ExecutionOrder] = []
         for position in positions:
             current_symbol = str(position.get("symbol", "")).upper()

@@ -247,6 +247,10 @@ def _exchange_fill_from_trade(
         event_time=trade["time"],
         transaction_time=trade.get("time"),
         source=source,
+        strategy_id=getattr(local_order, "strategy_id", "portfolio"),
+        decision_id=getattr(local_order, "decision_id", None),
+        target_exposure_id=getattr(local_order, "target_exposure_id", None),
+        source_intent_ids=list(getattr(local_order, "source_intent_ids", []) or []),
     )
 
 
@@ -280,6 +284,10 @@ class BinanceReconciliation:
                 local_order = await self.ledger.get_order_by_exchange_id(
                     str(trade.get("orderId"))
                 )
+                if local_order is None and trade.get("clientOrderId"):
+                    local_order = await self.ledger.get_order_by_client_id(
+                        str(trade["clientOrderId"])
+                    )
                 if local_order is None and not trade.get("clientOrderId"):
                     # Binance userTrades does not always return clientOrderId;
                     # do not invent one for historical trades that are not
@@ -515,12 +523,22 @@ class BinanceReconciliation:
                 raise ValueError("Binance bootstrap response is invalid")
 
             active_positions = [p for p in positions if _position_amount(p) != 0]
-            # Seed data provisionally.  The ledger must not become initialized
-            # until all exchange snapshots and fill verification succeed.
-            await self.ledger.replace_positions(active_positions, mark_initialized=False)
+            # A genuinely empty ledger may adopt the authoritative exchange
+            # snapshot as its initial state. A ledger that already contains
+            # open orders or active positions must be compared first; seeding
+            # it before _collect_diffs would make that comparison tautological.
+            local_open_orders = await self.ledger.get_open_orders()
+            local_positions = await self.ledger.get_positions()
+            has_local_exchange_state = bool(local_open_orders) or any(
+                position.quantity != 0 for position in local_positions
+            )
             await self.ledger.set_account_snapshot(None)
-            for order_data in open_orders:
-                await self.ledger.upsert_raw_exchange_order(order_data)
+            if not has_local_exchange_state:
+                await self.ledger.replace_positions(
+                    active_positions, mark_initialized=False
+                )
+                for order_data in open_orders:
+                    await self.ledger.upsert_raw_exchange_order(order_data)
             await self.ledger.update_balances(
                 _required_decimal(account, "totalWalletBalance"),
                 _required_decimal(account, "totalMarginBalance"),
@@ -538,6 +556,14 @@ class BinanceReconciliation:
             if diffs:
                 self._set_status("MISMATCH", diffs)
                 return False
+            # Refresh local snapshots only after the authoritative comparison
+            # succeeds. This keeps a mismatch inspectable and prevents stale
+            # mark/quantity fields from feeding subsequent risk gates.
+            await self.ledger.replace_positions(
+                active_positions, mark_initialized=False
+            )
+            for order_data in open_orders:
+                await self.ledger.upsert_raw_exchange_order(order_data)
             snapshot = build_account_snapshot(account, positions)
             await self.ledger.set_account_snapshot(snapshot)
             await self.ledger.mark_initialized()

@@ -37,12 +37,45 @@ async def test_duplicate_fills_idempotency():
     await ada._on_ws_event(event1)
     
     assert len(ledger.fills) == 1
-    
+
     # Simulate duplicate fill event
     await ada._on_ws_event(event1)
     
     # Should still be 1
     assert len(ledger.fills) == 1
+
+
+async def test_malformed_trade_update_is_not_recorded_as_a_fill():
+    ledger = InMemoryLedger()
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
+
+    await adapter._on_ws_event(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 12345,
+            "o": {
+                "s": "BTCUSDT",
+                "c": "BAI-MALFORMED-1",
+                "X": "FILLED",
+                "x": "TRADE",
+                "t": 1002,
+                "i": 5002,
+                "S": "BUY",
+                "ps": "BOTH",
+                "q": "0.001",
+                "p": "10000",
+                "l": "0",
+                "L": "10000",
+                "n": "0",
+                "N": "USDT",
+                "rp": "0",
+                "m": False,
+                "T": 12340,
+            },
+        }
+    )
+
+    assert ledger.fills == []
 
 async def test_account_update_positions():
     ledger = InMemoryLedger()

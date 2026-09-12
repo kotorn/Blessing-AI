@@ -96,6 +96,16 @@ class WorkerEngineState(str, Enum):
     DEGRADED = "DEGRADED"
     EMERGENCY = "EMERGENCY"
 
+
+# These states may process an already-approved decision.  The decision gate
+# still rejects NEW_RISK/INCREASE_RISK while paused or recovery-only, while
+# allowing reductions, recovery, close, and emergency actions through.
+EXECUTABLE_ENGINE_STATES = {
+    WorkerEngineState.ARMED,
+    WorkerEngineState.PAUSED_NEW_RISK,
+    WorkerEngineState.RECOVERY_ONLY,
+}
+
 class HealthIndicators(BaseModel):
     market_data_healthy: bool = False
     private_stream_healthy: bool = False
@@ -566,6 +576,21 @@ class TradingWorkerApp:
             self.execution_adapter.reconciliation, "last_status", "UNKNOWN"
         )
 
+    def _refresh_engine_state(self) -> None:
+        """Derive the single operational state from canonical control flags."""
+        if self.kill_switch_active:
+            self.engine_state = WorkerEngineState.EMERGENCY
+        elif self.recovery_only:
+            self.engine_state = WorkerEngineState.RECOVERY_ONLY
+        elif self.pause_new_risk:
+            self.engine_state = WorkerEngineState.PAUSED_NEW_RISK
+        else:
+            self.engine_state = (
+                WorkerEngineState.ARMED
+                if self.active_configuration
+                else WorkerEngineState.DISARMED
+            )
+
     def get_state(self) -> WorkerRuntimeState:
         self._sync_adapter_state()
             
@@ -636,7 +661,8 @@ class TradingWorkerApp:
         account_snapshot_ready = self.is_account_snapshot_ready()
         market_data_fresh = self.is_market_data_fresh()
         testnet_ready = (
-            testnet_configured
+            self.execution_mode == WorkerExecutionMode.TESTNET
+            and testnet_configured
             and self.authenticated
             and adapter_ready
             and symbol_rules_loaded
@@ -680,13 +706,23 @@ class TradingWorkerApp:
         try:
             import subprocess
 
-            current_build_sha = subprocess.run(
+            head_sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=2,
             ).stdout.strip()
+            working_tree = subprocess.run(
+                ["git", "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            ).stdout.strip()
+            # Evidence is for the exact source that was tested. A commit SHA
+            # alone is insufficient while tracked source changes are pending.
+            current_build_sha = head_sha if not working_tree else None
         except Exception:
             current_build_sha = os.getenv("BUILD_SHA")
 
@@ -751,6 +787,7 @@ class TradingWorkerApp:
         )
         
         readiness.testnet_autonomous_ready = (
+            self.execution_mode == WorkerExecutionMode.TESTNET and
             readiness.ci_verified and
             readiness.testnet_credentials_verified and
             self.authenticated and
@@ -901,21 +938,11 @@ class TradingWorkerApp:
 
     async def set_pause_new_risk(self, active: bool):
         self.pause_new_risk = bool(active)
-        if self.pause_new_risk:
-            self.engine_state = WorkerEngineState.PAUSED_NEW_RISK
-        elif self.kill_switch_active:
-            self.engine_state = WorkerEngineState.EMERGENCY
-        else:
-            self.engine_state = WorkerEngineState.ARMED if self.active_configuration else WorkerEngineState.DISARMED
+        self._refresh_engine_state()
 
     async def set_recovery_only(self, active: bool):
         self.recovery_only = bool(active)
-        if self.recovery_only:
-            self.engine_state = WorkerEngineState.RECOVERY_ONLY
-        elif self.kill_switch_active:
-            self.engine_state = WorkerEngineState.EMERGENCY
-        else:
-            self.engine_state = WorkerEngineState.ARMED if self.active_configuration else WorkerEngineState.DISARMED
+        self._refresh_engine_state()
 
     async def set_kill_switch(self, active: bool) -> dict:
         if not active:
@@ -924,7 +951,7 @@ class TradingWorkerApp:
                     "status": "UNKNOWN",
                     "reason": "Kill switch remains active until a verified restart/reconciliation.",
                 }
-            self.engine_state = WorkerEngineState.DISARMED
+            self._refresh_engine_state()
             return {"status": "CONFIRMED"}
 
         # The local block is the first operation and survives every exchange failure.
@@ -1026,6 +1053,25 @@ class TradingWorkerApp:
             return f"Unsupported instruments: {', '.join(unsupported)}"
         return None
 
+    async def _reset_after_failed_testnet_arm(self) -> None:
+        """Close a partially initialized adapter and clear failed ARM state."""
+        if self.execution_adapter is not None:
+            try:
+                await self.execution_adapter.close()
+            except Exception as exc:
+                logger.warning("Error closing failed Testnet adapter: %s", exc)
+            self.execution_adapter = None
+        self.connection_state = "DISCONNECTED"
+        self.market_data_healthy = False
+        self.private_stream_healthy = False
+        self.authenticated = False
+        self.reconciliation_status = "UNKNOWN"
+        self.active_configuration = None
+        self.pause_new_risk = False
+        self.recovery_only = False
+        self.risk_governor.hedge_mode = False
+        self.engine_state = WorkerEngineState.DISARMED
+
     async def arm(self, config: ArmRequest | dict):
         if self.kill_switch_active:
             return False, "Cannot arm: Kill switch is active"
@@ -1046,16 +1092,13 @@ class TradingWorkerApp:
             return False, validation_error
 
         mode = req.executionMode
+        if mode == "TESTNET" and not self._testnet_configured():
+            return False, "Configuration Preflight Failed: Testnet credentials or BINANCE_TESTNET=true missing."
 
         self.symbols = list(req.instruments)
         self.execution_mode = WorkerExecutionMode(mode)
 
         if mode == "TESTNET":
-            # Configuration Preflight
-            testnet_configured = self._testnet_configured()
-            if not testnet_configured:
-                return False, "Configuration Preflight Failed: Testnet credentials or BINANCE_TESTNET=true missing."
-
             self.engine_state = WorkerEngineState.ARMING
             api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
             api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
@@ -1070,33 +1113,25 @@ class TradingWorkerApp:
                 connected = await self.execution_adapter.connect()
                 self._sync_adapter_state()
                 if not connected or self.execution_adapter.connection_state != ConnectionState.READY:
-                    self.engine_state = WorkerEngineState.DISARMED
-                    return False, f"Failed to initialize Testnet Execution Adapter. State: {self.connection_state}"
+                    failed_state = self.connection_state
+                    await self._reset_after_failed_testnet_arm()
+                    return False, f"Failed to initialize Testnet Execution Adapter. State: {failed_state}"
                 self.risk_governor.hedge_mode = self.execution_adapter.capabilities.hedge_mode
                 if not await self.execution_adapter.refresh_market_data(self.symbols):
-                    self.engine_state = WorkerEngineState.DISARMED
+                    await self._reset_after_failed_testnet_arm()
                     return False, "Runtime preflight failed: fresh market data unavailable."
                 self.last_market_event_at.update(self.execution_adapter.last_market_event_at)
                 self.market_data_healthy = True
             except Exception as exc:
                 logger.error("Error connecting Testnet Execution Adapter: %s", exc)
-                self.engine_state = WorkerEngineState.DISARMED
+                await self._reset_after_failed_testnet_arm()
                 return False, f"Adapter connection failed: {exc}"
 
             # Runtime Preflight
             preflight = self.get_preflight("TESTNET")
             if not preflight["canArm"]:
                 failures = [c["message"] for c in preflight["checks"] if c["status"] == "FAIL"]
-                try:
-                    await self.execution_adapter.close()
-                except Exception as exc:
-                    logger.warning("Error closing failed Testnet preflight adapter: %s", exc)
-                self.execution_adapter = None
-                self.connection_state = "DISCONNECTED"
-                self.private_stream_healthy = False
-                self.authenticated = False
-                self.reconciliation_status = "UNKNOWN"
-                self.engine_state = WorkerEngineState.DISARMED
+                await self._reset_after_failed_testnet_arm()
                 return False, f"TESTNET runtime preflight failed: {'; '.join(failures)}"
 
             self.engine_state = WorkerEngineState.ARMED
@@ -1116,12 +1151,20 @@ class TradingWorkerApp:
             except Exception as e:
                 logger.warning("Error closing execution adapter on disarm: %s", e)
             self.execution_adapter = None
-        self.engine_state = WorkerEngineState.DISARMED
         self.connection_state = "DISCONNECTED"
+        self.market_data_healthy = False
         self.private_stream_healthy = False
         self.authenticated = False
         self.reconciliation_status = "DISCONNECTED"
+        self.active_configuration = None
+        self.pause_new_risk = False
+        self.recovery_only = False
         self.risk_governor.hedge_mode = False
+        self.engine_state = (
+            WorkerEngineState.EMERGENCY
+            if self.kill_switch_active
+            else WorkerEngineState.DISARMED
+        )
         logger.info("Worker DISARMED")
 
     def _evaluate_execution_gate(self, decision) -> tuple[bool, str]:
@@ -1140,6 +1183,7 @@ class TradingWorkerApp:
         if self.execution_mode != WorkerExecutionMode.TESTNET or self.execution_adapter is None:
             raise RuntimeError("Emergency flatten is available only for an active Testnet adapter")
         self.pause_new_risk = True
+        self._refresh_engine_state()
         return await self.execution_adapter.emergency_flatten(symbol)
 
     async def handle_market_event(self, event: MarketEvent):
@@ -1181,6 +1225,7 @@ class TradingWorkerApp:
                 self.authenticated = False
                 self.reconciliation_status = "UNKNOWN"
                 self.pause_new_risk = True
+                self._refresh_engine_state()
                 return
             try:
                 snapshot = await self.execution_adapter.ledger.get_account_snapshot()
@@ -1193,6 +1238,7 @@ class TradingWorkerApp:
                     logger.error("No account snapshot available from execution adapter")
                     self.connection_state = "DEGRADED"
                     self.pause_new_risk = True
+                    self._refresh_engine_state()
                     return # Block execution if no account truth
                     
                 equity = snapshot.wallet_balance + snapshot.unrealized_pnl
@@ -1227,6 +1273,7 @@ class TradingWorkerApp:
                 logger.error("Error extracting Testnet risk snapshot: %s", e)
                 self.connection_state = "DEGRADED"
                 self.pause_new_risk = True
+                self._refresh_engine_state()
                 return # Block execution without fake fallback
         else:
             risk_snapshot = RiskSnapshot(
@@ -1252,7 +1299,7 @@ class TradingWorkerApp:
         decision = self.risk_governor.evaluate(target_exposure, risk_snapshot, current_position_qty=current_position_qty)
         
         if decision.action != "NOOP":
-            if self.engine_state == WorkerEngineState.ARMED:
+            if self.engine_state in EXECUTABLE_ENGINE_STATES:
                 if self.execution_mode == WorkerExecutionMode.TESTNET and self.execution_adapter is not None:
                     autonomous_enabled = self._env_flag("AUTONOMOUS_TESTNET_EXECUTION", False)
                     launch_readiness = self.get_launch_readiness()
@@ -1261,7 +1308,7 @@ class TradingWorkerApp:
                         if is_safe:
                             logger.info(f"[TESTNET][AUTONOMOUS_EXEC] Executing decision {decision.decision_id} for {decision.symbol}")
                             try:
-                                await self.execution_adapter.execute_decision(decision)
+                                await self.execute_manual_decision(decision)
                             except Exception as e:
                                 logger.error(f"[TESTNET][AUTONOMOUS_EXEC] Execution failed: {e}")
                         else:

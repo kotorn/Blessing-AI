@@ -131,5 +131,7 @@ class ExposureRecoveryEngine:
             target_gross_limit_qty=target.target_gross_limit_qty,
             strategy_attributions=target.strategy_attributions,
             created_at=target.created_at,
-            expires_at=target.expires_at
+            expires_at=target.expires_at,
+            exposure_id=target.exposure_id,
+            source_intent_ids=target.source_intent_ids,
         )

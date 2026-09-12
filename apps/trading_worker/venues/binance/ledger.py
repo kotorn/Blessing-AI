@@ -1,5 +1,6 @@
 from decimal import Decimal
 from typing import Protocol, List, Optional, Union
+from domain.enums import EconomicRiskClass
 from domain.models import (
     ExecutionOrder,
     ExchangeFill,
@@ -103,6 +104,23 @@ class InMemoryLedger:
             position_side=PositionSide(str(raw_order.get("positionSide", "BOTH")).upper()),
             reduce_only=bool(raw_order.get("reduceOnly", False)),
             time_in_force=time_in_force,
+            strategy_id=(self.orders.get(client_oid).strategy_id if client_oid in self.orders else "portfolio"),
+            decision_id=(self.orders.get(client_oid).decision_id if client_oid in self.orders else None),
+            target_exposure_id=(
+                self.orders.get(client_oid).target_exposure_id
+                if client_oid in self.orders
+                else None
+            ),
+            source_intent_ids=(
+                list(self.orders[client_oid].source_intent_ids)
+                if client_oid in self.orders
+                else []
+            ),
+            risk_class=(
+                self.orders[client_oid].risk_class
+                if client_oid in self.orders
+                else EconomicRiskClass.NOOP
+            ),
         )
         self.orders[client_oid] = order
 

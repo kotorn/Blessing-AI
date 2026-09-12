@@ -49,6 +49,16 @@ class OrderStatus(str, Enum):
 
 
 class RegimeType(str, Enum):
+    # Seven-state regime vocabulary used by MarketStateClassifier and the
+    # strategy engines.  The generic names below remain as compatibility
+    # values for older paper/research payloads.
+    R0_STRONG_MEAN_REVERSION = "R0_STRONG_MEAN_REVERSION"
+    R1_RANGE = "R1_RANGE"
+    R2_WEAK_TREND = "R2_WEAK_TREND"
+    R3_STRONG_TREND = "R3_STRONG_TREND"
+    R4_BREAKOUT = "R4_BREAKOUT"
+    R5_VOLATILITY_SHOCK = "R5_VOLATILITY_SHOCK"
+    R6_CRISIS = "R6_CRISIS"
     RANGE = "RANGE"
     TREND = "TREND"
     BREAKOUT = "BREAKOUT"

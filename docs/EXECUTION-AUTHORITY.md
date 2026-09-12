@@ -36,9 +36,10 @@ and a signed `/fapi/v2/account` request has returned a valid account payload.
 An adapter is not ready merely because it exists. Before `READY`, the worker
 requires symbol rules, a connected private stream, a complete fresh Testnet
 account snapshot, fresh market data for each active symbol, and authoritative
-reconciliation. Bootstrap fetches positions, open orders, and account data,
-seeds the ledger, recovers fills, compares the ledger with the exchange, and
-only then reports `IN_SYNC`.
+reconciliation. Bootstrap fetches positions, open orders, and account data;
+an empty ledger may adopt that authoritative snapshot, while existing local
+orders/positions are compared before any refresh. It recovers fills, compares
+the ledger with the exchange, and only then reports `IN_SYNC`.
 
 Liquidation distance is calculated from position-side-aware mark and
 liquidation prices. Missing or unusable liquidation information is

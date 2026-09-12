@@ -24,6 +24,7 @@ class MetaAllocator:
         net_delta = Decimal("0.0")
         gross_exposure = Decimal("0.0")
         attributions: Dict[str, Decimal] = {}
+        source_intent_ids: List[str] = []
         
         # In a production setup, we apply correlation matrices and risk parity here.
         # For Blessing AI MVP, we resolve conflicts by netting intent deltas weighted by confidence.
@@ -34,7 +35,10 @@ class MetaAllocator:
             weight = intent.confidence * intent.opportunity_score
             effective_delta = intent.desired_delta_qty * weight
             
-            attributions[intent.strategy_id] = effective_delta
+            source_intent_ids.append(intent.intent_id)
+            attributions[intent.strategy_id] = (
+                attributions.get(intent.strategy_id, Decimal("0.0")) + effective_delta
+            )
             net_delta += effective_delta
             gross_exposure += abs(effective_delta)
             
@@ -52,5 +56,6 @@ class MetaAllocator:
             target_net_delta_qty=net_delta,
             target_gross_limit_qty=gross_exposure,
             strategy_attributions=attributions,
-            expires_at=utc_now() + timedelta(seconds=60)
+            expires_at=utc_now() + timedelta(seconds=60),
+            source_intent_ids=source_intent_ids,
         )

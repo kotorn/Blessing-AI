@@ -1,8 +1,6 @@
 import logging
 from decimal import Decimal
 from typing import Optional
-from apps.trading_worker.engines.ml_scorer import GridSafetyScorerML
-from typing import Dict
 from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType, utc_now
 from domain.enums import RegimeType
 
@@ -11,7 +9,6 @@ logger = logging.getLogger("blessing.engines.grid_strategy")
 class GridStrategyEngine:
     def __init__(self, strategy_id: str = "Structural Grid"):
         self.strategy_id = strategy_id
-        self.ml_scorer = GridSafetyScorerML()
         
     def evaluate(self, pa_state: PriceActionState, market_state: MarketState) -> Optional[StrategyIntent]:
         regime = market_state.primary_regime

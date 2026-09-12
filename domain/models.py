@@ -6,6 +6,7 @@ Strict financial models using Python Decimal arithmetic and UTC datetime fields.
 from decimal import Decimal
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
+from uuid import uuid4
 
 try:
     from pydantic import BaseModel, Field, ConfigDict
@@ -125,8 +126,8 @@ class StrategyIntent(BaseModel):
     market_type: MarketType
     direction: PositionSide
     desired_delta_qty: Decimal          # Signed: positive for Long, negative for Short
-    opportunity_score: Decimal          # Bounded [0.00, 1.00]
-    confidence: Decimal                 # Bounded [0.00, 1.00]
+    opportunity_score: Decimal = Field(ge=Decimal("0"), le=Decimal("1"))
+    confidence: Decimal = Field(ge=Decimal("0"), le=Decimal("1"))
     expected_holding_horizon_sec: int
     invalidation_price: Optional[Decimal] = None
     evidence: Dict[str, Any] = Field(default_factory=dict)
@@ -168,6 +169,8 @@ class TargetExposure(BaseModel):
     strategy_attributions: Dict[str, Decimal]  # Virtual strategy allocations
     created_at: datetime = Field(default_factory=utc_now)
     expires_at: datetime
+    exposure_id: str = Field(default_factory=lambda: f"EXP-{uuid4().hex}")
+    source_intent_ids: List[str] = Field(default_factory=list)
 
     @property
     def desired_delta_qty(self) -> Decimal:
@@ -263,6 +266,7 @@ class OrderIntent(BaseModel):
     reduce_only: bool = False
     post_only: bool = False
     strategy_id: str = "portfolio"
+    source_intent_ids: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
 
     @property
@@ -298,6 +302,8 @@ class ExecutionDecision(BaseModel):
     rational: str = ""
     net_exposure_delta: Decimal = Decimal("0.0")
     timestamp: datetime = Field(default_factory=utc_now)
+    target_exposure_id: Optional[str] = None
+    source_intent_ids: List[str] = Field(default_factory=list)
 
 class ExecutionOrder(BaseModel):
     if PYDANTIC_AVAILABLE:
@@ -315,6 +321,11 @@ class ExecutionOrder(BaseModel):
     position_side: PositionSide = PositionSide.BOTH
     reduce_only: bool = False
     time_in_force: TimeInForce = TimeInForce.GTC
+    strategy_id: str = "portfolio"
+    decision_id: Optional[str] = None
+    target_exposure_id: Optional[str] = None
+    source_intent_ids: List[str] = Field(default_factory=list)
+    risk_class: EconomicRiskClass = EconomicRiskClass.NOOP
 
 class ExchangeFill(BaseModel):
     if PYDANTIC_AVAILABLE:
@@ -334,6 +345,10 @@ class ExchangeFill(BaseModel):
     event_time: Any
     transaction_time: Any
     source: str
+    strategy_id: str = "portfolio"
+    decision_id: Optional[str] = None
+    target_exposure_id: Optional[str] = None
+    source_intent_ids: List[str] = Field(default_factory=list)
 
 
 class ExchangePosition(BaseModel):

@@ -1,8 +1,20 @@
 import pytest
 from decimal import Decimal
-from datetime import datetime
-from domain.models import StrategyIntent, MarketEvent, PositionSide, MarketType, TargetExposure, RiskSnapshot, ExecutionDecision
-from domain.enums import RiskState
+from datetime import datetime, timezone
+from domain.models import (
+    StrategyIntent,
+    MarketEvent,
+    PositionSide,
+    MarketType,
+    TargetExposure,
+    RiskSnapshot,
+    ExecutionDecision,
+    PriceActionState,
+)
+from domain.enums import RegimeType, RiskState
+from apps.trading_worker.engines.funding_carry import FundingCarryEngine
+from apps.trading_worker.engines.grid_strategy import GridStrategyEngine
+from apps.trading_worker.engines.market_state import MarketStateClassifier
 from apps.trading_worker.engines.meta_allocator import MetaAllocator
 from apps.trading_worker.engines.risk_governor import RiskGovernor
 from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
@@ -40,11 +52,27 @@ def test_meta_allocator_conflict_resolution():
     assert target.desired_delta_qty == Decimal("0.4")
     assert "grid" in target.strategy_allocations
     assert "trend" in target.strategy_allocations
+    assert target.source_intent_ids == ["G1", "T1"]
+
+    risk_snapshot = RiskSnapshot(
+        portfolio_equity=Decimal("100"),
+        unrealized_pnl=Decimal("0"),
+        realized_pnl_24h=Decimal("0"),
+        margin_utilization_pct=Decimal("0"),
+        effective_leverage=Decimal("0"),
+        current_drawdown_pct=Decimal("0"),
+        liquidation_distance_pct=Decimal("50"),
+        risk_state=RiskState.NORMAL,
+    )
+    decision = RiskGovernor().evaluate(target, risk_snapshot, Decimal("0"))
+    assert decision.target_exposure_id == target.exposure_id
+    assert decision.source_intent_ids == ["G1", "T1"]
+    assert decision.orders[0].source_intent_ids == ["G1", "T1"]
 
 def test_risk_governor_veto():
     governor = RiskGovernor()
     
-    target = TargetExposure(symbol="BTCUSDT", market_type=MarketType.USDM_FUTURES, target_net_delta_qty=Decimal("1.0"), target_gross_limit_qty=Decimal("1.0"), strategy_attributions={}, expires_at=datetime.utcnow())
+    target = TargetExposure(symbol="BTCUSDT", market_type=MarketType.USDM_FUTURES, target_net_delta_qty=Decimal("1.0"), target_gross_limit_qty=Decimal("1.0"), strategy_attributions={}, expires_at=datetime.now(timezone.utc))
     
     # Snapshot shows dangerously high margin utilization
     danger_risk = RiskSnapshot(
@@ -62,11 +90,39 @@ def test_risk_governor_veto():
     
     # The governor should override and emit NOOP or reduce_only
     assert decision.action == "NOOP"
-    
+
+
+def test_risk_governor_allows_deleveraging_during_hard_stop():
+    governor = RiskGovernor()
+    target = TargetExposure(
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        target_net_delta_qty=Decimal("-0.5"),
+        target_gross_limit_qty=Decimal("0.5"),
+        strategy_attributions={"recovery": Decimal("-0.5")},
+        expires_at=datetime.now(timezone.utc),
+    )
+    hard_stop = RiskSnapshot(
+        portfolio_equity=Decimal("100"),
+        unrealized_pnl=Decimal("-20"),
+        realized_pnl_24h=Decimal("0"),
+        margin_utilization_pct=Decimal("90"),
+        effective_leverage=Decimal("4"),
+        current_drawdown_pct=Decimal("10"),
+        liquidation_distance_pct=Decimal("2"),
+        risk_state=RiskState.EMERGENCY,
+    )
+
+    decision = governor.evaluate(target, hard_stop, Decimal("1.0"))
+
+    assert decision.action == "SUBMIT_ORDER"
+    assert decision.risk_class.value == "REDUCE_RISK"
+    assert decision.orders[0].reduce_only is True
+
 def test_exposure_recovery_grid_brake():
     recovery = ExposureRecoveryEngine(drawdown_trigger_pct=Decimal("2.5"))
     
-    target = TargetExposure(symbol="BTCUSDT", market_type=MarketType.USDM_FUTURES, target_net_delta_qty=Decimal("0.5"), target_gross_limit_qty=Decimal("0.5"), strategy_attributions={"grid": Decimal("0.5")}, expires_at=datetime.utcnow())
+    target = TargetExposure(symbol="BTCUSDT", market_type=MarketType.USDM_FUTURES, target_net_delta_qty=Decimal("0.5"), target_gross_limit_qty=Decimal("0.5"), strategy_attributions={"grid": Decimal("0.5")}, expires_at=datetime.now(timezone.utc))
     
     # Drawdown exceeds trigger (3.0% > 2.5%)
     danger_risk = RiskSnapshot(
@@ -90,3 +146,81 @@ def test_decimal_precision():
     # Verify no float mutation loss in core allocations
     val = Decimal("1.123") + Decimal("2.345")
     assert val == Decimal("3.468")
+
+
+def _carry_event(funding_rate=None):
+    return MarketEvent(
+        event_id="E-CARRY-1",
+        event_time=datetime.now(timezone.utc),
+        symbol="BTCUSDT",
+        venue="BINANCE",
+        market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("50000"),
+        best_bid=Decimal("49999.9"),
+        best_ask=Decimal("50000.1"),
+        funding_rate=funding_rate,
+    )
+
+
+def _carry_market_state():
+    return {
+        "symbol": "BTCUSDT",
+        "timestamp": datetime.now(timezone.utc),
+        "primary_regime": RegimeType.RANGE,
+        "regime_probabilities": {},
+        "atr_1h": Decimal("100"),
+        "volatility_zscore": Decimal("0"),
+    }
+
+
+def test_carry_requires_current_funding_rate():
+    engine = FundingCarryEngine()
+    market_state = type("MarketStateStub", (), _carry_market_state())()
+
+    assert engine.evaluate(_carry_event(), market_state) is None
+    assert engine.evaluate(_carry_event(Decimal("0")), market_state) is None
+
+
+def test_carry_intent_uses_bounded_score_and_explicit_rate():
+    engine = FundingCarryEngine()
+    market_state = type("MarketStateStub", (), _carry_market_state())()
+
+    intent = engine.evaluate(_carry_event(Decimal("0.0005")), market_state)
+
+    assert intent is not None
+    assert Decimal("0") <= intent.opportunity_score <= Decimal("1")
+    assert intent.direction == PositionSide.SHORT
+    assert intent.evidence["raw_funding"] == "0.0005"
+
+
+def test_live_grid_engine_does_not_instantiate_ml_authority():
+    assert not hasattr(GridStrategyEngine(), "ml_scorer")
+
+
+def test_market_state_classifier_uses_declared_regime_vocabulary():
+    state = MarketStateClassifier().classify(
+        PriceActionState(
+            symbol="BTCUSDT",
+            timestamp=datetime.now(timezone.utc),
+            swing_high=Decimal("101"),
+            swing_low=Decimal("99"),
+            prior_24h_high=Decimal("101"),
+            prior_24h_low=Decimal("99"),
+            displacement_velocity_pct=Decimal("0"),
+            displacement_acceleration=Decimal("0"),
+            range_expansion_ratio=Decimal("0"),
+        )
+    )
+
+    assert state.primary_regime == RegimeType.R1_RANGE
+
+
+@pytest.mark.asyncio
+async def test_worker_market_event_path_has_no_regime_attribute_error():
+    from apps.trading_worker.main import TradingWorkerApp
+
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+    for price in (Decimal("50000"), Decimal("50001")):
+        await worker.handle_market_event(
+            _carry_event().model_copy(update={"last_price": price})
+        )

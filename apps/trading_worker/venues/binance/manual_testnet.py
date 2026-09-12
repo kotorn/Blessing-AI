@@ -6,7 +6,7 @@ import logging
 import os
 import subprocess
 import time
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,13 +33,25 @@ def _enabled(name: str) -> bool:
 
 def _current_sha() -> str:
     try:
-        return subprocess.run(
+        head_sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
             timeout=2,
         ).stdout.strip()
+        working_tree = subprocess.run(
+            ["git", "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip()
+        if working_tree:
+            raise RuntimeError("ABORT: manual Testnet trial requires a clean working tree")
+        return head_sha
+    except RuntimeError:
+        raise
     except Exception:
         return os.getenv("BUILD_SHA", "UNKNOWN")
 
@@ -48,8 +60,13 @@ def _sanitized_positions(positions: List[dict]) -> List[dict]:
     result = []
     for position in positions:
         amount = str(position.get("positionAmt", "0"))
-        if amount in {"0", "0.0", "0.00000000"}:
-            continue
+        try:
+            if Decimal(amount) == 0:
+                continue
+        except (InvalidOperation, ValueError):
+            # Preserve malformed active-looking entries so the caller fails
+            # closed instead of treating an unusable exchange value as flat.
+            pass
         result.append(
             {
                 "symbol": position.get("symbol"),

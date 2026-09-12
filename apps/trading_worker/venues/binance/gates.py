@@ -43,6 +43,31 @@ def _is_risk_increasing(value: Any) -> bool:
     }
 
 
+def _is_risk_reducing(value: Any) -> bool:
+    return _risk_class(value) in {
+        EconomicRiskClass.REDUCE_RISK,
+        EconomicRiskClass.RECOVERY,
+        EconomicRiskClass.CLOSE,
+        EconomicRiskClass.EMERGENCY,
+    }
+
+
+def _liquidation_safety_is_known_and_positive(snapshot: Any) -> bool:
+    if getattr(snapshot, "liquidation_safety", "UNKNOWN") != "KNOWN":
+        return False
+    distance = getattr(snapshot, "min_liquidation_distance_pct", None)
+    # A flat account has no applicable liquidation distance.  For an active
+    # account, KNOWN must include a strictly positive, finite distance; zero
+    # is a known danger state and cannot authorize more exposure.
+    if distance is None:
+        return True
+    try:
+        parsed = Decimal(str(distance))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return parsed.is_finite() and parsed > 0
+
+
 def _positive_float(name: str, fallback: float) -> float:
     import os
 
@@ -81,6 +106,10 @@ class DecisionExecutionGate:
         if getattr(self.worker, "kill_switch_active", False):
             return GateResult(False, "Kill switch is active")
 
+        testnet_configured = getattr(self.worker, "_testnet_configured", None)
+        if callable(testnet_configured) and not testnet_configured():
+            return GateResult(False, "Binance Testnet configuration is not verified")
+
         adapter = getattr(self.worker, "execution_adapter", None)
         if adapter is None:
             return GateResult(False, "Execution adapter is unavailable")
@@ -116,20 +145,25 @@ class DecisionExecutionGate:
         snapshot = getattr(adapter, "account_snapshot", None)
         if snapshot is None:
             snapshot = getattr(getattr(adapter, "ledger", None), "account_snapshot", None)
-        if _is_risk_increasing(risk_class) and getattr(snapshot, "liquidation_safety", "UNKNOWN") != "KNOWN":
+        if _is_risk_increasing(risk_class) and not _liquidation_safety_is_known_and_positive(snapshot):
             return GateResult(False, "Liquidation safety is UNKNOWN")
 
-        if not getattr(self.worker, "market_data_healthy", False):
-            return GateResult(False, "Market data is stale")
-        max_age = _positive_float("MAX_MARKET_DATA_AGE_SEC", 3.0)
-        timestamps = getattr(self.worker, "last_market_event_at", {})
-        adapter_timestamps = getattr(adapter, "last_market_event_at", {})
-        for intent in decision.orders:
-            symbol = str(intent.symbol).upper()
-            last_event = timestamps.get(symbol) or adapter_timestamps.get(symbol)
-            age = _age_seconds(last_event)
-            if age is None or age < 0 or age > max_age:
-                return GateResult(False, f"Market data stale for {symbol}")
+        # Reductions may use an emergency fallback when the market stream is
+        # stale.  MARKET orders still require a fresh REST mark price in the
+        # individual order gate.  Risk-increasing decisions require both the
+        # worker-wide health bit and per-symbol event freshness here.
+        if _is_risk_increasing(risk_class):
+            if not getattr(self.worker, "market_data_healthy", False):
+                return GateResult(False, "Market data is stale")
+            max_age = _positive_float("MAX_MARKET_DATA_AGE_SEC", 3.0)
+            timestamps = getattr(self.worker, "last_market_event_at", {})
+            adapter_timestamps = getattr(adapter, "last_market_event_at", {})
+            for intent in decision.orders:
+                symbol = str(intent.symbol).upper()
+                last_event = timestamps.get(symbol) or adapter_timestamps.get(symbol)
+                age = _age_seconds(last_event)
+                if age is None or age < 0 or age > max_age:
+                    return GateResult(False, f"Market data stale for {symbol}")
 
         return GateResult(True, "Passed")
 
@@ -148,6 +182,7 @@ class OrderExecutionGate:
         reserved_open_orders: int = 0,
         reserved_notional: Decimal = Decimal("0"),
         exclude_client_order_id: Optional[str] = None,
+        require_reduce_only_for_risk_reduction: bool = True,
     ) -> GateResult:
         if self.adapter.env != self.adapter.testnet_environment:
             return GateResult(False, "Mutable execution is restricted to Binance Testnet")
@@ -178,7 +213,7 @@ class OrderExecutionGate:
             snapshot = getattr(self.adapter, "account_snapshot", None)
             if snapshot is None:
                 snapshot = getattr(getattr(self.adapter, "ledger", None), "account_snapshot", None)
-            if getattr(snapshot, "liquidation_safety", "UNKNOWN") != "KNOWN":
+            if not _liquidation_safety_is_known_and_positive(snapshot):
                 return GateResult(False, "Liquidation safety is UNKNOWN")
 
         symbol = str(intent.symbol).upper()
@@ -290,18 +325,15 @@ class OrderExecutionGate:
             EconomicRiskClass.INCREASE_RISK,
         }:
             return GateResult(False, "reduceOnly order cannot be classified as risk increasing")
-        if risk in {
-            EconomicRiskClass.REDUCE_RISK,
-            EconomicRiskClass.CLOSE,
-            EconomicRiskClass.EMERGENCY,
-        } and not intent.reduce_only:
+        if (
+            require_reduce_only_for_risk_reduction
+            and _is_risk_reducing(risk)
+            and not intent.reduce_only
+        ):
             return GateResult(False, "Risk-reducing and emergency orders must be reduceOnly")
 
-        if intent.reduce_only and risk in {
-            EconomicRiskClass.REDUCE_RISK,
-            EconomicRiskClass.CLOSE,
-        }:
-            known_exposure = Decimal("0")
+        if intent.reduce_only and _is_risk_reducing(risk):
+            reducible_exposure = Decimal("0")
             for position in await self.adapter.ledger.get_positions():
                 if position.symbol != symbol:
                     continue
@@ -310,9 +342,24 @@ class OrderExecutionGate:
                     or position.position_side in {position_side, PositionSide.BOTH}
                 )
                 if position_side_matches:
-                    known_exposure += abs(position.quantity)
-            if known_exposure < quantity:
-                return GateResult(False, "reduceOnly quantity exceeds known Testnet exposure")
+                    position_quantity = position.quantity
+                    if not position_quantity.is_finite() or position_quantity == 0:
+                        continue
+                    # Binance positionAmt is signed: SELL reduces a positive
+                    # long/BOTH position and BUY reduces a negative short/BOTH
+                    # position.  A reduceOnly flag alone is not enough to
+                    # prove that the requested side actually de-risks.
+                    if (
+                        side == OrderSide.SELL and position_quantity > 0
+                    ) or (
+                        side == OrderSide.BUY and position_quantity < 0
+                    ):
+                        reducible_exposure += abs(position_quantity)
+            if reducible_exposure < quantity:
+                return GateResult(
+                    False,
+                    "reduceOnly side or quantity exceeds known Testnet exposure",
+                )
 
         if risk_increasing:
             open_orders = await self.adapter.ledger.get_open_orders()

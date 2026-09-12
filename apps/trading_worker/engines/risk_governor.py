@@ -18,17 +18,24 @@ class RiskGovernor:
         self.hedge_mode = hedge_mode
 
     def evaluate(self, target: TargetExposure, risk_snapshot: RiskSnapshot, current_position_qty: Decimal) -> ExecutionDecision:
+        # TargetExposure is a relative signed delta. De-risking must remain
+        # available during a hard-stop state so the system can flatten rather
+        # than becoming trapped with toxic inventory.
+        required_delta = target.target_net_delta_qty
+        is_reducing = self._is_position_reduction(required_delta, current_position_qty)
+
         # 1. Hard Constraints
         if risk_snapshot.risk_state in [RiskState.EMERGENCY, RiskState.LIQUIDATING]:
-            return self._reject(target, "System is in EMERGENCY state. No new risk allowed.")
+            if not is_reducing:
+                return self._reject(target, "System is in EMERGENCY state. No new risk allowed.")
             
         if risk_snapshot.current_drawdown_pct >= self.max_drawdown_pct:
-            return self._reject(target, f"Drawdown ({risk_snapshot.current_drawdown_pct}%) exceeds limit ({self.max_drawdown_pct}%).")
+            if not is_reducing:
+                return self._reject(target, f"Drawdown ({risk_snapshot.current_drawdown_pct}%) exceeds limit ({self.max_drawdown_pct}%).")
             
         # 2. Leverage Constraint
         if risk_snapshot.effective_leverage >= self.max_leverage:
-            # Only allow risk-reducing trades
-            if abs(target.target_net_delta_qty) > abs(current_position_qty):
+            if not is_reducing:
                 return self._reject(target, f"Leverage ({risk_snapshot.effective_leverage}x) exceeds limit ({self.max_leverage}x). Cannot increase exposure.")
                 
         # 3. Calculate required order to reach target delta
@@ -38,8 +45,6 @@ class RiskGovernor:
         # relative change wanted by the strategies this tick, OR the absolute portfolio target?
         # Let's assume TargetExposure from MetaAllocator is relative to CURRENT position for now to make it a delta.
         
-        required_delta = target.target_net_delta_qty
-        
         if abs(required_delta) < Decimal("0.001"):
             return ExecutionDecision(
                 decision_id=f"DEC-{utc_now().timestamp()}",
@@ -47,7 +52,9 @@ class RiskGovernor:
                 action="NOOP",
                 risk_class=EconomicRiskClass.NOOP,
                 rational="Net delta is below minimum threshold.",
-                net_exposure_delta=Decimal("0.0")
+                net_exposure_delta=Decimal("0.0"),
+                target_exposure_id=target.exposure_id,
+                source_intent_ids=target.source_intent_ids,
             )
             
         # 4. Generate Execution Decision
@@ -76,7 +83,8 @@ class RiskGovernor:
             time_in_force=TimeInForce.GTC,
             quantity=abs(required_delta),
             reduce_only=risk_class in {EconomicRiskClass.REDUCE_RISK, EconomicRiskClass.CLOSE},
-            strategy_id="meta_allocator"
+            strategy_id="meta_allocator",
+            source_intent_ids=target.source_intent_ids,
         )
         
         return ExecutionDecision(
@@ -86,7 +94,9 @@ class RiskGovernor:
             risk_class=risk_class,
             orders=[order],
             rational=f"Approved target delta of {required_delta} with expected edge.",
-            net_exposure_delta=required_delta
+            net_exposure_delta=required_delta,
+            target_exposure_id=target.exposure_id,
+            source_intent_ids=target.source_intent_ids,
         )
 
     def _reject(self, target: TargetExposure, reason: str) -> ExecutionDecision:
@@ -97,7 +107,9 @@ class RiskGovernor:
             action="NOOP",
             risk_class=EconomicRiskClass.NOOP,
             rational=reason,
-            net_exposure_delta=Decimal("0.0")
+            net_exposure_delta=Decimal("0.0"),
+            target_exposure_id=target.exposure_id,
+            source_intent_ids=target.source_intent_ids,
         )
 
     @staticmethod
@@ -115,3 +127,11 @@ class RiskGovernor:
                 return EconomicRiskClass.CLOSE
             return EconomicRiskClass.REDUCE_RISK
         return EconomicRiskClass.INCREASE_RISK
+
+    @staticmethod
+    def _is_position_reduction(required_delta: Decimal, current_position_qty: Decimal) -> bool:
+        if current_position_qty > 0:
+            return required_delta < 0 and abs(required_delta) <= abs(current_position_qty)
+        if current_position_qty < 0:
+            return required_delta > 0 and abs(required_delta) <= abs(current_position_qty)
+        return False
