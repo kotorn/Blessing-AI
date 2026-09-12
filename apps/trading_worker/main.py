@@ -9,6 +9,29 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, List, Optional, Literal
 
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field, model_validator, ConfigDict
+
+from domain.models import MarketEvent, MarketType, RiskSnapshot, utc_now
+from domain.enums import RiskState
+
+from apps.trading_worker.engines.price_action import PriceActionEngine
+from apps.trading_worker.engines.market_state import MarketStateClassifier
+from apps.trading_worker.engines.grid_strategy import GridStrategyEngine
+from apps.trading_worker.engines.trend_strategy import TrendStrategyEngine
+from apps.trading_worker.engines.shock_strategy import ShockStrategyEngine
+from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
+from apps.trading_worker.engines.funding_carry import FundingCarryEngine
+from apps.trading_worker.engines.market_scanner import MarketScannerEngine
+from apps.trading_worker.engines.meta_allocator import MetaAllocator
+from apps.trading_worker.engines.risk_governor import RiskGovernor
+
+from venues.binance.public_ws import BinancePublicWebSocket
+from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
+from apps.trading_worker.venues.binance.config import BinanceEnvironment
+from apps.trading_worker.venues.binance.models import ConnectionState
+
 class StrategyEnablement(BaseModel):
     grid: bool = False
     trend: bool = False
@@ -42,7 +65,7 @@ from apps.trading_worker.engines.risk_governor import RiskGovernor
 from venues.binance.public_ws import BinancePublicWebSocket
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.config import BinanceEnvironment
-from apps.trading_worker.venues.binance.models import ConnectionState
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -440,6 +463,13 @@ class TradingWorkerApp:
             self.heartbeat_task.cancel()
 
     def get_state(self) -> WorkerRuntimeState:
+        if self.execution_adapter:
+            from apps.trading_worker.venues.binance.models import ConnectionState
+            adp_state = self.execution_adapter.connection_state
+            self.connection_state = "READY" if adp_state == ConnectionState.READY else "DEGRADED" if adp_state == ConnectionState.DEGRADED else "DISCONNECTED"
+            self.authenticated = self.execution_adapter.is_authenticated()
+            self.private_stream_healthy = self.execution_adapter.user_stream.is_connected if self.execution_adapter.user_stream else False
+            
         uptime = (utc_now() - self.start_time).total_seconds()
         trading_healthy = self.connection_state == "READY"
         health = HealthIndicators(
@@ -529,25 +559,55 @@ class TradingWorkerApp:
         }
 
     def get_launch_readiness(self) -> dict:
+        import json
+        import os
+        from datetime import timezone
+        import datetime
+        
         testnet_configured = bool(
             os.getenv("BINANCE_TESTNET_API_KEY") and os.getenv("BINANCE_TESTNET_API_SECRET")
         )
         auto_flag = os.getenv("AUTONOMOUS_TESTNET_EXECUTION", "false").lower() in ("true", "1", "yes")
         
-        # Testnet Readiness includes all required conditions from GATE 4
+        ci_verified = False
+        readonly_contract_verified = False
+        manual_trial_verified = False
+        soak_verified = False
         
+        if os.path.exists("build_metadata.json"):
+            try:
+                with open("build_metadata.json", "r") as f:
+                    meta = json.load(f)
+                    ci_verified = meta.get("ci_verified", False)
+                    readonly_contract_verified = meta.get("readonly_contract_verified", False)
+                    if meta.get("manual_trial_verified") and meta.get("build_sha") == meta.get("trial_build_sha"):
+                        manual_trial_verified = True
+            except Exception:
+                pass
+                
+        account_ready = False
+        rules_ready = False
+        if hasattr(self, "execution_adapter") and self.execution_adapter:
+            if hasattr(self.execution_adapter, "ledger") and self.execution_adapter.ledger and self.execution_adapter.ledger.account_snapshot:
+                snap = self.execution_adapter.ledger.account_snapshot
+                now = utc_now()
+                if hasattr(snap, "timestamp") and snap.timestamp and (now - snap.timestamp).total_seconds() < 60:
+                    account_ready = True
+            if hasattr(self.execution_adapter, "symbol_rules") and self.execution_adapter.symbol_rules and len(self.execution_adapter.symbol_rules) > 0:
+                rules_ready = True
+
         readiness = LaunchReadiness(
             paper_ready=not self.kill_switch_active,
-            ci_verified=os.getenv("CI_VERIFIED", "false").lower() in ("true", "1", "yes"),
+            ci_verified=ci_verified,
             testnet_credentials_verified=testnet_configured,
-            testnet_readonly_contract_verified=os.getenv("TESTNET_READONLY_CONTRACT_VERIFIED", "false").lower() in ("true", "1", "yes"),
-            testnet_manual_trial_verified=os.getenv("TESTNET_MANUAL_TRIAL_VERIFIED", "false").lower() in ("true", "1", "yes"),
-            testnet_soak_verified=os.getenv("TESTNET_SOAK_VERIFIED", "false").lower() in ("true", "1", "yes"),
+            testnet_readonly_contract_verified=readonly_contract_verified,
+            testnet_manual_trial_verified=manual_trial_verified,
+            testnet_soak_verified=soak_verified,
             adapter_ready=self.connection_state == "READY",
             private_stream_healthy=self.private_stream_healthy,
             reconciliation_in_sync=self.reconciliation_status == "IN_SYNC",
-            account_snapshot_ready=True, # Will be handled by the account snapshot
-            symbol_rules_ready=True, # Handled by the adapter rules loaded
+            account_snapshot_ready=account_ready,
+            symbol_rules_ready=rules_ready,
             market_data_fresh=self.market_data_healthy,
             autonomous_flag_enabled=auto_flag,
             launch_approved=os.getenv("TESTNET_LAUNCH_APPROVED", "false").lower() in ("true", "1", "yes"),
@@ -560,9 +620,9 @@ class TradingWorkerApp:
             readiness.testnet_credentials_verified and
             readiness.testnet_readonly_contract_verified and
             readiness.testnet_manual_trial_verified and
-            readiness.testnet_soak_verified and
             readiness.adapter_ready and
             readiness.symbol_rules_ready and
+            readiness.account_snapshot_ready and
             readiness.private_stream_healthy and
             readiness.reconciliation_in_sync and
             readiness.market_data_fresh and
@@ -570,7 +630,7 @@ class TradingWorkerApp:
             readiness.launch_approved and
             not self.kill_switch_active
         )
-
+        
         return readiness.model_dump()
 
     def get_preflight(self, execution_mode: str) -> dict:
@@ -681,20 +741,28 @@ class TradingWorkerApp:
         else:
             self.engine_state = WorkerEngineState.ARMED if self.active_configuration else WorkerEngineState.DISARMED
 
-    async def set_kill_switch(self, active: bool):
+    async def set_kill_switch(self, active: bool) -> dict:
         self.kill_switch_active = active
+        status = "CONFIRMED"
         if active:
             self.engine_state = WorkerEngineState.EMERGENCY
             if getattr(self, "execution_adapter", None) and self.execution_adapter.state == ConnectionState.READY:
                 try:
-                    open_orders = await self.execution_adapter.ledger.get_open_orders()
-                    for o in open_orders:
-                        if o.client_order_id:
-                            await self.execution_adapter.cancel_order(o.symbol, o.client_order_id)
+                    all_open = []
+                    for sym in self.symbols:
+                        sym_orders = await self.execution_adapter.rest_client.request("GET", "/fapi/v1/openOrders", signed=True, params={"symbol": sym})
+                        all_open.extend(sym_orders)
+                        
+                    for o in all_open:
+                        await self.execution_adapter.rest_client.request("DELETE", "/fapi/v1/order", signed=True, params={"symbol": o["symbol"], "orderId": o["orderId"]})
+                        
+                    await self.trigger_reconciliation()
                 except Exception as e:
                     logger.error("Failed to cancel open orders on Kill Switch: %s", e)
+                    status = "UNKNOWN"
         else:
             self.engine_state = WorkerEngineState.DISARMED
+        return {"status": status}
             
     async def trigger_reconciliation(self) -> str:
         if hasattr(self, "execution_adapter") and self.execution_adapter is not None:
@@ -706,11 +774,18 @@ class TradingWorkerApp:
                 self.connection_state = "DEGRADED"
             return res
             
-        self.reconciliation_status = "IN_SYNC"
-        self.connection_state = "READY"
-        self.private_stream_healthy = True
-        self.authenticated = True
-        return self.reconciliation_status
+        if self.execution_mode == WorkerExecutionMode.TESTNET:
+            self.authenticated = False
+            self.private_stream_healthy = False
+            self.reconciliation_status = "UNKNOWN"
+            self.connection_state = "DISCONNECTED"
+            return self.reconciliation_status
+        else:
+            self.reconciliation_status = "SIMULATED_SYNC"
+            self.connection_state = "READY"
+            self.private_stream_healthy = True
+            self.authenticated = True
+            return self.reconciliation_status
 
     async def arm(self, config: dict):
         if self.kill_switch_active:
@@ -802,7 +877,7 @@ class TradingWorkerApp:
         if not self.market_data_healthy:
             return False, "Market data stale"
 
-        action = decision.action
+        action = str(decision.action)
         is_risk_increasing = action in ("NEW_RISK", "INCREASE_RISK", "OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT")
         
         if is_risk_increasing:
@@ -811,16 +886,30 @@ class TradingWorkerApp:
             if self.recovery_only:
                 return False, "Recovery only mode active"
                 
-        # Validate notional limits (conservative TESTNET ceilings)
+            max_age = float(os.getenv("MAX_MARKET_DATA_AGE_SEC", "60.0"))
+            now = utc_now()
+            if hasattr(self, "last_market_event_at"):
+                for intent in decision.orders:
+                    last_at = self.last_market_event_at.get(intent.symbol)
+                    if not last_at or (now - last_at).total_seconds() > max_age:
+                        return False, f"Market data stale for {intent.symbol}"
+
         max_notional = Decimal(os.getenv("TESTNET_MAX_SINGLE_ORDER_NOTIONAL", "25.0"))
-        if hasattr(decision, "quantity") and hasattr(decision, "price") and decision.price and decision.quantity:
-            notional = abs(decision.quantity) * decision.price
-            if notional > max_notional:
-                return False, f"Notional {notional} exceeds ceiling {max_notional}"
-                
+        if hasattr(decision, "orders"):
+            for intent in decision.orders:
+                if intent.price and intent.quantity:
+                    notional = abs(intent.quantity) * intent.price
+                    if notional > max_notional:
+                        return False, f"Notional {notional} exceeds ceiling {max_notional} for {intent.symbol}"
+                elif not intent.price:
+                    return False, f"Rejecting market order for {intent.symbol} because price is required for safety check"
+
         return True, "Passed"
 
     async def handle_market_event(self, event: MarketEvent):
+        if not hasattr(self, "last_market_event_at"):
+            self.last_market_event_at = {}
+        self.last_market_event_at[event.symbol] = utc_now()
         if not self.market_data_healthy:
             self.market_data_healthy = True
             

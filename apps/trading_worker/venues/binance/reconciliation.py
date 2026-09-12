@@ -132,7 +132,7 @@ class BinanceReconciliation:
                                     signed=True, 
                                     params={"symbol": local_order.symbol}
                                 )
-                                from .models import ExchangeFill
+                                from domain.models import ExchangeFill, OrderSide, PositionSide
                                 for t in trades:
                                     # match by orderId
                                     if str(t.get("orderId")) == str(order_status.get("orderId")):
@@ -141,23 +141,26 @@ class BinanceReconciliation:
                                             exchange_trade_id=str(t.get("id", "")),
                                             exchange_order_id=str(t.get("orderId", "")),
                                             client_order_id=local_order.client_order_id,
+                                            side=OrderSide(t.get("side", local_order.side.value)),
+                                            position_side=PositionSide(t.get("positionSide", local_order.position_side.value)),
                                             price=Decimal(str(t.get("price", "0"))),
                                             quantity=Decimal(str(t.get("qty", "0"))),
                                             commission=Decimal(str(t.get("commission", "0"))),
                                             commission_asset=t.get("commissionAsset", ""),
-                                            is_maker=t.get("maker", False),
+                                            realized_pnl=Decimal(str(t.get("realizedPnl", "0"))),
+                                            maker=t.get("maker", False),
                                             event_time=t.get("time", 0),
                                             transaction_time=t.get("time", 0),
                                             source="BINANCE_TESTNET_RECOVERY"
                                         )
                                         await self.ledger.append_fill(fill)
                                 logger.info("Recovered fills for order %s", local_order.client_order_id)
+                                await self.ledger.upsert_order(local_order)
+                                logger.info("Resolved local order %s status to terminal state: %s", local_order.client_order_id, status)
+                                resolved = True
                             except Exception as t_err:
                                 logger.warning("Failed to fetch userTrades for recovery of %s: %s", local_order.client_order_id, t_err)
-                            
-                            await self.ledger.upsert_order(local_order)
-                            logger.info("Resolved local order %s status to terminal state: %s", local_order.client_order_id, status)
-                            resolved = True
+                                pass
                             
                         elif status in ("CANCELED", "EXPIRED", "REJECTED"):
                             local_order.status = status
@@ -273,14 +276,41 @@ class BinanceReconciliation:
                     timestamp=datetime.now(timezone.utc)
                 )
                 
+                pos_risk = await self.rest_client.request("GET", "/fapi/v2/positionRisk", signed=True)
+                
                 equity = snap.wallet_balance + snap.unrealized_pnl
+                missing_mark_price = False
+                min_liq_dist = Decimal("1.0")
+                has_active_pos = False
+                
                 if equity > 0:
                     tot_notional = Decimal("0.0")
-                    for p in account.get("positions", []):
-                        tot_notional += abs(Decimal(str(p.get("positionAmt", "0")))) * Decimal(str(p.get("markPrice", "0")))
-                    snap.total_position_notional = tot_notional
-                    snap.effective_leverage = snap.total_position_notional / equity
-                    snap.margin_utilization_pct = (snap.total_maint_margin / equity) * Decimal("100")
+                    for p in pos_risk:
+                        amt = abs(Decimal(str(p.get("positionAmt", "0"))))
+                        if amt > 0:
+                            has_active_pos = True
+                            if "markPrice" not in p or p.get("markPrice") is None:
+                                missing_mark_price = True
+                            else:
+                                mp = Decimal(str(p.get("markPrice", "0")))
+                                tot_notional += amt * mp
+                                liq = Decimal(str(p.get("liquidationPrice", "0")))
+                                if liq > 0 and mp > 0:
+                                    dist = abs(mp - liq) / mp
+                                    if dist < min_liq_dist:
+                                        min_liq_dist = dist
+                    
+                    if missing_mark_price:
+                        snap.total_position_notional = Decimal("0.0")
+                        snap.liquidation_safety = "UNKNOWN"
+                    else:
+                        snap.total_position_notional = tot_notional
+                        snap.effective_leverage = snap.total_position_notional / equity
+                        snap.margin_utilization_pct = (snap.total_maint_margin / equity) * Decimal("100")
+                        
+                        if has_active_pos:
+                            snap.min_liquidation_distance_pct = min_liq_dist * Decimal("100")
+
                     
                 await self.ledger.set_account_snapshot(snap)
             except Exception as e:

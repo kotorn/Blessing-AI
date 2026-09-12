@@ -1,0 +1,25 @@
+
+        action = decision.action
+        is_risk_increasing = action in ("NEW_RISK", "INCREASE_RISK", "OPEN_LONG", "OPEN_SHORT", "ADD_LONG", "ADD_SHORT")
+        
+        if is_risk_increasing:
+            if self.pause_new_risk:
+                return False, "Paused new risk"
+            if self.recovery_only:
+                return False, "Recovery only mode active"
+                
+        # Validate notional limits (conservative TESTNET ceilings)
+        max_notional = Decimal(os.getenv("TESTNET_MAX_SINGLE_ORDER_NOTIONAL", "25.0"))
+        if hasattr(decision, "quantity") and hasattr(decision, "price") and decision.price and decision.quantity:
+            notional = abs(decision.quantity) * decision.price
+            if notional > max_notional:
+                return False, f"Notional {notional} exceeds ceiling {max_notional}"
+                
+        return True, "Passed"
+
+    async def handle_market_event(self, event: MarketEvent):
+        if not self.market_data_healthy:
+            self.market_data_healthy = True
+            
+        pa_state = self.pa_engine.process_event(event)
+        if not pa_state:

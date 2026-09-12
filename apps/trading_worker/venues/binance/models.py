@@ -19,6 +19,9 @@ class ExchangeAccountSnapshot(BaseModel):
 
     effective_leverage: Decimal
     margin_utilization_pct: Decimal
+    
+    min_liquidation_distance_pct: Decimal = Decimal("100.0")
+    liquidation_safety: str = "KNOWN"
 
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
