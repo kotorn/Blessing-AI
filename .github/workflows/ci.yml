@@ -11,24 +11,27 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Setup Node.js
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
-        node-version: '20'
+        node-version: '24'
         
     - name: Install Node Dependencies
-      run: npm install
+      run: npm ci
+      
+    - name: TypeScript Lint
+      run: npm run lint
+
+    - name: TypeScript Unit Tests
+      run: npm run test
       
     - name: TypeScript Build
       run: npm run build
       
-    # - name: TypeScript Unit Tests
-    #   run: npm run test
-      
     - name: Setup Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.13'
         
@@ -36,6 +39,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pytest pydantic
+        # pip install -e ".[dev]" if we had a setup.py, for now just requirements
         
     - name: Python Unit Tests
       env:

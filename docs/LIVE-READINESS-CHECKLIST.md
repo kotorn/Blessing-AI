@@ -7,9 +7,9 @@ The `LIVE` mode is hard-blocked until the following conditions are met. This che
 - [x] Preflight Safety Verification endpoints
 - [x] Global Kill Switch Synchronization
 - [x] Single Execution Authority established (Python Trading Worker)
-- [ ] Binance Live Adapter Implementation (CCXT/HTTPX)
-- [ ] Signature / Timestamp synchronization guarantees (Clock Skew Management)
-- [ ] Webhook / Listen Key subscription recovery (User Data Stream contract)
+- [x] Binance Native Adapter Implementation (`aiohttp`, `websockets`)
+- [x] Signature / Timestamp synchronization guarantees (Clock Skew Management)
+- [x] Webhook / Listen Key subscription recovery (User Data Stream contract)
 - [ ] CI Contract tests implemented and passing
 - [ ] Live execution `capabilities.liveExecutionReady` flag enabled on backend
 

@@ -10,8 +10,28 @@ def test_meta_allocator_conflict_resolution():
     allocator = MetaAllocator()
     
     # Conflict: Grid says Long, Trend says Short
-    grid_intent = StrategyIntent("G1", "grid", "BTCUSDT", MarketType.USDM_FUTURES, PositionSide.LONG, Decimal("1.0"), Decimal("80"), Decimal("0.8"), 60, {})
-    trend_intent = StrategyIntent("T1", "trend", "BTCUSDT", MarketType.USDM_FUTURES, PositionSide.SHORT, Decimal("-0.6"), Decimal("85"), Decimal("0.9"), 3600, {})
+    grid_intent = StrategyIntent(
+        intent_id="G1",
+        strategy_id="grid",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        direction=PositionSide.LONG,
+        desired_delta_qty=Decimal("1.0"),
+        opportunity_score=Decimal("0.80"),
+        confidence=Decimal("0.8"),
+        expected_holding_horizon_sec=60
+    )
+    trend_intent = StrategyIntent(
+        intent_id="T1",
+        strategy_id="trend",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        direction=PositionSide.SHORT,
+        desired_delta_qty=Decimal("-0.6"),
+        opportunity_score=Decimal("0.85"),
+        confidence=Decimal("0.9"),
+        expected_holding_horizon_sec=3600
+    )
     
     target = allocator.allocate([grid_intent, trend_intent], "BTCUSDT")
     
@@ -23,7 +43,8 @@ def test_meta_allocator_conflict_resolution():
 def test_risk_governor_veto():
     governor = RiskGovernor()
     
-    target = TargetExposure("BTCUSDT", Decimal("1.0"), {})
+    from datetime import datetime
+    target = TargetExposure(symbol="BTCUSDT", market_type=MarketType.USDM_FUTURES, target_net_delta_qty=Decimal("1.0"), target_gross_limit_qty=Decimal("1.0"), strategy_attributions={}, expires_at=datetime.utcnow())
     
     # Snapshot shows dangerously high margin utilization
     danger_risk = RiskSnapshot(
@@ -45,7 +66,7 @@ def test_risk_governor_veto():
 def test_exposure_recovery_grid_brake():
     recovery = ExposureRecoveryEngine(drawdown_trigger_pct=Decimal("2.5"))
     
-    target = TargetExposure("BTCUSDT", Decimal("0.5"), {"grid": Decimal("0.5")})
+    target = TargetExposure(symbol="BTCUSDT", market_type=MarketType.USDM_FUTURES, target_net_delta_qty=Decimal("0.5"), target_gross_limit_qty=Decimal("0.5"), strategy_attributions={"grid": Decimal("0.5")}, expires_at=datetime.utcnow())
     
     # Drawdown exceeds trigger (3.0% > 2.5%)
     danger_risk = RiskSnapshot(

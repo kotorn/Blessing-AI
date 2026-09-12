@@ -6,31 +6,49 @@ Checked Date: 2026-09-11
 
 ## Endpoint Verification
 
-### 1. User Data Stream
+### Base URLs
+* **Mainnet REST**: `https://fapi.binance.com`
+* **Testnet REST**: `https://testnet.binancefuture.com`
+* **Mainnet WS**: `wss://fstream.binance.com/ws` or `wss://fstream.binance.com/stream`
+* **Testnet WS**: `wss://stream.binancefuture.com/ws` or `wss://stream.binancefuture.com/stream`
+
+### 1. Server Time
+* **Purpose**: Fetch server time for clock synchronization.
+* **Endpoint**: `GET /fapi/v1/time`
+* **Implementation**: `apps/trading_worker/venues/binance/clock.py`
+
+### 2. Exchange Information
+* **Purpose**: Retrieve step sizes, tick sizes, minimum notionals.
+* **Endpoint**: `GET /fapi/v1/exchangeInfo`
+* **Implementation**: `apps/trading_worker/venues/binance/symbol_rules.py`
+
+### 3. Position Mode & Account
+* **Purpose**: Check if account is in Hedge Mode or One-Way.
+* **Endpoint**: `GET /fapi/v1/positionSide/dual` and `GET /fapi/v2/account`
+* **Implementation**: `apps/trading_worker/venues/binance/capabilities.py`
+
+### 4. User Data Stream
 * **Purpose**: Receive account updates, position updates, and execution reports (fills, cancels).
 * **Endpoints**: 
   - `POST /fapi/v1/listenKey` (Start user stream)
-  - `PUT /fapi/v1/listenKey` (Keepalive, send every 60m, recommended every 30m)
+  - `PUT /fapi/v1/listenKey` (Keepalive, send every 30m)
   - `DELETE /fapi/v1/listenKey` (Close stream)
-* **Auth**: Valid API Key (HMAC not required for listenKey creation, but required for trade endpoints).
-* **Testnet Equivalent**: Same endpoints on `https://testnet.binancefuture.com`
-* **Implementation Note**: Python worker must ping every 30m. Disconnect requires full reconciliation.
+* **Auth**: Valid API Key via X-MBX-APIKEY.
+* **Implementation**: `apps/trading_worker/venues/binance/user_stream.py`
 
-### 2. Order Placement
+### 5. Order Placement
 * **Purpose**: Create limits/markets.
 * **Endpoint**: `POST /fapi/v1/order`
-* **Testnet Equivalent**: Yes.
 * **Auth**: HMAC SHA256 signature required.
-* **Hedge Mode Semantics**: Requires `positionSide` (LONG, SHORT) if Hedge Mode enabled. `reduceOnly` can be set to true for closing positions.
+* **Hedge Mode Semantics**: Requires `positionSide` (LONG, SHORT) if Hedge Mode enabled. `reduceOnly` can be set to true for closing positions in ONE_WAY.
+* **Implementation**: `apps/trading_worker/venues/binance/rest_client.py`
 
-### 3. Cancel/Replace
+### 6. Cancel/Replace (Modification)
 * **Purpose**: Modify an order.
-* **Endpoint**: `POST /fapi/v1/order/cancelReplace`
-* **Status**: Supported for USDM Futures. However, the system currently assumes atomic cancel/replace.
-* **Implementation Note**: Explicit fallback or test coverage for failure modes during replacement is required.
+* **Endpoint**: `PUT /fapi/v1/order` (Binance officially supports PUT for modification).
+* **Implementation Note**: Modifying an order returns the new order details. We must map deterministic IDs cleanly.
 
-### 4. Exchange Information
-* **Purpose**: Retrieve step sizes, tick sizes, minimum notionals.
-* **Endpoint**: `GET /fapi/v1/exchangeInfo`
-* **Testnet Equivalent**: Yes.
-* **Implementation Note**: The Python execution adapter must pull these limits before executing `round(qty, 3)` to ensure valid precision per instrument.
+### 7. Reconciliation
+* **Purpose**: Open orders and positions recovery.
+* **Endpoint**: `GET /fapi/v1/openOrders` and `GET /fapi/v2/positionRisk`
+* **Implementation**: `apps/trading_worker/venues/binance/reconciliation.py`
