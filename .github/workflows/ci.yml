@@ -43,11 +43,11 @@ jobs:
     - name: Python Unit Tests
       env:
         PYTHONPATH: .
-      run: pytest tests/python/
+      run: pytest tests/python/ -m "not contract_readonly and not contract_mutating"
       
     - name: Hygiene Check
       run: |
-        if find . -name "patch_*.cjs" | grep -q .; then
-          echo "Hygiene failure: patch scripts found in source."
+        if find . -name "patch_*.cjs" -o -name "patch_*.js" -o -name "patch_*.py" -o -name "fix_*.py" -o -name ".pytest_cache" | grep -q .; then
+          echo "Hygiene failure: patch scripts or cache artifacts found in source."
           exit 1
         fi

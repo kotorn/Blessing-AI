@@ -326,3 +326,39 @@ class ExchangeFill(BaseModel):
     event_time: Any
     transaction_time: Any
     source: str
+
+
+class ExchangePosition(BaseModel):
+    """
+    Normalized exchange position representation across USDⓈ-M Futures accounts.
+    Uses Decimal precision for quantities and prices.
+    """
+    if PYDANTIC_AVAILABLE:
+        model_config = ConfigDict(frozen=False)
+    symbol: str
+    position_side: PositionSide = PositionSide.BOTH
+    quantity: Decimal = Decimal("0.0")
+    entry_price: Decimal = Decimal("0.0")
+    mark_price: Optional[Decimal] = None
+    unrealized_pnl: Decimal = Decimal("0.0")
+    margin_type: str = "cross"
+    event_time: Optional[Any] = None
+    source: str = "BINANCE_TESTNET"
+
+    def __getitem__(self, item: str) -> Any:
+        mapping = {
+            "positionSide": str(self.position_side.value if hasattr(self.position_side, "value") else self.position_side),
+            "positionAmt": str(self.quantity),
+            "entryPrice": str(self.entry_price),
+            "unRealizedProfit": str(self.unrealized_pnl),
+            "marginType": self.margin_type,
+        }
+        if item in mapping:
+            return mapping[item]
+        if hasattr(self, item):
+            return getattr(self, item)
+        snake = "".join(["_" + c.lower() if c.isupper() else c for c in item]).lstrip("_")
+        if hasattr(self, snake):
+            return getattr(self, snake)
+        raise KeyError(item)
+

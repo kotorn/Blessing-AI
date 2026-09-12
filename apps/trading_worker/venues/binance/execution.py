@@ -10,7 +10,15 @@ from .capabilities import BinanceCapabilities
 from .user_stream import BinanceUserStream
 from .reconciliation import BinanceReconciliation
 from .ledger import ExecutionLedger, InMemoryLedger
-from .models import ConnectionState
+from .models import (
+    ConnectionState,
+    TestnetSafetyLimits,
+    BinanceDefinitiveRejection,
+    BinanceTransportAmbiguity,
+    BinanceAuthenticationError,
+    BinanceRateLimitError,
+    BinanceTimestampError,
+)
 
 logger = logging.getLogger("blessing.venues.binance.execution")
 
@@ -26,10 +34,16 @@ class BinanceExecutionAdapter:
         self.api_key = api_key
         self.api_secret = api_secret
         self.ledger = ledger or InMemoryLedger()
+        self.safety_limits = TestnetSafetyLimits()
         
         self.rest_client = BinanceRestClient(api_key, api_secret, env)
         self.capabilities = BinanceCapabilities()
-        self.user_stream = BinanceUserStream(self.rest_client, env, on_disconnect=self._on_user_stream_disconnect)
+        self.user_stream = BinanceUserStream(
+            self.rest_client,
+            env,
+            on_disconnect=self._on_user_stream_disconnect,
+            on_reconnected=self._on_user_stream_reconnected
+        )
         self.reconciliation = BinanceReconciliation(self.rest_client, self.ledger)
         
         self.state = ConnectionState.DISCONNECTED
@@ -43,6 +57,18 @@ class BinanceExecutionAdapter:
         else:
             self.state = ConnectionState.DEGRADED
 
+    async def _on_user_stream_reconnected(self):
+        logger.info("[%s] User stream reconnected. Initiating reconciliation.", self.env)
+        self.state = ConnectionState.SYNCING
+        sync_result = await self.reconciliation.reconcile()
+        if sync_result == "IN_SYNC" and self.user_stream.is_connected:
+            self.state = ConnectionState.READY
+            logger.info("[%s] Reconnected and IN_SYNC. State transitioned to READY.", self.env)
+        else:
+            self.state = ConnectionState.DEGRADED
+            logger.warning("[%s] Reconnection complete but sync_result=%s, ws_connected=%s. State remains DEGRADED.",
+                           self.env, sync_result, self.user_stream.is_connected)
+
     async def connect(self):
         self.state = ConnectionState.CONNECTING
         await self.rest_client.init_session()
@@ -54,11 +80,14 @@ class BinanceExecutionAdapter:
             return False
             
         self.state = ConnectionState.STREAM_STARTING
-        await self.user_stream.start(self._on_ws_event)
+        ws_ok = await self.user_stream.start(self._on_ws_event)
+        if not ws_ok:
+            self.state = ConnectionState.DEGRADED
+            return False
         
         self.state = ConnectionState.SYNCING
         sync_result = await self.reconciliation.reconcile()
-        if sync_result == "IN_SYNC":
+        if sync_result == "IN_SYNC" and self.user_stream.is_connected:
             self.state = ConnectionState.READY
             return True
         else:
@@ -151,27 +180,54 @@ class BinanceExecutionAdapter:
         executed_orders = []
         for i, order_intent in enumerate(decision.orders):
             symbol = decision.symbol
+            if symbol not in self.safety_limits.allowed_symbols:
+                logger.error("Symbol %s not in allowed Testnet symbols %s. Skipping.", symbol, self.safety_limits.allowed_symbols)
+                continue
+
             rules = self.capabilities.symbol_rules.get(symbol)
             if not rules:
                 logger.error("No rules for %s. Skipping.", symbol)
                 continue
                 
             rounded_qty = rules.normalize_quantity(order_intent.quantity)
-            
             if rounded_qty <= 0:
                 continue
                 
             price_str = None
+            rounded_price = Decimal("0")
             if order_intent.limit_price:
                 rounded_price = rules.normalize_price(order_intent.limit_price)
                 price_str = str(rounded_price)
 
-            # Notional check against min_notional
             est_price = rounded_price if price_str else (rules.min_price or Decimal("1"))
-            if rules.min_notional and (rounded_qty * est_price) < rules.min_notional:
+            order_notional = rounded_qty * est_price
+
+            # Check min notional rule
+            if rules.min_notional and order_notional < rules.min_notional:
                 logger.error(
                     "Order notional %s below min_notional %s for %s. Skipping.",
-                    rounded_qty * est_price, rules.min_notional, symbol
+                    order_notional, rules.min_notional, symbol
+                )
+                continue
+
+            # Gate G2: Testnet Safety Limits
+            if order_notional > self.safety_limits.max_single_order_notional:
+                logger.error(
+                    "Order notional %s exceeds safety limit %s for %s. Skipping.",
+                    order_notional, self.safety_limits.max_single_order_notional, symbol
+                )
+                continue
+
+            open_orders = await self.ledger.get_open_orders()
+            if len(open_orders) >= self.safety_limits.max_open_orders:
+                logger.error("Max open orders limit reached (%d >= %d). Skipping.", len(open_orders), self.safety_limits.max_open_orders)
+                continue
+
+            current_open_notional = sum(o.quantity * o.price for o in open_orders)
+            if current_open_notional + order_notional > self.safety_limits.max_total_open_notional:
+                logger.error(
+                    "Total open notional %s exceeds safety cap %s. Skipping.",
+                    current_open_notional + order_notional, self.safety_limits.max_total_open_notional
                 )
                 continue
                 
@@ -217,8 +273,17 @@ class BinanceExecutionAdapter:
                 await self.ledger.upsert_order(executed_order)
                 executed_orders.append(executed_order)
             except BinanceAPIError as api_err:
-                # Definitive rejection from exchange (invalid params, min notional, margin, etc.)
-                logger.error("Order %s definitively rejected by Binance API (code %s): %s", client_oid, api_err.code, api_err)
+                code = api_err.code or 0
+                if code in (-2014, -2015):
+                    classified_err = BinanceAuthenticationError(code, str(api_err))
+                elif code in (-1003, -1015) or api_err.status == 429:
+                    classified_err = BinanceRateLimitError(code, str(api_err))
+                elif code == -1021:
+                    classified_err = BinanceTimestampError(code, str(api_err))
+                else:
+                    classified_err = BinanceDefinitiveRejection(code, str(api_err))
+                
+                logger.error("Order %s rejected (%s): %s", client_oid, type(classified_err).__name__, classified_err)
                 executed_order = ExecutionOrder(
                     symbol=symbol,
                     side=order_intent.side,
@@ -233,7 +298,7 @@ class BinanceExecutionAdapter:
                 executed_orders.append(executed_order)
             except Exception as e:
                 logger.error("Order execution failed, ambiguity triggered: %s", e)
-                # Implement timeout ambiguity handling here: QUERY order state.
+                # Gate I1: Ambiguous order state machine - query order status before declaring failure
                 self.state = ConnectionState.RECONCILING
                 try:
                     logger.info("Querying ambiguous order by client ID: %s", client_oid)

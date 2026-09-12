@@ -74,3 +74,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests/python"]
+markers = [
+    "contract_readonly: Read-only contract tests against Binance Testnet API",
+    "contract_mutating: Mutating contract tests against Binance Testnet API"
+]

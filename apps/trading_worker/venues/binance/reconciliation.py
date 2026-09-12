@@ -128,10 +128,16 @@ class BinanceReconciliation:
             # Build normalized local positions map
             local_pos_map: Dict[Tuple[str, str], Decimal] = {}
             for p in local_positions:
-                amt = Decimal(str(p.get("positionAmt", "0")))
-                if amt != Decimal("0"):
+                if isinstance(p, dict):
+                    amt = Decimal(str(p.get("positionAmt", "0")))
                     pos_side = str(p.get("positionSide", "BOTH")).upper()
-                    local_pos_map[(p.get("symbol", ""), pos_side)] = amt
+                    sym = p.get("symbol", "")
+                else:
+                    amt = p.quantity
+                    pos_side = p.position_side.name if hasattr(p.position_side, "name") else str(p.position_side).upper()
+                    sym = p.symbol
+                if amt != Decimal("0"):
+                    local_pos_map[(sym, pos_side)] = amt
 
             # Compare local positions to exchange
             for (sym, pside), local_amt in local_pos_map.items():

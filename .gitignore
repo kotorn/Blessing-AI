@@ -9,6 +9,7 @@ coverage/
 # Temporary AI patch scripts
 patch_*.cjs
 patch_*.js
+patch_*.py
 fix_*.cjs
 fix_*.py
 update_*.cjs
@@ -19,6 +20,7 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+.pytest_cache/
 env/
 venv/
 .venv/

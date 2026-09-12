@@ -1,6 +1,6 @@
 from decimal import Decimal
-from typing import Protocol, List, Optional
-from domain.models import ExecutionOrder, ExchangeFill, OrderSide, utc_now
+from typing import Protocol, List, Optional, Union
+from domain.models import ExecutionOrder, ExchangeFill, ExchangePosition, PositionSide, OrderSide, utc_now
 import logging
 
 logger = logging.getLogger("blessing.binance.ledger")
@@ -11,18 +11,19 @@ class ExecutionLedger(Protocol):
     async def append_fill(self, fill: ExchangeFill) -> None: ...
     async def get_order_by_client_id(self, client_order_id: str) -> Optional[ExecutionOrder]: ...
     async def get_order_by_exchange_id(self, exchange_order_id: str) -> Optional[ExecutionOrder]: ...
-    async def replace_positions(self, raw_positions: List[dict]) -> None: ...
-    async def upsert_position(self, raw_position: dict) -> None: ...
+    async def replace_positions(self, raw_positions: List[Union[dict, ExchangePosition]]) -> None: ...
+    async def upsert_position(self, raw_position: Union[dict, ExchangePosition]) -> None: ...
     async def get_open_orders(self) -> List[ExecutionOrder]: ...
-    async def get_positions(self) -> List[dict]: ...
+    async def get_positions(self) -> List[ExchangePosition]: ...
     async def is_initialized(self) -> bool: ...
-    async def has_fill(self, exchange_trade_id: str) -> bool: ...
+    async def has_fill(self, deduplication_key: str) -> bool: ...
 
 class InMemoryLedger:
     def __init__(self):
-        self.orders = {}
-        self.fills = []
-        self.positions = []
+        self.orders: dict[str, ExecutionOrder] = {}
+        self.fills: list[ExchangeFill] = []
+        self._fill_keys: set[str] = set()
+        self.positions: list[ExchangePosition] = []
         self._initialized = False
         
     async def is_initialized(self) -> bool:
@@ -51,9 +52,15 @@ class InMemoryLedger:
         )
         self.orders[client_oid] = order
 
+    def _get_fill_key(self, fill: ExchangeFill) -> str:
+        return f"{fill.symbol}_{fill.exchange_trade_id}"
+
     async def append_fill(self, fill: ExchangeFill) -> None:
-        if await self.has_fill(fill.exchange_trade_id):
+        key = self._get_fill_key(fill)
+        if key in self._fill_keys or await self.has_fill(fill.exchange_trade_id):
+            logger.info("Ignoring duplicate fill event: %s", key)
             return
+        self._fill_keys.add(key)
         self.fills.append(fill)
         
     async def has_fill(self, exchange_trade_id: str) -> bool:
@@ -68,22 +75,41 @@ class InMemoryLedger:
                 return o
         return None
         
-    async def replace_positions(self, raw_positions: List[dict]) -> None:
-        self.positions = raw_positions
+    def _to_exchange_position(self, pos: Union[dict, ExchangePosition]) -> ExchangePosition:
+        if isinstance(pos, ExchangePosition):
+            return pos
+        ps_str = str(pos.get("positionSide", "BOTH")).upper()
+        try:
+            ps = PositionSide(ps_str)
+        except Exception:
+            ps = PositionSide.BOTH
+        return ExchangePosition(
+            symbol=pos.get("symbol", ""),
+            position_side=ps,
+            quantity=Decimal(str(pos.get("positionAmt", "0"))),
+            entry_price=Decimal(str(pos.get("entryPrice", "0"))),
+            mark_price=Decimal(str(pos.get("markPrice", "0"))) if pos.get("markPrice") is not None else None,
+            unrealized_pnl=Decimal(str(pos.get("unRealizedProfit", "0"))),
+            margin_type=pos.get("marginType", "cross"),
+            event_time=pos.get("eventTime"),
+            source=pos.get("source", "BINANCE_TESTNET")
+        )
+
+    async def replace_positions(self, raw_positions: List[Union[dict, ExchangePosition]]) -> None:
+        self.positions = [self._to_exchange_position(p) for p in raw_positions]
         self._initialized = True
 
-    async def upsert_position(self, raw_position: dict) -> None:
-        sym = raw_position.get("symbol")
-        ps = raw_position.get("positionSide")
-        # Replace existing or append
+    async def upsert_position(self, raw_position: Union[dict, ExchangePosition]) -> None:
+        norm_pos = self._to_exchange_position(raw_position)
         for i, p in enumerate(self.positions):
-            if p.get("symbol") == sym and p.get("positionSide") == ps:
-                self.positions[i] = raw_position
+            if p.symbol == norm_pos.symbol and p.position_side == norm_pos.position_side:
+                self.positions[i] = norm_pos
                 return
-        self.positions.append(raw_position)
+        self.positions.append(norm_pos)
         
     async def get_open_orders(self) -> List[ExecutionOrder]:
         return [o for o in self.orders.values() if o.status in ("NEW", "PARTIALLY_FILLED")]
         
-    async def get_positions(self) -> List[dict]:
+    async def get_positions(self) -> List[ExchangePosition]:
         return self.positions
+

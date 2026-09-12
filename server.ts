@@ -1364,6 +1364,22 @@ app.get('/api/system/preflight', async (req, res) => {
   }
 });
 
+app.get('/api/system/readiness', async (req, res) => {
+  try {
+    const resp = await fetch(WORKER_URL + '/readiness');
+    const data = await resp.json();
+    res.json(data);
+  } catch (err) {
+    res.json({
+      PAPER_READY: true,
+      TESTNET_READ_ONLY_READY: false,
+      TESTNET_MANUAL_READY: false,
+      TESTNET_AUTONOMOUS_READY: false,
+      SMALL_LIVE_READY: false
+    });
+  }
+});
+
 app.post('/api/system/arm', async (req, res) => {
   const { executionMode, riskProfile, instruments, strategies } = req.body;
   if (executionMode === 'LIVE') {
@@ -1528,8 +1544,17 @@ app.get('/api/quant/state', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/quant/risk/kill-switch', (req: Request, res: Response) => {
+app.post('/api/quant/risk/kill-switch', async (req: Request, res: Response) => {
   const { active: ksActive } = req.body;
+  try {
+    await fetch(WORKER_URL + '/kill-switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: ksActive })
+    });
+  } catch (err) {
+    console.warn('Could not forward kill switch to worker:', err);
+  }
   tradingSystemState.killSwitchActive = ksActive;
   tradingSystemState.engineState = ksActive ? 'EMERGENCY' : 'DISARMED';
   tradingSystemState.updatedAt = new Date().toISOString();
@@ -1539,6 +1564,12 @@ app.post('/api/quant/risk/kill-switch', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/expand', (req: Request, res: Response) => {
+  if (tradingSystemState.executionMode === 'TESTNET') {
+    return res.status(400).json({
+      error: 'NOT_AVAILABLE_IN_TESTNET_YET',
+      message: 'Simulated basket mutations are not permitted in TESTNET execution mode.',
+    });
+  }
   if (!canExecuteAction(tradingSystemState.engineState, 'INCREASE_RISK')) {
     return res.status(403).json({ error: 'ACTION_BLOCKED_BY_SYSTEM_STATE', engineState: tradingSystemState.engineState, action: 'INCREASE_RISK' });
   }
@@ -1563,6 +1594,12 @@ app.post('/api/quant/basket/expand', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/recovery', (req: Request, res: Response) => {
+  if (tradingSystemState.executionMode === 'TESTNET') {
+    return res.status(400).json({
+      error: 'NOT_AVAILABLE_IN_TESTNET_YET',
+      message: 'Simulated basket mutations are not permitted in TESTNET execution mode.',
+    });
+  }
   if (!canExecuteAction(tradingSystemState.engineState, 'RECOVERY')) {
     return res.status(403).json({ error: 'ACTION_BLOCKED_BY_SYSTEM_STATE', engineState: tradingSystemState.engineState, action: 'RECOVERY' });
   }
@@ -1577,6 +1614,12 @@ app.post('/api/quant/basket/recovery', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/close', (req: Request, res: Response) => {
+  if (tradingSystemState.executionMode === 'TESTNET') {
+    return res.status(400).json({
+      error: 'NOT_AVAILABLE_IN_TESTNET_YET',
+      message: 'Simulated basket mutations are not permitted in TESTNET execution mode.',
+    });
+  }
   if (!canExecuteAction(tradingSystemState.engineState, 'CLOSE')) {
     return res.status(403).json({ error: 'ACTION_BLOCKED_BY_SYSTEM_STATE', engineState: tradingSystemState.engineState, action: 'CLOSE' });
   }
@@ -1593,6 +1636,12 @@ app.post('/api/quant/basket/close', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/action', (req: Request, res: Response) => {
+  if (tradingSystemState.executionMode === 'TESTNET') {
+    return res.status(400).json({
+      error: 'NOT_AVAILABLE_IN_TESTNET_YET',
+      message: 'Simulated basket mutations are not permitted in TESTNET execution mode.',
+    });
+  }
   const { basket_id, action } = req.body;
   
   let riskClass = 'NEW_RISK';
@@ -1635,12 +1684,21 @@ app.post('/api/quant/basket/action', (req: Request, res: Response) => {
   res.json({ status: 'success', basket });
 });
 
-app.post('/api/quant/killswitch', (req: Request, res: Response) => {
+app.post('/api/quant/killswitch', async (req: Request, res: Response) => {
   // Alias for backward compatibility
   const { active: ksActive } = req.body;
   const targetState = ksActive ? 'EMERGENCY' : 'DISARMED';
   if (!validateStateTransition(tradingSystemState.engineState, targetState)) {
     return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: targetState });
+  }
+  try {
+    await fetch(WORKER_URL + '/kill-switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: ksActive })
+    });
+  } catch (err) {
+    console.warn('Could not forward kill switch to worker:', err);
   }
   const prevState = tradingSystemState.engineState;
   tradingSystemState.killSwitchActive = ksActive;
