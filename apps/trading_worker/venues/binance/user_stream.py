@@ -1,19 +1,22 @@
 import asyncio
-import logging
 import json
-import random
+import logging
 import math
 import os
+import random
 from datetime import datetime, timezone
+
 try:
     import websockets
 except ImportError:
     websockets = None
-from .rest_client import BinanceRestClient
+
 from .config import BinanceEnvironment, get_ws_url
 from .models import BinanceAuthenticationError
+from .rest_client import BinanceRestClient
 
 logger = logging.getLogger("blessing.binance.user_stream")
+
 
 class BinanceUserStream:
     BACKOFF_STEPS = [1.0, 2.0, 4.0, 8.0, 15.0, 30.0]
@@ -119,9 +122,20 @@ class BinanceUserStream:
         if self.ws is None:
             return False
         try:
-            await asyncio.wait_for(
+            # websockets.ping() returns an awaitable pong waiter. Await both
+            # the ping send and the actual pong; sending a ping alone is not
+            # evidence that the private stream is still usable.
+            deadline = (
+                asyncio.get_running_loop().time()
+                + self.STREAM_HEARTBEAT_TIMEOUT_SEC
+            )
+            pong_waiter = await asyncio.wait_for(
                 self.ws.ping(), timeout=self.STREAM_HEARTBEAT_TIMEOUT_SEC
             )
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError("private stream pong deadline exceeded")
+            await asyncio.wait_for(pong_waiter, timeout=remaining)
         except Exception as exc:
             logger.warning("Private stream ping/pong failed: %s", exc)
             return False

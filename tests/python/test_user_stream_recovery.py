@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -5,8 +6,10 @@ import pytest
 from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
-from apps.trading_worker.venues.binance.models import ConnectionState
-from apps.trading_worker.venues.binance.models import BinanceAuthenticationError
+from apps.trading_worker.venues.binance.models import (
+    BinanceAuthenticationError,
+    ConnectionState,
+)
 from apps.trading_worker.venues.binance.user_stream import BinanceUserStream
 
 pytestmark = pytest.mark.asyncio
@@ -26,6 +29,39 @@ async def test_private_stream_needs_event_or_transport_heartbeat():
     stream.last_event_at = None
     stream.last_transport_heartbeat_at = datetime.now(UTC)
     assert stream.is_healthy() is True
+
+
+async def test_transport_heartbeat_requires_pong():
+    class ResponsiveWebSocket:
+        def __init__(self):
+            self.ping_calls = 0
+
+        async def ping(self):
+            self.ping_calls += 1
+            pong = asyncio.get_running_loop().create_future()
+            pong.set_result(0.001)
+            return pong
+
+    stream = BinanceUserStream(None, BinanceEnvironment.TESTNET)
+    stream.ws = ResponsiveWebSocket()
+    stream.STREAM_HEARTBEAT_TIMEOUT_SEC = 0.1
+
+    assert await stream._transport_heartbeat() is True
+    assert stream.ws.ping_calls == 1
+    assert stream.last_transport_heartbeat_at is not None
+
+
+async def test_transport_heartbeat_fails_when_pong_is_missing():
+    class UnresponsiveWebSocket:
+        async def ping(self):
+            return asyncio.get_running_loop().create_future()
+
+    stream = BinanceUserStream(None, BinanceEnvironment.TESTNET)
+    stream.ws = UnresponsiveWebSocket()
+    stream.STREAM_HEARTBEAT_TIMEOUT_SEC = 0.01
+
+    assert await stream._transport_heartbeat() is False
+    assert stream.last_transport_heartbeat_at is None
 
 
 class MockUserStream:
