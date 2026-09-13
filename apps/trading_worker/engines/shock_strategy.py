@@ -1,8 +1,9 @@
 import logging
 from decimal import Decimal
 from typing import Optional
-from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType, utc_now
+from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType
 from domain.enums import RegimeType
+from .identifiers import event_time_token
 
 logger = logging.getLogger("blessing.engines.shock_strategy")
 
@@ -24,7 +25,7 @@ class ShockStrategyEngine:
         delta = Decimal("0.3") if direction == PositionSide.LONG else Decimal("-0.3")
         
         return StrategyIntent(
-            intent_id=f"SHOCK-INTENT-{utc_now().timestamp()}",
+            intent_id=f"SHOCK-INTENT-{pa_state.symbol}-{event_time_token(pa_state.timestamp)}",
             strategy_id=self.strategy_id,
             symbol=pa_state.symbol,
             market_type=MarketType.USDM_FUTURES,

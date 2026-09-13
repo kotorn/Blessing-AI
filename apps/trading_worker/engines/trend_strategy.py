@@ -1,8 +1,9 @@
 import logging
 from decimal import Decimal
 from typing import Optional
-from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType, utc_now
+from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType
 from domain.enums import RegimeType
+from .identifiers import event_time_token
 
 logger = logging.getLogger("blessing.engines.trend_strategy")
 
@@ -21,7 +22,7 @@ class TrendStrategyEngine:
         delta = Decimal("0.2") if direction == PositionSide.LONG else Decimal("-0.2")
         
         return StrategyIntent(
-            intent_id=f"TREND-INTENT-{utc_now().timestamp()}",
+            intent_id=f"TREND-INTENT-{pa_state.symbol}-{event_time_token(pa_state.timestamp)}",
             strategy_id=self.strategy_id,
             symbol=pa_state.symbol,
             market_type=MarketType.USDM_FUTURES,

@@ -1,4 +1,6 @@
 import logging
+from collections.abc import Callable
+from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Optional, Tuple
 from domain.models import TargetExposure, RiskSnapshot, utc_now
@@ -7,11 +9,11 @@ from domain.enums import RecoveryActionType
 logger = logging.getLogger("blessing.engines.exposure_recovery")
 
 class RecoveryState:
-    def __init__(self):
+    def __init__(self, clock: Callable[[], datetime]):
         self.is_active: bool = False
         self.action_type: RecoveryActionType = RecoveryActionType.HOLD
         self.hedge_ratio: Decimal = Decimal("0.0")
-        self.last_update = utc_now()
+        self.last_update = clock()
         self.locked_toxicity_level: Decimal = Decimal("0.0")
         
     def reset(self):
@@ -21,14 +23,21 @@ class RecoveryState:
         self.locked_toxicity_level = Decimal("0.0")
 
 class ExposureRecoveryEngine:
-    def __init__(self, drawdown_trigger_pct: Decimal = Decimal("2.0"), max_hedge_ratio: Decimal = Decimal("0.8")):
+    def __init__(
+        self,
+        drawdown_trigger_pct: Decimal = Decimal("2.0"),
+        max_hedge_ratio: Decimal = Decimal("0.8"),
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ):
         self.drawdown_trigger_pct = drawdown_trigger_pct
         self.max_hedge_ratio = max_hedge_ratio
         self.states: Dict[str, RecoveryState] = {}
+        self._clock = clock or utc_now
 
     def _get_or_create_state(self, symbol: str) -> RecoveryState:
         if symbol not in self.states:
-            self.states[symbol] = RecoveryState()
+            self.states[symbol] = RecoveryState(self._clock)
         return self.states[symbol]
 
     def _determine_action(self, state: RecoveryState, risk: RiskSnapshot, current_qty: Decimal, target_delta: Decimal) -> Tuple[RecoveryActionType, Decimal]:
@@ -82,7 +91,7 @@ class ExposureRecoveryEngine:
             state.is_active = True
             state.locked_toxicity_level = risk.current_drawdown_pct
             
-        state.last_update = utc_now()
+        state.last_update = self._clock()
 
         # A recovery state must never manufacture exposure.  With no existing
         # position there is nothing to hedge or unwind, so every strategy

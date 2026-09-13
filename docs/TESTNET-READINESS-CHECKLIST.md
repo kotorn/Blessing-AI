@@ -11,6 +11,7 @@ Testnet has been verified.
 | Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED` | The exact clean commit SHA is recorded in the generated `build-evidence.json`; the exact-SHA GitHub Actions check must pass Node install/lint/tests/build. |
 | Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED` | The exact clean commit SHA is recorded in the generated `build-evidence.json`; the exact-SHA GitHub Actions check must pass Python install/tests and hygiene. |
 | Net economics and WFO/OOS research evaluator | `LOCAL_VERIFIED; RESEARCH_ONLY` | Explicit fees/funding/spread/slippage inputs, contiguous complete-horizon research candles, purged/embargoed OOS folds, regime coverage, parameter plateau, common OOS-fold coverage, and train-only selection binding; never launch evidence |
+| Deterministic strategy replay and event-time WFO windows | `UNIT_TESTED; LOCAL_VERIFIED; RESEARCH_ONLY` | Existing strategy engines run through allocator, recovery, RiskGovernor, per-order research gate, recorded bid/ask/depth fills, explicit funding settlement, and canonical fill lineage; replay remains non-launch evidence and does not claim positive edge |
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
 | Binance CLI research cross-check boundary | `UNIT_TESTED; LOCAL_VERIFIED` | The isolated wrapper allowlists read-only USDⓈ-M checks and blocks Mainnet/mutations; no CLI binary is configured |
@@ -85,3 +86,12 @@ The local non-secret gates were rerun for the current clean checkout. The
 generated `artifacts/build-evidence.json` records the exact commit SHA and the
 exact-SHA GitHub CI result; the workflow artifact is the authoritative handoff
 when this document is viewed from a clean checkout.
+
+The deterministic replay is now available for validated public read-only event
+datasets. It is intentionally conservative: unknown historical liquidation
+safety blocks further risk increase after entry, missing funding settlements
+fail closed, insufficient recorded depth rejects a fill, and an explicit
+end-of-sample close is required for a complete trade result. No replay result
+is Testnet evidence or proof of positive expected return; real dataset hashes,
+walk-forward train-only selection artifacts, and statistical robustness remain
+required before any capital decision.

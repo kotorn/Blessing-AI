@@ -113,6 +113,18 @@ wrapper rejects Mainnet/demo routes, profiles, custom requests, and all
 mutable CLI commands; details and commands are in
 `docs/BINANCE-CLI-RESEARCH.md`.
 
+## Research replay boundary
+
+`apps/trading_worker/backtest/replay.py` is an offline research simulator. It
+replays the existing strategy engines through the allocator, recovery engine,
+and RiskGovernor against validated public event data, then applies explicit
+bid/ask/depth, fee, spread, slippage, and funding accounting. It has no Binance
+REST/WebSocket imports and cannot submit an order. Historical liquidation
+safety is `UNKNOWN` unless an authoritative position-risk source is supplied;
+the replay therefore blocks further risk increase after an entry and remains
+`RESEARCH_REPLAY_ONLY`. A replay result cannot promote Testnet readiness,
+manual-trial evidence, autonomous execution, or a positive-edge claim.
+
 ## Current evidence status
 
 The current verified safety/research implementation checkpoint is the clean

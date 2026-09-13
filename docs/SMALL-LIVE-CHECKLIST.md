@@ -20,6 +20,9 @@ operational approval before any Mainnet implementation is considered.
 - [ ] Current-SHA controlled Testnet mutation and sanitized artifact:
       `MANUAL_TESTNET_VERIFIED` (blocked: 50 USDT exchange minimum exceeds
       the hard 25 USDT first-launch cap).
+- [x] Deterministic strategy replay and event-time research windows:
+      `UNIT_TESTED; LOCAL_VERIFIED; RESEARCH_ONLY`; this is not a live-readiness
+      or positive-edge claim.
 - [ ] Long-duration Testnet soak with zero unhandled execution exceptions.
 - [ ] Independent risk and operations sign-off.
 - [ ] Durable operational persistence on **Cloud SQL PostgreSQL** for orders,

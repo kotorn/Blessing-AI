@@ -10,8 +10,8 @@ from domain.models import (
     MarketType,
     PositionSide,
     StrategyIntent,
-    utc_now,
 )
+from .identifiers import event_time_token
 
 logger = logging.getLogger("blessing.engines.funding_carry")
 
@@ -179,7 +179,7 @@ class FundingCarryEngine:
         )
         
         return StrategyIntent(
-            intent_id=f"CARRY-INTENT-{utc_now().timestamp()}",
+            intent_id=f"CARRY-INTENT-{event.symbol}-{event_time_token(event.event_time)}",
             strategy_id=self.strategy_id,
             symbol=event.symbol,
             market_type=MarketType.USDM_FUTURES,

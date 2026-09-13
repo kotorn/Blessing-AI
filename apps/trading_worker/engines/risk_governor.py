@@ -1,4 +1,6 @@
 import logging
+from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 from domain.models import TargetExposure, RiskSnapshot, ExecutionDecision, OrderIntent, OrderSide, PositionSide, OrderType, TimeInForce, utc_now
@@ -23,11 +25,29 @@ class RiskGovernor:
         max_drawdown_pct: Decimal = Decimal("6.0"),
         hedge_mode: bool = False,
         max_margin_utilization_pct: Decimal = Decimal("70.0"),
+        *,
+        clock: Callable[[], datetime] | None = None,
     ):
         self.max_leverage = max_leverage
         self.max_drawdown_pct = max_drawdown_pct
         self.max_margin_utilization_pct = max_margin_utilization_pct
         self.hedge_mode = hedge_mode
+        self._clock = clock or utc_now
+        self._sequence = 0
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if not isinstance(value, datetime):
+            raise ValueError("RiskGovernor clock must return a datetime")
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    def _next_id(self, prefix: str, timestamp: datetime | None = None) -> str:
+        self._sequence += 1
+        observed_at = timestamp or self._now()
+        token = observed_at.strftime("%Y%m%dT%H%M%S%fZ")
+        return f"{prefix}-{token}-{self._sequence:06d}"
 
     def evaluate(self, target: TargetExposure, risk_snapshot: RiskSnapshot, current_position_qty: Decimal) -> ExecutionDecision:
         """Turn one relative target delta into a gated execution decision.
@@ -39,6 +59,7 @@ class RiskGovernor:
         absolute target.
         """
 
+        now = self._now()
         try:
             required_delta = Decimal(str(target.target_net_delta_qty))
             current_position_qty = Decimal(str(current_position_qty))
@@ -49,7 +70,7 @@ class RiskGovernor:
 
         try:
             target_expiry = target.expires_at
-            if target_expiry.tzinfo is None or target_expiry <= utc_now():
+            if target_expiry.tzinfo is None or target_expiry <= now:
                 return self._reject(target, "Target exposure is expired or has no timezone")
         except (AttributeError, TypeError):
             return self._reject(target, "Target exposure expiry is invalid")
@@ -114,12 +135,13 @@ class RiskGovernor:
         # decisions with independent gates.
         if abs(required_delta) < Decimal("0.001"):
             return ExecutionDecision(
-                decision_id=f"DEC-{utc_now().timestamp()}",
+                decision_id=self._next_id("DEC", now),
                 symbol=target.symbol,
                 action="NOOP",
                 risk_class=EconomicRiskClass.NOOP,
                 rational="Net delta is below minimum threshold.",
                 net_exposure_delta=Decimal("0.0"),
+                timestamp=now,
                 target_exposure_id=target.exposure_id,
                 source_intent_ids=target.source_intent_ids,
             )
@@ -141,7 +163,7 @@ class RiskGovernor:
             pos_side = PositionSide.LONG if required_delta > 0 else PositionSide.SHORT
         
         order = OrderIntent(
-            client_order_id=f"B-SYS-{int(utc_now().timestamp() * 1000)}",
+            client_order_id=self._next_id("B-SYS", now),
             symbol=target.symbol,
             market_type=target.market_type,
             side=side,
@@ -152,29 +174,33 @@ class RiskGovernor:
             reduce_only=risk_class in {EconomicRiskClass.REDUCE_RISK, EconomicRiskClass.CLOSE},
             strategy_id="meta_allocator",
             source_intent_ids=target.source_intent_ids,
+            created_at=now,
         )
         
         return ExecutionDecision(
-            decision_id=f"DEC-{utc_now().timestamp()}",
+            decision_id=self._next_id("DEC", now),
             symbol=target.symbol,
             action="SUBMIT_ORDER",
             risk_class=risk_class,
             orders=[order],
             rational=f"Approved relative target delta of {required_delta} after risk checks.",
             net_exposure_delta=required_delta,
+            timestamp=now,
             target_exposure_id=target.exposure_id,
             source_intent_ids=target.source_intent_ids,
         )
 
     def _reject(self, target: TargetExposure, reason: str) -> ExecutionDecision:
         logger.warning("Risk Governor REJECTED TargetExposure: %s", reason)
+        now = self._now()
         return ExecutionDecision(
-            decision_id=f"DEC-{utc_now().timestamp()}",
+            decision_id=self._next_id("DEC", now),
             symbol=target.symbol,
             action="NOOP",
             risk_class=EconomicRiskClass.NOOP,
             rational=reason,
             net_exposure_delta=Decimal("0.0"),
+            timestamp=now,
             target_exposure_id=target.exposure_id,
             source_intent_ids=target.source_intent_ids,
         )

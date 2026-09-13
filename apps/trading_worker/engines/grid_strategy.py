@@ -1,8 +1,9 @@
 import logging
 from decimal import Decimal, InvalidOperation
 from typing import Optional
-from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType, utc_now
+from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType
 from domain.enums import RegimeType
+from .identifiers import event_time_token
 
 logger = logging.getLogger("blessing.engines.grid_strategy")
 
@@ -39,7 +40,7 @@ class GridStrategyEngine:
 
     def _brake_intent(self, pa_state: PriceActionState, reason: str) -> StrategyIntent:
         return StrategyIntent(
-            intent_id=f"GRID-BRAKE-{utc_now().timestamp()}",
+            intent_id=f"GRID-BRAKE-{pa_state.symbol}-{event_time_token(pa_state.timestamp)}",
             strategy_id=self.strategy_id,
             symbol=pa_state.symbol,
             market_type=MarketType.USDM_FUTURES,
@@ -136,7 +137,7 @@ class GridStrategyEngine:
             delta = Decimal("0.0")
         
         return StrategyIntent(
-            intent_id=f"GRID-INTENT-{utc_now().timestamp()}",
+            intent_id=f"GRID-INTENT-{pa_state.symbol}-{event_time_token(pa_state.timestamp)}",
             strategy_id=self.strategy_id,
             symbol=pa_state.symbol,
             market_type=MarketType.USDM_FUTURES,
