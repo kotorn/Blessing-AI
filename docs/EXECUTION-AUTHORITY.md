@@ -115,9 +115,9 @@ mutable CLI commands; details and commands are in
 
 ## Current evidence status
 
-The verified safety/research implementation checkpoint
-`76195a79b2e5d75f3578333b185f91ae8a257f88` passed the non-secret unit and
-frontend gates in GitHub Actions run `34774313266`. The credentialed contract
+The current verified safety/research implementation checkpoint
+`c2e480f06eb5b880135ccefccde120579d81f184` passed the non-secret unit and
+frontend gates in GitHub Actions run `34777457189`. The credentialed contract
 workflow records current-SHA sanitized evidence after read-only success and
 only marks the manual trial verified after the mutating test passes. The
 read-only contract passed locally on 2026-09-14; the controlled mutation trial

@@ -14,7 +14,7 @@ operational approval before any Mainnet implementation is considered.
 
 ## Required future evidence
 
-- [x] Code checkpoint `76195a79b2e5d75f3578333b185f91ae8a257f88` Testnet
+- [x] Code checkpoint `c2e480f06eb5b880135ccefccde120579d81f184` Testnet
       read-only contract: `LOCAL_VERIFIED; CONTRACT_TESTED` (1 passed,
       2 deselected; no mutation).
 - [ ] Current-SHA controlled Testnet mutation and sanitized artifact:
@@ -31,8 +31,8 @@ operational approval before any Mainnet implementation is considered.
 
 Current sprint evidence: local non-secret gates are `LOCAL_VERIFIED` and
 verified safety/research implementation checkpoint
-`76195a79b2e5d75f3578333b185f91ae8a257f88` is `CI_VERIFIED` by GitHub Actions
-run `34774313266`. Testnet read-only is `LOCAL_VERIFIED; CONTRACT_TESTED`;
+`c2e480f06eb5b880135ccefccde120579d81f184` is `CI_VERIFIED` by GitHub Actions
+run `34777457189`. Testnet read-only is `LOCAL_VERIFIED; CONTRACT_TESTED`;
 manual mutation is `NOT_RUN` because the 50 USDT exchange minimum exceeds the
 hard 25 USDT cap; the supervised soak runner is not approved or run; autonomous
 Testnet is locked. No Mainnet order has been created or tested.
