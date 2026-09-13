@@ -12,6 +12,9 @@ on:
         - 'false'
         - 'true'
 
+permissions:
+  contents: read
+
 jobs:
   contract_tests:
     runs-on: ubuntu-latest
@@ -19,6 +22,8 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
     
     - name: Setup Python
       uses: actions/setup-python@v5
@@ -31,7 +36,6 @@ jobs:
         pip install -e ".[dev]"
 
     - name: Run Non-Secret Unit Tests
-      if: github.event.inputs.allow_mutation == 'true'
       env:
         PYTHONPATH: .
       run: |
@@ -57,7 +61,6 @@ jobs:
         pytest -m "contract_readonly" tests/python/contract/
 
     - name: Record Current-SHA Testnet Evidence
-      if: github.event.inputs.allow_mutation == 'true'
       env:
         BUILD_SHA: ${{ github.sha }}
       run: |
@@ -109,7 +112,7 @@ jobs:
         PY
 
     - name: Upload Sanitized Testnet Evidence
-      if: always() && github.event.inputs.allow_mutation == 'true'
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: testnet-contract-evidence-${{ github.sha }}

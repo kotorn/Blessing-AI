@@ -16,7 +16,7 @@ Testnet has been verified.
 | Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
 | Read-only Binance Testnet contract | `NOT_RUN` | No local Testnet credentials were configured in this session |
 | Controlled manual Testnet mutation | `NOT_RUN` | Requires explicit `TESTNET_MANUAL_TRIAL_APPROVED=true` and read-only evidence |
-| Credentialed contract evidence handoff | `CODE_PRESENT` | Explicit mutation dispatch runs non-secret tests first, records current-SHA evidence after read-only success, and promotes manual evidence only after the mutating trial passes |
+| Credentialed contract evidence handoff | `CODE_PRESENT` | The workflow runs non-secret tests first, records current-SHA evidence after read-only success in either mode, and promotes manual evidence only after the mutating trial passes |
 | GitHub CI for runtime candidate `cd4e2f9` | `CI_VERIFIED` | Run `34747554913` passed Node install/lint/tests/build, Python install/tests, and hygiene |
 | Autonomous Testnet execution | `LOCKED` | Requires current-SHA evidence, approval, and runtime readiness; default is false |
 | Mainnet execution | `DISABLED` | LIVE ARM and mutable Mainnet adapter construction are rejected |
