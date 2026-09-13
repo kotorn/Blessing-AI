@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canExecuteAction, evaluatePreflight } from '../src/backend/system';
+import { canExecuteAction, evaluatePreflight, isWorkerTradingConnectionHealthy } from '../src/backend/system';
 import { TradingSystemState } from '../src/backend/types';
 import {
   parsePortfolioMarginResponse,
@@ -97,6 +97,18 @@ describe('System Preflight Execution Enforcements', () => {
     expect(canExecuteAction('EMERGENCY', 'RECOVERY')).toBe(false);
     expect(canExecuteAction('EMERGENCY', 'EMERGENCY')).toBe(true);
     expect(canExecuteAction('DISARMED', 'CLOSE')).toBe(false);
+  });
+
+  it('fails closed when transport state is READY but worker health is false', () => {
+    expect(isWorkerTradingConnectionHealthy({
+      connection_state: 'READY',
+      trading_connection_healthy: false,
+    })).toBe(false);
+    expect(isWorkerTradingConnectionHealthy({
+      connection_state: 'READY',
+      trading_connection_healthy: true,
+    })).toBe(true);
+    expect(isWorkerTradingConnectionHealthy({ connection_state: 'READY' })).toBe(false);
   });
 
   it('keeps Portfolio Margin observations read-only and separate from Worker collateral', () => {

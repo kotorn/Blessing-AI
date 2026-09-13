@@ -13,6 +13,19 @@ export const EXECUTION_CAPABILITIES: ExecutionCapabilities = {
   hedgeModeSupported: false
 };
 
+/**
+ * Project the worker's canonical connection-health verdict without inferring
+ * readiness from a transport/state label.  A READY connection can still be
+ * unsafe for execution when authentication, the private stream, or
+ * reconciliation is unhealthy, so a missing or conflicting health field must
+ * fail closed.
+ */
+export function isWorkerTradingConnectionHealthy(workerState: unknown): boolean {
+  if (!workerState || typeof workerState !== 'object') return false;
+  const state = workerState as { trading_connection_healthy?: unknown };
+  return state.trading_connection_healthy === true;
+}
+
 export const RISK_PROFILES = {
   CONSERVATIVE: {
     maxPortfolioDrawdownPct: 10.0,

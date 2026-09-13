@@ -5,7 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { TradingSystemState, RiskConfiguration } from './src/backend/types.js';
-import { evaluatePreflight, validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES } from './src/backend/system.js';
+import { evaluatePreflight, validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES, isWorkerTradingConnectionHealthy } from './src/backend/system.js';
 import { auditRepository } from './src/backend/audit.js';
 import {
   parsePortfolioMarginResponse,
@@ -1534,7 +1534,10 @@ app.get('/api/system/state', async (req, res) => {
     tradingSystemState.recoveryOnly = workerState.recovery_only;
     tradingSystemState.killSwitchActive = workerState.kill_switch_active;
     tradingSystemState.updatedAt = workerState.updated_at;
-    tradingSystemState.tradingConnectionHealthy = workerState.connection_state === 'READY' || workerState.trading_connection_healthy === true;
+    // The Python worker owns the canonical health verdict. A READY transport
+    // label alone must not imply execution health while stream/auth/
+    // reconciliation checks are still false.
+    tradingSystemState.tradingConnectionHealthy = isWorkerTradingConnectionHealthy(workerState);
     if (typeof workerState.market_data_healthy === 'boolean') {
       tradingSystemState.marketDataHealthy = workerState.market_data_healthy;
     }
