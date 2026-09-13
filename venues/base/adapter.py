@@ -23,7 +23,9 @@ class SymbolInfo(BaseModel):
     tick_size: Decimal
     step_size: Decimal
     min_notional: Decimal
-    max_leverage: int
+    # ExchangeInfo does not universally expose an account/symbol leverage
+    # limit.  Keep it explicitly unknown instead of inventing a venue default.
+    max_leverage: Optional[int] = None
 
 
 class BalanceInfo(BaseModel):

@@ -9,11 +9,9 @@ Dynamically interrogates Binance Global REST endpoints on startup to discover:
 Ensures strategy logic never hard-codes exchange parameters.
 """
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Dict, Any, Optional
-import json
 import logging
-from datetime import datetime, timezone
 
 try:
     import aiohttp
@@ -24,6 +22,43 @@ except ImportError:
 from domain.models import Instrument, MarketType
 
 logger = logging.getLogger("blessing.binance.capabilities")
+
+
+def _required_positive_decimal(value: Any, field_name: str) -> Decimal:
+    if value in (None, ""):
+        raise ValueError(f"ExchangeInfo is missing {field_name}")
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"ExchangeInfo has invalid {field_name}") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise ValueError(f"ExchangeInfo has unusable {field_name}")
+    return parsed
+
+
+def _parse_symbol_filters(raw_symbol_data: Dict[str, Any]) -> tuple[Decimal, Decimal, Decimal]:
+    filters = raw_symbol_data.get("filters")
+    if not isinstance(filters, list):
+        raise ValueError("ExchangeInfo symbol is missing filters")
+    by_type = {
+        str(item.get("filterType", "")).upper(): item
+        for item in filters
+        if isinstance(item, dict)
+    }
+    price_filter = by_type.get("PRICE_FILTER")
+    lot_filter = by_type.get("LOT_SIZE")
+    notional_filter = by_type.get("MIN_NOTIONAL") or by_type.get("NOTIONAL")
+    if not price_filter or not lot_filter or not notional_filter:
+        raise ValueError(
+            "ExchangeInfo symbol must include PRICE_FILTER, LOT_SIZE, and MIN_NOTIONAL/NOTIONAL"
+        )
+    tick_size = _required_positive_decimal(price_filter.get("tickSize"), "tickSize")
+    step_size = _required_positive_decimal(lot_filter.get("stepSize"), "stepSize")
+    min_notional = _required_positive_decimal(
+        notional_filter.get("notional", notional_filter.get("minNotional")),
+        "minNotional",
+    )
+    return tick_size, step_size, min_notional
 
 
 class BinanceCapabilityDiscovery:
@@ -50,35 +85,34 @@ class BinanceCapabilityDiscovery:
                     raise RuntimeError(f"Failed to fetch futures exchangeInfo: HTTP {resp.status}")
                 data = await resp.json()
 
-        symbols = {s["symbol"]: s for s in data.get("symbols", [])}
+        if not isinstance(data, dict) or not isinstance(data.get("symbols"), list):
+            raise RuntimeError("Binance exchangeInfo response is invalid")
+        symbols = {
+            s["symbol"]: s
+            for s in data["symbols"]
+            if isinstance(s, dict) and s.get("symbol")
+        }
         if symbol not in symbols:
             raise ValueError(f"Symbol {symbol} not found on Binance USDⓈ-M Futures")
 
         s = symbols[symbol]
-        tick_size = Decimal("0.1")
-        step_size = Decimal("0.001")
-        min_notional = Decimal("5.0")
-
-        for f in s.get("filters", []):
-            f_type = f.get("filterType")
-            if f_type == "PRICE_FILTER":
-                tick_size = Decimal(str(f.get("tickSize", "0.1")))
-            elif f_type == "LOT_SIZE":
-                step_size = Decimal(str(f.get("stepSize", "0.001")))
-            elif f_type in ("MIN_NOTIONAL", "NOTIONAL"):
-                min_notional = Decimal(str(f.get("notional", "5.0")))
+        if s.get("status") != "TRADING":
+            raise ValueError(f"Symbol {symbol} is not TRADING")
+        tick_size, step_size, min_notional = _parse_symbol_filters(s)
+        if not s.get("baseAsset") or not s.get("quoteAsset"):
+            raise ValueError(f"ExchangeInfo symbol {symbol} is missing asset metadata")
 
         instrument = Instrument(
             symbol=s["symbol"],
             venue="binance_global",
             market_type=MarketType.USDM_FUTURES,
-            base_asset=s.get("baseAsset", ""),
-            quote_asset=s.get("quoteAsset", ""),
+            base_asset=s["baseAsset"],
+            quote_asset=s["quoteAsset"],
             tick_size=tick_size,
             step_size=step_size,
             min_notional=min_notional,
-            price_precision=int(s.get("pricePrecision", 2)),
-            quantity_precision=int(s.get("quantityPrecision", 3)),
+            price_precision=int(s["pricePrecision"]),
+            quantity_precision=int(s["quantityPrecision"]),
             is_trading_enabled=s.get("status") == "TRADING",
         )
         self.cached_instruments[symbol] = instrument
@@ -93,29 +127,22 @@ class BinanceCapabilityDiscovery:
 
     def parse_mock_exchange_info(self, symbol: str, raw_symbol_data: Dict[str, Any]) -> Instrument:
         """Deterministic offline parser for unit tests and local simulation."""
-        tick_size = Decimal("0.1")
-        step_size = Decimal("0.001")
-        min_notional = Decimal("5.0")
-
-        for f in raw_symbol_data.get("filters", []):
-            f_type = f.get("filterType")
-            if f_type == "PRICE_FILTER":
-                tick_size = Decimal(str(f.get("tickSize", "0.1")))
-            elif f_type == "LOT_SIZE":
-                step_size = Decimal(str(f.get("stepSize", "0.001")))
-            elif f_type in ("MIN_NOTIONAL", "NOTIONAL"):
-                min_notional = Decimal(str(f.get("notional", "5.0")))
+        if raw_symbol_data.get("status") != "TRADING":
+            raise ValueError(f"Symbol {symbol} is not TRADING")
+        tick_size, step_size, min_notional = _parse_symbol_filters(raw_symbol_data)
+        if not raw_symbol_data.get("baseAsset") or not raw_symbol_data.get("quoteAsset"):
+            raise ValueError(f"ExchangeInfo symbol {symbol} is missing asset metadata")
 
         return Instrument(
             symbol=raw_symbol_data["symbol"],
             venue="binance_global",
             market_type=MarketType.USDM_FUTURES,
-            base_asset=raw_symbol_data.get("baseAsset", "BTC"),
-            quote_asset=raw_symbol_data.get("quoteAsset", "USDT"),
+            base_asset=raw_symbol_data["baseAsset"],
+            quote_asset=raw_symbol_data["quoteAsset"],
             tick_size=tick_size,
             step_size=step_size,
             min_notional=min_notional,
-            price_precision=int(raw_symbol_data.get("pricePrecision", 2)),
-            quantity_precision=int(raw_symbol_data.get("quantityPrecision", 3)),
+            price_precision=int(raw_symbol_data["pricePrecision"]),
+            quantity_precision=int(raw_symbol_data["quantityPrecision"]),
             is_trading_enabled=raw_symbol_data.get("status") == "TRADING",
         )

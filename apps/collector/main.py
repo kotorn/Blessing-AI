@@ -6,16 +6,14 @@ Publishes normalized MarketEvent instances to NATS JetStream.
 
 import asyncio
 import logging
-import signal
 import sys
-from decimal import Decimal
-from typing import List
+from typing import List, Optional
 
 from domain.events import DomainEvent, EventSubjectBuilder
-from domain.models import MarketEvent, MarketType, utc_now
+from domain.models import MarketEvent
+from infrastructure.nats_client import NatsBus
 from venues.binance.capabilities import BinanceCapabilityDiscovery
 from venues.binance.public_ws import BinancePublicWebSocket
-from infrastructure.nats_client import NatsBus
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,8 +23,8 @@ logger = logging.getLogger("blessing.collector")
 
 
 class MarketDataCollectorApp:
-    def __init__(self, symbols: List[str] = ["BTCUSDT", "ETHUSDT"], nats_url: str = "nats://127.0.0.1:4222"):
-        self.symbols = symbols
+    def __init__(self, symbols: Optional[List[str]] = None, nats_url: str = "nats://127.0.0.1:4222"):
+        self.symbols = symbols if symbols is not None else ["BTCUSDT", "ETHUSDT"]
         self.nats_url = nats_url
         self.bus = NatsBus(nats_url)
         self.discovery = BinanceCapabilityDiscovery()
@@ -54,7 +52,11 @@ class MarketDataCollectorApp:
                 inst = await self.discovery.fetch_futures_symbol_capabilities(sym)
                 logger.info("Verified %s: tick=%s, step=%s", sym, inst.tick_size, inst.step_size)
             except Exception as err:
-                logger.warning("Could not probe live capabilities for %s (using offline fallback): %s", sym, err)
+                logger.warning(
+                    "Could not verify live capabilities for %s; continuing without exchange rules: %s",
+                    sym,
+                    err,
+                )
 
         logger.info("Starting public WebSocket ingestion for: %s", self.symbols)
         self.ws_client = BinancePublicWebSocket(

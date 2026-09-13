@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { canExecuteAction, evaluatePreflight } from '../src/backend/system';
 import { TradingSystemState } from '../src/backend/types';
+import {
+  parsePortfolioMarginResponse,
+  unavailablePortfolioMarginObservation,
+} from '../src/backend/portfolio-margin';
 
 describe('System Preflight Execution Enforcements', () => {
   it('should reject TESTNET arming if synchronized to MAINNET', () => {
@@ -93,5 +97,32 @@ describe('System Preflight Execution Enforcements', () => {
     expect(canExecuteAction('EMERGENCY', 'RECOVERY')).toBe(false);
     expect(canExecuteAction('EMERGENCY', 'EMERGENCY')).toBe(true);
     expect(canExecuteAction('DISARMED', 'CLOSE')).toBe(false);
+  });
+
+  it('keeps Portfolio Margin observations read-only and separate from Worker collateral', () => {
+    const observation = parsePortfolioMarginResponse([
+      {
+        asset: 'usdc',
+        totalWalletBalance: '100',
+        crossMarginAsset: '100',
+        crossMarginFree: '99.5',
+      },
+    ]);
+
+    expect(observation.status).toBe('OBSERVED_READ_ONLY');
+    expect(observation.verified).toBe(false);
+    expect(observation.includedInWorkerCollateral).toBe(false);
+    expect(observation.balances[0].asset).toBe('USDC');
+    expect(observation.balances[0].crossMarginAsset).toBe(100);
+  });
+
+  it('does not turn a malformed Portfolio Margin response into a zero balance', () => {
+    const observation = parsePortfolioMarginResponse([
+      { asset: 'USDC', totalWalletBalance: '100', crossMarginFree: '100' },
+    ]);
+
+    expect(observation.status).toBe('INVALID_RESPONSE');
+    expect(observation.balances).toEqual([]);
+    expect(unavailablePortfolioMarginObservation().includedInWorkerCollateral).toBe(false);
   });
 });

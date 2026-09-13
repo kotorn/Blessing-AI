@@ -16,6 +16,7 @@ Testnet has been verified.
 | Binance CLI research cross-check boundary | `UNIT_TESTED; LOCAL_VERIFIED` | The isolated wrapper allowlists read-only USDⓈ-M checks and blocks Mainnet/mutations; no CLI binary or credentials were present |
 | Public Testnet BTCUSDT rule spot-check | `LOCAL_VERIFIED` | Public GET-only `exchangeInfo` spot-check recorded on 2026-09-13 reports `TRADING`, `MIN_NOTIONAL=50 USDT`, `tickSize=0.10`, and `stepSize=0.0001`; this does not authenticate or authorize execution |
 | Account snapshot, liquidation math, and derived risk state | `UNIT_TESTED; LOCAL_VERIFIED` | Uses Binance account/position-risk fields; liquidation is `UNKNOWN` when unusable and unsafe account metrics set `NO_NEW_RISK` |
+| Spot/Portfolio Margin wallet observation | `CODE_PRESENT` (unverified) | Separate from USDⓈ-M Futures Testnet collateral; a Spot-to-Portfolio-Margin transfer cannot authorize the Worker or satisfy Testnet readiness |
 | Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
 | Read-only Binance Testnet contract | `NOT_RUN` | No local Testnet credentials were configured in this session |
 | Controlled manual Testnet mutation | `NOT_RUN` | Requires explicit `TESTNET_MANUAL_TRIAL_APPROVED=true` and read-only evidence |
@@ -42,6 +43,16 @@ AND the local kill switch is inactive
 ```
 
 Infrastructure readiness does not depend on `engine_state == ARMED`.
+
+## Wallet-product boundary
+
+The Worker reads only the Binance USDⓈ-M Futures Testnet account and position
+endpoints. Spot and Portfolio Margin balances belong to a separate account
+product. The TypeScript control-plane can expose a strictly parsed, signed
+Portfolio Margin observation for display, but it is always read-only and
+unverified relative to the Worker; missing or malformed Portfolio Margin
+fields are not converted to zero. No Portfolio Margin transfer is performed
+by this repository.
 
 ## First-launch Testnet limits
 

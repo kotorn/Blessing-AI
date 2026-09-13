@@ -7,6 +7,10 @@ import { GoogleGenAI } from '@google/genai';
 import { TradingSystemState, RiskConfiguration } from './src/backend/types.js';
 import { evaluatePreflight, validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES } from './src/backend/system.js';
 import { auditRepository } from './src/backend/audit.js';
+import {
+  parsePortfolioMarginResponse,
+  unavailablePortfolioMarginObservation,
+} from './src/backend/portfolio-margin.js';
 
 
 dotenv.config();
@@ -974,12 +978,27 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     });
     sub_wallets.sort((a, b) => b.usdVal - a.usdVal);
 
-    // Parse Portfolio Margin
-    let pmData: any[] = [];
+    // Portfolio Margin is a separate account product from the USDⓈ-M
+    // Futures Testnet worker.  Keep this as an explicitly read-only
+    // observation: it can never authorize the worker or be silently treated
+    // as Futures collateral.
+    let portfolioMarginObservation = unavailablePortfolioMarginObservation();
+
     if (pmResp && (pmResp as any).ok) {
       try {
-        pmData = await (pmResp as any).json();
-      } catch {}
+        const rawPmData = await (pmResp as any).json();
+        portfolioMarginObservation = parsePortfolioMarginResponse(rawPmData);
+      } catch (err: any) {
+        portfolioMarginObservation = {
+          ...unavailablePortfolioMarginObservation(
+            err?.message || 'Portfolio Margin response could not be read.',
+          ),
+          status: 'INVALID_RESPONSE',
+        };
+      }
+    } else if (pmResp) {
+      portfolioMarginObservation.message =
+        `Portfolio Margin read-only endpoint unavailable (HTTP ${(pmResp as any).status}).`;
     }
 
     // Parse Flexible Earn
@@ -1094,9 +1113,13 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     }
 
     // 2. Portfolio Margin (PM)
-    if (Array.isArray(pmData)) {
-      pmData.forEach((item: any) => {
-        const qty = parseFloat(item.totalWalletBalance || item.crossMarginAsset || '0');
+    if (portfolioMarginObservation.status === 'OBSERVED_READ_ONLY') {
+      portfolioMarginObservation.balances.forEach((item) => {
+        // This allocation is specifically the documented cross-margin asset
+        // balance.  Do not substitute totalWalletBalance: that field can
+        // include other Portfolio Margin components and would risk double
+        // counting against the separate Futures account below.
+        const qty = item.crossMarginAsset;
         if (qty > 0) {
           getLayerAsset(item.asset).allocations.push({
             location: 'Portfolio Margin',
@@ -1254,6 +1277,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       holdings,
       two_layer_assets,
       sub_wallets,
+      portfolio_margin_observation: portfolioMarginObservation,
       source: isTestnet ? 'BINANCE_TESTNET' : 'BINANCE_LIVE',
       last_sync_time: new Date().toISOString(),
       error: snapshotValid
@@ -1333,6 +1357,8 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     (quantEngineState.account as any).holdings = liveResult.holdings;
     (quantEngineState.account as any).two_layer_assets = liveResult.two_layer_assets;
     (quantEngineState.account as any).sub_wallets = liveResult.sub_wallets;
+    (quantEngineState.account as any).portfolio_margin_observation =
+      liveResult.portfolio_margin_observation;
 
     // Direct REST sync cannot pass worker-owned readiness checks.
     tradingSystemState.accountSynchronized = false;

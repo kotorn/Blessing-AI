@@ -67,7 +67,10 @@ class Instrument(BaseModel):
     price_precision: int
     quantity_precision: int
     is_trading_enabled: bool = True
-    max_leverage: int = 20
+    # A leverage limit is venue/account specific and is not present in every
+    # public exchange-info response.  Unknown must remain distinguishable from
+    # a guessed default so a caller cannot overstate available risk capacity.
+    max_leverage: Optional[int] = None
 
 
 class MarketEvent(BaseModel):

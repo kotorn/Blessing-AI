@@ -41,6 +41,17 @@ permission to be explicitly true. A connected user stream must also pass a
 recent WebSocket ping/pong or private-event freshness check; socket
 establishment alone is not a readiness signal.
 
+## Spot and Portfolio Margin boundary
+
+Spot and Portfolio Margin are separate Binance account products from the
+USDⓈ-M Futures Testnet account owned by the Worker. A Spot-to-Portfolio-Margin
+transfer is therefore not Testnet Futures collateral, does not populate the
+Worker's `ExchangeAccountSnapshot`, and cannot make `testnetExecutionReady`
+true. The TypeScript control-plane may show a signed Portfolio Margin balance
+as `OBSERVED_READ_ONLY`, but it marks the observation unverified and
+`includedInWorkerCollateral=false`. It never performs a Portfolio Margin
+transfer and never promotes that observation into execution authority.
+
 ## Readiness and reconciliation
 
 An adapter is not ready merely because it exists. Before `READY`, the worker
