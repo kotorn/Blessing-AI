@@ -362,6 +362,15 @@ class BinanceCliResearchRunner:
         if not self.binary:
             raise ValueError("binance-cli binary path must not be empty")
 
+    def _validate_binary_name(self) -> None:
+        """Prevent this bridge from executing an arbitrary helper binary."""
+
+        binary_name = os.path.basename(self.binary).lower()
+        if binary_name not in ALLOWED_BINARY_NAMES:
+            raise BinanceCliPolicyError(
+                "only the official binance-cli or binance-cli.exe binary is allowed"
+            )
+
     def _validate_binary_for_credentials(self) -> None:
         """Prevent PATH hijacking or arbitrary tools from receiving secrets."""
 
@@ -369,11 +378,7 @@ class BinanceCliResearchRunner:
             raise BinanceCliPolicyError(
                 "signed checks require an absolute BINANCE_CLI_PATH to the official binance-cli binary"
             )
-        binary_name = os.path.basename(self.binary).lower()
-        if binary_name not in ALLOWED_BINARY_NAMES:
-            raise BinanceCliPolicyError(
-                "signed checks only allow an executable named binance-cli or binance-cli.exe"
-            )
+        self._validate_binary_name()
 
     def run(
         self,
@@ -403,17 +408,18 @@ class BinanceCliResearchRunner:
                 credential_source=credential_source,
                 error="signed read-only check requires explicit Testnet credentials",
             )
-        if spec.requires_credentials:
-            try:
+        try:
+            self._validate_binary_name()
+            if spec.requires_credentials:
                 self._validate_binary_for_credentials()
-            except BinanceCliPolicyError as exc:
-                return BinanceCliResult(
-                    check=normalized_check.value,
-                    status="NOT_RUN",
-                    command=command,
-                    credential_source=credential_source,
-                    error=str(exc),
-                )
+        except BinanceCliPolicyError as exc:
+            return BinanceCliResult(
+                check=normalized_check.value,
+                status="NOT_RUN",
+                command=command,
+                credential_source=credential_source,
+                error=str(exc),
+            )
 
         resolved_binary = shutil.which(self.binary)
         if resolved_binary is None:

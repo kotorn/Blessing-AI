@@ -112,6 +112,20 @@ def test_public_check_never_forwards_credentials(monkeypatch):
     assert "BINANCE_TESTNET_API_SECRET" not in captured
 
 
+def test_public_check_rejects_non_official_binary(monkeypatch):
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda _: pytest.fail("arbitrary binaries must be rejected before execution"),
+    )
+    result = BinanceCliResearchRunner(
+        binary="python.exe",
+        environ={"BINANCE_API_ENV": "testnet"},
+    ).run(ReadOnlyCheck.SERVER_TIME)
+
+    assert result.status == "NOT_RUN"
+    assert "official binance-cli" in result.error
+
+
 def test_signed_check_without_credentials_is_not_run(monkeypatch):
     monkeypatch.setattr(
         "apps.trading_worker.research.binance_cli.shutil.which",
