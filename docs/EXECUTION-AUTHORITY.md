@@ -85,8 +85,11 @@ deduplicated by symbol plus exchange trade ID.
 
 ## Current evidence status
 
-For candidate `42e082418ef0e5360e74d586942a4fa176113288`, non-secret unit and
-frontend gates are `LOCAL_VERIFIED` and `CI_VERIFIED` by GitHub Actions run
-`34746139860`. Credentialed Binance Testnet read-only and mutation trials are
+For runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac`, non-secret
+unit and frontend gates are `LOCAL_VERIFIED` and `CI_VERIFIED` by GitHub
+Actions run `34747554913`. The credentialed contract workflow now records
+current-SHA sanitized evidence after read-only success and only marks the
+manual trial verified after the mutating test passes; that workflow was not
+run here. Credentialed Binance Testnet read-only and mutation trials are
 `NOT_RUN` because no Testnet credentials were configured. Autonomous Testnet
 execution remains locked, and Mainnet execution remains disabled.

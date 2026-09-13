@@ -8,15 +8,16 @@ Testnet has been verified.
 
 | Gate | Status | Evidence boundary |
 |---|---|---|
-| Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED` | Local checkout plus GitHub Actions run `34746139860` for candidate `42e082418ef0e5360e74d586942a4fa176113288` |
-| Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED` | Local checkout plus GitHub Actions run `34746139860` for candidate `42e082418ef0e5360e74d586942a4fa176113288` |
+| Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED` | Local checkout plus GitHub Actions run `34747554913` for runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac` |
+| Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED` | Local checkout plus GitHub Actions run `34747554913` for runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac` |
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
 | Account snapshot and liquidation math | `UNIT_TESTED` | Uses Binance account/position-risk fields; liquidation is `UNKNOWN` when unusable |
 | Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
 | Read-only Binance Testnet contract | `NOT_RUN` | No local Testnet credentials were configured in this session |
 | Controlled manual Testnet mutation | `NOT_RUN` | Requires explicit `TESTNET_MANUAL_TRIAL_APPROVED=true` and read-only evidence |
-| GitHub CI for candidate `42e0824` | `CI_VERIFIED` | Run `34746139860` passed Node install/lint/tests/build, Python install/tests, and hygiene |
+| Credentialed contract evidence handoff | `CODE_PRESENT` | Explicit mutation dispatch runs non-secret tests first, records current-SHA evidence after read-only success, and promotes manual evidence only after the mutating trial passes |
+| GitHub CI for runtime candidate `cd4e2f9` | `CI_VERIFIED` | Run `34747554913` passed Node install/lint/tests/build, Python install/tests, and hygiene |
 | Autonomous Testnet execution | `LOCKED` | Requires current-SHA evidence, approval, and runtime readiness; default is false |
 | Mainnet execution | `DISABLED` | LIVE ARM and mutable Mainnet adapter construction are rejected |
 
@@ -56,6 +57,6 @@ the first-launch defaults.
 No Binance Testnet credentials were present locally, so the signed read-only
 contract, private-stream contract, and controlled mutation trial are
 `NOT_RUN`. No Testnet order was submitted and no Testnet trial artifact exists.
-The local non-secret gates and GitHub CI were verified for candidate
-`42e082418ef0e5360e74d586942a4fa176113288` by run `34746139860`. Any later
-source change requires a new current-SHA workflow result.
+The local non-secret gates and GitHub CI were verified for runtime candidate
+`cd4e2f91f60527e52d738c0f6ae63e53da7253ac` by run `34747554913`. Any later
+runtime or workflow source change requires a new current-SHA workflow result.

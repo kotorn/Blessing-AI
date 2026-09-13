@@ -27,8 +27,8 @@ operational approval before any Mainnet implementation is considered.
       approved change.
 
 Current sprint evidence: local non-secret gates are `LOCAL_VERIFIED`, and
-GitHub Actions run `34746139860` verified candidate
-`42e082418ef0e5360e74d586942a4fa176113288` as `CI_VERIFIED`. Testnet read-only
+GitHub Actions run `34747554913` verified runtime candidate
+`cd4e2f91f60527e52d738c0f6ae63e53da7253ac` as `CI_VERIFIED`. Testnet read-only
 and manual mutation are `NOT_RUN`; autonomous Testnet is locked. No Mainnet
 order has been created or tested.
 
