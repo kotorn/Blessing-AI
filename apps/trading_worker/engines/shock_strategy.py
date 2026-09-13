@@ -33,5 +33,6 @@ class ShockStrategyEngine:
             opportunity_score=Decimal("0.9"),
             confidence=Decimal("0.6"),
             expected_holding_horizon_sec=300, # 5 mins
-            evidence={"is_sweep": is_sweep, "is_shock": is_shock}
+            evidence={"is_sweep": is_sweep, "is_shock": is_shock},
+            timestamp=pa_state.timestamp,
         )

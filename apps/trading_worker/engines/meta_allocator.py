@@ -1,8 +1,9 @@
 import logging
 from decimal import Decimal, InvalidOperation
 from typing import List, Dict
+from datetime import UTC, timedelta
+
 from domain.models import StrategyIntent, TargetExposure, MarketType, PositionSide, utc_now
-from datetime import timedelta
 
 logger = logging.getLogger("blessing.engines.meta_allocator")
 
@@ -96,12 +97,18 @@ class MetaAllocator:
             for k in attributions:
                 attributions[k] *= scale_factor
                 
+        intent_timestamps = [intent.timestamp for intent in intents]
+        if any(timestamp.tzinfo is None for timestamp in intent_timestamps):
+            raise ValueError("strategy intent timestamps must be timezone-aware")
+        as_of = max(timestamp.astimezone(UTC) for timestamp in intent_timestamps)
+
         return TargetExposure(
             symbol=normalized_symbol,
             market_type=market_type,
             target_net_delta_qty=net_delta,
             target_gross_limit_qty=gross_exposure,
             strategy_attributions=attributions,
-            expires_at=utc_now() + timedelta(seconds=60),
+            created_at=as_of,
+            expires_at=as_of + timedelta(seconds=60),
             source_intent_ids=source_intent_ids,
         )

@@ -20,6 +20,7 @@ from apps.trading_worker.engines.grid_strategy import GridStrategyEngine
 from apps.trading_worker.engines.market_state import MarketStateClassifier
 from apps.trading_worker.engines.meta_allocator import MetaAllocator
 from apps.trading_worker.engines.market_scanner import MarketScannerEngine
+from apps.trading_worker.engines.price_action import PriceActionEngine
 from apps.trading_worker.engines.risk_governor import RiskGovernor
 from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
 
@@ -72,6 +73,48 @@ def test_meta_allocator_conflict_resolution():
     assert decision.target_exposure_id == target.exposure_id
     assert decision.source_intent_ids == ["G1", "T1"]
     assert decision.orders[0].source_intent_ids == ["G1", "T1"]
+
+
+def test_market_event_time_is_preserved_through_state_intent_and_target():
+    event_time = datetime(2024, 1, 2, 3, 4, 5, 678000, tzinfo=timezone.utc)
+    event = MarketEvent(
+        event_id="E-TRACE-1",
+        event_time=event_time,
+        symbol="BTCUSDT",
+        venue="BINANCE_TESTNET",
+        market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("50001"),
+        best_bid=Decimal("50000.9"),
+        best_ask=Decimal("50001.1"),
+    )
+    later_event = event.model_copy(
+        update={
+            "event_id": "E-TRACE-2",
+            "event_time": event_time + timedelta(minutes=1),
+            "last_price": Decimal("50002"),
+        }
+    )
+
+    price_action = PriceActionEngine()
+    assert price_action.process_event(event) is None
+    pa_state = price_action.process_event(later_event)
+    assert pa_state is not None
+    assert pa_state.timestamp == later_event.event_time
+
+    market_state = MarketStateClassifier().classify(pa_state)
+    assert market_state.timestamp == later_event.event_time
+
+    intent = GridStrategyEngine().evaluate(
+        pa_state.model_copy(update={"is_reclaiming": True}),
+        market_state,
+        grid_depth=0,
+    )
+    assert intent is not None
+    assert intent.timestamp == later_event.event_time
+
+    target = MetaAllocator().allocate([intent], "BTCUSDT")
+    assert target.created_at == later_event.event_time
+    assert target.expires_at == later_event.event_time + timedelta(seconds=60)
 
 
 def test_meta_allocator_rejects_mixed_symbol_intents():

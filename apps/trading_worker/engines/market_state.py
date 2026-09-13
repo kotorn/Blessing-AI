@@ -1,7 +1,7 @@
 import logging
 from decimal import Decimal
 from typing import Dict, Optional
-from domain.models import PriceActionState, MarketState, RegimeType, utc_now
+from domain.models import PriceActionState, MarketState, RegimeType
 
 logger = logging.getLogger("blessing.engines.market_state")
 
@@ -51,7 +51,9 @@ class MarketStateClassifier:
         
         state = MarketState(
             symbol=sym,
-            timestamp=utc_now(),
+            # Preserve the source market-event timestamp through the state
+            # pipeline so replay cannot manufacture wall-clock time.
+            timestamp=pa_state.timestamp,
             primary_regime=regime,
             regime_probabilities=probs,
             atr_1h=atr_1h,

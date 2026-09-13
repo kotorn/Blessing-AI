@@ -49,6 +49,7 @@ class GridStrategyEngine:
             confidence=Decimal("1.0"),
             expected_holding_horizon_sec=0,
             evidence={"brake_reason": reason},
+            timestamp=pa_state.timestamp,
         )
 
     def observed_depth(
@@ -149,5 +150,6 @@ class GridStrategyEngine:
                 "atr": str(market_state.atr_1h),
                 "grid_depth": grid_depth,
                 "max_grid_levels": self.max_grid_levels,
-            }
+            },
+            timestamp=pa_state.timestamp,
         )

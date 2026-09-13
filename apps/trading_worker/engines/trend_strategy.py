@@ -30,5 +30,6 @@ class TrendStrategyEngine:
             opportunity_score=Decimal("0.8"),
             confidence=Decimal("0.7"),
             expected_holding_horizon_sec=14400, # 4 hours
-            evidence={"regime": regime.name, "velocity": str(pa_state.displacement_velocity_pct)}
+            evidence={"regime": regime.name, "velocity": str(pa_state.displacement_velocity_pct)},
+            timestamp=pa_state.timestamp,
         )

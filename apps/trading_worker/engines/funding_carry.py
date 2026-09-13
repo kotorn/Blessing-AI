@@ -197,5 +197,6 @@ class FundingCarryEngine:
                 "net_horizon_pct": str(net_horizon_pct),
                 "net_annualized_pct": str(net_annualized_pct),
                 "raw_funding": str(funding_rate)
-            }
+            },
+            timestamp=event.event_time,
         )
