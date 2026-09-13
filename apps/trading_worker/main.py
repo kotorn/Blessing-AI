@@ -136,7 +136,9 @@ class LaunchReadiness(BaseModel):
     symbol_rules_ready: bool
     market_data_fresh: bool
     autonomous_flag_enabled: bool
+    autonomous_soak_flag_enabled: bool = False
     launch_approved: bool
+    testnet_autonomous_soak_ready: bool = False
     testnet_autonomous_ready: bool
     small_live_ready: bool = False
 
@@ -925,6 +927,7 @@ class TradingWorkerApp:
         self._sync_adapter_state()
         testnet_configured = self._testnet_configured()
         auto_flag = self._env_flag("AUTONOMOUS_TESTNET_EXECUTION", False)
+        auto_soak_flag = self._env_flag("AUTONOMOUS_TESTNET_SOAK_APPROVED", False)
 
         ci_verified = False
         local_non_secret_tests_verified = False
@@ -1013,12 +1016,14 @@ class TradingWorkerApp:
             symbol_rules_ready=rules_ready,
             market_data_fresh=market_data_fresh,
             autonomous_flag_enabled=auto_flag,
+            autonomous_soak_flag_enabled=auto_soak_flag,
             launch_approved=self._env_flag("TESTNET_LAUNCH_APPROVED", False),
+            testnet_autonomous_soak_ready=False,
             testnet_autonomous_ready=False,
             small_live_ready=False
         )
         
-        readiness.testnet_autonomous_ready = (
+        readiness.testnet_autonomous_soak_ready = (
             self.execution_mode == WorkerExecutionMode.TESTNET and
             readiness.local_non_secret_tests_verified and
             readiness.ci_verified and
@@ -1027,16 +1032,21 @@ class TradingWorkerApp:
             self.authenticated and
             readiness.testnet_readonly_contract_verified and
             readiness.testnet_manual_trial_verified and
-            readiness.testnet_soak_verified and
             readiness.adapter_ready and
             readiness.symbol_rules_ready and
             readiness.account_snapshot_ready and
             readiness.private_stream_healthy and
             readiness.reconciliation_in_sync and
             readiness.market_data_fresh and
-            readiness.autonomous_flag_enabled and
+            readiness.autonomous_soak_flag_enabled and
             readiness.launch_approved and
             not self.kill_switch_active
+        )
+
+        readiness.testnet_autonomous_ready = (
+            readiness.testnet_autonomous_soak_ready and
+            readiness.testnet_soak_verified and
+            readiness.autonomous_flag_enabled
         )
         
         return readiness.model_dump()

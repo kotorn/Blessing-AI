@@ -60,3 +60,34 @@ class TestnetTrialArtifact(BaseModel):
         if value.rstrip("/") != "wss://stream.binancefuture.com/ws":
             raise ValueError("Trial artifacts must use the Binance Testnet WS host")
         return value
+
+
+class TestnetSoakArtifact(BaseModel):
+    """Sanitized artifact contract for supervised Testnet soak run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    build_sha: str = Field(min_length=7)
+    environment: Literal["BINANCE_TESTNET"]
+    strategy: str
+    symbol: str
+    runtime_seconds: float
+    intent_count: int = 0
+    risk_approved_count: int = 0
+    risk_rejected_count: int = 0
+    orders_submitted_count: int = 0
+    fills_count: int = 0
+    total_fees_usdt: float = 0.0
+    slippage_bps: float = 0.0
+    max_exposure_notional: float = 0.0
+    stream_disconnect_count: int = 0
+    stream_reconnect_count: int = 0
+    reconciliation_runs_count: int = 0
+    reconciliation_diffs_count: int = 0
+    ambiguous_requests_count: int = 0
+    duplicate_fills_count: int = 0
+    final_positions: List[Dict[str, Any]] = Field(default_factory=list)
+    hard_stop_triggered: bool = False
+    hard_stop_reason: Optional[str] = None
+    status: Literal["PASS", "FAIL"]
+

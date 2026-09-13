@@ -76,6 +76,8 @@ async def test_worker_testnet_readonly_lifecycle(api_credentials):
 
         assert adapter.reconciliation.last_status == "IN_SYNC"
         assert worker.is_account_snapshot_ready() is True
+        assert await adapter.refresh_market_data(["BTCUSDT"]) is True
+        worker.last_market_event_at.update(adapter.last_market_event_at)
         assert worker.is_market_data_fresh(["BTCUSDT"]) is True
         assert worker.get_capabilities()["testnetExecutionReady"] is True
     finally:

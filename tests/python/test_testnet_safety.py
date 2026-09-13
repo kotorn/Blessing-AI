@@ -1631,6 +1631,18 @@ async def test_manual_trial_does_not_raise_cap_for_exchange_minimum():
 
 
 @pytest.mark.asyncio
+async def test_manual_trial_allows_approved_override_for_exchange_minimum():
+    adapter = await make_adapter()
+    adapter.symbol_rules["BTCUSDT"].min_notional = Decimal("50")
+    adapter.safety_limits.max_single_order_notional = Decimal("60")
+
+    price, qty = _passive_order(adapter, "BTCUSDT", Decimal("10000"), Decimal("10001"))
+    assert price == Decimal("9999.9")
+    assert qty * price >= Decimal("50")
+    assert qty * price <= Decimal("60")
+
+
+@pytest.mark.asyncio
 async def test_filled_order_recovery_recovers_canonical_fill_and_reaches_in_sync():
     async def handler(method, path, kwargs):
         if path == "/fapi/v2/positionRisk":
@@ -2094,3 +2106,64 @@ async def test_reconciliation_detects_open_order_economic_quantity_mismatch():
     assert any(
         diff.code == "ORDER_QUANTITY_MISMATCH" for diff in reconciliation.last_diffs
     )
+
+
+@pytest.mark.asyncio
+async def test_autonomous_soak_and_autonomous_readiness_state_transition(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    fake_sha = "deadbeef1234567"
+
+    import json
+    import subprocess
+    real_run = subprocess.run
+
+    def mock_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{fake_sha}\n", stderr="")
+        if isinstance(cmd, list) and cmd == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    evidence_path = tmp_path / "artifacts" / "build-evidence.json"
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_data = {
+        "build_sha": fake_sha,
+        "local_non_secret_tests_verified": True,
+        "github_ci_verified": True,
+        "readonly_contract_verified": True,
+        "manual_trial_verified": True,
+        "manual_trial_sha": fake_sha,
+        "testnet_soak_verified": False,
+    }
+    evidence_path.write_text(json.dumps(evidence_data), encoding="utf-8")
+
+    worker = await make_ready_worker(monkeypatch)
+    monkeypatch.setenv("TESTNET_LAUNCH_APPROVED", "true")
+
+    # 1. Without AUTONOMOUS_TESTNET_SOAK_APPROVED: neither soak nor full autonomous is ready
+    readiness = worker.get_launch_readiness()
+    assert readiness["testnet_autonomous_soak_ready"] is False
+    assert readiness["testnet_autonomous_ready"] is False
+
+    # 2. With AUTONOMOUS_TESTNET_SOAK_APPROVED: soak is ready, full autonomous is NOT
+    monkeypatch.setenv("AUTONOMOUS_TESTNET_SOAK_APPROVED", "true")
+    readiness = worker.get_launch_readiness()
+    assert readiness["testnet_autonomous_soak_ready"] is True
+    assert readiness["testnet_autonomous_ready"] is False
+
+    # 3. Even with AUTONOMOUS_TESTNET_EXECUTION enabled, if soak is not verified, autonomous is NOT ready
+    monkeypatch.setenv("AUTONOMOUS_TESTNET_EXECUTION", "true")
+    readiness = worker.get_launch_readiness()
+    assert readiness["testnet_autonomous_soak_ready"] is True
+    assert readiness["testnet_autonomous_ready"] is False
+
+    # 4. Once soak is verified: full autonomous readiness becomes True
+    evidence_data["testnet_soak_verified"] = True
+    evidence_path.write_text(json.dumps(evidence_data), encoding="utf-8")
+    readiness = worker.get_launch_readiness()
+    assert readiness["testnet_autonomous_soak_ready"] is True
+    assert readiness["testnet_autonomous_ready"] is True
+

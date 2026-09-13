@@ -233,7 +233,7 @@ def _passive_order(adapter, symbol: str, bid: Decimal, ask: Decimal):
         raise RuntimeError("Exchange minimum notional requires more than the symbol max quantity")
     if notional > adapter.safety_limits.max_single_order_notional:
         raise RuntimeError(
-            "ABORT: Binance minimum notional exceeds the configured 25 USDT Testnet cap"
+            f"ABORT: Binance minimum notional exceeds the configured {int(adapter.safety_limits.max_single_order_notional)} USDT Testnet cap"
         )
     return passive_price, quantity
 
