@@ -27,11 +27,10 @@ operational approval before any Mainnet implementation is considered.
       approved change.
 
 Current sprint evidence: local non-secret gates are `LOCAL_VERIFIED`, and
-GitHub Actions run `34747554913` verified the historical runtime candidate
-`cd4e2f91f60527e52d738c0f6ae63e53da7253ac` as `CI_VERIFIED`. Testnet read-only
-and manual mutation are `NOT_RUN`; autonomous Testnet is locked. Current local
-research/stream changes require a new current-SHA workflow result. No Mainnet
-order has been created or tested.
+GitHub Actions run `34751051688` verified current runtime candidate
+`98a1cb44942199afe5032adbdb62265417604be8` as `CI_VERIFIED`. Testnet
+read-only and manual mutation are `NOT_RUN`; autonomous Testnet is locked. No
+Mainnet order has been created or tested.
 
 ## MVP infrastructure boundary
 

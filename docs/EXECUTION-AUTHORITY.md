@@ -99,12 +99,11 @@ mutable CLI commands; details and commands are in
 
 ## Current evidence status
 
-For historical runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac`,
+For current runtime candidate `98a1cb44942199afe5032adbdb62265417604be8`,
 non-secret unit and frontend gates are `LOCAL_VERIFIED` and `CI_VERIFIED` by
-GitHub Actions run `34747554913`. The credentialed contract workflow now records
+GitHub Actions run `34751051688`. The credentialed contract workflow records
 current-SHA sanitized evidence after read-only success and only marks the
 manual trial verified after the mutating test passes; that workflow was not
 run here. Credentialed Binance Testnet read-only and mutation trials are
-`NOT_RUN` because no Testnet credentials were configured. Current local
-research/stream changes need a new current-SHA workflow result. Autonomous
-Testnet execution remains locked, and Mainnet execution remains disabled.
+`NOT_RUN` because no Testnet credentials were configured. Autonomous Testnet
+execution remains locked, and Mainnet execution remains disabled.
