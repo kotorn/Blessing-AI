@@ -44,6 +44,11 @@ class ParameterVariantResult(BaseModel):
     max_drawdown_pct: Decimal
     oos_trade_count: int = Field(gt=0)
     adjacent_to_baseline: bool = True
+    # The caller must identify every OOS fold used to produce this aggregate.
+    # An empty/default value remains valid as a research record, but it can no
+    # longer contribute to a passing quality result because fold coverage is
+    # verified by ``evaluate_walk_forward_evidence``.
+    evaluated_oos_fold_indices: tuple[int, ...] = ()
 
     @field_validator("oos_net_return_pct", "oos_average_net_pnl", "max_drawdown_pct")
     @classmethod
@@ -52,6 +57,39 @@ class ParameterVariantResult(BaseModel):
         if info.field_name == "max_drawdown_pct" and parsed < 0:
             raise ValueError("max_drawdown_pct must be non-negative")
         return parsed
+
+    @field_validator("evaluated_oos_fold_indices")
+    @classmethod
+    def require_unique_nonnegative_fold_indices(
+        cls, value: tuple[int, ...]
+    ) -> tuple[int, ...]:
+        normalized = tuple(int(index) for index in value)
+        if any(index < 0 for index in normalized):
+            raise ValueError("evaluated_oos_fold_indices must be non-negative")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("evaluated_oos_fold_indices must not contain duplicates")
+        return normalized
+
+
+class WalkForwardSelectionEvidence(BaseModel):
+    """Auditable proof pointer for train-only parameter selection per fold.
+
+    This model does not execute a strategy or inspect the referenced artifact;
+    it records the minimum binding information needed for a downstream audit.
+    A missing record, mismatched train window, or unbound variant prevents the
+    evaluator from calling the research result quality-passed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fold_index: int = Field(ge=0)
+    train_start: int = Field(ge=0)
+    train_end: int = Field(gt=0)
+    selected_variant_id: str = Field(min_length=1)
+    selection_artifact_sha256: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$"
+    )
+    selection_method: Literal["TRAIN_ONLY"] = "TRAIN_ONLY"
 
 
 class WalkForwardFoldEvidence(BaseModel):
@@ -91,9 +129,12 @@ class WalkForwardEvidence(BaseModel):
     required_regimes: list[str]
     regime_coverage_passed: bool
     parameter_plateau_passed: bool
+    parameter_oos_coverage_passed: bool
+    selection_evidence_verified: bool
     research_quality_passed: bool
     folds: list[WalkForwardFoldEvidence]
     parameter_variants: list[ParameterVariantResult]
+    selection_evidence: list[WalkForwardSelectionEvidence]
     evidence_status: Literal["RESEARCH_ONLY"] = "RESEARCH_ONLY"
     launch_eligible: Literal[False] = False
 
@@ -134,6 +175,7 @@ def evaluate_walk_forward_evidence(
     cost_model: EconomicCostModel,
     required_regimes: Sequence[str],
     parameter_variants: Sequence[ParameterVariantResult],
+    selection_evidence: Sequence[WalkForwardSelectionEvidence] = (),
     min_folds: int = 3,
     min_positive_fold_ratio: Decimal = Decimal("0.67"),
     min_plateau_variants: int = 3,
@@ -212,12 +254,38 @@ def evaluate_walk_forward_evidence(
         min_variants=min_plateau_variants,
         max_return_spread_pct=max_plateau_return_spread_pct,
     )
+    expected_fold_indices = tuple(range(len(fold_evidence)))
+    adjacent_variants = [
+        variant
+        for variant in parameter_variants
+        if variant.adjacent_to_baseline
+    ]
+    parameter_oos_coverage_passed = bool(adjacent_variants) and all(
+        tuple(sorted(variant.evaluated_oos_fold_indices)) == expected_fold_indices
+        for variant in adjacent_variants
+    )
+    selection_by_fold = {
+        evidence.fold_index: evidence for evidence in selection_evidence
+    }
+    variant_ids = {variant.variant_id for variant in parameter_variants}
+    selection_evidence_verified = (
+        len(selection_by_fold) == len(selection_evidence) == len(fold_evidence)
+        and set(selection_by_fold) == set(expected_fold_indices)
+        and all(
+            selection_by_fold[index].selected_variant_id in variant_ids
+            and selection_by_fold[index].train_start == fold.train_start
+            and selection_by_fold[index].train_end == fold.train_end
+            for index, fold in enumerate(folds)
+        )
+    )
     research_quality_passed = bool(
         oos_result.positive_net_expectancy
         and positive_fold_ratio >= positive_ratio_limit
         and unknown_oos_trade_count == 0
         and regime_coverage_passed
         and plateau_passed
+        and parameter_oos_coverage_passed
+        and selection_evidence_verified
     )
 
     return WalkForwardEvidence(
@@ -239,7 +307,10 @@ def evaluate_walk_forward_evidence(
         required_regimes=normalized_regimes,
         regime_coverage_passed=regime_coverage_passed,
         parameter_plateau_passed=plateau_passed,
+        parameter_oos_coverage_passed=parameter_oos_coverage_passed,
+        selection_evidence_verified=selection_evidence_verified,
         research_quality_passed=research_quality_passed,
         folds=fold_evidence,
         parameter_variants=list(parameter_variants),
+        selection_evidence=list(selection_evidence),
     )

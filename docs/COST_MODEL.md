@@ -89,12 +89,17 @@ component separately before applying the minimum net annualized-yield filter.
 
 `apps/trading_worker/backtest/evidence.py` evaluates externally generated
 trades using purged/embargoed chronological test windows, regime coverage, and
-neighboring parameter-variant stability. Trade-level funding, spread, and
-slippage observations are mandatory, duplicate trade IDs are rejected, and
-unknown-regime OOS trades prevent research-quality status. A positive result
-is still `RESEARCH_ONLY` and can never authorize Worker execution. The ML
-scorer remains disabled until a real versioned model and out-of-sample evidence
-exist; no fabricated probability is used.
+neighboring parameter-variant stability. Research candles must be timezone-aware,
+strictly chronological, contiguous 1-minute observations with a complete
+forward-label horizon. Trade-level funding, spread, and slippage observations
+are mandatory, duplicate trade IDs are rejected, and unknown-regime OOS trades
+prevent research-quality status. A quality result also requires every adjacent
+parameter variant to identify the same OOS folds and a train-only selection
+record bound to each fold's actual train window. These are structural audit
+checks over externally generated research artifacts; they do not prove that an
+artifact exists or authorize Worker execution. A positive result is still
+`RESEARCH_ONLY`. The ML scorer remains disabled until a real versioned model and
+out-of-sample evidence exist; no fabricated probability is used.
 
 To ensure costs never exceed experimental budgets:
 

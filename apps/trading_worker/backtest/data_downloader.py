@@ -248,6 +248,14 @@ class BinanceDataDownloader:
             deduplicated.append(row)
         if not deduplicated:
             raise ValueError("No unique closed kline rows were downloaded")
+        if any(
+            (right["timestamp"] - left["timestamp"]).total_seconds() * 1000
+            != step_ms
+            for left, right in zip(deduplicated, deduplicated[1:])
+        ):
+            raise ValueError(
+                "Binance kline response contains a missing or non-contiguous interval"
+            )
 
         frame = pl.DataFrame(deduplicated)
         output_path = os.path.join(

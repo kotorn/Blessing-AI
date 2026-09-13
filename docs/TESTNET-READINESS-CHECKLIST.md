@@ -10,7 +10,7 @@ Testnet has been verified.
 |---|---|---|
 | Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED` | Latest safety code candidate `c007475`; GitHub Actions run `34758661365` passed Node install/lint/tests/build. |
 | Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED` | Latest safety code candidate `c007475`; GitHub Actions run `34758661365` passed Python install/tests and hygiene. |
-| Net economics and WFO/OOS research evaluator | `LOCAL_VERIFIED; RESEARCH_ONLY` | Explicit fees/funding/spread/slippage inputs, purged/embargoed OOS folds, regime coverage, and parameter plateau checks; never launch evidence |
+| Net economics and WFO/OOS research evaluator | `LOCAL_VERIFIED; RESEARCH_ONLY` | Explicit fees/funding/spread/slippage inputs, contiguous complete-horizon research candles, purged/embargoed OOS folds, regime coverage, parameter plateau, common OOS-fold coverage, and train-only selection binding; never launch evidence |
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
 | Binance CLI research cross-check boundary | `UNIT_TESTED; LOCAL_VERIFIED` | The isolated wrapper allowlists read-only USDⓈ-M checks and blocks Mainnet/mutations; no CLI binary or credentials were present |
