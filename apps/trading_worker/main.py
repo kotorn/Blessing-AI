@@ -1039,6 +1039,7 @@ class TradingWorkerApp:
             readiness.reconciliation_in_sync and
             readiness.market_data_fresh and
             readiness.autonomous_soak_flag_enabled and
+            readiness.autonomous_flag_enabled and
             readiness.launch_approved and
             not self.kill_switch_active
         )
@@ -1678,7 +1679,12 @@ class TradingWorkerApp:
                 if self.execution_mode == WorkerExecutionMode.TESTNET and self.execution_adapter is not None:
                     autonomous_enabled = self._env_flag("AUTONOMOUS_TESTNET_EXECUTION", False)
                     launch_readiness = self.get_launch_readiness()
-                    if autonomous_enabled and launch_readiness["testnet_autonomous_ready"]:
+                    readiness_key = (
+                        "testnet_autonomous_soak_ready"
+                        if self._env_flag("AUTONOMOUS_TESTNET_SOAK_APPROVED", False)
+                        else "testnet_autonomous_ready"
+                    )
+                    if autonomous_enabled and launch_readiness[readiness_key]:
                         is_safe, reason = self._evaluate_execution_gate(decision)
                         if is_safe:
                             logger.info(f"[TESTNET][AUTONOMOUS_EXEC] Executing decision {decision.decision_id} for {decision.symbol}")
@@ -1698,6 +1704,12 @@ class TradingWorkerApp:
                         )
                 else:
                     logger.info(f"[{self.execution_mode.value}][SIMULATED] EXECUTION DECISION: {decision.symbol} | Action: {decision.action}")
+
+        # Returning the worker-owned decision is an observability hook for the
+        # supervised Testnet runner. Existing WebSocket callers ignore the
+        # return value, while the runner can prove that the strategy/risk path
+        # actually processed market events without creating a second authority.
+        return decision
 
     async def start(self):
         logger.info("Initializing Blessing AI Trading Worker v0.2...")

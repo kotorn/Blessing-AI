@@ -130,6 +130,7 @@ async def _exchange_open_orders(adapter, symbol: str) -> List[dict]:
 async def _cleanup_trial_open_orders(
     worker: TradingWorkerApp,
     trial_client_order_ids: set[str],
+    allowed_prefixes: tuple[str, ...] = ("BAI-MANUAL-",),
 ) -> bool:
     """Cancel and verify only the manual trial's still-open orders.
 
@@ -154,8 +155,10 @@ async def _cleanup_trial_open_orders(
             # Binance amendments normally retain the original client ID. Keep
             # the prefix check as a bounded fallback for a Testnet-generated
             # replacement ID, while still rejecting unknown IDs.
-            belongs_to_trial = client_order_id in known_ids or client_order_id.startswith(
-                "BAI-MANUAL-"
+            belongs_to_trial = client_order_id in known_ids or any(
+                client_order_id.startswith(prefix)
+                for prefix in allowed_prefixes
+                if prefix
             )
             if not belongs_to_trial or not client_order_id:
                 cancellation_failed = True

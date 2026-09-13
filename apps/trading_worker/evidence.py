@@ -72,6 +72,8 @@ class TestnetSoakArtifact(BaseModel):
     strategy: str
     symbol: str
     runtime_seconds: float
+    market_events_count: int = 0
+    decision_count: int = 0
     intent_count: int = 0
     risk_approved_count: int = 0
     risk_rejected_count: int = 0
@@ -84,6 +86,8 @@ class TestnetSoakArtifact(BaseModel):
     stream_reconnect_count: int = 0
     reconciliation_runs_count: int = 0
     reconciliation_diffs_count: int = 0
+    reconciliation_status: str = "UNKNOWN"
+    open_orders_remaining: int = 0
     ambiguous_requests_count: int = 0
     duplicate_fills_count: int = 0
     final_positions: List[Dict[str, Any]] = Field(default_factory=list)

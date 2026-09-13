@@ -49,6 +49,7 @@ from apps.trading_worker.venues.binance.reconciliation import (
     BinanceReconciliation,
     build_account_snapshot,
 )
+from apps.trading_worker.venues.binance.soak_runner import run_supervised_soak
 from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
 from venues.binance_global.usdm import BinanceGlobalUSDMAdapter
 
@@ -2148,13 +2149,14 @@ async def test_autonomous_soak_and_autonomous_readiness_state_transition(monkeyp
     assert readiness["testnet_autonomous_soak_ready"] is False
     assert readiness["testnet_autonomous_ready"] is False
 
-    # 2. With AUTONOMOUS_TESTNET_SOAK_APPROVED: soak is ready, full autonomous is NOT
+    # 2. A soak approval alone cannot authorize the autonomous execution path.
     monkeypatch.setenv("AUTONOMOUS_TESTNET_SOAK_APPROVED", "true")
     readiness = worker.get_launch_readiness()
-    assert readiness["testnet_autonomous_soak_ready"] is True
+    assert readiness["testnet_autonomous_soak_ready"] is False
     assert readiness["testnet_autonomous_ready"] is False
 
-    # 3. Even with AUTONOMOUS_TESTNET_EXECUTION enabled, if soak is not verified, autonomous is NOT ready
+    # 3. Both explicit flags are required to enter the supervised soak path;
+    # full autonomous readiness still requires the soak evidence.
     monkeypatch.setenv("AUTONOMOUS_TESTNET_EXECUTION", "true")
     readiness = worker.get_launch_readiness()
     assert readiness["testnet_autonomous_soak_ready"] is True
@@ -2166,4 +2168,17 @@ async def test_autonomous_soak_and_autonomous_readiness_state_transition(monkeyp
     readiness = worker.get_launch_readiness()
     assert readiness["testnet_autonomous_soak_ready"] is True
     assert readiness["testnet_autonomous_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_autonomous_soak_requires_the_normal_execution_flag(monkeypatch):
+    monkeypatch.setenv("AUTONOMOUS_TESTNET_SOAK_APPROVED", "true")
+    monkeypatch.setenv("AUTONOMOUS_TESTNET_EXECUTION", "false")
+    monkeypatch.setenv("TESTNET_LAUNCH_APPROVED", "true")
+
+    with pytest.raises(
+        RuntimeError,
+        match="AUTONOMOUS_TESTNET_EXECUTION must be true",
+    ):
+        await run_supervised_soak(duration_sec=1.0)
 
