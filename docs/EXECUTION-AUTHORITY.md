@@ -99,11 +99,9 @@ mutable CLI commands; details and commands are in
 
 ## Current evidence status
 
-The previous runtime candidate `2177874fc79b62c447696f8a1b2444090fae10c8`
-passed the non-secret unit and frontend gates in GitHub Actions run
-`34751295292`. The current research changes have also passed locally but need
-their own post-push CI run before they can be marked `CI_VERIFIED`. The
-credentialed contract workflow records current-SHA sanitized evidence after
+The current candidate `bc45677` passed the non-secret unit and frontend gates
+in GitHub Actions run `34754008070`. The credentialed contract workflow records
+current-SHA sanitized evidence after
 read-only success and only marks the manual trial verified after the mutating
 test passes; that workflow was not run here. Credentialed Binance Testnet
 read-only and mutation trials are `NOT_RUN` because no Testnet credentials were

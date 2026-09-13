@@ -26,12 +26,10 @@ operational approval before any Mainnet implementation is considered.
 - [ ] Mainnet-specific adapter and endpoint audit, implemented in a separate
       approved change.
 
-Current sprint evidence: local non-secret gates are `LOCAL_VERIFIED`. The
-previous runtime candidate `2177874fc79b62c447696f8a1b2444090fae10c8` was
-verified by GitHub Actions run `34751295292`; the current research changes
-await their own post-push CI run. Testnet read-only and manual mutation are
-`NOT_RUN`; autonomous Testnet is locked. No Mainnet order has been created or
-tested.
+Current sprint evidence: local non-secret gates are `LOCAL_VERIFIED` and
+current candidate `bc45677` is `CI_VERIFIED` by GitHub Actions run
+`34754008070`. Testnet read-only and manual mutation are `NOT_RUN`; autonomous
+Testnet is locked. No Mainnet order has been created or tested.
 
 ## MVP infrastructure boundary
 

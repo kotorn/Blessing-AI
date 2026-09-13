@@ -8,8 +8,8 @@ Testnet has been verified.
 
 | Gate | Status | Evidence boundary |
 |---|---|---|
-| Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED (previous candidate)` | Previous CI-verified candidate `2177874fc79b62c447696f8a1b2444090fae10c8`; GitHub Actions run `34751295292`. The current research changes require a new CI run. |
-| Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED (previous candidate)` | Previous CI-verified candidate `2177874fc79b62c447696f8a1b2444090fae10c8`; GitHub Actions run `34751295292`. The current research changes require a new CI run. |
+| Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED` | Current candidate `bc45677`; GitHub Actions run `34754008070` passed Node install/lint/tests/build. |
+| Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED` | Current candidate `bc45677`; GitHub Actions run `34754008070` passed Python install/tests and hygiene. |
 | Net economics and WFO/OOS research evaluator | `LOCAL_VERIFIED; RESEARCH_ONLY` | Explicit fees/funding/spread/slippage inputs, purged/embargoed OOS folds, regime coverage, and parameter plateau checks; never launch evidence |
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
@@ -19,7 +19,7 @@ Testnet has been verified.
 | Read-only Binance Testnet contract | `NOT_RUN` | No local Testnet credentials were configured in this session |
 | Controlled manual Testnet mutation | `NOT_RUN` | Requires explicit `TESTNET_MANUAL_TRIAL_APPROVED=true` and read-only evidence |
 | Credentialed contract evidence handoff | `CODE_PRESENT` | The workflow runs non-secret tests first, records current-SHA evidence after read-only success in either mode, and promotes manual evidence only after the mutating trial passes |
-| GitHub CI for previous runtime candidate `2177874` | `CI_VERIFIED` | Run `34751295292` passed Node install/lint/tests/build, Python install/tests, and hygiene; current research changes await their own CI run |
+| GitHub CI for current candidate `bc45677` | `CI_VERIFIED` | Run `34754008070` passed Node install/lint/tests/build, Python install/tests, and hygiene |
 | Autonomous Testnet execution | `LOCKED` | Requires current-SHA evidence, approval, and runtime readiness; default is false |
 | Mainnet execution | `DISABLED` | LIVE ARM and mutable Mainnet adapter construction are rejected |
 
@@ -61,6 +61,4 @@ No Binance Testnet credentials were present locally, so the signed read-only
 contract, private-stream contract, and controlled mutation trial are
 `NOT_RUN`. No Testnet order was submitted and no Testnet trial artifact exists.
 The local non-secret gates were rerun for the current working tree. GitHub CI
-was verified for the previous candidate `2177874fc79b62c447696f8a1b2444090fae10c8`
-by run `34751295292`; the current research changes require the post-push CI
-run before they can be marked `CI_VERIFIED`.
+verified the current candidate `bc45677` in run `34754008070`.
