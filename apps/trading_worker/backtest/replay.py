@@ -388,6 +388,19 @@ class ReplayOrderRecord(BaseModel):
     exchange_order_id: str | None = None
 
 
+class ReplayEquityPoint(BaseModel):
+    """Event-level mark-to-market account state for audit and drawdown review."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    event_id: str
+    timestamp: datetime
+    position_qty: Decimal
+    unrealized_pnl: Decimal
+    open_funding_pnl: Decimal
+    equity: Decimal
+
+
 class ReplayResult(BaseModel):
     """Research replay output with an explicit non-launch status."""
 
@@ -398,9 +411,14 @@ class ReplayResult(BaseModel):
     event_count: int
     start_time: datetime
     end_time: datetime
+    strategy_intents: tuple[StrategyIntent, ...]
+    target_exposures: tuple[TargetExposure, ...]
+    risk_snapshots: tuple[RiskSnapshot, ...]
+    execution_decisions: tuple[ExecutionDecision, ...]
     decisions: tuple[ReplayOrderRecord, ...]
     fills: tuple[ExchangeFill, ...]
     trades: tuple[BacktestTrade, ...]
+    equity_curve: tuple[ReplayEquityPoint, ...]
     economic_result: EconomicBacktestResult | None
     final_position_qty: Decimal
     final_equity: Decimal
@@ -434,6 +452,44 @@ class EventWalkForwardFold(BaseModel):
     test_end_time: datetime
 
 
+class ReplayParameterVariant(BaseModel):
+    """One explicit parameter/configuration candidate for train-only selection."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    variant_id: str = Field(min_length=1)
+    config: ReplayExecutionConfig
+
+
+class ReplayWalkForwardFoldResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fold_index: int
+    train_start: int
+    train_end: int
+    test_start: int
+    test_end: int
+    selected_variant_id: str
+    train_net_pnl_by_variant: dict[str, Decimal | None]
+    selection_artifact_sha256: str
+    test_trade_count: int
+    test_net_pnl: Decimal | None
+
+
+class ReplayWalkForwardResult(BaseModel):
+    """Actual train-select/test-replay output, still explicitly non-launch."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dataset_sha256: str
+    variant_ids: tuple[str, ...]
+    folds: tuple[ReplayWalkForwardFoldResult, ...]
+    oos_trades: tuple[BacktestTrade, ...]
+    oos_economic_result: EconomicBacktestResult | None
+    evidence_status: Literal["RESEARCH_WALK_FORWARD_ONLY"] = "RESEARCH_WALK_FORWARD_ONLY"
+    launch_eligible: Literal[False] = False
+
+
 @dataclass
 class _PositionState:
     signed_qty: Decimal
@@ -448,10 +504,20 @@ class _PositionState:
     funding_pnl: Decimal = Decimal(0)
 
 
-def _canonical_hash(value: Any) -> str:
+def _canonical_json_value(value: Any) -> Any:
     if isinstance(value, BaseModel):
-        value = value.model_dump(mode="json")
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+        return _canonical_json_value(value.model_dump(mode="json"))
+    if isinstance(value, dict):
+        return {str(key): _canonical_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_json_value(item) for item in value]
+    return value
+
+
+def _canonical_hash(value: Any) -> str:
+    encoded = json.dumps(
+        _canonical_json_value(value), sort_keys=True, separators=(",", ":"), default=str
+    ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -542,10 +608,15 @@ class DeterministicReplay:
 
     def __init__(self, config: ReplayExecutionConfig):
         self.config = config
+        self._reset_runtime()
+
+    def _reset_runtime(self) -> None:
+        """Reset all mutable replay state so one runner is safely reusable."""
+
         self._clock_time: datetime | None = None
         self._position: _PositionState | None = None
         self._realized_net_pnl = Decimal(0)
-        self._peak_equity = config.initial_capital
+        self._peak_equity = self.config.initial_capital
         self._active_exposure_chains = 0
         self._last_funding_at: datetime | None = None
         self._grid_depth = 0
@@ -557,13 +628,13 @@ class DeterministicReplay:
         self.grid = GridStrategyEngine()
         self.trend = TrendStrategyEngine()
         self.shock = ShockStrategyEngine()
-        self.carry = FundingCarryEngine(cost_inputs=config.carry_cost_inputs)
-        self.allocator = MetaAllocator(max_gross_exposure_btc=config.max_target_gross_qty)
+        self.carry = FundingCarryEngine(cost_inputs=self.config.carry_cost_inputs)
+        self.allocator = MetaAllocator(max_gross_exposure_btc=self.config.max_target_gross_qty)
         self.recovery = ExposureRecoveryEngine(clock=self._now)
         self.governor = RiskGovernor(
-            max_leverage=config.max_leverage,
-            max_drawdown_pct=config.max_drawdown_pct,
-            max_margin_utilization_pct=config.max_margin_utilization_pct,
+            max_leverage=self.config.max_leverage,
+            max_drawdown_pct=self.config.max_drawdown_pct,
+            max_margin_utilization_pct=self.config.max_margin_utilization_pct,
             clock=self._now,
         )
 
@@ -584,6 +655,16 @@ class DeterministicReplay:
             + self._realized_net_pnl
             + open_funding
             + self._current_unrealized(mark_price)
+        )
+
+    def _equity_point(self, event: HistoricalMarketEvent) -> ReplayEquityPoint:
+        return ReplayEquityPoint(
+            event_id=event.event_id,
+            timestamp=event.event_time,
+            position_qty=self._position.signed_qty if self._position else Decimal(0),
+            unrealized_pnl=self._current_unrealized(event.mark_price),
+            open_funding_pnl=self._position.funding_pnl if self._position else Decimal(0),
+            equity=self._current_equity(event.mark_price),
         )
 
     def _risk_snapshot(self, event: HistoricalMarketEvent) -> RiskSnapshot:
@@ -669,9 +750,8 @@ class DeterministicReplay:
             if intent is not None:
                 intents.append(intent)
         if "carry" in self.config.enabled_strategies:
-            # No carry cost inputs are silently invented.  A caller that
-            # wants carry must use the explicit FundingCarryCostInputs path;
-            # the current replay config intentionally does not construct one.
+            # The config validator requires the complete explicit carry-cost
+            # object before this engine can be enabled.
             intent = self.carry.evaluate(event.to_market_event(), market_state)
             if intent is not None:
                 intents.append(intent)
@@ -915,7 +995,12 @@ class DeterministicReplay:
         return fill, trade
 
     def _force_close(
-        self, event: HistoricalMarketEvent, decisions: list[ReplayOrderRecord], fills: list[ExchangeFill], trades: list[BacktestTrade]
+        self,
+        event: HistoricalMarketEvent,
+        execution_decisions: list[ExecutionDecision],
+        decisions: list[ReplayOrderRecord],
+        fills: list[ExchangeFill],
+        trades: list[BacktestTrade],
     ) -> None:
         if self._position is None:
             return
@@ -945,6 +1030,7 @@ class DeterministicReplay:
             net_exposure_delta=-self._position.signed_qty,
             timestamp=event.event_time,
         )
+        execution_decisions.append(decision)
         normalized_order, fill_price, reason = self._order_gate(order, decision, event)
         if normalized_order is None or fill_price is None:
             decisions.append(
@@ -985,36 +1071,48 @@ class DeterministicReplay:
 
     def run(self, events: Sequence[HistoricalMarketEvent]) -> ReplayResult:
         normalized_events = _validate_event_sequence(events)
+        self._reset_runtime()
         if any(event.symbol not in {rule.symbol for rule in self.config.symbol_rules} for event in normalized_events):
             raise ReplayValidationError("every event symbol must have captured exchange rules")
         dataset_sha256 = _canonical_hash([event.model_dump(mode="json") for event in normalized_events])
         config_sha256 = _canonical_hash(self.config)
+        strategy_intents: list[StrategyIntent] = []
+        target_exposures: list[TargetExposure] = []
+        risk_snapshots: list[RiskSnapshot] = []
+        execution_decisions: list[ExecutionDecision] = []
         decisions: list[ReplayOrderRecord] = []
         fills: list[ExchangeFill] = []
         trades: list[BacktestTrade] = []
+        equity_curve: list[ReplayEquityPoint] = []
 
         for event in normalized_events:
             self._clock_time = event.event_time
             self._apply_funding(event)
             pa_state = self.price_action.process_event(event.to_market_event())
             if pa_state is None:
+                equity_curve.append(self._equity_point(event))
                 continue
             market_state = self.market_state.classify(pa_state)
             intents = self._strategy_intents(event, pa_state, market_state)
             if not intents:
+                equity_curve.append(self._equity_point(event))
                 continue
+            strategy_intents.extend(intents)
             target = self._target_with_stable_id(self.allocator.allocate(intents, event.symbol))
             risk_snapshot = self._risk_snapshot(event)
+            risk_snapshots.append(risk_snapshot)
             target = self.recovery.process(
                 target=target,
                 risk=risk_snapshot,
                 current_position_qty=self._position.signed_qty if self._position else Decimal(0),
             )
+            target_exposures.append(target)
             decision = self.governor.evaluate(
                 target,
                 risk_snapshot,
                 current_position_qty=self._position.signed_qty if self._position else Decimal(0),
             )
+            execution_decisions.append(decision)
             strategy_id = "+".join(sorted({intent.strategy_id for intent in intents}))
             regime = getattr(market_state.primary_regime, "value", str(market_state.primary_regime))
             if not decision.orders:
@@ -1028,6 +1126,7 @@ class DeterministicReplay:
                         reason=decision.rational,
                     )
                 )
+                equity_curve.append(self._equity_point(event))
                 continue
             for order in decision.orders:
                 normalized_order, fill_price, reason = self._order_gate(order, decision, event)
@@ -1056,7 +1155,7 @@ class DeterministicReplay:
                 fills.append(fill)
                 if trade is not None:
                     trades.append(trade)
-                if strategy_id.startswith("grid"):
+                if any("grid" in intent.strategy_id.lower() for intent in intents):
                     self._grid_depth += 1
                 decisions.append(
                     ReplayOrderRecord(
@@ -1070,10 +1169,19 @@ class DeterministicReplay:
                         exchange_order_id=fill.exchange_order_id,
                     )
                 )
+            equity_curve.append(self._equity_point(event))
 
         self._clock_time = normalized_events[-1].event_time
         if self._position is not None and self.config.force_close_at_end:
-            self._force_close(normalized_events[-1], decisions, fills, trades)
+            self._force_close(
+                normalized_events[-1],
+                execution_decisions,
+                decisions,
+                fills,
+                trades,
+            )
+            if equity_curve:
+                equity_curve[-1] = self._equity_point(normalized_events[-1])
 
         economic_result = (
             evaluate_trades(
@@ -1092,9 +1200,14 @@ class DeterministicReplay:
             event_count=len(normalized_events),
             start_time=normalized_events[0].event_time,
             end_time=final_event.event_time,
+            strategy_intents=tuple(strategy_intents),
+            target_exposures=tuple(target_exposures),
+            risk_snapshots=tuple(risk_snapshots),
+            execution_decisions=tuple(execution_decisions),
             decisions=tuple(decisions),
             fills=tuple(fills),
             trades=tuple(trades),
+            equity_curve=tuple(equity_curve),
             economic_result=economic_result,
             final_position_qty=self._position.signed_qty if self._position else Decimal(0),
             final_equity=final_equity,
@@ -1108,3 +1221,124 @@ def run_replay(
     """Convenience wrapper that creates a fresh isolated replay runner."""
 
     return DeterministicReplay(config).run(events)
+
+
+def run_walk_forward_replay(
+    events: Sequence[HistoricalMarketEvent],
+    variants: Sequence[ReplayParameterVariant],
+    window_config: EventWalkForwardConfig,
+) -> ReplayWalkForwardResult:
+    """Select each fold's variant on train events, then replay untouched OOS events.
+
+    Each train and test window gets a fresh runner.  Purge and embargo are
+    expressed in event time by ``walk_forward_event_splits``.  No variant is
+    selected from test output, and the selection artifact hash is recomputed
+    from the train data/config/scores rather than accepted from a caller.
+    """
+
+    normalized_events = _validate_event_sequence(events)
+    normalized_variants = list(variants)
+    if not normalized_variants:
+        raise ReplayValidationError("walk-forward replay requires at least one parameter variant")
+    variant_ids = [variant.variant_id for variant in normalized_variants]
+    if len(set(variant_ids)) != len(variant_ids):
+        raise ReplayValidationError("walk-forward variant IDs must be unique")
+
+    first_config = normalized_variants[0].config
+    for variant in normalized_variants[1:]:
+        if (
+            variant.config.initial_capital != first_config.initial_capital
+            or variant.config.cost_model != first_config.cost_model
+        ):
+            raise ReplayValidationError(
+                "walk-forward variants must share initial capital and economic cost model"
+            )
+
+    folds = walk_forward_event_splits(normalized_events, window_config)
+    fold_results: list[ReplayWalkForwardFoldResult] = []
+    oos_trades: list[BacktestTrade] = []
+    for fold in folds:
+        train_events = normalized_events[fold.train_start : fold.train_end]
+        test_events = normalized_events[fold.test_start : fold.test_end]
+        train_scores: dict[str, Decimal | None] = {}
+        for variant in normalized_variants:
+            train_result = run_replay(train_events, variant.config)
+            train_scores[variant.variant_id] = (
+                train_result.economic_result.net_pnl
+                if train_result.economic_result is not None
+                else None
+            )
+        eligible = [
+            (variant_id, score)
+            for variant_id, score in train_scores.items()
+            if score is not None
+        ]
+        if not eligible:
+            raise ReplayValidationError(
+                f"walk-forward fold {fold.fold_index} has no train replay economics"
+            )
+        # Select by descending train net PnL, then variant ID for deterministic
+        # tie-breaking. Test output is deliberately not part of selection.
+        selected_variant_id = min(
+            eligible,
+            key=lambda item: (-item[1], item[0]),
+        )[0]
+        selected_variant = next(
+            variant for variant in normalized_variants if variant.variant_id == selected_variant_id
+        )
+        selection_artifact_sha256 = _canonical_hash(
+            {
+                "fold_index": fold.fold_index,
+                "train_event_ids": [event.event_id for event in train_events],
+                "train_dataset_sha256": _canonical_hash(train_events),
+                "variant_config_sha256": {
+                    variant.variant_id: _canonical_hash(variant.config)
+                    for variant in normalized_variants
+                },
+                "train_net_pnl_by_variant": train_scores,
+                "selected_variant_id": selected_variant_id,
+            }
+        )
+        test_result = run_replay(test_events, selected_variant.config)
+        test_trades = [
+            trade.model_copy(
+                update={"trade_id": f"WF{fold.fold_index}-{trade.trade_id}"}
+            )
+            for trade in test_result.trades
+        ]
+        oos_trades.extend(test_trades)
+        fold_results.append(
+            ReplayWalkForwardFoldResult(
+                fold_index=fold.fold_index,
+                train_start=fold.train_start,
+                train_end=fold.train_end,
+                test_start=fold.test_start,
+                test_end=fold.test_end,
+                selected_variant_id=selected_variant_id,
+                train_net_pnl_by_variant=train_scores,
+                selection_artifact_sha256=selection_artifact_sha256,
+                test_trade_count=len(test_trades),
+                test_net_pnl=(
+                    test_result.economic_result.net_pnl
+                    if test_result.economic_result is not None
+                    else None
+                ),
+            )
+        )
+
+    oos_economic_result = (
+        evaluate_trades(
+            oos_trades,
+            initial_capital=first_config.initial_capital,
+            cost_model=first_config.cost_model,
+        )
+        if oos_trades
+        else None
+    )
+    return ReplayWalkForwardResult(
+        dataset_sha256=_canonical_hash(normalized_events),
+        variant_ids=tuple(variant_ids),
+        folds=tuple(fold_results),
+        oos_trades=tuple(oos_trades),
+        oos_economic_result=oos_economic_result,
+    )

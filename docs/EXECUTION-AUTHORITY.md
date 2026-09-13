@@ -118,7 +118,9 @@ mutable CLI commands; details and commands are in
 `apps/trading_worker/backtest/replay.py` is an offline research simulator. It
 replays the existing strategy engines through the allocator, recovery engine,
 and RiskGovernor against validated public event data, then applies explicit
-bid/ask/depth, fee, spread, slippage, and funding accounting. It has no Binance
+bid/ask/depth, fee, spread, slippage, and funding accounting. It records the
+full intent/target/risk/decision/fill/equity lineage and supports train-only
+variant selection followed by fresh event-time OOS replay. It has no Binance
 REST/WebSocket imports and cannot submit an order. Historical liquidation
 safety is `UNKNOWN` unless an authoritative position-risk source is supplied;
 the replay therefore blocks further risk increase after an entry and remains

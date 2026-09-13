@@ -10,9 +10,11 @@ from apps.trading_worker.backtest.replay import (
     HistoricalMarketEvent,
     ReplayExecutionConfig,
     ReplayExecutionError,
+    ReplayParameterVariant,
     ReplaySymbolRules,
     ReplayValidationError,
     run_replay,
+    run_walk_forward_replay,
     walk_forward_event_splits,
 )
 from domain.enums import MarketType
@@ -129,6 +131,11 @@ def test_replay_runs_existing_pipeline_and_accounts_explicit_costs_and_funding()
 
     assert len(result.fills) == 2
     assert len(result.trades) == 1
+    assert result.strategy_intents
+    assert result.target_exposures
+    assert len(result.risk_snapshots) == len(result.execution_decisions)
+    assert result.execution_decisions
+    assert len(result.equity_curve) == result.event_count
     assert all(fill.decision_id for fill in result.fills)
     assert all(fill.target_exposure_id is not None for fill in result.fills)
     assert result.final_position_qty == Decimal("0")
@@ -237,6 +244,46 @@ def test_event_time_walk_forward_has_purge_and_embargo_gaps():
     assert first.train_end <= first.test_start
     assert first.train_end_time <= first.test_start_time
     assert first.test_end <= len(events)
+
+
+def test_walk_forward_replay_selects_on_train_and_evaluates_untouched_oos():
+    events = [_event(index, str(100 + index)) for index in range(12)]
+    baseline = ReplayParameterVariant(variant_id="baseline", config=_config())
+    higher_slippage = ReplayParameterVariant(
+        variant_id="higher-slippage",
+        config=_config().model_copy(update={"market_slippage_bps": Decimal("4")}),
+    )
+
+    result = run_walk_forward_replay(
+        events,
+        [baseline, higher_slippage],
+        EventWalkForwardConfig(
+            train_duration_sec=120,
+            test_duration_sec=120,
+            purge_duration_sec=60,
+            embargo_duration_sec=60,
+        ),
+    )
+
+    assert len(result.folds) >= 2
+    assert all(fold.selected_variant_id == "baseline" for fold in result.folds)
+    assert all(len(fold.selection_artifact_sha256) == 64 for fold in result.folds)
+    assert result.oos_trades
+    assert result.oos_economic_result is not None
+    assert result.evidence_status == "RESEARCH_WALK_FORWARD_ONLY"
+    assert result.launch_eligible is False
+
+    repeat = run_walk_forward_replay(
+        events,
+        [baseline, higher_slippage],
+        EventWalkForwardConfig(
+            train_duration_sec=120,
+            test_duration_sec=120,
+            purge_duration_sec=60,
+            embargo_duration_sec=60,
+        ),
+    )
+    assert result.model_dump() == repeat.model_dump()
 
 
 def test_replay_is_research_only_and_does_not_import_binance_execution():
