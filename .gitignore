@@ -1,4 +1,5 @@
 node_modules/
+.npm-cache-run/
 build/
 dist/
 coverage/
@@ -21,6 +22,7 @@ __pycache__/
 *.pyd
 .Python
 .pytest_cache/
+.pytest-tmp*/
 env/
 venv/
 .venv/

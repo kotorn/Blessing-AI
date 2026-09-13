@@ -5,18 +5,19 @@ import { ExposureAttributionCard } from '../components/ExposureAttributionCard';
 import { InstrumentsPanel } from '../components/InstrumentsPanel';
 import { BasketManager } from '../components/BasketManager';
 import { RiskGovernorMonitor } from '../components/RiskGovernorMonitor';
-import { AccountData, BasketItem, InstrumentData, RiskRuleItem } from '../types';
+import { AccountData, BasketItem, InstrumentData, RiskRuleItem, TradingSystemState } from '../types';
 import { AppRoute } from '../contracts/system';
 import { AlertCircle, ArrowUpRight, Flame } from 'lucide-react';
 
 interface CommandCenterPageProps {
   account: AccountData;
+  systemState: TradingSystemState | null;
   onAccountUpdated: (account: AccountData) => void;
   instruments: Record<string, InstrumentData>;
   baskets: BasketItem[];
   riskRules: RiskRuleItem[];
-  correlationBtcEth: number;
-  cryptoBetaExposurePct: number;
+  correlationBtcEth: number | null;
+  cryptoBetaExposurePct: number | null;
   liquidationDistancePct: number | null;
   isActionLoading: boolean;
   onExpandGrid: (basketId: string) => Promise<void>;
@@ -28,6 +29,7 @@ interface CommandCenterPageProps {
 
 export const CommandCenterPage: React.FC<CommandCenterPageProps> = ({
   account,
+  systemState,
   onAccountUpdated,
   instruments,
   baskets,
@@ -65,6 +67,7 @@ export const CommandCenterPage: React.FC<CommandCenterPageProps> = ({
       {/* 2. Interactive Operational Decision Pipeline */}
       <CommandDecisionFlow
         account={account}
+        systemState={systemState}
         instruments={instruments}
         baskets={baskets}
         riskRules={riskRules}

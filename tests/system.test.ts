@@ -29,6 +29,36 @@ describe('System Preflight Execution Enforcements', () => {
     expect(result.checks.find(c => c.id === 'CHK-ENV-MISMATCH')).toBeDefined();
   });
 
+  it('should reject TESTNET arming when the exchange environment is unknown', () => {
+    const mockState: TradingSystemState = {
+      dataSource: 'SIMULATED',
+      exchangeEnvironment: 'NONE',
+      executionMode: 'PAPER',
+      engineState: 'DISARMED',
+      accountSynchronized: true,
+      marketDataHealthy: true,
+      privateStreamHealthy: true,
+      tradingConnectionHealthy: true,
+      reconciliationStatus: 'IN_SYNC',
+      killSwitchActive: false,
+      pauseNewRisk: false,
+      recoveryOnly: false,
+      configVersion: '1',
+      updatedAt: 'now',
+      workerResponsive: true,
+    };
+
+    const result = evaluatePreflight(mockState, {
+      executionMode: 'TESTNET',
+      instruments: ['BTCUSDT'],
+      strategies: { grid: true },
+      riskProfile: 'CONSERVATIVE',
+    });
+
+    expect(result.canArm).toBe(false);
+    expect(result.checks.find(c => c.id === 'CHK-ENV-MISMATCH')?.status).toBe('FAIL');
+  });
+
   it('should reject LIVE arming globally', () => {
     const mockState: TradingSystemState = {
       dataSource: 'BINANCE',

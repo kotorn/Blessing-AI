@@ -6,12 +6,16 @@ export const AIQuantCopilot: React.FC = () => {
   const [selectedTask, setSelectedTask] = useState('ANALYZE_DAILY_SUMMARY');
   const [isLoading, setIsLoading] = useState(false);
   const [response, setResponse] = useState<string | null>(null);
+  const [responseMeta, setResponseMeta] = useState({
+    model: 'deterministic_quant_engine',
+    evidence: 'ILLUSTRATIVE_ONLY',
+  });
 
   const presets = [
     { id: 'ANALYZE_DAILY_SUMMARY', label: 'Daily Trading Audit', prompt: 'Audit today\'s basket performance, total funding drag, and grid expansion frequency across BTC and ETH.' },
     { id: 'DIAGNOSE_RECOVERY', label: 'Diagnose Basket Recovery', prompt: 'Explain why Basket #BASKET-BTC-001 entered RECOVERY state and whether dynamic ATR spacing mitigated adverse excursion.' },
     { id: 'STRESS_TEST_SCENARIOS', label: 'Design Stress Scenarios', prompt: 'Propose 3 synthetic black-swan stress test scenarios with simultaneous funding spike and basis dislocation.' },
-    { id: 'AUDIT_RISK_INCIDENTS', label: 'Audit Risk Governance', prompt: 'Review current portfolio margin utilization (14.2%) and effective leverage (0.85x) against hard drawdown escalation tiers.' },
+    { id: 'AUDIT_RISK_INCIDENTS', label: 'Audit Risk Governance', prompt: 'Review the verified worker risk snapshot against hard drawdown escalation tiers. If the snapshot is unavailable, explain the fail-closed state.' },
   ];
 
   const handleRunTask = async (taskPrompt: string) => {
@@ -26,11 +30,9 @@ export const AIQuantCopilot: React.FC = () => {
           prompt: taskPrompt,
           query: taskPrompt,
           context: {
-            portfolio_equity: 50720.50,
-            active_baskets: 2,
-            risk_state: 'NORMAL',
-            effective_leverage: 0.85,
-            drawdown_pct: 1.15,
+            data_source: 'SIMULATED',
+            evidence_status: 'ILLUSTRATIVE_ONLY',
+            execution_authority: 'PYTHON_TRADING_WORKER',
           },
         }),
       });
@@ -38,6 +40,10 @@ export const AIQuantCopilot: React.FC = () => {
       if (contentType && contentType.includes('application/json')) {
         const data = await resp.json();
         setResponse(data.analysis || data.error || 'No response returned');
+        setResponseMeta({
+          model: data.model || 'unknown provider',
+          evidence: data.evidence_status || 'UNVERIFIED',
+        });
       } else {
         const text = await resp.text();
         setResponse(text.slice(0, 300) || 'Quant engine processing completed.');
@@ -61,7 +67,7 @@ export const AIQuantCopilot: React.FC = () => {
             <div>
               <h2 className="text-base font-bold text-zinc-100 flex items-center space-x-2">
                 <span>AI Quant Research Copilot (Section 33)</span>
-                <span className="text-[11px] px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">Gemini Flash</span>
+                <span className="text-[11px] px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">Research Only</span>
               </h2>
               <p className="text-xs text-zinc-400">Post-trade analytics, regime explainability & scenario generation</p>
             </div>
@@ -131,7 +137,9 @@ export const AIQuantCopilot: React.FC = () => {
               <Sparkles className="w-4 h-4 text-indigo-400" />
               <span>Quant Research Synthesis</span>
             </div>
-            <span className="text-[11px] font-mono text-zinc-400">Model: Gemini 2.5 Flash</span>
+            <span className="text-[11px] font-mono text-zinc-400">
+              Provider: {responseMeta.model} • Evidence: {responseMeta.evidence}
+            </span>
           </div>
           <div className="text-xs text-zinc-300 whitespace-pre-wrap font-mono leading-relaxed bg-zinc-950/60 p-4 rounded-lg border border-zinc-800/80">
             {response}

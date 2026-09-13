@@ -52,8 +52,10 @@ def _current_sha() -> str:
         return head_sha
     except RuntimeError:
         raise
-    except Exception:
-        return os.getenv("BUILD_SHA", "UNKNOWN")
+    except Exception as exc:
+        raise RuntimeError(
+            "ABORT: cannot verify the current Git SHA for the manual Testnet trial"
+        ) from exc
 
 
 def _sanitized_positions(positions: List[dict]) -> List[dict]:
@@ -304,6 +306,12 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
             raise RuntimeError("WS NEW was not observed for the submitted order")
         artifact["order_lifecycle"].append("WS_NEW")
 
+        # ORDER_TRADE_UPDATE invalidates the previous account snapshot and
+        # reconciliation result.  Re-verify the new open order before any
+        # amendment is allowed through the Worker decision gate.
+        if await adapter.reconciliation.reconcile() != "IN_SYNC":
+            raise RuntimeError("Post-WS_NEW reconciliation was not verified")
+
         order_status = (streamed_order or order).status
         if order_status in {"FILLED", "PARTIALLY_FILLED"}:
             # An unexpected fill is handled only on Testnet and only through
@@ -314,7 +322,7 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
             amended_price = adapter.symbol_rules["BTCUSDT"].normalize_price(
                 passive_price - adapter.symbol_rules["BTCUSDT"].tick_size
             )
-            amended = await adapter.modify_order(
+            amended = await worker.amend_testnet_order(
                 "BTCUSDT", client_order_id, amended_price, quantity, "BUY"
             )
             if amended is None:
@@ -326,7 +334,7 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
             if not queried or queried.get("status") not in {"NEW", "PARTIALLY_FILLED"}:
                 raise RuntimeError("Amended Testnet order was not verified as open")
             cancel_event_before = adapter.last_order_event_at.get(active_client_id)
-            cancelled = await adapter.cancel_order("BTCUSDT", active_client_id)
+            cancelled = await worker.cancel_testnet_order("BTCUSDT", active_client_id)
             if not cancelled:
                 latest_order = await adapter.ledger.get_order_by_client_id(active_client_id)
                 if latest_order is not None and latest_order.status in {

@@ -4,7 +4,15 @@ from decimal import Decimal
 import pytest
 
 from domain.enums import EconomicRiskClass, MarketType, OrderSide, OrderType, PositionSide, TimeInForce
-from domain.models import ExchangeFill, ExchangePosition, ExecutionDecision, ExecutionOrder, OrderIntent, utc_now
+from domain.models import (
+    ExchangeFill,
+    ExchangePosition,
+    ExecutionDecision,
+    ExecutionOrder,
+    MarketEvent,
+    OrderIntent,
+    utc_now,
+)
 from apps.trading_worker.main import (
     ArmRequest,
     EXECUTABLE_ENGINE_STATES,
@@ -41,6 +49,16 @@ class FakeStream:
 
     async def close(self):
         self.is_connected = False
+
+
+class GateAuthority:
+    def _evaluate_execution_gate(self, decision):
+        return True, "unit-test gate"
+
+
+class BlockingGateAuthority:
+    def _evaluate_execution_gate(self, decision):
+        return False, "blocked by unit-test decision gate"
 
 
 class FakeReconciliation:
@@ -121,8 +139,18 @@ async def make_adapter(snapshot=None, rest=None):
     if rest is not None:
         adapter.rest_client = rest
     adapter.last_market_event_at["BTCUSDT"] = utc_now()
+    adapter.last_market_event_source["BTCUSDT"] = "BINANCE_TESTNET_WS"
+    adapter.last_market_event_venue["BTCUSDT"] = "BINANCE_TESTNET"
+    adapter.last_market_event_market_type["BTCUSDT"] = MarketType.USDM_FUTURES.value
     await ledger.set_account_snapshot(snapshot or make_snapshot())
     return adapter
+
+
+async def execute_internal(adapter, decision):
+    """Exercise the adapter's private path with an explicit test authority."""
+    authority = object()
+    adapter.bind_worker_authority(authority)
+    return await adapter._execute_decision(decision, authority=authority)
 
 
 async def make_ready_worker(monkeypatch, *, snapshot=None, symbols=None, rest=None):
@@ -133,6 +161,12 @@ async def make_ready_worker(monkeypatch, *, snapshot=None, symbols=None, rest=No
     worker.execution_mode = WorkerExecutionMode.TESTNET
     worker.engine_state = WorkerEngineState.ARMED
     worker.execution_adapter = await make_adapter(snapshot or make_snapshot(), rest=rest)
+    worker.active_configuration = {
+        "executionMode": "TESTNET",
+        "instruments": list(symbols or ["BTCUSDT"]),
+        "strategies": {"grid": True, "trend": False, "shock": False, "carry": False},
+        "riskProfile": "CONSERVATIVE",
+    }
     worker.market_data_healthy = True
     worker.last_market_event_at["BTCUSDT"] = utc_now()
     worker._sync_adapter_state()
@@ -222,6 +256,35 @@ def test_worker_adapter_state_contract_has_no_attribute_error(monkeypatch):
     assert state.connection_status == "DEGRADED"
 
 
+def test_worker_becomes_degraded_when_ready_adapter_health_truth_is_not_ready():
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET)
+    adapter.state = ConnectionState.READY
+    adapter.capabilities.account_request_succeeded = True
+    adapter.capabilities.authenticated = True
+    adapter.user_stream = FakeStream()
+    adapter.reconciliation = FakeReconciliation("MISMATCH")
+    worker.execution_adapter = adapter
+    worker.execution_mode = WorkerExecutionMode.TESTNET
+    worker.active_configuration = {"executionMode": "TESTNET"}
+
+    state = worker.get_state()
+
+    assert state.engine_state == WorkerEngineState.DEGRADED
+    assert state.reconciliation_status == "MISMATCH"
+
+
+def test_worker_authority_cannot_be_rebound():
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET)
+    first = object()
+    second = object()
+
+    adapter.bind_worker_authority(first)
+    adapter.bind_worker_authority(first)
+    with pytest.raises(RuntimeError, match="cannot be rebound"):
+        adapter.bind_worker_authority(second)
+
+
 @pytest.mark.asyncio
 async def test_testnet_readiness_does_not_depend_on_engine_armed(monkeypatch):
     worker = await make_ready_worker(monkeypatch)
@@ -270,7 +333,20 @@ async def test_market_data_freshness_is_checked_per_symbol(monkeypatch):
 
     assert worker.is_market_data_fresh() is False
     worker.last_market_event_at["ETHUSDT"] = utc_now()
+    worker.execution_adapter.last_market_event_source["ETHUSDT"] = "BINANCE_TESTNET_WS"
+    worker.execution_adapter.last_market_event_venue["ETHUSDT"] = "BINANCE_TESTNET"
+    worker.execution_adapter.last_market_event_market_type["ETHUSDT"] = MarketType.USDM_FUTURES.value
     assert worker.is_market_data_fresh() is True
+
+
+@pytest.mark.asyncio
+async def test_market_readiness_rejects_unproven_timestamp(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    worker.last_market_event_at["BTCUSDT"] = utc_now()
+    worker.execution_adapter.last_market_event_source.pop("BTCUSDT", None)
+
+    assert worker.is_market_data_fresh(["BTCUSDT"]) is False
+    assert worker.get_capabilities()["testnetExecutionReady"] is False
 
 
 def test_testnet_limits_have_bounded_defaults_and_safe_invalid_overrides(monkeypatch):
@@ -293,6 +369,18 @@ def test_testnet_limits_have_bounded_defaults_and_safe_invalid_overrides(monkeyp
 
     monkeypatch.setenv("TESTNET_MAX_SINGLE_ORDER_NOTIONAL", "not-a-number")
     assert SafetyLimits.from_environment().max_single_order_notional == Decimal("25.0")
+
+    monkeypatch.setenv("TESTNET_MAX_SINGLE_ORDER_NOTIONAL", "1000000")
+    monkeypatch.setenv("TESTNET_ALLOWED_SYMBOLS", "BTCUSDT,ETHUSDT")
+    monkeypatch.delenv("TESTNET_LIMITS_OVERRIDE_APPROVED", raising=False)
+    bounded = SafetyLimits.from_environment()
+    assert bounded.max_single_order_notional == Decimal("25.0")
+    assert bounded.allowed_symbols == {"BTCUSDT"}
+
+    monkeypatch.setenv("TESTNET_LIMITS_OVERRIDE_APPROVED", "true")
+    approved = SafetyLimits.from_environment()
+    assert approved.max_single_order_notional == Decimal("1000000")
+    assert approved.allowed_symbols == {"BTCUSDT", "ETHUSDT"}
 
 
 def test_manual_trial_requires_matching_readonly_build_evidence(monkeypatch, tmp_path):
@@ -428,6 +516,19 @@ async def test_unknown_liquidation_safety_blocks_risk_increase(monkeypatch):
         monkeypatch, snapshot=make_snapshot(liquidation_safety="UNKNOWN")
     )
     decision = make_decision(EconomicRiskClass.INCREASE_RISK, make_limit_intent())
+
+    result = worker.decision_execution_gate.check(decision)
+
+    assert result.allowed is False
+    assert "liquidation" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_active_position_without_liquidation_distance_fails_closed(monkeypatch):
+    snapshot = make_snapshot()
+    snapshot.total_position_notional = Decimal("100")
+    worker = await make_ready_worker(monkeypatch, snapshot=snapshot)
+    decision = make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
 
     result = worker.decision_execution_gate.check(decision)
 
@@ -578,6 +679,151 @@ async def test_market_order_without_fresh_price_is_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_market_order_uses_executable_ask_and_respects_single_order_cap():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/ticker/bookTicker":
+            return {
+                "symbol": "BTCUSDT",
+                "bidPrice": "24999",
+                "askPrice": "26000",
+                "bidQty": "1",
+                "askQty": "1",
+                "time": int(utc_now().timestamp() * 1000),
+            }
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    intent = OrderIntent(
+        client_order_id="MARKET-ASK-CAP",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.001"),
+    )
+
+    result = await adapter.order_gate.check(intent, EconomicRiskClass.NEW_RISK)
+
+    assert result.allowed is False
+    assert "single-order" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_market_order_rejects_when_top_of_book_depth_is_insufficient():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/ticker/bookTicker":
+            return {
+                "symbol": "BTCUSDT",
+                "bidPrice": "10000",
+                "askPrice": "10001",
+                "bidQty": "0.0005",
+                "askQty": "0.0005",
+                "time": int(utc_now().timestamp() * 1000),
+            }
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    intent = OrderIntent(
+        client_order_id="MARKET-DEPTH",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.001"),
+    )
+
+    result = await adapter.order_gate.check(intent, EconomicRiskClass.NEW_RISK)
+
+    assert result.allowed is False
+    assert "depth" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_stale_exchange_quote_timestamp_blocks_market_order():
+    stale_event_ms = int((utc_now() - timedelta(seconds=60)).timestamp() * 1000)
+
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/ticker/bookTicker":
+            return {
+                "symbol": "BTCUSDT",
+                "bidPrice": "10000",
+                "askPrice": "10001",
+                "bidQty": "1",
+                "askQty": "1",
+                "E": stale_event_ms,
+            }
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    intent = OrderIntent(
+        client_order_id="MARKET-STALE-QUOTE",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.001"),
+    )
+
+    result = await adapter.order_gate.check(intent, EconomicRiskClass.NEW_RISK)
+
+    assert result.allowed is False
+    assert "stale" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_exchange_quote_requires_symbol_and_exchange_timestamp():
+    responses = [
+        {
+            "symbol": "ETHUSDT",
+            "bidPrice": "10000",
+            "askPrice": "10001",
+            "bidQty": "1",
+            "askQty": "1",
+            "time": int(utc_now().timestamp() * 1000),
+        },
+        {
+            "symbol": "BTCUSDT",
+            "bidPrice": "10000",
+            "askPrice": "10001",
+            "bidQty": "1",
+            "askQty": "1",
+        },
+    ]
+
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/ticker/bookTicker":
+            return responses.pop(0)
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    assert await adapter.get_best_bid_ask("BTCUSDT") is None
+    assert await adapter.get_best_bid_ask("BTCUSDT") is None
+
+
+def test_market_event_from_non_testnet_venue_is_not_authoritative():
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET)
+    event = MarketEvent(
+        event_id="MAINNET-EVENT",
+        event_time=utc_now(),
+        symbol="ETHUSDT",
+        venue="BINANCE_LIVE",
+        market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("100"),
+        best_bid=Decimal("99.9"),
+        best_ask=Decimal("100.1"),
+    )
+
+    assert adapter.record_market_event(event) is False
+    assert "ETHUSDT" not in adapter.last_market_event_at
+
+
+@pytest.mark.asyncio
 async def test_testnet_single_order_cap_is_enforced(monkeypatch):
     adapter = await make_adapter()
     result = await adapter.order_gate.check(
@@ -613,7 +859,7 @@ async def test_multiple_orders_are_gated_individually():
         make_limit_intent(client_id="ORDER-2", price="20000"),
     )
 
-    executed = await adapter.execute_decision(decision)
+    executed = await execute_internal(adapter, decision)
 
     assert len(executed) == 1
     assert len(post_calls) == 1
@@ -647,7 +893,7 @@ async def test_execution_lineage_survives_order_and_fill_events():
         source_intent_ids=["INT-1"],
     )
 
-    executed = await adapter.execute_decision(decision)
+    executed = await execute_internal(adapter, decision)
 
     assert len(executed) == 1
     assert executed[0].strategy_id == "grid"
@@ -685,6 +931,38 @@ async def test_execution_lineage_survives_order_and_fill_events():
     assert adapter.ledger.fills[0].decision_id == "DEC-1"
     assert adapter.ledger.fills[0].target_exposure_id == "EXP-1"
     assert adapter.ledger.fills[0].source_intent_ids == ["INT-1"]
+    assert adapter.ledger.account_snapshot is None
+    assert adapter.reconciliation.last_status == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_filled_rest_ack_without_recoverable_fills_is_not_execution_success():
+    async def handler(method, path, kwargs):
+        if method == "POST" and path == "/fapi/v1/order":
+            return {
+                "orderId": 42,
+                "clientOrderId": "UNIT-1",
+                "status": "FILLED",
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "positionSide": "BOTH",
+                "price": "10000",
+                "origQty": "0.001",
+            }
+        if method == "GET" and path == "/fapi/v1/userTrades":
+            return []
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    executed = await execute_internal(
+        adapter,
+        make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
+    )
+
+    assert executed == []
+    assert adapter.state == ConnectionState.DEGRADED
+    assert adapter.reconciliation.last_status == "UNKNOWN"
+    assert adapter.ledger.fills == []
 
 
 @pytest.mark.asyncio
@@ -711,8 +989,10 @@ async def test_order_amendment_that_increases_notional_is_capped():
         )
     )
 
+    authority = GateAuthority()
+    adapter.bind_worker_authority(authority)
     amended = await adapter.modify_order(
-        "BTCUSDT", "AMEND-1", Decimal("10000"), Decimal("0.003"), "BUY"
+        "BTCUSDT", "AMEND-1", Decimal("10000"), Decimal("0.003"), "BUY", authority=authority
     )
 
     assert amended is None
@@ -751,8 +1031,10 @@ async def test_lower_notional_entry_amendment_preserves_entry_semantics():
         )
     )
 
+    authority = GateAuthority()
+    adapter.bind_worker_authority(authority)
     amended = await adapter.modify_order(
-        "BTCUSDT", "AMEND-2", Decimal("9000"), Decimal("0.001"), "BUY"
+        "BTCUSDT", "AMEND-2", Decimal("9000"), Decimal("0.001"), "BUY", authority=authority
     )
 
     assert amended is not None
@@ -760,6 +1042,45 @@ async def test_lower_notional_entry_amendment_preserves_entry_semantics():
     assert amended.quantity == Decimal("0.001")
     assert amended.reduce_only is False
     assert put_calls and "reduceOnly" not in put_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_order_amendment_cannot_bypass_worker_decision_gate():
+    put_calls = []
+
+    async def handler(method, path, kwargs):
+        if method == "PUT" and path == "/fapi/v1/order":
+            put_calls.append(kwargs["params"])
+            return {}
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    await adapter.ledger.upsert_order(
+        ExecutionOrder(
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=Decimal("0.001"),
+            price=Decimal("10000"),
+            order_type="LIMIT",
+            client_order_id="AMEND-BLOCKED",
+            status="NEW",
+            exchange_order_id="15",
+        )
+    )
+    authority = BlockingGateAuthority()
+    adapter.bind_worker_authority(authority)
+
+    amended = await adapter.modify_order(
+        "BTCUSDT",
+        "AMEND-BLOCKED",
+        Decimal("9000"),
+        Decimal("0.001"),
+        "BUY",
+        authority=authority,
+    )
+
+    assert amended is None
+    assert put_calls == []
 
 
 @pytest.mark.asyncio
@@ -777,7 +1098,8 @@ async def test_transport_ambiguity_never_blindly_resubmits():
     adapter = await make_adapter(rest=ScriptedRest(handler))
     adapter.reconciliation.next_status = "MISMATCH"
 
-    await adapter.execute_decision(
+    await execute_internal(
+        adapter,
         make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
     )
 
@@ -805,7 +1127,8 @@ async def test_ambiguity_recovery_requires_authoritative_reconciliation():
     adapter = await make_adapter(rest=ScriptedRest(handler))
     adapter.reconciliation.next_status = "MISMATCH"
 
-    recovered = await adapter.execute_decision(
+    recovered = await execute_internal(
+        adapter,
         make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
     )
 
@@ -844,7 +1167,9 @@ async def test_cancel_ambiguity_returns_success_only_after_query_and_reconciliat
         )
     )
 
-    assert await adapter.cancel_order("BTCUSDT", "UNIT-1") is True
+    authority = object()
+    adapter.bind_worker_authority(authority)
+    assert await adapter.cancel_order("BTCUSDT", "UNIT-1", authority=authority) is True
     assert adapter.state == ConnectionState.READY
     assert adapter.reconciliation.calls == 1
 
@@ -855,7 +1180,8 @@ async def test_authentication_failure_degrades_adapter_and_clears_truth():
         raise BinanceAuthenticationError(-2015, "Invalid API-key, IP, or permissions")
 
     adapter = await make_adapter(rest=ScriptedRest(handler))
-    executed = await adapter.execute_decision(
+    executed = await execute_internal(
+        adapter,
         make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
     )
 
@@ -909,6 +1235,49 @@ async def test_kill_switch_stays_active_when_exchange_is_unreachable(monkeypatch
     assert result["status"] == "UNKNOWN"
     assert worker.kill_switch_active is True
     assert worker.engine_state == WorkerEngineState.EMERGENCY
+
+
+@pytest.mark.asyncio
+async def test_emergency_flatten_reports_partial_when_private_stream_is_down():
+    async def handler(method, path, kwargs):
+        if method == "GET" and path == "/fapi/v2/positionRisk":
+            return [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": "0.001",
+                    "entryPrice": "10000",
+                    "markPrice": "10000",
+                }
+            ]
+        if method == "GET" and path == "/fapi/v1/ticker/bookTicker":
+            return {"bidPrice": "9999", "askPrice": "10001"}
+        if method == "POST" and path == "/fapi/v1/order":
+            return {
+                "orderId": 99,
+                "clientOrderId": kwargs["params"]["newClientOrderId"],
+                "status": "NEW",
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "positionSide": "BOTH",
+                "price": "10001",
+                "origQty": "0.001",
+                "reduceOnly": True,
+            }
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    adapter.state = ConnectionState.DEGRADED
+    adapter.user_stream.is_connected = False
+    authority = object()
+    adapter.bind_worker_authority(authority)
+
+    flattened = await adapter.emergency_flatten(authority=authority)
+
+    assert flattened == []
+    assert adapter.last_emergency_result["status"] == "PARTIAL"
+    assert adapter.last_emergency_result["attempted_orders"] == 1
+    assert adapter.state == ConnectionState.DEGRADED
 
 
 def test_mainnet_mutable_adapters_are_rejected():
@@ -1089,6 +1458,147 @@ async def test_filled_order_recovery_recovers_canonical_fill_and_reaches_in_sync
 
 
 @pytest.mark.asyncio
+async def test_terminal_filled_order_is_queried_and_fill_recovered_before_in_sync():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v2/positionRisk":
+            return []
+        if path == "/fapi/v1/openOrders":
+            return []
+        if path == "/fapi/v2/account":
+            return account_payload()
+        if path == "/fapi/v1/userTrades":
+            return [trade_payload()]
+        if path == "/fapi/v1/order":
+            return {
+                "orderId": 7,
+                "status": "FILLED",
+                "symbol": "BTCUSDT",
+                "executedQty": "0.001",
+            }
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    ledger = InMemoryLedger()
+    await ledger.upsert_order(
+        ExecutionOrder(
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=Decimal("0.001"),
+            price=Decimal("10000"),
+            order_type="LIMIT",
+            client_order_id="LOCAL-1",
+            status="FILLED",
+            exchange_order_id="7",
+            position_side=PositionSide.LONG,
+        )
+    )
+    await ledger.replace_positions([])
+    reconciliation = BinanceReconciliation(ScriptedRest(handler), ledger)
+
+    status = await reconciliation.reconcile()
+
+    assert status == "IN_SYNC"
+    assert len(ledger.fills) == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_filled_order_without_recovered_trade_cannot_be_in_sync():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v2/positionRisk":
+            return []
+        if path == "/fapi/v1/openOrders":
+            return []
+        if path == "/fapi/v2/account":
+            return account_payload()
+        if path in {"/fapi/v1/userTrades", "/fapi/v1/order"}:
+            return [] if path.endswith("userTrades") else {
+                "orderId": 7,
+                "status": "FILLED",
+                "symbol": "BTCUSDT",
+                "executedQty": "0.001",
+            }
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    ledger = InMemoryLedger()
+    await ledger.upsert_order(
+        ExecutionOrder(
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=Decimal("0.001"),
+            price=Decimal("10000"),
+            order_type="LIMIT",
+            client_order_id="LOCAL-1",
+            status="FILLED",
+            exchange_order_id="7",
+            position_side=PositionSide.LONG,
+        )
+    )
+    await ledger.replace_positions([])
+    reconciliation = BinanceReconciliation(ScriptedRest(handler), ledger)
+
+    status = await reconciliation.reconcile()
+
+    assert status == "MISMATCH"
+    assert any(diff.code == "FILL_RECOVERY_FAILED" for diff in reconciliation.last_diffs)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_rejects_unowned_exchange_position():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v2/positionRisk":
+            return [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": "0.001",
+                    "entryPrice": "10000",
+                    "markPrice": "10000",
+                    "liquidationPrice": "9000",
+                    "notional": "10",
+                }
+            ]
+        if path == "/fapi/v1/openOrders":
+            return []
+        if path == "/fapi/v2/account":
+            return account_payload()
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    ledger = InMemoryLedger()
+    reconciliation = BinanceReconciliation(ScriptedRest(handler), ledger)
+
+    assert await reconciliation.bootstrap() is False
+    assert reconciliation.last_status == "UNKNOWN"
+    assert any(diff.code == "EXCHANGE_STATE_UNOWNED" for diff in reconciliation.last_diffs)
+    assert await ledger.is_initialized() is False
+
+
+def test_account_snapshot_rejects_inconsistent_position_notional():
+    position = {
+        "symbol": "BTCUSDT",
+        "positionSide": "BOTH",
+        "positionAmt": "1",
+        "markPrice": "100",
+        "notional": "50",
+        "liquidationPrice": "90",
+    }
+
+    with pytest.raises(ValueError, match="notional"):
+        build_account_snapshot(account_payload(), [position])
+
+
+def test_account_snapshot_rejects_active_position_without_position_side():
+    position = {
+        "symbol": "BTCUSDT",
+        "positionAmt": "1",
+        "markPrice": "100",
+        "notional": "100",
+        "liquidationPrice": "90",
+    }
+
+    with pytest.raises(ValueError, match="positionSide"):
+        build_account_snapshot(account_payload(), [position])
+
+
+@pytest.mark.asyncio
 async def test_recent_trade_recovery_falls_back_to_client_order_id_for_lineage():
     async def handler(method, path, kwargs):
         if path == "/fapi/v1/userTrades":
@@ -1104,7 +1614,8 @@ async def test_recent_trade_recovery_falls_back_to_client_order_id_for_lineage()
             price=Decimal("10000"),
             client_order_id="LOCAL-1",
             status="FILLED",
-            exchange_order_id="999",
+            exchange_order_id=None,
+            position_side=PositionSide.LONG,
             strategy_id="grid",
             decision_id="DEC-1",
         )
@@ -1230,3 +1741,98 @@ async def test_bootstrap_detects_existing_local_position_mismatch_before_sync():
         diff.code == "POSITION_QTY_MISMATCH" for diff in reconciliation.last_diffs
     )
     assert await ledger.is_initialized() is False
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_does_not_adopt_exchange_open_order_over_terminal_local_order():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v2/positionRisk":
+            return [{"symbol": "BTCUSDT", "positionSide": "BOTH", "positionAmt": "0"}]
+        if path == "/fapi/v1/openOrders":
+            return [
+                {
+                    "symbol": "BTCUSDT",
+                    "orderId": "7",
+                    "clientOrderId": "LOCAL-TERMINAL",
+                    "status": "NEW",
+                    "side": "BUY",
+                    "positionSide": "BOTH",
+                    "reduceOnly": False,
+                    "origQty": "0.001",
+                    "price": "10000",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                }
+            ]
+        if path == "/fapi/v2/account":
+            return account_payload()
+        if path == "/fapi/v1/userTrades":
+            return []
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    ledger = InMemoryLedger()
+    await ledger.upsert_order(
+        ExecutionOrder(
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=Decimal("0.001"),
+            price=Decimal("10000"),
+            client_order_id="LOCAL-TERMINAL",
+            exchange_order_id="7",
+            status="CANCELED",
+        )
+    )
+    reconciliation = BinanceReconciliation(ScriptedRest(handler), ledger)
+
+    assert await reconciliation.bootstrap() is False
+    assert reconciliation.last_status == "MISMATCH"
+    assert any(diff.code == "ORDER_STATUS_MISMATCH" for diff in reconciliation.last_diffs)
+    assert await ledger.is_initialized() is False
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_detects_open_order_economic_quantity_mismatch():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v2/positionRisk":
+            return [{"symbol": "BTCUSDT", "positionSide": "BOTH", "positionAmt": "0"}]
+        if path == "/fapi/v1/openOrders":
+            return [
+                {
+                    "symbol": "BTCUSDT",
+                    "orderId": "8",
+                    "clientOrderId": "LOCAL-OPEN",
+                    "status": "NEW",
+                    "side": "BUY",
+                    "positionSide": "BOTH",
+                    "reduceOnly": False,
+                    "origQty": "0.002",
+                    "price": "10000",
+                    "type": "LIMIT",
+                    "timeInForce": "GTC",
+                }
+            ]
+        if path == "/fapi/v2/account":
+            return account_payload()
+        if path == "/fapi/v1/userTrades":
+            return []
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    ledger = InMemoryLedger()
+    await ledger.upsert_order(
+        ExecutionOrder(
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=Decimal("0.001"),
+            price=Decimal("10000"),
+            client_order_id="LOCAL-OPEN",
+            exchange_order_id="8",
+            status="NEW",
+        )
+    )
+    await ledger.mark_initialized()
+    reconciliation = BinanceReconciliation(ScriptedRest(handler), ledger)
+
+    assert await reconciliation.reconcile() == "MISMATCH"
+    assert any(
+        diff.code == "ORDER_QUANTITY_MISMATCH" for diff in reconciliation.last_diffs
+    )

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Wallet,
   TrendingUp,
@@ -37,10 +37,7 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
   const [showTwoLayer, setShowTwoLayer] = useState(true);
   const [viewMode, setViewMode] = useState<'TWO_LAYER' | 'SUB_WALLETS'>('TWO_LAYER');
   const [searchQuery, setSearchQuery] = useState('');
-  const [expandedCoins, setExpandedCoins] = useState<Record<string, boolean>>({
-    USDC: true,
-    BNB: true,
-  });
+  const [expandedCoins, setExpandedCoins] = useState<Record<string, boolean>>({});
   const [syncFeedback, setSyncFeedback] = useState<{
     type: 'success' | 'warn' | 'error';
     msg: string;
@@ -65,137 +62,20 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
   const isDrawdownCritical = drawdownPct >= 4.0;
   const isMarginHigh = marginPct >= 25.0;
 
-  // If live data hasn't populated yet, provide structured 2-layer fallback matching user portfolio
-  const twoLayerAssets: TwoLayerAsset[] =
-    rawTwoLayerAssets.length > 0
-      ? rawTwoLayerAssets
-      : [
-          {
-            asset: 'USDC',
-            totalQty: 1012.99,
-            totalUsdVal: 1012.99,
-            unitPrice: 1.0,
-            pctOfPortfolio: 93.0,
-            allocations: [
-              {
-                location: 'Trading Bot',
-                category: 'TRADING_BOT',
-                qty: 922.1,
-                usdVal: 922.1,
-                pctOfAsset: 91.0,
-                detail: 'Active Grid / Strategy Bot',
-              },
-              {
-                location: 'Portfolio Margin',
-                category: 'PORTFOLIO_MARGIN',
-                qty: 90.88,
-                usdVal: 90.88,
-                pctOfAsset: 9.0,
-                detail: 'Cross Margin (PM)',
-              },
-              {
-                location: 'Simple Earn (Flexible)',
-                category: 'EARN',
-                qty: 0.0113,
-                usdVal: 0.0113,
-                pctOfAsset: 0.01,
-                detail: 'Flexible Earn (LD)',
-              },
-              {
-                location: 'Spot Wallet',
-                category: 'SPOT',
-                qty: 0.000044,
-                usdVal: 0,
-                pctOfAsset: 0.0,
-                detail: 'Available in Spot',
-              },
-            ],
-          },
-          {
-            asset: 'BNB',
-            totalQty: 0.0982,
-            totalUsdVal: 72.3,
-            unitPrice: 736.6,
-            pctOfPortfolio: 6.6,
-            allocations: [
-              {
-                location: 'Simple Earn (Locked 120D)',
-                category: 'EARN',
-                qty: 0.09,
-                usdVal: 66.3,
-                pctOfAsset: 91.7,
-                detail: 'Locked 120 Days',
-              },
-              {
-                location: 'Portfolio Margin',
-                category: 'PORTFOLIO_MARGIN',
-                qty: 0.008,
-                usdVal: 5.89,
-                pctOfAsset: 8.1,
-                detail: 'Cross Margin (PM)',
-              },
-              {
-                location: 'Simple Earn (Flexible)',
-                category: 'EARN',
-                qty: 0.00016,
-                usdVal: 0.12,
-                pctOfAsset: 0.2,
-                detail: 'APR 0.06%',
-              },
-            ],
-          },
-          {
-            asset: 'USDE',
-            totalQty: 4.0437,
-            totalUsdVal: 4.04,
-            unitPrice: 1.0,
-            pctOfPortfolio: 0.4,
-            allocations: [
-              {
-                location: 'Spot Wallet',
-                category: 'SPOT',
-                qty: 4.0437,
-                usdVal: 4.04,
-                pctOfAsset: 100.0,
-                detail: 'Available in Spot',
-              },
-            ],
-          },
-        ];
-
-  const subWallets: SubWalletSummary[] =
-    rawSubWallets.length > 0
-      ? rawSubWallets
-      : [
-          {
-            walletName: 'Trading Bots',
-            category: 'TRADING_BOT',
-            btcVal: 0.01174,
-            usdVal: 922.1,
-            pctOfTotal: 84.6,
-          },
-          {
-            walletName: 'Cross Margin (PM)',
-            category: 'PORTFOLIO_MARGIN',
-            btcVal: 0.00123,
-            usdVal: 96.73,
-            pctOfTotal: 8.9,
-          },
-          {
-            walletName: 'Earn',
-            category: 'EARN',
-            btcVal: 0.00085,
-            usdVal: 66.61,
-            pctOfTotal: 6.1,
-          },
-          {
-            walletName: 'Spot',
-            category: 'SPOT',
-            btcVal: 0.00005,
-            usdVal: 4.04,
-            pctOfTotal: 0.4,
-          },
-        ];
+  // Empty state is intentional: fixture balances are not account evidence.
+  const twoLayerAssets: TwoLayerAsset[] = rawTwoLayerAssets;
+  const subWallets: SubWalletSummary[] = rawSubWallets;
+  const hasVerifiedSnapshot = account?.verified === true && source === 'BINANCE_TESTNET';
+  const snapshotLabel =
+    source === 'BINANCE_TESTNET'
+      ? hasVerifiedSnapshot ? 'BINANCE TESTNET' : 'BINANCE TESTNET / UNVERIFIED'
+      : 'NO VERIFIED TESTNET SNAPSHOT';
+  const formatCurrency = (value: number, digits = 2) =>
+    hasVerifiedSnapshot
+      ? `$${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
+      : 'UNKNOWN';
+  const formatNumber = (value: number, digits = 2) =>
+    hasVerifiedSnapshot ? value.toFixed(digits) : 'UNKNOWN';
 
   const toggleCoinExpand = (asset: string) => {
     setExpandedCoins((prev) => ({
@@ -213,21 +93,25 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
         headers: { 'Content-Type': 'application/json' },
       });
       const data = await res.json();
-      if (data.success && data.account) {
+      if (
+        data.success &&
+        data.account?.verified === true &&
+        data.account?.source === 'BINANCE_TESTNET'
+      ) {
         if (onAccountUpdated) {
           onAccountUpdated(data.account);
         }
         setSyncFeedback({
           type: 'success',
-          msg: `ดึงยอดเงิน 2 เลเยอร์จาก Binance สำเร็จ! ยอดรวมพอร์ต $${data.account.equity.toLocaleString('en-US', {
+          msg: `ดึง snapshot Binance Testnet ที่ยืนยันแล้วสำเร็จ! ยอดรวมพอร์ต $${data.account.equity.toLocaleString('en-US', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
-          })} (Trading Bots: ~$922 | PM: ~$96.7 | Earn: ~$66.6 | Spot: ~$4.0)`,
+          })}`,
         });
       } else {
         setSyncFeedback({
           type: 'warn',
-          msg: data.message || 'ไม่สามารถดึงยอดเงินจริงจาก Binance ได้ (ตรวจสอบ API Key หรือ IP restriction)',
+          msg: data.message || 'ได้เพียง snapshot ที่ยังไม่ยืนยันจาก Worker; ต้องทำ authentication, private stream และ reconciliation ก่อนใช้เป็น execution evidence',
         });
       }
     } catch (err: any) {
@@ -242,13 +126,6 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
       }, 7000);
     }
   };
-
-  // Auto-fetch on mount if not yet synced with live Binance
-  useEffect(() => {
-    if (account.source !== 'BINANCE_LIVE') {
-      handleSyncBinance();
-    }
-  }, []);
 
   const filteredAssets = twoLayerAssets.filter((a) =>
     a.asset.toLowerCase().includes(searchQuery.toLowerCase())
@@ -296,33 +173,21 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
 
   return (
     <div className="space-y-3" id="account-overview-panel">
-      {/* 1. Binance Live Sync Control & Sub-Wallet Allocation Header Bar */}
+      {/* 1. Binance Testnet read-only snapshot control */}
       <div className="bg-zinc-900/90 border border-zinc-800 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 shadow-sm">
         <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
           {/* Live Status Badge */}
           <div className="flex items-center space-x-2">
             <div
               className={`w-2.5 h-2.5 rounded-full ${
-                source === 'BINANCE_LIVE' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                hasVerifiedSnapshot ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
               }`}
             />
             <span className="text-xs font-semibold text-zinc-100 flex items-center space-x-1.5">
               <span>Binance Balance Feed</span>
-              {source === 'BINANCE_LIVE' && (
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800/60">
-                  LIVE MAINNET
-                </span>
-              )}
-              {source === 'BINANCE_TESTNET' && (
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800/60">
-                  TESTNET
-                </span>
-              )}
-              {source === 'SIMULATED' && (
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-zinc-800 text-zinc-400 border border-zinc-700">
-                  LOCAL SIMULATOR
-                </span>
-              )}
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-zinc-800 text-zinc-300 border border-zinc-700">
+                {snapshotLabel}
+              </span>
             </span>
           </div>
 
@@ -342,6 +207,9 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
                 </div>
               );
             })}
+            {subWallets.length === 0 && (
+              <span className="text-[10px] text-amber-400 font-mono">NO VERIFIED SNAPSHOT</span>
+            )}
           </div>
         </div>
 
@@ -493,6 +361,12 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
           {/* VIEW MODE 1: Two-Layer Coin Breakdown (Asset -> Allocations) */}
           {viewMode === 'TWO_LAYER' && (
             <div className="space-y-3">
+              {filteredAssets.length === 0 && (
+                <div className="rounded-xl border border-amber-900/60 bg-amber-950/20 px-3 py-4 text-xs text-amber-300">
+                  No verified allocation snapshot is available. Connect the Python worker and
+                  complete a Testnet account sync before treating balances as evidence.
+                </div>
+              )}
               {filteredAssets.map((assetItem) => {
                 const isExpanded = expandedCoins[assetItem.asset] ?? false;
 
@@ -647,6 +521,11 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
           {/* VIEW MODE 2: Sub-Wallets Overview */}
           {viewMode === 'SUB_WALLETS' && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {subWallets.length === 0 && (
+                <div className="lg:col-span-4 rounded-xl border border-amber-900/60 bg-amber-950/20 px-3 py-4 text-xs text-amber-300">
+                  NO VERIFIED SNAPSHOT
+                </div>
+              )}
               {subWallets.map((wallet) => {
                 const b = getCategoryBadge(wallet.category);
                 return (
@@ -734,15 +613,11 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <Wallet className="w-3.5 h-3.5 text-zinc-500" />
           </div>
           <div className="text-xl font-bold text-zinc-100 font-mono">
-            ${equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            {formatCurrency(equity)}
           </div>
           <div className="text-[11px] text-zinc-400 mt-1 flex items-center justify-between">
-            <span>Bal: ${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-            {source === 'BINANCE_LIVE' ? (
-              <span className="text-emerald-400 font-mono text-[10px] font-semibold">BINANCE</span>
-            ) : (
-              <span className="text-zinc-500 font-mono text-[10px]">SIMULATED</span>
-            )}
+            <span>Bal: {formatCurrency(balance)}</span>
+            <span className="text-zinc-500 font-mono text-[10px]">{snapshotLabel}</span>
           </div>
         </div>
 
@@ -752,8 +627,8 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <span>24h Net PnL</span>
             <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
           </div>
-          <div className={`text-xl font-bold font-mono ${dailyPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}
+          <div className={`text-xl font-bold font-mono ${!hasVerifiedSnapshot ? 'text-amber-400' : dailyPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {hasVerifiedSnapshot ? `${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)}` : 'UNKNOWN'}
           </div>
           <div className="text-[11px] text-zinc-400 mt-1">
             Net after fees & funding
@@ -766,8 +641,8 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <span>Margin Utilization</span>
             <Percent className={`w-3.5 h-3.5 ${isMarginHigh ? 'text-amber-400' : 'text-zinc-500'}`} />
           </div>
-          <div className={`text-xl font-bold font-mono ${isMarginHigh ? 'text-amber-400' : 'text-zinc-100'}`}>
-            {marginPct.toFixed(1)}%
+          <div className={`text-xl font-bold font-mono ${!hasVerifiedSnapshot || isMarginHigh ? 'text-amber-400' : 'text-zinc-100'}`}>
+            {formatNumber(marginPct, 1)}{hasVerifiedSnapshot ? '%' : ''}
           </div>
           <div className="w-full bg-zinc-800 h-1.5 rounded-full mt-2 overflow-hidden">
             <div
@@ -778,7 +653,7 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
                   ? 'bg-amber-500'
                   : 'bg-emerald-500'
               }`}
-              style={{ width: `${Math.min(marginPct, 100)}%` }}
+              style={{ width: `${hasVerifiedSnapshot ? Math.min(marginPct, 100) : 0}%` }}
             />
           </div>
         </div>
@@ -790,7 +665,7 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <Scale className="w-3.5 h-3.5 text-zinc-500" />
           </div>
           <div className="text-xl font-bold text-zinc-100 font-mono">
-            {leverage.toFixed(2)}x
+            {hasVerifiedSnapshot ? `${leverage.toFixed(2)}x` : 'UNKNOWN'}
           </div>
           <div className="text-[11px] text-zinc-400 mt-1">
             Hard Cap: 2.00x
@@ -803,8 +678,8 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <span>Equity Drawdown</span>
             <AlertTriangle className={`w-3.5 h-3.5 ${isDrawdownCritical ? 'text-rose-400' : 'text-zinc-500'}`} />
           </div>
-          <div className={`text-xl font-bold font-mono ${isDrawdownCritical ? 'text-rose-400' : 'text-zinc-100'}`}>
-            {drawdownPct.toFixed(2)}%
+          <div className={`text-xl font-bold font-mono ${!hasVerifiedSnapshot ? 'text-amber-400' : isDrawdownCritical ? 'text-rose-400' : 'text-zinc-100'}`}>
+            {formatNumber(drawdownPct)}{hasVerifiedSnapshot ? '%' : ''}
           </div>
           <div className="text-[11px] text-zinc-400 mt-1">
             Caution: 2% | Hard: 8%
@@ -818,10 +693,10 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <Wallet className="w-3.5 h-3.5 text-zinc-500" />
           </div>
           <div className="text-xl font-bold text-zinc-100 font-mono">
-            ${freeMargin.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            {formatCurrency(freeMargin)}
           </div>
           <div className="text-[11px] text-zinc-400 mt-1">
-            Used: ${usedMargin.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            Used: {formatCurrency(usedMargin)}
           </div>
         </div>
       </div>

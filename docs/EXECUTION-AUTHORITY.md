@@ -20,6 +20,12 @@ No ML, RL, Transformer, Gemini, Claude, Codex, or other LLM is part of the
 live execution authority. Research or strategy output is not an execution
 authorization.
 
+The TypeScript control plane may perform explicitly read-only observation for
+the UI, but those responses are labelled `UNVERIFIED` until the Python worker
+reports signed authentication, a healthy private stream, a fresh account
+snapshot, and `IN_SYNC` reconciliation. The control plane cannot promote its
+own REST observation to execution readiness.
+
 ## Environment invariant
 
 The mutable native Binance adapter, REST execution client, and private user
@@ -76,3 +82,10 @@ the client order ID, runs authoritative reconciliation, requires a healthy
 private stream, and returns to `READY` only after all evidence is consistent.
 Recovered fills use the canonical `domain.models.ExchangeFill` model and are
 deduplicated by symbol plus exchange trade ID.
+
+## Current evidence status
+
+For the current local candidate, non-secret unit and frontend gates are
+`LOCAL_VERIFIED`. Credentialed Binance Testnet read-only and mutation trials
+are `NOT_RUN` because no Testnet credentials were configured. Autonomous
+Testnet execution remains locked, and Mainnet execution remains disabled.

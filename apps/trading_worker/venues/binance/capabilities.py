@@ -6,6 +6,18 @@ from typing import Dict
 
 logger = logging.getLogger("blessing.binance.capabilities")
 
+
+def _exchange_bool(value: object) -> bool:
+    """Parse Binance booleans without treating the string ``"false"`` as true."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 class BinanceCapabilities:
     def __init__(self):
         self.authenticated = False
@@ -36,7 +48,7 @@ class BinanceCapabilities:
             pos_mode = await rest_client.request("GET", "/fapi/v1/positionSide/dual", signed=True)
             if not isinstance(pos_mode, dict) or "dualSidePosition" not in pos_mode:
                 raise ValueError("Position mode response is invalid")
-            self.hedge_mode = bool(pos_mode["dualSidePosition"])
+            self.hedge_mode = _exchange_bool(pos_mode["dualSidePosition"])
             
             # Fetch Exchange Info
             exchange_info = await rest_client.request("GET", "/fapi/v1/exchangeInfo")
@@ -48,7 +60,7 @@ class BinanceCapabilities:
                     continue
                 rules = SymbolTradingRules(symbol_name)
                 rules.parse_exchange_info(s)
-                self.symbol_rules[symbol_name] = rules
+                self.symbol_rules[str(symbol_name).upper()] = rules
 
             self.authenticated = self.account_request_succeeded and bool(self.symbol_rules)
             logger.info("Capability discovery complete. Hedge Mode: %s, Symbols loaded: %d", self.hedge_mode, len(self.symbol_rules))

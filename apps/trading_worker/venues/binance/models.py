@@ -53,11 +53,19 @@ class TestnetSafetyLimits(BaseModel):
 
     @classmethod
     def from_environment(cls) -> "TestnetSafetyLimits":
-        """Load bounded overrides without allowing malformed values to disable caps."""
+        """Load bounded overrides without allowing malformed values to disable caps.
+
+        First-launch limits are a hard safety default.  Expanding them requires
+        an explicit operator acknowledgement; a typo or an inherited large
+        deployment value must never silently widen Testnet exposure.
+        """
 
         defaults = cls()
 
         raw_symbols = os.getenv("TESTNET_ALLOWED_SYMBOLS")
+        overrides_approved = os.getenv(
+            "TESTNET_LIMITS_OVERRIDE_APPROVED", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         if raw_symbols is None:
             symbols = defaults.allowed_symbols
         else:
@@ -67,6 +75,8 @@ class TestnetSafetyLimits(BaseModel):
                 if symbol.strip()
             }
             symbols = parsed_symbols or defaults.allowed_symbols
+            if not overrides_approved:
+                symbols = symbols & defaults.allowed_symbols or defaults.allowed_symbols
 
         def positive_decimal(name: str, fallback: Decimal) -> Decimal:
             raw = os.getenv(name)
@@ -88,18 +98,30 @@ class TestnetSafetyLimits(BaseModel):
                 return fallback
             return value if value > 0 else fallback
 
+        single_order = positive_decimal(
+            "TESTNET_MAX_SINGLE_ORDER_NOTIONAL", defaults.max_single_order_notional
+        )
+        total_open = positive_decimal(
+            "TESTNET_MAX_TOTAL_OPEN_NOTIONAL", defaults.max_total_open_notional
+        )
+        max_open_orders = positive_int(
+            "TESTNET_MAX_OPEN_ORDERS", defaults.max_open_orders
+        )
+        max_chains = positive_int(
+            "TESTNET_MAX_ACTIVE_EXPOSURE_CHAINS", defaults.max_active_exposure_chains
+        )
+        if not overrides_approved:
+            single_order = min(single_order, defaults.max_single_order_notional)
+            total_open = min(total_open, defaults.max_total_open_notional)
+            max_open_orders = min(max_open_orders, defaults.max_open_orders)
+            max_chains = min(max_chains, defaults.max_active_exposure_chains)
+
         return cls(
             allowed_symbols=symbols,
-            max_single_order_notional=positive_decimal(
-                "TESTNET_MAX_SINGLE_ORDER_NOTIONAL", defaults.max_single_order_notional
-            ),
-            max_total_open_notional=positive_decimal(
-                "TESTNET_MAX_TOTAL_OPEN_NOTIONAL", defaults.max_total_open_notional
-            ),
-            max_open_orders=positive_int("TESTNET_MAX_OPEN_ORDERS", defaults.max_open_orders),
-            max_active_exposure_chains=positive_int(
-                "TESTNET_MAX_ACTIVE_EXPOSURE_CHAINS", defaults.max_active_exposure_chains
-            ),
+            max_single_order_notional=single_order,
+            max_total_open_notional=total_open,
+            max_open_orders=max_open_orders,
+            max_active_exposure_chains=max_chains,
         )
 
 class BinanceExecutionError(Exception):

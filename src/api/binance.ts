@@ -24,8 +24,8 @@ export interface BinanceKeyStatus {
 export interface ApiProfile {
   id: string;
   name: string;
-  environment: 'MAINNET' | 'TESTNET';
-  isLiveRealMoney: boolean;
+  environment: 'TESTNET';
+  isLiveRealMoney: false;
   maskedApiKey: string;
   hasSecret: boolean;
   isActive: boolean;
@@ -47,10 +47,9 @@ export const binanceApi = {
   saveProfile: async (payload: {
     id?: string;
     name: string;
-    environment: 'MAINNET' | 'TESTNET';
+    isTestnet: true;
     apiKey: string;
     apiSecret: string;
-    isLiveRealMoney: boolean;
   }): Promise<any> => {
     return apiClient.post('/api/binance/profiles/save', payload);
   },

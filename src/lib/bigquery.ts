@@ -40,6 +40,10 @@ export interface BigQueryQueryResult {
   bytesProcessedFormatted: string;
   executionTimeMs: number;
   cacheHit: boolean;
+  data_source?: 'SIMULATED' | 'BIGQUERY';
+  evidence_status?: 'ILLUSTRATIVE_ONLY' | 'UNVERIFIED' | 'VERIFIED';
+  verified?: boolean;
+  note?: string;
 }
 
 export const PRESET_BIGQUERY_QUERIES = [

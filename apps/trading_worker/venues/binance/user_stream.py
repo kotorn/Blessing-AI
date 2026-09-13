@@ -2,6 +2,8 @@ import asyncio
 import logging
 import json
 import random
+import math
+import os
 from datetime import datetime, timezone
 try:
     import websockets
@@ -43,11 +45,34 @@ class BinanceUserStream:
         self.on_reconnected = on_reconnected
         self.on_authentication_failed = on_authentication_failed
         self.running = False
+        self.authentication_failed = False
+
+    def is_healthy(self) -> bool:
+        """Require a connected stream with a bounded recent event heartbeat."""
+        if not self.is_connected:
+            return False
+        timestamp = self.last_event_at or self.connected_at
+        if timestamp is None:
+            return False
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        try:
+            max_age = float(os.getenv("PRIVATE_STREAM_MAX_AGE_SEC", "60"))
+        except (TypeError, ValueError):
+            max_age = 60.0
+        if not math.isfinite(max_age) or max_age <= 0:
+            max_age = 60.0
+        age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+        return 0 <= age <= max_age
 
     async def start(self, event_callback) -> bool:
         self.on_event = event_callback
         self.running = True
-        return await self._connect()
+        self.authentication_failed = False
+        connected = await self._connect()
+        if not connected and self.running and not self.authentication_failed:
+            self._trigger_reconnect()
+        return connected
 
     async def _connect(self) -> bool:
         await self._get_listen_key()
@@ -87,6 +112,7 @@ class BinanceUserStream:
             logger.info("Acquired new listenKey.")
         except BinanceAuthenticationError as exc:
             self.listen_key = None
+            self.authentication_failed = True
             logger.error("Testnet authentication failed while starting user stream: %s", exc)
             self._notify_authentication_failure()
         except Exception as e:

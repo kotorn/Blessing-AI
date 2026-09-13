@@ -36,6 +36,7 @@ export const AppShell: React.FC = () => {
     isLoading,
     isActionLoading,
     lastUpdated,
+    error,
     refresh,
     updateAccount,
     toggleKillSwitch,
@@ -112,10 +113,11 @@ export const AppShell: React.FC = () => {
   }, []);
 
   // Authoritative system execution mode
-  const systemMode: SystemMode = systemState?.executionMode || 'PAPER';
+  const workerUnavailable = !systemState || Boolean(error) || systemState.workerResponsive === false;
+  const systemMode: SystemMode = workerUnavailable ? 'UNKNOWN' : systemState.executionMode;
   const pauseNewRiskActive = systemState?.pauseNewRisk || false;
-  const killSwitchActive = systemState?.killSwitchActive || false;
-  const engineState = systemState?.engineState || 'DISARMED';
+  const killSwitchActive = systemState?.killSwitchActive || workerUnavailable;
+  const engineState = workerUnavailable ? 'DEGRADED' : systemState.engineState;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
@@ -174,6 +176,7 @@ export const AppShell: React.FC = () => {
             <AppRoutes
               currentRoute={currentRoute}
               onNavigate={handleNavigate}
+              systemState={systemState}
               account={account}
               onAccountUpdated={updateAccount}
               instruments={instruments}
@@ -241,7 +244,7 @@ export const AppShell: React.FC = () => {
       <GoogleCloudCenterModal
         isOpen={showGoogleCloudModal}
         onClose={() => setShowGoogleCloudModal(false)}
-        firestoreConnected={Boolean(account.source)}
+        firestoreConnected={firestoreConnected}
       />
 
       <GoogleWorkspaceModal

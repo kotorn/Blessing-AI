@@ -20,17 +20,18 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
   instrument,
   symbol,
 }) => {
-  const spotPrice = instrument?.spot_price || 64235;
-  const perpPrice = instrument?.perp_price || 64250;
-  const basisUsd = instrument?.basis ?? (perpPrice - spotPrice);
-  const basisZScore = instrument?.basis_zscore ?? 0.12;
-  const fundingRate8h = instrument?.funding_rate ?? 0.0001;
-  const fundingAnnualizedPct = instrument?.funding_annualized_pct ?? 10.95;
+  const hasVerifiedData =
+    instrument?.verified === true &&
+    instrument.data_source === 'BINANCE_TESTNET';
+  const basisUsd = hasVerifiedData ? instrument?.basis ?? null : null;
+  const basisZScore = hasVerifiedData ? instrument?.basis_zscore ?? null : null;
+  const fundingRate8h = hasVerifiedData ? instrument?.funding_rate ?? null : null;
+  const fundingAnnualizedPct = hasVerifiedData ? instrument?.funding_annualized_pct ?? null : null;
 
   // Realistic cost accounting: taker fee (0.05% * 2 legs = 0.10%) + slippage (0.02%) = 0.12% round trip
   const roundTripCostPct = 0.12;
-  const netExpectedCarryAnnualized = Math.max(0, fundingAnnualizedPct - roundTripCostPct * 365 / 30);
-  const isCarryViable = netExpectedCarryAnnualized > 5.0 && Math.abs(basisZScore) < 2.0;
+  const netExpectedCarryAnnualized = fundingAnnualizedPct == null ? null : fundingAnnualizedPct - roundTripCostPct * 365 / 30;
+  const isCarryViable = netExpectedCarryAnnualized != null && basisZScore != null && netExpectedCarryAnnualized > 5.0 && Math.abs(basisZScore) < 2.0;
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">
@@ -59,7 +60,7 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
                 : 'bg-zinc-800 text-zinc-400 border-zinc-700'
             }`}
           >
-            {isCarryViable ? 'VIABLE (POSITIVE NET SPREAD)' : 'MARGINAL (FEES DILUTE)'}
+            {hasVerifiedData ? (isCarryViable ? 'VIABLE (POSITIVE NET SPREAD)' : 'MARGINAL (FEES DILUTE)') : 'UNKNOWN (NO VERIFIED DATA)'}
           </span>
         </div>
       </div>
@@ -73,10 +74,10 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
             <DollarSign className="w-3.5 h-3.5 text-zinc-400" />
           </div>
           <div className="text-sm font-mono font-bold text-zinc-100">
-            {basisUsd >= 0 ? '+' : ''}${basisUsd.toFixed(2)}
+            {basisUsd == null ? 'UNKNOWN' : `${basisUsd >= 0 ? '+' : ''}$${basisUsd.toFixed(2)}`}
           </div>
           <div className="text-[10px] text-zinc-400 font-mono">
-            Z-Score: <span className="text-cyan-300 font-bold">{basisZScore > 0 ? '+' : ''}{basisZScore.toFixed(2)}σ</span>
+            Z-Score: <span className="text-cyan-300 font-bold">{basisZScore == null ? 'UNKNOWN' : `${basisZScore > 0 ? '+' : ''}${basisZScore.toFixed(2)}σ`}</span>
           </div>
         </div>
 
@@ -87,10 +88,10 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
             <Percent className="w-3.5 h-3.5 text-amber-400" />
           </div>
           <div className="text-sm font-mono font-bold text-amber-400">
-            {(fundingRate8h * 100).toFixed(4)}%
+            {fundingRate8h == null ? 'UNKNOWN' : `${(fundingRate8h * 100).toFixed(4)}%`}
           </div>
           <div className="text-[10px] text-zinc-400">
-            Next settlement: <span className="font-mono text-zinc-200">03:42:15</span>
+            Next settlement: <span className="font-mono text-zinc-200">{hasVerifiedData ? 'from Testnet stream' : 'UNKNOWN'}</span>
           </div>
         </div>
 
@@ -101,7 +102,7 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
             <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
           </div>
           <div className="text-sm font-mono font-bold text-emerald-400">
-            +{fundingAnnualizedPct.toFixed(2)}% APY
+            {fundingAnnualizedPct == null ? 'UNKNOWN' : `+${fundingAnnualizedPct.toFixed(2)}% APY`}
           </div>
           <div className="text-[10px] text-zinc-400">
             Longs pay shorts in perp
@@ -115,7 +116,7 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
             <CheckCircle2 className="w-3.5 h-3.5 text-cyan-400" />
           </div>
           <div className="text-sm font-mono font-bold text-cyan-300">
-            +{netExpectedCarryAnnualized.toFixed(2)}% Net
+            {netExpectedCarryAnnualized == null ? 'UNKNOWN' : `+${netExpectedCarryAnnualized.toFixed(2)}% Net`}
           </div>
           <div className="text-[10px] text-zinc-400">
             Deducts 12 bps round-trip fees/slip

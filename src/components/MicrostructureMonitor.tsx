@@ -14,35 +14,82 @@ interface OrderBookEntry {
 export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ symbol }) => {
   const [bids, setBids] = useState<OrderBookEntry[]>([]);
   const [asks, setAsks] = useState<OrderBookEntry[]>([]);
-  const [cvd, setCvd] = useState<number>(0);
-  const [lastPrice, setLastPrice] = useState<number>(0);
-  const [imbalance, setImbalance] = useState<number>(50); // 0-100, 50 is balanced
+  const [cvd, setCvd] = useState<number | null>(null);
+  const [lastPrice, setLastPrice] = useState<number | null>(null);
+  const [imbalance, setImbalance] = useState<number | null>(null); // 0-100, null means no snapshot
+  const [streamState, setStreamState] = useState<'CONNECTING' | 'HEALTHY' | 'DEGRADED'>('CONNECTING');
   
   const wsDepthRef = useRef<WebSocket | null>(null);
   const wsTradesRef = useRef<WebSocket | null>(null);
+  const lastDepthEventAtRef = useRef<number | null>(null);
+  const lastTradeEventAtRef = useRef<number | null>(null);
+  const MARKET_DATA_MAX_AGE_MS = 3000;
 
   useEffect(() => {
     // Reset state on symbol change
     setBids([]);
     setAsks([]);
-    setCvd(0);
-    setImbalance(50);
+    setCvd(null);
+    setLastPrice(null);
+    setImbalance(null);
+    setStreamState('CONNECTING');
+    lastDepthEventAtRef.current = null;
+    lastTradeEventAtRef.current = null;
+
+    let active = true;
+    const updateStreamHealth = () => {
+      if (!active) return;
+      const now = Date.now();
+      const depthAge = lastDepthEventAtRef.current == null
+        ? null
+        : now - lastDepthEventAtRef.current;
+      const tradeAge = lastTradeEventAtRef.current == null
+        ? null
+        : now - lastTradeEventAtRef.current;
+      if (
+        depthAge != null &&
+        tradeAge != null &&
+        depthAge >= 0 &&
+        tradeAge >= 0 &&
+        depthAge <= MARKET_DATA_MAX_AGE_MS &&
+        tradeAge <= MARKET_DATA_MAX_AGE_MS
+      ) {
+        setStreamState('HEALTHY');
+      } else if (
+        (depthAge != null && depthAge > MARKET_DATA_MAX_AGE_MS) ||
+        (tradeAge != null && tradeAge > MARKET_DATA_MAX_AGE_MS)
+      ) {
+        setStreamState('DEGRADED');
+      } else {
+        setStreamState('CONNECTING');
+      }
+    };
     
     const lowerSymbol = symbol.toLowerCase();
     
     // 1. OrderBook WebSocket (10 levels, 100ms updates)
-    const depthUrl = `wss://stream.binance.com:9443/ws/${lowerSymbol}@depth10@100ms`;
+    const depthUrl = `wss://stream.binancefuture.com/ws/${lowerSymbol}@depth10@100ms`;
     wsDepthRef.current = new WebSocket(depthUrl);
+
+    wsDepthRef.current.onopen = () => updateStreamHealth();
+    wsDepthRef.current.onerror = () => setStreamState('DEGRADED');
+    wsDepthRef.current.onclose = () => setStreamState('DEGRADED');
     
     wsDepthRef.current.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.bids && data.asks) {
-          const parsedBids = data.bids.slice(0, 5).map((b: string[]) => ({ price: parseFloat(b[0]), qty: parseFloat(b[1]) }));
-          const parsedAsks = data.asks.slice(0, 5).map((a: string[]) => ({ price: parseFloat(a[0]), qty: parseFloat(a[1]) }));
+          const parsedBids = data.bids.slice(0, 5)
+            .map((b: string[]) => ({ price: Number(b[0]), qty: Number(b[1]) }))
+            .filter((entry: OrderBookEntry) => Number.isFinite(entry.price) && Number.isFinite(entry.qty) && entry.price > 0 && entry.qty >= 0);
+          const parsedAsks = data.asks.slice(0, 5)
+            .map((a: string[]) => ({ price: Number(a[0]), qty: Number(a[1]) }))
+            .filter((entry: OrderBookEntry) => Number.isFinite(entry.price) && Number.isFinite(entry.qty) && entry.price > 0 && entry.qty >= 0);
           
           setBids(parsedBids);
           setAsks(parsedAsks);
+          lastDepthEventAtRef.current = Date.now();
+          updateStreamHealth();
           
           // Calculate volume imbalance for top 5 levels
           const bidVol = parsedBids.reduce((sum: number, b: OrderBookEntry) => sum + b.qty, 0);
@@ -56,18 +103,25 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
     };
 
     // 2. Aggregate Trades WebSocket (for CVD and Last Price)
-    const tradesUrl = `wss://stream.binance.com:9443/ws/${lowerSymbol}@aggTrade`;
+    const tradesUrl = `wss://stream.binancefuture.com/ws/${lowerSymbol}@aggTrade`;
     wsTradesRef.current = new WebSocket(tradesUrl);
+
+    wsTradesRef.current.onopen = () => updateStreamHealth();
+    wsTradesRef.current.onerror = () => setStreamState('DEGRADED');
+    wsTradesRef.current.onclose = () => setStreamState('DEGRADED');
     
     wsTradesRef.current.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.p && data.q) {
-          const price = parseFloat(data.p);
-          const qty = parseFloat(data.q);
+          const price = Number(data.p);
+          const qty = Number(data.q);
+          if (!Number.isFinite(price) || !Number.isFinite(qty) || price <= 0 || qty <= 0) return;
           const isBuyerMaker = data.m; // True if the buyer is the maker (sell order hit the bid)
           
           setLastPrice(price);
+          lastTradeEventAtRef.current = Date.now();
+          updateStreamHealth();
           
           // If buyer is maker, it was a market sell (negative delta)
           // If buyer is NOT maker, it was a market buy (positive delta)
@@ -76,7 +130,7 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
           setCvd((prev) => {
             // Decay CVD slowly to keep it readable, or just let it accumulate
             // For UI purposes, we'll bound it or decay it slightly so it doesn't go to infinity
-            const newCvd = prev + delta;
+            const newCvd = (prev ?? 0) + delta;
             // Apply slight decay (0.1% per trade) to keep it centered around recent activity
             return newCvd * 0.999;
           });
@@ -84,17 +138,21 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
       } catch (err) {}
     };
 
+    const watchdog = window.setInterval(updateStreamHealth, 1000);
+
     return () => {
+      active = false;
+      window.clearInterval(watchdog);
       if (wsDepthRef.current) wsDepthRef.current.close();
       if (wsTradesRef.current) wsTradesRef.current.close();
     };
   }, [symbol]);
 
   // Calculations for UI
-  const spread = asks.length > 0 && bids.length > 0 ? asks[0].price - bids[0].price : 0;
-  const spreadBps = asks.length > 0 ? (spread / asks[0].price) * 10000 : 0;
+  const spread = asks.length > 0 && bids.length > 0 ? asks[0].price - bids[0].price : null;
+  const spreadBps = spread != null && asks.length > 0 ? (spread / asks[0].price) * 10000 : null;
   
-  const isCvdBullish = cvd > 0;
+  const isCvdBullish = cvd != null && cvd > 0;
   
   return (
     <div className="bg-zinc-950 border border-zinc-800/80 rounded-xl overflow-hidden flex flex-col shadow-sm">
@@ -106,9 +164,15 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
           <div>
             <h3 className="text-sm font-bold text-zinc-100 flex items-center space-x-1.5">
               <span>L2 Microstructure & Order Flow</span>
-              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-950/50 text-emerald-400 border border-emerald-800/50 flex items-center shadow-sm">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 mr-1 animate-pulse" />
-                LIVE
+              <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border flex items-center shadow-sm ${
+                streamState === 'HEALTHY'
+                  ? 'bg-emerald-950/50 text-emerald-400 border-emerald-800/50'
+                  : streamState === 'DEGRADED'
+                    ? 'bg-rose-950/50 text-rose-300 border-rose-800/50'
+                    : 'bg-amber-950/50 text-amber-300 border-amber-800/50'
+              }`}>
+                <span className={`w-1.5 h-1.5 rounded-full mr-1 ${streamState === 'HEALTHY' ? 'bg-emerald-500 animate-pulse' : streamState === 'DEGRADED' ? 'bg-rose-500' : 'bg-amber-500'}`} />
+                TESTNET {streamState}
               </span>
             </h3>
             <p className="text-[11px] text-zinc-400 font-mono">
@@ -119,11 +183,11 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
         
         <div className="text-right">
           <div className="text-lg font-mono font-bold text-zinc-100">
-            {lastPrice > 0 ? lastPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '---'}
+            {lastPrice != null ? lastPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : 'UNKNOWN'}
           </div>
           <div className="text-[10px] text-zinc-400 font-mono flex items-center justify-end space-x-1">
             <ArrowRightLeft className="w-3 h-3" />
-            <span>Spread: {spreadBps.toFixed(2)} bps</span>
+            <span>Spread: {spreadBps == null ? 'UNKNOWN' : `${spreadBps.toFixed(2)} bps`}</span>
           </div>
         </div>
       </div>
@@ -137,6 +201,7 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
             <span>Qty</span>
           </div>
           <div className="space-y-0.5 font-mono text-[11px]">
+            {asks.length === 0 && <span className="text-amber-400">Waiting for Testnet market data</span>}
             {asks.slice().reverse().map((ask, i) => (
               <div key={`ask-${i}`} className="flex justify-between items-center relative py-0.5 px-1 rounded-sm overflow-hidden group hover:bg-rose-950/20">
                 <div 
@@ -151,11 +216,12 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
           
           <div className="py-1 flex items-center justify-center">
             <span className="text-[10px] font-mono font-bold text-zinc-500 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
-              SPREAD {(spread).toFixed(2)}
+              SPREAD {spread == null ? 'UNKNOWN' : spread.toFixed(2)}
             </span>
           </div>
           
           <div className="space-y-0.5 font-mono text-[11px]">
+            {bids.length === 0 && <span className="text-amber-400">Waiting for Testnet market data</span>}
             {bids.map((bid, i) => (
               <div key={`bid-${i}`} className="flex justify-between items-center relative py-0.5 px-1 rounded-sm overflow-hidden group hover:bg-emerald-950/20">
                 <div 
@@ -181,7 +247,7 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
             <div className="flex justify-between items-center text-xs">
               <span className="text-zinc-400 font-medium">L2 Book Imbalance</span>
               <span className="font-mono font-bold text-zinc-200">
-                {imbalance.toFixed(1)}% / {(100 - imbalance).toFixed(1)}%
+                {imbalance == null ? 'UNKNOWN' : `${imbalance.toFixed(1)}% / ${(100 - imbalance).toFixed(1)}%`}
               </span>
             </div>
             
@@ -189,11 +255,11 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
             <div className="h-2 w-full bg-zinc-800 rounded-full overflow-hidden flex">
               <div 
                 className="h-full bg-emerald-500 transition-all duration-300"
-                style={{ width: `${imbalance}%` }}
+                style={{ width: `${imbalance ?? 0}%` }}
               />
               <div 
                 className="h-full bg-rose-500 transition-all duration-300"
-                style={{ width: `${100 - imbalance}%` }}
+                style={{ width: `${imbalance == null ? 0 : 100 - imbalance}%` }}
               />
             </div>
             
@@ -207,9 +273,9 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
           <div className="bg-zinc-900/50 p-4 rounded-xl border border-zinc-800/80 space-y-3">
             <div className="flex justify-between items-center text-xs">
               <span className="text-zinc-400 font-medium">Cumulative Vol Delta (CVD)</span>
-              <div className={`flex items-center space-x-1 font-mono font-bold ${isCvdBullish ? 'text-emerald-400' : 'text-rose-400'}`}>
+              <div className={`flex items-center space-x-1 font-mono font-bold ${cvd == null ? 'text-amber-400' : isCvdBullish ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {isCvdBullish ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
-                <span>{cvd > 0 ? '+' : ''}{cvd.toFixed(2)}</span>
+                <span>{cvd == null ? 'UNKNOWN' : `${cvd > 0 ? '+' : ''}${cvd.toFixed(2)}`}</span>
               </div>
             </div>
             

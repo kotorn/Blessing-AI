@@ -17,6 +17,18 @@ logger = logging.getLogger("blessing.binance.ledger")
 
 from .models import ExchangeAccountSnapshot
 
+
+def _exchange_bool(value: object) -> bool:
+    """Parse Binance boolean fields without making ``bool('false')`` true."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 class ExecutionLedger(Protocol):
     async def upsert_order(self, order: ExecutionOrder) -> None: ...
     async def upsert_raw_exchange_order(self, raw_order: dict) -> None: ...
@@ -32,7 +44,10 @@ class ExecutionLedger(Protocol):
     async def mark_initialized(self) -> None: ...
     async def upsert_position(self, raw_position: Union[dict, ExchangePosition]) -> None: ...
     async def get_open_orders(self) -> List[ExecutionOrder]: ...
+    async def get_all_orders(self) -> List[ExecutionOrder]: ...
+    async def get_fills(self) -> List[ExchangeFill]: ...
     async def get_positions(self) -> List[ExchangePosition]: ...
+    async def clear_positions_for_symbol(self, symbol: str) -> None: ...
     async def is_initialized(self) -> bool: ...
     async def has_fill(self, deduplication_key: str) -> bool: ...
     async def update_balances(self, wallet_balance: Decimal, margin_balance: Decimal) -> None: ...
@@ -91,7 +106,7 @@ class InMemoryLedger:
             else TimeInForce(raw_time_in_force)
         )
         order = ExecutionOrder(
-            symbol=raw_order["symbol"],
+            symbol=str(raw_order["symbol"]).upper(),
             side=side,
             quantity=Decimal(str(raw_order["origQty"])),
             price=Decimal(str(raw_order.get("price", "0"))),
@@ -102,7 +117,7 @@ class InMemoryLedger:
             timestamp=utc_now(),
             market_type=MarketType.USDM_FUTURES,
             position_side=PositionSide(str(raw_order.get("positionSide", "BOTH")).upper()),
-            reduce_only=bool(raw_order.get("reduceOnly", False)),
+            reduce_only=_exchange_bool(raw_order.get("reduceOnly", False)),
             time_in_force=time_in_force,
             strategy_id=(self.orders.get(client_oid).strategy_id if client_oid in self.orders else "portfolio"),
             decision_id=(self.orders.get(client_oid).decision_id if client_oid in self.orders else None),
@@ -125,7 +140,7 @@ class InMemoryLedger:
         self.orders[client_oid] = order
 
     def _get_fill_key(self, fill: ExchangeFill) -> str:
-        return f"{fill.symbol}:{fill.exchange_trade_id}"
+        return f"{str(fill.symbol).upper()}:{fill.exchange_trade_id}"
 
     async def append_fill(self, fill: ExchangeFill) -> None:
         key = self._get_fill_key(fill)
@@ -139,9 +154,11 @@ class InMemoryLedger:
         if ":" in deduplication_key:
             symbol, trade_id = deduplication_key.split(":", 1)
             return any(
-                f.symbol == symbol and f.exchange_trade_id == trade_id for f in self.fills
+                str(f.symbol).upper() == symbol.upper()
+                and str(f.exchange_trade_id) == trade_id
+                for f in self.fills
             )
-        return any(f.exchange_trade_id == deduplication_key for f in self.fills)
+        return any(str(f.exchange_trade_id) == deduplication_key for f in self.fills)
 
     async def get_order_by_client_id(self, client_order_id: str) -> Optional[ExecutionOrder]:
         return self.orders.get(client_order_id)
@@ -167,7 +184,7 @@ class InMemoryLedger:
         except ValueError as exc:
             raise ValueError(f"Unsupported exchange position side: {ps_str}") from exc
         return ExchangePosition(
-            symbol=pos.get("symbol", ""),
+            symbol=str(pos.get("symbol", "")).upper(),
             position_side=ps,
             quantity=Decimal(str(pos.get("positionAmt", "0"))),
             entry_price=Decimal(str(pos.get("entryPrice", "0"))),
@@ -211,7 +228,20 @@ class InMemoryLedger:
         
     async def get_open_orders(self) -> List[ExecutionOrder]:
         return [o for o in self.orders.values() if o.status in ("NEW", "PARTIALLY_FILLED")]
+
+    async def get_all_orders(self) -> List[ExecutionOrder]:
+        return list(self.orders.values())
+
+    async def get_fills(self) -> List[ExchangeFill]:
+        return list(self.fills)
         
     async def get_positions(self) -> List[ExchangePosition]:
         return self.positions
+
+    async def clear_positions_for_symbol(self, symbol: str) -> None:
+        normalized = str(symbol).upper()
+        self.positions = [
+            position for position in self.positions
+            if str(position.symbol).upper() != normalized
+        ]
 

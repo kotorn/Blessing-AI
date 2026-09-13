@@ -12,8 +12,8 @@ export interface QuantStateResponse {
   meta_allocations?: any[];
   exposure_recovery?: any;
   risk_rules?: RiskRuleItem[];
-  correlation_btc_eth?: number;
-  crypto_beta_exposure_pct?: number;
+  correlation_btc_eth?: number | null;
+  crypto_beta_exposure_pct?: number | null;
   liquidation_distance_pct?: number | null;
 }
 
@@ -46,8 +46,8 @@ export const quantApi = {
     return apiClient.get<{ status: string }>('/api/health');
   },
 
-  toggleKillSwitch: async (active: boolean): Promise<{ success: boolean; kill_switch_active: boolean }> => {
-    return apiClient.post<{ success: boolean; kill_switch_active: boolean }>(
+  toggleKillSwitch: async (active: boolean): Promise<{ success?: boolean; status?: string; kill_switch_active: boolean }> => {
+    return apiClient.post<{ success?: boolean; status?: string; kill_switch_active: boolean }>(
       '/api/quant/risk/kill-switch',
       { active }
     );

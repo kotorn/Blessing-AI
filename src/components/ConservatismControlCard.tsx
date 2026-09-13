@@ -16,6 +16,7 @@ import {
   Info,
 } from 'lucide-react';
 import { ConservatismMetrics, FilterEfficacyItem, MissedMoveItem } from '../types/analytics';
+import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
 
 export const ConservatismControlCard: React.FC = () => {
   const [filterCategory, setFilterCategory] = useState<'ALL' | 'EXCESSIVE' | 'OPTIMAL'>('ALL');
@@ -139,6 +140,8 @@ export const ConservatismControlCard: React.FC = () => {
           </span>
         </div>
       </div>
+
+      <IllustrativeEvidenceBanner message="Filter counts and avoided-tail-risk metrics are not verified against a current dataset." />
 
       {/* Primary Conservatism Telemetry Metrics */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 text-xs font-mono">

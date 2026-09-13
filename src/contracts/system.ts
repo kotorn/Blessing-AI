@@ -1,4 +1,4 @@
-export type SystemMode = 'RESEARCH' | 'BACKTEST' | 'PAPER' | 'TESTNET' | 'LIVE';
+export type SystemMode = 'RESEARCH' | 'BACKTEST' | 'PAPER' | 'TESTNET' | 'LIVE' | 'UNKNOWN';
 
 export type HealthStatus = 'HEALTHY' | 'DEGRADED' | 'DISCONNECTED' | 'UNKNOWN';
 

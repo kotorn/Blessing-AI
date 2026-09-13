@@ -22,7 +22,6 @@ import {
   Save,
   Check,
   Layers,
-  Globe,
   FileSpreadsheet,
   PieChart,
   Wallet,
@@ -95,7 +94,7 @@ export const Header: React.FC<HeaderProps> = ({
     name: '',
     apiKey: '',
     apiSecret: '',
-    isTestnet: false,
+    isTestnet: true,
   });
 
   const fetchBinanceStatus = async () => {
@@ -174,7 +173,7 @@ export const Header: React.FC<HeaderProps> = ({
         name: `Binance Key ${profiles.length + 1}`,
         apiKey: '',
         apiSecret: '',
-        isTestnet: false,
+        isTestnet: true,
       });
     }
     setShowSecretInput(false);
@@ -211,7 +210,7 @@ export const Header: React.FC<HeaderProps> = ({
       setActiveProfileId(data.activeProfileId);
       await fetchProfiles();
       setIsEditing(false);
-      setFeedbackMsg({ type: 'success', text: 'Credentials updated and verified successfully!' });
+      setFeedbackMsg({ type: 'success', text: 'Testnet profile saved. Worker authentication and reconciliation are still required for execution readiness.' });
     } catch (err: any) {
       setFeedbackMsg({ type: 'error', text: err.message || 'Failed to save profile' });
     } finally {
@@ -607,7 +606,7 @@ export const Header: React.FC<HeaderProps> = ({
                       type="text"
                       value={formData.name}
                       onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                      placeholder="e.g., Binance Mainnet Primary or Testnet"
+                      placeholder="e.g., Binance Testnet Primary"
                       required
                       className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500/70 text-xs"
                     />
@@ -619,15 +618,10 @@ export const Header: React.FC<HeaderProps> = ({
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
-                        onClick={() => setFormData({ ...formData, isTestnet: false })}
-                        className={`py-2 px-3 rounded-lg border text-xs font-medium flex items-center justify-center space-x-1.5 cursor-pointer ${
-                          !formData.isTestnet
-                            ? 'bg-emerald-950/60 border-emerald-500/60 text-emerald-300'
-                            : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                        }`}
+                        disabled
+                        className="py-2 px-3 rounded-lg border text-xs font-medium flex items-center justify-center space-x-1.5 cursor-not-allowed bg-zinc-950 border-zinc-800 text-zinc-600"
                       >
-                        <Globe className="w-3.5 h-3.5" />
-                        <span>Binance Mainnet (Live)</span>
+                        <span>Binance Mainnet (Blocked)</span>
                       </button>
                       <button
                         type="button"

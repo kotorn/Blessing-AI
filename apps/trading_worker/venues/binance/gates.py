@@ -61,7 +61,14 @@ def _liquidation_safety_is_known_and_positive(snapshot: Any) -> bool:
     # account, KNOWN must include a strictly positive, finite distance; zero
     # is a known danger state and cannot authorize more exposure.
     if distance is None:
-        return True
+        try:
+            notional = Decimal(str(getattr(snapshot, "total_position_notional", "")))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+        # ``None`` is only acceptable when the authoritative snapshot proves
+        # that the account is flat. An active position without a usable
+        # liquidation price remains UNKNOWN and must fail closed.
+        return notional.is_finite() and notional == 0
     try:
         parsed = Decimal(str(distance))
     except (InvalidOperation, TypeError, ValueError):
@@ -147,7 +154,13 @@ class DecisionExecutionGate:
             return GateResult(False, "Adapter not READY")
         if not bool(getattr(adapter, "authenticated", False)):
             return GateResult(False, "Adapter is not authenticated")
-        if not bool(getattr(adapter, "user_stream", None) and adapter.user_stream.is_connected):
+        stream_health = getattr(adapter, "private_stream_healthy", None)
+        if stream_health is None:
+            stream_health = bool(
+                getattr(adapter, "user_stream", None)
+                and getattr(adapter.user_stream, "is_connected", False)
+            )
+        if not bool(stream_health):
             return GateResult(False, "Private stream disconnected")
         if getattr(adapter.reconciliation, "last_status", "UNKNOWN") != "IN_SYNC":
             return GateResult(False, "Reconciliation not IN_SYNC")
@@ -192,6 +205,14 @@ class DecisionExecutionGate:
             adapter_timestamps = getattr(adapter, "last_market_event_at", {})
             for intent in decision.orders:
                 symbol = str(intent.symbol).upper()
+                has_market_sample = getattr(
+                    adapter, "has_authoritative_market_sample", None
+                )
+                if callable(has_market_sample) and not has_market_sample(symbol):
+                    return GateResult(
+                        False,
+                        f"Authoritative Testnet market sample unavailable for {symbol}",
+                    )
                 last_event = timestamps.get(symbol) or adapter_timestamps.get(symbol)
                 age = _age_seconds(last_event)
                 if age is None or age < 0 or age > max_age:
@@ -215,33 +236,44 @@ class OrderExecutionGate:
         reserved_notional: Decimal = Decimal("0"),
         exclude_client_order_id: Optional[str] = None,
         require_reduce_only_for_risk_reduction: bool = True,
+        allow_emergency_fallback: bool = False,
     ) -> GateResult:
         if self.adapter.env != self.adapter.testnet_environment:
             return GateResult(False, "Mutable execution is restricted to Binance Testnet")
-        adapter_state = getattr(self.adapter.connection_state, "value", self.adapter.connection_state)
-        if adapter_state != ConnectionState.READY.value:
-            return GateResult(False, "Adapter not READY")
-        if not bool(getattr(self.adapter, "authenticated", False)):
-            return GateResult(False, "Adapter is not authenticated")
-        if not bool(
-            getattr(self.adapter, "user_stream", None)
-            and self.adapter.user_stream.is_connected
-        ):
-            return GateResult(False, "Private stream disconnected")
-        if getattr(self.adapter.reconciliation, "last_status", "UNKNOWN") != "IN_SYNC":
-            return GateResult(False, "Reconciliation not IN_SYNC")
-
         risk = _risk_class(risk_class)
         if risk is None or risk == EconomicRiskClass.NOOP:
             return GateResult(False, "Invalid economic risk class")
+        emergency_fallback = (
+            allow_emergency_fallback and risk == EconomicRiskClass.EMERGENCY
+        )
+        adapter_state = getattr(self.adapter.connection_state, "value", self.adapter.connection_state)
+        if not emergency_fallback and adapter_state != ConnectionState.READY.value:
+            return GateResult(False, "Adapter not READY")
+        if not bool(getattr(self.adapter, "authenticated", False)):
+            return GateResult(False, "Adapter is not authenticated")
+        stream_health = getattr(self.adapter, "private_stream_healthy", None)
+        if stream_health is None:
+            stream_health = bool(
+                getattr(self.adapter, "user_stream", None)
+                and getattr(self.adapter.user_stream, "is_connected", False)
+            )
+        if not emergency_fallback and not bool(stream_health):
+            return GateResult(False, "Private stream disconnected")
+        if not emergency_fallback and getattr(self.adapter.reconciliation, "last_status", "UNKNOWN") != "IN_SYNC":
+            return GateResult(False, "Reconciliation not IN_SYNC")
+
         risk_increasing = risk in {
             EconomicRiskClass.NEW_RISK,
             EconomicRiskClass.INCREASE_RISK,
         }
         snapshot_checker = getattr(self.adapter, "is_account_snapshot_fresh", None)
-        if risk_increasing and (not callable(snapshot_checker) or not snapshot_checker()):
+        if (
+            risk_increasing
+            and not emergency_fallback
+            and (not callable(snapshot_checker) or not snapshot_checker())
+        ):
             return GateResult(False, "Account snapshot is missing, stale, invalid, or not Testnet")
-        if risk_increasing:
+        if risk_increasing and not emergency_fallback:
             snapshot = getattr(self.adapter, "account_snapshot", None)
             if snapshot is None:
                 snapshot = getattr(getattr(self.adapter, "ledger", None), "account_snapshot", None)
@@ -258,12 +290,6 @@ class OrderExecutionGate:
             return GateResult(False, f"Symbol {symbol} is not allowed by Testnet limits")
         if intent.market_type != MarketType.USDM_FUTURES:
             return GateResult(False, "Only USDⓈ-M Futures intents are supported")
-        if risk_increasing:
-            last_event = getattr(self.adapter, "last_market_event_at", {}).get(symbol)
-            age = _age_seconds(last_event)
-            if age is None or age < 0 or age > _positive_float("MAX_MARKET_DATA_AGE_SEC", 3.0):
-                return GateResult(False, f"Market data stale for {symbol}")
-
         order_type = getattr(intent.order_type, "value", intent.order_type)
         order_type = str(order_type).upper()
         if order_type not in {OrderType.LIMIT.value, OrderType.MARKET.value}:
@@ -347,9 +373,44 @@ class OrderExecutionGate:
                 return GateResult(False, "MARKET orders do not support this timeInForce")
             if intent.price is not None:
                 return GateResult(False, "MARKET order must not provide a limit price")
-            estimated_price = await self.adapter.get_fresh_market_price(symbol)
+            estimated_price = await self.adapter.get_fresh_market_price(
+                symbol,
+                getattr(intent.side, "value", intent.side),
+            )
             if estimated_price is None:
                 return GateResult(False, f"Fresh market price unavailable for {symbol}")
+
+        # Check the timestamp after price discovery.  A MARKET order may have
+        # had no usable cached quote and therefore refresh from the Testnet
+        # book; that fresh REST sample must be accepted only if its own event
+        # or receipt timestamp is within the same per-symbol bound.
+        if risk_increasing and not emergency_fallback:
+            has_market_sample = getattr(
+                self.adapter, "has_authoritative_market_sample", None
+            )
+            if callable(has_market_sample) and not has_market_sample(symbol):
+                return GateResult(
+                    False,
+                    f"Authoritative Testnet market sample unavailable for {symbol}",
+                )
+            last_event = getattr(self.adapter, "last_market_event_at", {}).get(symbol)
+            age = _age_seconds(last_event)
+            if age is None or age < 0 or age > _positive_float("MAX_MARKET_DATA_AGE_SEC", 3.0):
+                return GateResult(False, f"Market data stale for {symbol}")
+
+            if order_type == OrderType.MARKET.value:
+                depth = (
+                    getattr(self.adapter, "last_market_ask_qty", {}).get(symbol)
+                    if side == OrderSide.BUY
+                    else getattr(self.adapter, "last_market_bid_qty", {}).get(symbol)
+                )
+                if depth is None or not depth.is_finite() or depth <= 0:
+                    return GateResult(False, f"Top-of-book depth is unknown for {symbol}")
+                if quantity > depth:
+                    return GateResult(
+                        False,
+                        f"Market quantity exceeds available top-of-book depth for {symbol}",
+                    )
 
         notional = quantity * estimated_price
         if notional.is_nan() or notional.is_infinite() or notional <= 0:

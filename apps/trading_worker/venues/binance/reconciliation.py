@@ -16,6 +16,17 @@ from .rest_client import BinanceRestClient
 logger = logging.getLogger("blessing.binance.reconciliation")
 
 
+def _exchange_bool(value: object) -> bool:
+    """Parse Binance boolean fields without making ``bool('false')`` true."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 class ReconciliationDiff(BaseModel):
     code: str
     symbol: Optional[str] = None
@@ -81,7 +92,7 @@ def _liquidation_distance(position: Dict[str, Any], mark_price: Decimal) -> Opti
 
     if not distance.is_finite():
         return None
-    return max(Decimal("0"), distance * Decimal("100"))
+    return min(Decimal("100"), max(Decimal("0"), distance * Decimal("100")))
 
 
 def build_account_snapshot(
@@ -108,6 +119,7 @@ def build_account_snapshot(
     for field, value in (
         ("totalWalletBalance", wallet_balance),
         ("totalMarginBalance", margin_balance),
+        ("availableBalance", available_balance),
         ("totalInitialMargin", total_initial_margin),
         ("totalMaintMargin", total_maint_margin),
         ("totalPositionInitialMargin", position_initial_margin),
@@ -130,7 +142,10 @@ def build_account_snapshot(
         symbol = position.get("symbol")
         if not symbol:
             raise ValueError("Active Binance position is missing symbol")
-        position_side = str(position.get("positionSide", "BOTH")).upper()
+        raw_position_side = position.get("positionSide")
+        if raw_position_side in (None, ""):
+            raise ValueError(f"Active position {symbol} is missing positionSide")
+        position_side = str(raw_position_side).upper()
         try:
             PositionSide(position_side)
         except ValueError as exc:
@@ -147,17 +162,25 @@ def build_account_snapshot(
         if not mark_price.is_finite() or mark_price <= 0:
             raise ValueError(f"Active position {symbol} has unusable markPrice")
 
-        notional: Optional[Decimal] = None
+        computed_notional = abs(amount) * mark_price
+        if not computed_notional.is_finite() or computed_notional <= 0:
+            raise ValueError(f"Active position {symbol} has uncomputable notional")
         raw_notional = position.get("notional")
         if raw_notional not in (None, ""):
             try:
                 parsed_notional = abs(Decimal(str(raw_notional)))
-                if parsed_notional.is_finite() and parsed_notional > 0:
-                    notional = parsed_notional
-            except (InvalidOperation, ValueError):
-                notional = None
-        if notional is None:
-            notional = abs(amount) * mark_price
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ValueError(f"Active position {symbol} has invalid notional") from exc
+            if (
+                not parsed_notional.is_finite()
+                or parsed_notional <= 0
+                or abs(parsed_notional - computed_notional)
+                > max(Decimal("0.00000001"), computed_notional * Decimal("0.01"))
+            ):
+                raise ValueError(
+                    f"Active position {symbol} notional disagrees with positionAmt*markPrice"
+                )
+        notional = computed_notional
         if notional <= 0 or not notional.is_finite():
             raise ValueError(f"Active position {symbol} has uncomputable notional")
         total_notional += notional
@@ -207,6 +230,9 @@ def _exchange_fill_from_trade(
     required = (
         "id",
         "orderId",
+        "symbol",
+        "side",
+        "positionSide",
         "qty",
         "price",
         "commission",
@@ -219,23 +245,35 @@ def _exchange_fill_from_trade(
     if missing:
         raise FillRecoveryError(f"Trade is missing required fields: {', '.join(missing)}")
 
-    symbol = str(trade.get("symbol") or getattr(local_order, "symbol", ""))
+    symbol = str(trade.get("symbol") or getattr(local_order, "symbol", "")).upper()
     client_order_id = str(
         trade.get("clientOrderId") or getattr(local_order, "client_order_id", "")
     )
     if not symbol or not client_order_id:
         raise FillRecoveryError("Trade is missing symbol or clientOrderId")
+    if local_order is not None:
+        if symbol != str(local_order.symbol).upper():
+            raise FillRecoveryError("Trade symbol does not match the local order")
+        if local_order.exchange_order_id and str(trade["orderId"]) != str(local_order.exchange_order_id):
+            raise FillRecoveryError("Trade order ID does not match the local order")
+        if trade.get("clientOrderId") and str(trade["clientOrderId"]) != str(local_order.client_order_id):
+            raise FillRecoveryError("Trade clientOrderId does not match the local order")
     try:
         side = OrderSide(str(trade.get("side") or local_order.side.value))
         position_side = PositionSide(
-            str(trade.get("positionSide") or local_order.position_side.value)
+            str(trade.get("positionSide") or local_order.position_side.value).upper()
         )
         quantity = Decimal(str(trade["qty"]))
         price = Decimal(str(trade["price"]))
         commission = Decimal(str(trade["commission"]))
         realized_pnl = Decimal(str(trade.get("realizedPnl", "0")))
-    except (AttributeError, InvalidOperation, ValueError) as exc:
+    except (AttributeError, InvalidOperation, TypeError, ValueError) as exc:
         raise FillRecoveryError("Trade contains invalid fill fields") from exc
+    if local_order is not None:
+        if side != local_order.side:
+            raise FillRecoveryError("Trade side does not match the local order")
+        if position_side != local_order.position_side:
+            raise FillRecoveryError("Trade positionSide does not match the local order")
     if any(not value.is_finite() for value in (quantity, price, commission, realized_pnl)):
         raise FillRecoveryError("Trade contains non-finite fill fields")
     if quantity <= 0 or price <= 0 or commission < 0 or not str(trade["commissionAsset"]):
@@ -253,7 +291,7 @@ def _exchange_fill_from_trade(
         commission=commission,
         commission_asset=str(trade["commissionAsset"]),
         realized_pnl=realized_pnl,
-        maker=bool(trade.get("maker", False)),
+        maker=_exchange_bool(trade.get("maker", False)),
         event_time=trade["time"],
         transaction_time=trade.get("time"),
         source=source,
@@ -271,6 +309,7 @@ class BinanceReconciliation:
         self.last_diffs: List[ReconciliationDiff] = []
         self.last_status = "UNKNOWN"
         self.authentication_failed = False
+        self._unattributed_fill_diffs: List[ReconciliationDiff] = []
 
     def _set_status(
         self, status: str, diffs: Optional[List[ReconciliationDiff]] = None
@@ -280,8 +319,12 @@ class BinanceReconciliation:
             self.last_diffs = diffs
         return status
 
-    async def _recover_recent_trades(self, symbols: set[str]) -> None:
-        for symbol in sorted(symbols):
+    async def _recover_recent_trades(
+        self, symbols: set[str]
+    ) -> List[ReconciliationDiff]:
+        """Recover only fills with local lineage and report foreign fills."""
+        diffs: List[ReconciliationDiff] = []
+        for symbol in sorted({str(item).upper() for item in symbols if item}):
             trades = await self.rest_client.request(
                 "GET",
                 "/fapi/v1/userTrades",
@@ -298,15 +341,25 @@ class BinanceReconciliation:
                     local_order = await self.ledger.get_order_by_client_id(
                         str(trade["clientOrderId"])
                     )
-                if local_order is None and not trade.get("clientOrderId"):
-                    # Binance userTrades does not always return clientOrderId;
-                    # do not invent one for historical trades that are not
-                    # associated with a local order.
+                if local_order is None:
+                    # Binance userTrades does not always return clientOrderId.
+                    # An exchange fill with no local order lineage is an
+                    # unresolved reconciliation difference, never an order we
+                    # silently adopt into the local ledger.
+                    diffs.append(
+                        ReconciliationDiff(
+                            code="EXCHANGE_FILL_UNKNOWN_LOCALLY",
+                            symbol=str(trade.get("symbol") or symbol).upper(),
+                            exchange_value=str(trade.get("id") or trade.get("orderId") or "UNKNOWN"),
+                        )
+                    )
                     continue
                 fill = _exchange_fill_from_trade(
                     trade, local_order, source="BINANCE_TESTNET_BOOTSTRAP"
                 )
                 await self.ledger.append_fill(fill)
+        self._unattributed_fill_diffs = diffs
+        return diffs
 
     async def _recover_order_fills(self, local_order: Any, order_status: Dict[str, Any]) -> int:
         order_id = order_status.get("orderId") or local_order.exchange_order_id
@@ -325,14 +378,40 @@ class BinanceReconciliation:
             raise FillRecoveryError(
                 f"No fills recovered for exchange order {order_id} reported {order_status.get('status')}"
             )
-        recovered = 0
+        recovered_fills: List[ExchangeFill] = []
         for trade in matching_trades:
-            fill = _exchange_fill_from_trade(
-                trade, local_order, source="BINANCE_TESTNET_RECOVERY"
+            recovered_fills.append(
+                _exchange_fill_from_trade(
+                    trade, local_order, source="BINANCE_TESTNET_RECOVERY"
+                )
             )
+        recovered_quantity = sum(
+            (fill.quantity for fill in recovered_fills), Decimal("0")
+        )
+        expected_raw = order_status.get("executedQty")
+        if expected_raw not in (None, ""):
+            try:
+                expected_quantity = Decimal(str(expected_raw))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise FillRecoveryError("Order executedQty is invalid") from exc
+            if (
+                not expected_quantity.is_finite()
+                or expected_quantity < 0
+                or recovered_quantity != expected_quantity
+            ):
+                raise FillRecoveryError(
+                    "Recovered fill quantity does not match exchange executedQty"
+                )
+        if str(order_status.get("status", "")).upper() == "FILLED":
+            if recovered_quantity != local_order.quantity:
+                raise FillRecoveryError(
+                    "FILLED order recovered fill quantity does not match origQty"
+                )
+        elif recovered_quantity <= 0 or recovered_quantity > local_order.quantity:
+            raise FillRecoveryError("PARTIALLY_FILLED order has invalid recovered fill quantity")
+        for fill in recovered_fills:
             await self.ledger.append_fill(fill)
-            recovered += 1
-        return recovered
+        return len(recovered_fills)
 
     @staticmethod
     def _active_position_map(
@@ -344,15 +423,105 @@ class BinanceReconciliation:
             if amount == 0:
                 continue
             symbol = position.get("symbol")
-            side = str(position.get("positionSide", "BOTH")).upper()
+            raw_side = position.get("positionSide")
+            if raw_side in (None, ""):
+                raise ValueError("Active position is missing positionSide")
+            side = str(raw_side).upper()
             if not symbol:
                 raise ValueError("Active position is missing symbol")
             try:
                 PositionSide(side)
             except ValueError as exc:
                 raise ValueError(f"Active position has unsupported positionSide: {side}") from exc
-            result[(str(symbol), side)] = amount
+            result[(str(symbol).upper(), side)] = amount
         return result
+
+    @staticmethod
+    def _compare_open_order(
+        local_order: Any, exchange_order: Dict[str, Any]
+    ) -> List[ReconciliationDiff]:
+        """Compare exchange economics, not only order identity."""
+        diffs: List[ReconciliationDiff] = []
+        symbol = str(exchange_order.get("symbol", local_order.symbol)).upper()
+
+        def add(code: str, local_value: Any, exchange_value: Any) -> None:
+            if local_value != exchange_value:
+                diffs.append(
+                    ReconciliationDiff(
+                        code=code,
+                        symbol=symbol,
+                        local_value=str(local_value),
+                        exchange_value=str(exchange_value),
+                    )
+                )
+
+        add("ORDER_STATUS_MISMATCH", str(local_order.status).upper(), str(exchange_order.get("status", "UNKNOWN")).upper())
+        add("ORDER_SIDE_MISMATCH", local_order.side.value, str(exchange_order.get("side", "UNKNOWN")).upper())
+        add(
+            "ORDER_POSITION_SIDE_MISMATCH",
+            local_order.position_side.value,
+            str(exchange_order.get("positionSide", "BOTH")).upper(),
+        )
+        add(
+            "ORDER_REDUCE_ONLY_MISMATCH",
+            bool(local_order.reduce_only),
+            _exchange_bool(exchange_order.get("reduceOnly", False)),
+        )
+
+        try:
+            exchange_quantity = Decimal(str(exchange_order.get("origQty")))
+        except (InvalidOperation, TypeError, ValueError):
+            exchange_quantity = None
+        if exchange_quantity is None or not exchange_quantity.is_finite() or exchange_quantity <= 0:
+            diffs.append(
+                ReconciliationDiff(
+                    code="ORDER_QUANTITY_UNKNOWN",
+                    symbol=symbol,
+                    local_value=str(local_order.quantity),
+                    exchange_value=str(exchange_order.get("origQty")),
+                )
+            )
+        else:
+            add("ORDER_QUANTITY_MISMATCH", local_order.quantity, exchange_quantity)
+
+        order_type = str(exchange_order.get("type", local_order.order_type)).upper()
+        raw_price = exchange_order.get("price")
+        if order_type != "MARKET":
+            try:
+                exchange_price = Decimal(str(raw_price))
+            except (InvalidOperation, TypeError, ValueError):
+                exchange_price = None
+            if exchange_price is None or not exchange_price.is_finite() or exchange_price <= 0:
+                diffs.append(
+                    ReconciliationDiff(
+                        code="ORDER_PRICE_UNKNOWN",
+                        symbol=symbol,
+                        local_value=str(local_order.price),
+                        exchange_value=str(raw_price),
+                    )
+                )
+            else:
+                add("ORDER_PRICE_MISMATCH", local_order.price, exchange_price)
+
+        if local_order.exchange_order_id and str(local_order.exchange_order_id) != str(exchange_order.get("orderId")):
+            diffs.append(
+                ReconciliationDiff(
+                    code="ORDER_EXCHANGE_ID_MISMATCH",
+                    symbol=symbol,
+                    local_value=str(local_order.exchange_order_id),
+                    exchange_value=str(exchange_order.get("orderId")),
+                )
+            )
+        if local_order.client_order_id and exchange_order.get("clientOrderId") and local_order.client_order_id != str(exchange_order.get("clientOrderId")):
+            diffs.append(
+                ReconciliationDiff(
+                    code="ORDER_CLIENT_ID_MISMATCH",
+                    symbol=symbol,
+                    local_value=local_order.client_order_id,
+                    exchange_value=str(exchange_order.get("clientOrderId")),
+                )
+            )
+        return diffs
 
     async def _collect_diffs(
         self,
@@ -375,10 +544,20 @@ class BinanceReconciliation:
             for o in exchange_open_orders
             if o.get("clientOrderId")
         }
-        diffs: List[ReconciliationDiff] = []
+        diffs: List[ReconciliationDiff] = list(self._unattributed_fill_diffs)
         recovered_position_symbols: set[str] = set()
+        recovered_reduction_symbols: set[str] = set()
+        get_all_orders = getattr(self.ledger, "get_all_orders", None)
+        all_orders = (
+            await get_all_orders()
+            if callable(get_all_orders)
+            else await self.ledger.get_open_orders()
+        )
 
-        for local_order in await self.ledger.get_open_orders():
+        for local_order in all_orders:
+            local_status = str(local_order.status).upper()
+            active_local_order = local_status in {"NEW", "PARTIALLY_FILLED"}
+            terminal_execution = local_status in {"FILLED", "PARTIALLY_FILLED"}
             found = bool(
                 local_order.exchange_order_id
                 and str(local_order.exchange_order_id) in exchange_order_ids
@@ -387,7 +566,71 @@ class BinanceReconciliation:
                 and local_order.client_order_id in exchange_client_ids
             )
             if found:
-                continue
+                exchange_order = (
+                    exchange_order_ids.get(str(local_order.exchange_order_id))
+                    if local_order.exchange_order_id
+                    else None
+                )
+                if exchange_order is None and local_order.client_order_id:
+                    exchange_order = exchange_client_ids.get(local_order.client_order_id)
+                if exchange_order is not None:
+                    diffs.extend(self._compare_open_order(local_order, exchange_order))
+                    if local_status == "PARTIALLY_FILLED":
+                        try:
+                            executed_qty = Decimal(str(exchange_order.get("executedQty", "0")))
+                        except (InvalidOperation, TypeError, ValueError):
+                            executed_qty = None
+                        if executed_qty is None or executed_qty < 0:
+                            diffs.append(
+                                ReconciliationDiff(
+                                    code="PARTIAL_EXECUTED_QTY_UNKNOWN",
+                                    symbol=local_order.symbol,
+                                    local_value=local_order.client_order_id,
+                                )
+                            )
+                        elif executed_qty > 0:
+                            try:
+                                await self._recover_order_fills(local_order, exchange_order)
+                            except BinanceAuthenticationError:
+                                raise
+                            except Exception as exc:
+                                logger.warning(
+                                    "Fill recovery failed for open partial order %s: %s",
+                                    local_order.client_order_id,
+                                    exc,
+                                )
+                                diffs.append(
+                                    ReconciliationDiff(
+                                        code="FILL_RECOVERY_FAILED",
+                                        symbol=local_order.symbol,
+                                        local_value=local_order.client_order_id,
+                                        exchange_value=str(exchange_order.get("orderId", "")),
+                                    )
+                                )
+                    elif local_status == "FILLED":
+                        try:
+                            await self._recover_order_fills(local_order, exchange_order)
+                        except BinanceAuthenticationError:
+                            raise
+                        except Exception as exc:
+                            logger.warning(
+                                "Fill recovery failed for terminal open order %s: %s",
+                                local_order.client_order_id,
+                                exc,
+                            )
+                            diffs.append(
+                                ReconciliationDiff(
+                                    code="FILL_RECOVERY_FAILED",
+                                    symbol=local_order.symbol,
+                                    local_value=local_order.client_order_id,
+                                    exchange_value=str(exchange_order.get("orderId", "")),
+                                )
+                            )
+                # A FILLED/PARTIALLY_FILLED local order is still queried below
+                # when it is absent from openOrders; an open match already gave
+                # us the authoritative order record and any recoverable fills.
+                if active_local_order or terminal_execution:
+                    continue
 
             query_params = {"symbol": local_order.symbol}
             if local_order.client_order_id:
@@ -415,7 +658,16 @@ class BinanceReconciliation:
                 )
                 continue
 
-            status = str(order_status.get("status", "UNKNOWN"))
+            if not isinstance(order_status, dict):
+                diffs.append(
+                    ReconciliationDiff(
+                        code="LOCAL_ORDER_STATUS_UNKNOWN",
+                        symbol=local_order.symbol,
+                        local_value=local_order.client_order_id or local_order.exchange_order_id,
+                    )
+                )
+                continue
+            status = str(order_status.get("status", "UNKNOWN")).upper()
             if status in ("FILLED", "PARTIALLY_FILLED"):
                 try:
                     await self._recover_order_fills(local_order, order_status)
@@ -440,9 +692,26 @@ class BinanceReconciliation:
                 )
                 await self.ledger.upsert_order(local_order)
                 recovered_position_symbols.add(str(local_order.symbol).upper())
+                if local_order.reduce_only or local_order.risk_class in {
+                    "REDUCE_RISK",
+                    "RECOVERY",
+                    "CLOSE",
+                    "EMERGENCY",
+                }:
+                    recovered_reduction_symbols.add(str(local_order.symbol).upper())
             elif status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED"):
-                local_order.status = status
-                await self.ledger.upsert_order(local_order)
+                if terminal_execution:
+                    diffs.append(
+                        ReconciliationDiff(
+                            code="TERMINAL_ORDER_STATUS_MISMATCH",
+                            symbol=local_order.symbol,
+                            local_value=local_status,
+                            exchange_value=status,
+                        )
+                    )
+                elif active_local_order:
+                    local_order.status = status
+                    await self.ledger.upsert_order(local_order)
             else:
                 diffs.append(
                     ReconciliationDiff(
@@ -468,6 +737,10 @@ class BinanceReconciliation:
                         exchange_value=exchange_order_id,
                     )
                 )
+            elif str(local_match.status).upper() not in {"NEW", "PARTIALLY_FILLED"}:
+                # A terminal local record cannot coexist with an exchange
+                # order that is still open, even when the IDs match.
+                diffs.extend(self._compare_open_order(local_match, exchange_order))
 
         # A locally tracked order can disappear from openOrders after a fill
         # before its private-stream position event arrives. Once the order
@@ -479,11 +752,25 @@ class BinanceReconciliation:
                 await self.ledger.upsert_position(position)
 
         exchange_position_map = self._active_position_map(exchange_positions)
+        for symbol in recovered_reduction_symbols:
+            if not any(key[0] == symbol for key in exchange_position_map):
+                clear_positions = getattr(self.ledger, "clear_positions_for_symbol", None)
+                if callable(clear_positions):
+                    await clear_positions(symbol)
+                else:
+                    diffs.append(
+                        ReconciliationDiff(
+                            code="LOCAL_CLOSED_POSITION_NOT_CLEARED",
+                            symbol=symbol,
+                        )
+                    )
         local_position_map: Dict[Tuple[str, str], Decimal] = {}
         for position in await self.ledger.get_positions():
             if position.quantity == 0:
                 continue
-            local_position_map[(position.symbol, position.position_side.value)] = position.quantity
+            local_position_map[
+                (str(position.symbol).upper(), position.position_side.value)
+            ] = position.quantity
 
         for key, local_amount in local_position_map.items():
             exchange_amount = exchange_position_map.get(key)
@@ -515,11 +802,69 @@ class BinanceReconciliation:
                         exchange_value=str(exchange_amount),
                     )
                 )
+
+        # A terminal local order is not proof of execution. Every FILLED or
+        # PARTIALLY_FILLED record must have at least one canonical ExchangeFill
+        # linked by exchange order ID or client order ID before reconciliation
+        # can report IN_SYNC.
+        get_fills = getattr(self.ledger, "get_fills", None)
+        fills = await get_fills() if callable(get_fills) else []
+        for local_order in all_orders:
+            local_status = str(local_order.status).upper()
+            if local_status not in {"FILLED", "PARTIALLY_FILLED"}:
+                continue
+            linked_fills = [
+                fill
+                for fill in fills
+                if (
+                    local_order.exchange_order_id
+                    and str(fill.exchange_order_id) == str(local_order.exchange_order_id)
+                )
+                or (
+                    local_order.client_order_id
+                    and str(fill.client_order_id) == str(local_order.client_order_id)
+                )
+            ]
+            has_linked_fill = bool(linked_fills)
+            if not has_linked_fill:
+                diffs.append(
+                    ReconciliationDiff(
+                        code="TERMINAL_ORDER_FILL_MISSING",
+                        symbol=str(local_order.symbol).upper(),
+                        local_value=local_order.client_order_id
+                        or local_order.exchange_order_id,
+                    )
+                )
+                continue
+            recovered_quantity = sum(
+                (fill.quantity for fill in linked_fills), Decimal("0")
+            )
+            if local_status == "FILLED" and recovered_quantity != local_order.quantity:
+                diffs.append(
+                    ReconciliationDiff(
+                        code="FILL_QUANTITY_MISMATCH",
+                        symbol=str(local_order.symbol).upper(),
+                        local_value=str(local_order.quantity),
+                        exchange_value=str(recovered_quantity),
+                    )
+                )
+            elif local_status == "PARTIALLY_FILLED" and (
+                recovered_quantity <= 0 or recovered_quantity > local_order.quantity
+            ):
+                diffs.append(
+                    ReconciliationDiff(
+                        code="PARTIAL_FILL_QUANTITY_INVALID",
+                        symbol=str(local_order.symbol).upper(),
+                        local_value=str(local_order.quantity),
+                        exchange_value=str(recovered_quantity),
+                    )
+                )
         return diffs
 
     async def bootstrap(self) -> bool:
         """Fetch, seed, compare, and only then mark the ledger synchronized."""
         self.authentication_failed = False
+        self._unattributed_fill_diffs = []
         self._set_status("RECONCILING", [])
         try:
             positions = await self.rest_client.request(
@@ -533,32 +878,53 @@ class BinanceReconciliation:
                 raise ValueError("Binance bootstrap response is invalid")
 
             active_positions = [p for p in positions if _position_amount(p) != 0]
-            # A genuinely empty ledger may adopt the authoritative exchange
-            # snapshot as its initial state. A ledger that already contains
-            # open orders or active positions must be compared first; seeding
-            # it before _collect_diffs would make that comparison tautological.
+            # Bootstrap never silently adopts exchange exposure or orders that
+            # have no local lineage.  An empty, uninitialized ledger is safe
+            # to initialize only when the authoritative Testnet account is
+            # also empty of positions and open orders.
             local_open_orders = await self.ledger.get_open_orders()
             local_positions = await self.ledger.get_positions()
-            has_local_exchange_state = bool(local_open_orders) or any(
+            get_all_orders = getattr(self.ledger, "get_all_orders", None)
+            local_orders = (
+                await get_all_orders() if callable(get_all_orders) else local_open_orders
+            )
+            get_fills = getattr(self.ledger, "get_fills", None)
+            local_fills = await get_fills() if callable(get_fills) else []
+            has_local_exchange_state = bool(local_orders) or bool(local_fills) or any(
                 position.quantity != 0 for position in local_positions
             )
             await self.ledger.set_account_snapshot(None)
-            if not has_local_exchange_state:
-                await self.ledger.replace_positions(
-                    active_positions, mark_initialized=False
+            if not has_local_exchange_state and (active_positions or open_orders):
+                self._set_status(
+                    "UNKNOWN",
+                    [
+                        ReconciliationDiff(
+                            code="EXCHANGE_STATE_UNOWNED",
+                            local_value="EMPTY_LEDGER",
+                            exchange_value={
+                                "active_positions": len(active_positions),
+                                "open_orders": len(open_orders),
+                            },
+                        )
+                    ],
                 )
-                for order_data in open_orders:
-                    await self.ledger.upsert_raw_exchange_order(order_data)
-            await self.ledger.update_balances(
-                _required_decimal(account, "totalWalletBalance"),
-                _required_decimal(account, "totalMarginBalance"),
-            )
+                return False
 
             symbols = {
                 str(position.get("symbol")) for position in active_positions if position.get("symbol")
             }
             symbols.update(
                 str(order.get("symbol")) for order in open_orders if order.get("symbol")
+            )
+            tracked_orders = (
+                await get_all_orders()
+                if callable(get_all_orders)
+                else await self.ledger.get_open_orders()
+            )
+            symbols.update(
+                str(order.symbol)
+                for order in tracked_orders
+                if getattr(order, "symbol", None)
             )
             await self._recover_recent_trades(symbols)
 
@@ -607,6 +973,7 @@ class BinanceReconciliation:
             await self.bootstrap()
             return self.last_status
 
+        self._unattributed_fill_diffs = []
         self._set_status("RECONCILING", [])
         try:
             exchange_positions = await self.rest_client.request(
@@ -619,12 +986,40 @@ class BinanceReconciliation:
             if not isinstance(exchange_positions, list) or not isinstance(exchange_open_orders, list):
                 raise ValueError("Binance reconciliation response is invalid")
 
+            symbols = {
+                str(position.get("symbol"))
+                for position in exchange_positions
+                if position.get("symbol") and _position_amount(position) != 0
+            }
+            symbols.update(
+                str(order.get("symbol"))
+                for order in exchange_open_orders
+                if order.get("symbol")
+            )
+            get_all_orders = getattr(self.ledger, "get_all_orders", None)
+            tracked_orders = (
+                await get_all_orders()
+                if callable(get_all_orders)
+                else await self.ledger.get_open_orders()
+            )
+            symbols.update(
+                str(order.symbol)
+                for order in tracked_orders
+                if getattr(order, "symbol", None)
+            )
+            await self._recover_recent_trades(symbols)
             diffs = await self._collect_diffs(exchange_positions, exchange_open_orders)
             if diffs:
                 self._set_status("MISMATCH", diffs)
                 return self.last_status
 
             snapshot = build_account_snapshot(account, exchange_positions)
+            # Keep the local position-risk fields (mark, liquidation price,
+            # leverage, and quantity) authoritative after every successful
+            # reconciliation, not only during bootstrap.
+            await self.ledger.replace_positions(
+                exchange_positions, mark_initialized=False
+            )
             await self.ledger.update_balances(snapshot.wallet_balance, snapshot.margin_balance)
             await self.ledger.set_account_snapshot(snapshot)
             self._set_status("IN_SYNC", [])

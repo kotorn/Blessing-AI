@@ -4,6 +4,10 @@ Status for this sprint: `DISABLED` / `NOT_IMPLEMENTED`. This repository does
 not authorize Mainnet execution, and no shortcut or approval flag can enable
 it. `LIVE` ARM and mutable Mainnet adapter construction are rejected.
 
+Evidence status is intentionally separate from implementation status:
+`CODE_PRESENT` does not mean `LOCAL_VERIFIED`, and local verification does not
+mean `CI_VERIFIED` or operational approval.
+
 The following is a future-only checklist. Each item must become
 `LOCAL_VERIFIED`, then `CI_VERIFIED`, and finally receive independent
 operational approval before any Mainnet implementation is considered.
@@ -21,6 +25,10 @@ operational approval before any Mainnet implementation is considered.
       state.
 - [ ] Mainnet-specific adapter and endpoint audit, implemented in a separate
       approved change.
+
+Current sprint evidence: Testnet read-only and manual mutation are
+`NOT_RUN`; autonomous Testnet is locked. No Mainnet order has been created or
+tested.
 
 ## MVP infrastructure boundary
 

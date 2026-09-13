@@ -28,6 +28,9 @@ export const ConnectionsPage: React.FC<ConnectionsPageProps> = ({
   onOpenWorkspaceModal,
 }) => {
   const { user, firestoreConnected } = useAuth();
+  const testnetFuturesAuthenticated = Boolean(
+    binanceStatus?.isTestnet === true && binanceStatus?.futures?.authenticated,
+  );
 
   return (
     <div className="space-y-6">
@@ -52,17 +55,17 @@ export const ConnectionsPage: React.FC<ConnectionsPageProps> = ({
               </div>
               <span
                 className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                  binanceStatus?.spot?.authenticated
+                  testnetFuturesAuthenticated
                     ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
                     : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                 }`}
               >
-                {binanceStatus?.spot?.authenticated ? 'CONNECTED' : 'DISCONNECTED'}
+                {testnetFuturesAuthenticated ? 'CONNECTED' : 'DISCONNECTED'}
               </span>
             </div>
 
             <div>
-              <h3 className="text-sm font-bold text-zinc-100">Binance Global API</h3>
+              <h3 className="text-sm font-bold text-zinc-100">Binance USDⓈ-M Testnet API</h3>
               <p className="text-xs text-zinc-400 mt-1">
                 Spot & USDⓈ-M Futures trading keys, multi-profile credentials, and Hedge Mode detection.
               </p>
@@ -71,19 +74,19 @@ export const ConnectionsPage: React.FC<ConnectionsPageProps> = ({
             <div className="text-xs space-y-1 text-zinc-400 font-mono bg-zinc-950 p-2.5 rounded-lg border border-zinc-800/80">
               <div className="flex justify-between">
                 <span>Spot Market:</span>
-                <span className={binanceStatus?.spot?.authenticated ? 'text-emerald-400' : 'text-zinc-500'}>
-                  {binanceStatus?.spot?.authenticated ? 'Authenticated' : 'Pending'}
+                <span className={binanceStatus?.spot?.authenticated && binanceStatus?.isTestnet ? 'text-emerald-400' : 'text-zinc-500'}>
+                  {binanceStatus?.spot?.authenticated && binanceStatus?.isTestnet ? 'Authenticated (read-only probe)' : 'Pending'}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span>USDⓈ-M Futures:</span>
-                <span className={binanceStatus?.futures?.authenticated ? 'text-emerald-400' : 'text-zinc-500'}>
-                  {binanceStatus?.futures?.authenticated ? 'Authenticated' : 'Pending'}
+                <span className={testnetFuturesAuthenticated ? 'text-emerald-400' : 'text-zinc-500'}>
+                  {testnetFuturesAuthenticated ? 'Authenticated (read-only probe)' : 'Pending'}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span>Key Source:</span>
-                <span className="text-cyan-400">{binanceStatus?.source || 'Profiles'}</span>
+                <span className="text-cyan-400">{binanceStatus?.isTestnet ? 'BINANCE_TESTNET' : 'MAINNET BLOCKED'}</span>
               </div>
             </div>
           </div>

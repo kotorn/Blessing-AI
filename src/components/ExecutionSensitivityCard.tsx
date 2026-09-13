@@ -11,6 +11,7 @@ import {
   Info,
 } from 'lucide-react';
 import { ExecutionFrictionAnalysis } from '../types/research';
+import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
 
 export const ExecutionSensitivityCard: React.FC = () => {
   const analysis: ExecutionFrictionAnalysis = {
@@ -51,6 +52,8 @@ export const ExecutionSensitivityCard: React.FC = () => {
           </span>
         </div>
       </div>
+
+      <IllustrativeEvidenceBanner message="The friction comparison is a static example until a verified backtest/testnet evidence artifact is attached." />
 
       {/* Comparison: Naive vs Realistic */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs font-mono">

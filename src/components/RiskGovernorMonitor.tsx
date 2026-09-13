@@ -5,8 +5,8 @@ import { RiskRuleItem, RiskState } from '../types';
 interface RiskGovernorMonitorProps {
   riskState: RiskState;
   rules: RiskRuleItem[];
-  correlationBtcEth: number;
-  cryptoBetaExposurePct: number;
+  correlationBtcEth: number | null;
+  cryptoBetaExposurePct: number | null;
   liquidationDistancePct: number | null;
 }
 
@@ -43,17 +43,17 @@ export const RiskGovernorMonitor: React.FC<RiskGovernorMonitorProps> = ({
         <div>
           <div className="text-zinc-400 text-[11px]">BTC-ETH Rolling Correlation (30d)</div>
           <div className="text-base font-bold font-mono text-zinc-200 mt-0.5">
-            {(correlationBtcEth ?? 0).toFixed(2)}
+            {correlationBtcEth == null ? 'UNKNOWN' : correlationBtcEth.toFixed(2)}
           </div>
           <div className="text-[10px] text-zinc-400">
-            {(correlationBtcEth ?? 0) > 0.85 ? 'High Co-movement Alert' : 'Normal Cross-Beta'}
+            {correlationBtcEth == null ? 'Awaiting verified portfolio snapshot' : correlationBtcEth > 0.85 ? 'High Co-movement Alert' : 'Normal Cross-Beta'}
           </div>
         </div>
 
         <div>
           <div className="text-zinc-400 text-[11px]">Aggregate Crypto Beta Exposure</div>
           <div className="text-base font-bold font-mono text-zinc-200 mt-0.5">
-            {(cryptoBetaExposurePct ?? 0).toFixed(1)}%
+            {cryptoBetaExposurePct == null ? 'UNKNOWN' : `${cryptoBetaExposurePct.toFixed(1)}%`}
           </div>
           <div className="text-[10px] text-zinc-400">Target Ceiling: &le; 65.0%</div>
         </div>

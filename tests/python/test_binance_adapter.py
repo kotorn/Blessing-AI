@@ -75,6 +75,9 @@ def adapter():
     rules.min_notional = Decimal("5")
     ada.capabilities.symbol_rules["BTCUSDT"] = rules
     ada.last_market_event_at["BTCUSDT"] = utc_now()
+    ada.last_market_event_source["BTCUSDT"] = "BINANCE_TESTNET_WS"
+    ada.last_market_event_venue["BTCUSDT"] = "BINANCE_TESTNET"
+    ada.last_market_event_market_type["BTCUSDT"] = "USDM_FUTURES"
     ledger.account_snapshot = ExchangeAccountSnapshot(
         wallet_balance=Decimal("100"),
         margin_balance=Decimal("100"),
@@ -115,12 +118,42 @@ async def test_timeout_ambiguity_handling(adapter):
         orders=[intent],
     )
     
-    await adapter.execute_decision(decision)
+    authority = object()
+    adapter.bind_worker_authority(authority)
+    await adapter._execute_decision(decision, authority=authority)
 
     # The ambiguous POST is never blindly retried. A single authoritative query
     # confirms absence, then reconciliation is required before READY returns.
     assert adapter.state == ConnectionState.READY
     assert adapter.rest_client.calls.count(("POST", "/fapi/v1/order")) == 1
-    assert adapter.rest_client.calls.count(("GET", "/fapi/v1/order")) == 1
+    assert adapter.rest_client.calls.count(("GET", "/fapi/v1/order")) == 3
     assert adapter.reconciliation.calls == 1
+
+
+async def test_direct_adapter_mutation_is_blocked(adapter):
+    adapter.state = ConnectionState.READY
+    decision = ExecutionDecision(
+        decision_id="DIRECT-BLOCK",
+        symbol="BTCUSDT",
+        action="SUBMIT",
+        risk_class=EconomicRiskClass.NEW_RISK,
+        orders=[],
+    )
+
+    assert await adapter.execute_decision(decision) == []
+    assert adapter.rest_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_private_adapter_mutation_also_requires_worker_authority(adapter):
+    decision = ExecutionDecision(
+        decision_id="PRIVATE-DIRECT-BLOCK",
+        symbol="BTCUSDT",
+        action="SUBMIT",
+        risk_class=EconomicRiskClass.NEW_RISK,
+        orders=[],
+    )
+
+    assert await adapter._execute_decision(decision) == []
+    assert adapter.rest_client.calls == []
 

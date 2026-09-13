@@ -120,6 +120,7 @@ class HealthIndicators(BaseModel):
 
 class LaunchReadiness(BaseModel):
     paper_ready: bool
+    local_non_secret_tests_verified: bool
     ci_verified: bool
     testnet_credentials_verified: bool
     testnet_readonly_contract_verified: bool
@@ -389,21 +390,33 @@ async def pause_new_risk_endpoint(req: ToggleRequest):
     if not WORKER_ENGINE:
         raise HTTPException(status_code=503, detail="Worker not initialized")
     await WORKER_ENGINE.set_pause_new_risk(req.active)
-    return {"status": "ok", "active": req.active}
+    return {
+        "status": "ok",
+        "active": req.active,
+        "engine_state": WORKER_ENGINE.get_state().engine_state.value,
+    }
 
 @app.post("/recovery-only")
 async def recovery_only_endpoint(req: ToggleRequest):
     if not WORKER_ENGINE:
         raise HTTPException(status_code=503, detail="Worker not initialized")
     await WORKER_ENGINE.set_recovery_only(req.active)
-    return {"status": "ok", "active": req.active}
+    return {
+        "status": "ok",
+        "active": req.active,
+        "engine_state": WORKER_ENGINE.get_state().engine_state.value,
+    }
 
 @app.post("/kill-switch")
 async def kill_switch_endpoint(req: ToggleRequest):
     if not WORKER_ENGINE:
         raise HTTPException(status_code=503, detail="Worker not initialized")
     result = await WORKER_ENGINE.set_kill_switch(req.active)
-    return {**result, "kill_switch_active": WORKER_ENGINE.kill_switch_active}
+    return {
+        **result,
+        "kill_switch_active": WORKER_ENGINE.kill_switch_active,
+        "engine_state": WORKER_ENGINE.get_state().engine_state.value,
+    }
 
 @app.post("/reconcile")
 async def reconcile_endpoint():
@@ -414,7 +427,7 @@ async def reconcile_endpoint():
 
 class TradingWorkerApp:
     def __init__(self, symbols: Optional[List[str]] = None):
-        self.symbols = [str(symbol).upper() for symbol in (symbols or ["BTCUSDT", "ETHUSDT"])]
+        self.symbols = [str(symbol).upper() for symbol in (symbols or ["BTCUSDT"])]
         self.is_running = True
         
         self.session_start_equity: Optional[Decimal] = None
@@ -496,6 +509,21 @@ class TradingWorkerApp:
                 return [str(symbol).upper() for symbol in configured]
         return [str(symbol).upper() for symbol in self.symbols]
 
+    def _symbol_rules_ready(self) -> bool:
+        """Require complete exchange rules for every active Testnet symbol."""
+        active_symbols = self._active_instruments()
+        adapter = self.execution_adapter
+        return bool(
+            adapter
+            and active_symbols
+            and all(
+                symbol in adapter.symbol_rules
+                and adapter.symbol_rules[symbol].is_ready_for("LIMIT")
+                and adapter.symbol_rules[symbol].is_ready_for("MARKET")
+                for symbol in active_symbols
+            )
+        )
+
     @staticmethod
     def _positive_env_float(name: str, fallback: float) -> float:
         raw = os.getenv(name)
@@ -549,6 +577,7 @@ class TradingWorkerApp:
                 for field in (
                     "wallet_balance",
                     "margin_balance",
+                    "available_balance",
                     "total_initial_margin",
                     "total_maint_margin",
                     "position_initial_margin",
@@ -566,7 +595,13 @@ class TradingWorkerApp:
             return False
         max_age = self._positive_env_float("MAX_MARKET_DATA_AGE_SEC", 3.0)
         adapter_timestamps = getattr(self.execution_adapter, "last_market_event_at", {})
-        for symbol in symbols or self._active_instruments():
+        for raw_symbol in symbols or self._active_instruments():
+            symbol = str(raw_symbol).upper()
+            has_authoritative_sample = getattr(
+                self.execution_adapter, "has_authoritative_market_sample", None
+            )
+            if callable(has_authoritative_sample) and not has_authoritative_sample(symbol):
+                return False
             timestamp = self.last_market_event_at.get(symbol) or adapter_timestamps.get(symbol)
             if not isinstance(timestamp, datetime):
                 return False
@@ -585,18 +620,35 @@ class TradingWorkerApp:
         adapter_state = self.execution_adapter.connection_state
         self.connection_state = getattr(adapter_state, "value", str(adapter_state))
         self.authenticated = self.execution_adapter.authenticated
-        self.private_stream_healthy = bool(
-            self.execution_adapter.user_stream
-            and self.execution_adapter.user_stream.is_connected
-        )
+        stream_health = getattr(self.execution_adapter, "private_stream_healthy", None)
+        if stream_health is None:
+            stream = getattr(self.execution_adapter, "user_stream", None)
+            stream_health = bool(stream and getattr(stream, "is_connected", False))
+        self.private_stream_healthy = bool(stream_health)
         self.reconciliation_status = getattr(
             self.execution_adapter.reconciliation, "last_status", "UNKNOWN"
         )
+        self._refresh_engine_state()
 
     def _refresh_engine_state(self) -> None:
         """Derive the single operational state from canonical control flags."""
         if self.kill_switch_active:
             self.engine_state = WorkerEngineState.EMERGENCY
+        elif (
+            self.execution_mode == WorkerExecutionMode.TESTNET
+            and self.active_configuration is not None
+            and (
+                self.connection_state != ConnectionState.READY.value
+                or not self.authenticated
+                or not self.private_stream_healthy
+                or self.reconciliation_status != "IN_SYNC"
+            )
+        ):
+            # A worker cannot remain visibly ARMED while its sole exchange
+            # adapter is degraded, disconnected, or reconciling.  This is a
+            # control-plane state only; emergency reduction remains available
+            # through its explicit Worker-owned fallback path.
+            self.engine_state = WorkerEngineState.DEGRADED
         elif self.recovery_only:
             self.engine_state = WorkerEngineState.RECOVERY_ONLY
         elif self.pause_new_risk:
@@ -668,15 +720,7 @@ class TradingWorkerApp:
             self.execution_adapter is not None
             and self.execution_adapter.connection_state == ConnectionState.READY
         )
-        symbol_rules_loaded = bool(
-            self.execution_adapter
-            and all(
-                symbol in self.execution_adapter.symbol_rules
-                and self.execution_adapter.symbol_rules[symbol].is_ready_for("LIMIT")
-                and self.execution_adapter.symbol_rules[symbol].is_ready_for("MARKET")
-                for symbol in self._active_instruments()
-            )
-        )
+        symbol_rules_loaded = self._symbol_rules_ready()
         account_snapshot_ready = self.is_account_snapshot_ready()
         market_data_fresh = self.is_market_data_fresh()
         testnet_ready = (
@@ -717,6 +761,7 @@ class TradingWorkerApp:
         auto_flag = self._env_flag("AUTONOMOUS_TESTNET_EXECUTION", False)
 
         ci_verified = False
+        local_non_secret_tests_verified = False
         readonly_contract_verified = False
         manual_trial_verified = False
         soak_verified = False
@@ -743,7 +788,10 @@ class TradingWorkerApp:
             # alone is insufficient while tracked source changes are pending.
             current_build_sha = head_sha if not working_tree else None
         except Exception:
-            current_build_sha = os.getenv("BUILD_SHA")
+            # A caller-supplied SHA is not evidence of the source that is
+            # actually running.  Fail closed if the repository identity cannot
+            # be read and keep all launch evidence disabled.
+            current_build_sha = None
 
         metadata_paths = ("build_metadata.json", os.path.join("artifacts", "build-evidence.json"))
         meta: dict = {}
@@ -759,6 +807,9 @@ class TradingWorkerApp:
                 pass
 
         evidence_matches_build = bool(current_build_sha and meta.get("build_sha") == current_build_sha)
+        local_non_secret_tests_verified = bool(
+            evidence_matches_build and meta.get("local_non_secret_tests_verified", False)
+        )
         ci_verified = bool(evidence_matches_build and meta.get("github_ci_verified", False))
         readonly_contract_verified = bool(
             evidence_matches_build and meta.get("readonly_contract_verified", False)
@@ -774,20 +825,13 @@ class TradingWorkerApp:
             self.execution_adapter
             and self.execution_adapter.connection_state == ConnectionState.READY
         )
-        rules_ready = bool(
-            self.execution_adapter
-            and all(
-                symbol in self.execution_adapter.symbol_rules
-                and self.execution_adapter.symbol_rules[symbol].is_ready_for("LIMIT")
-                and self.execution_adapter.symbol_rules[symbol].is_ready_for("MARKET")
-                for symbol in self._active_instruments()
-            )
-        )
+        rules_ready = self._symbol_rules_ready()
         account_ready = self.is_account_snapshot_ready()
         market_data_fresh = self.is_market_data_fresh()
 
         readiness = LaunchReadiness(
             paper_ready=not self.kill_switch_active,
+            local_non_secret_tests_verified=local_non_secret_tests_verified,
             ci_verified=ci_verified,
             testnet_credentials_verified=testnet_configured and self.authenticated,
             testnet_readonly_contract_verified=readonly_contract_verified,
@@ -807,6 +851,7 @@ class TradingWorkerApp:
         
         readiness.testnet_autonomous_ready = (
             self.execution_mode == WorkerExecutionMode.TESTNET and
+            readiness.local_non_secret_tests_verified and
             readiness.ci_verified and
             readiness.testnet_credentials_verified and
             self.authenticated and
@@ -850,15 +895,7 @@ class TradingWorkerApp:
                 self.execution_adapter
                 and self.execution_adapter.connection_state == ConnectionState.READY
             )
-            rules_ready = bool(
-                self.execution_adapter
-                and all(
-                    symbol in self.execution_adapter.symbol_rules
-                    and self.execution_adapter.symbol_rules[symbol].is_ready_for("LIMIT")
-                    and self.execution_adapter.symbol_rules[symbol].is_ready_for("MARKET")
-                    for symbol in self._active_instruments()
-                )
-            )
+            rules_ready = self._symbol_rules_ready()
             account_ready = self.is_account_snapshot_ready()
             market_data_fresh = self.is_market_data_fresh()
             checks = [
@@ -966,10 +1003,58 @@ class TradingWorkerApp:
     async def set_kill_switch(self, active: bool) -> dict:
         if not active:
             if self.kill_switch_active:
-                return {
-                    "status": "UNKNOWN",
-                    "reason": "Kill switch remains active until a verified restart/reconciliation.",
-                }
+                adapter = self.execution_adapter
+                if self.execution_mode == WorkerExecutionMode.PAPER and adapter is None:
+                    self.kill_switch_active = False
+                    self._refresh_engine_state()
+                    return {"status": "CONFIRMED", "environment": "PAPER"}
+                if self.execution_mode != WorkerExecutionMode.TESTNET or adapter is None:
+                    return {
+                        "status": "UNKNOWN",
+                        "reason": "Kill switch remains active until a verified Testnet restart/reconciliation.",
+                    }
+                try:
+                    open_orders = await adapter.rest_client.request(
+                        "GET", "/fapi/v1/openOrders", signed=True
+                    )
+                    if not isinstance(open_orders, list):
+                        return {
+                            "status": "UNKNOWN",
+                            "reason": "Authoritative openOrders response is invalid.",
+                        }
+                    if open_orders:
+                        return {
+                            "status": "PARTIAL",
+                            "remaining_orders": len(open_orders),
+                            "reason": "Kill switch remains active while Testnet open orders exist.",
+                        }
+                    reconciliation = await self.trigger_reconciliation()
+                    if (
+                        reconciliation != "IN_SYNC"
+                        or not adapter.private_stream_healthy
+                        or not adapter.authenticated
+                    ):
+                        return {
+                            "status": "PARTIAL",
+                            "reconciliation": reconciliation,
+                            "reason": "Kill switch remains active until stream, authentication, and reconciliation are verified.",
+                        }
+                    self.kill_switch_active = False
+                    self._refresh_engine_state()
+                    return {"status": "CONFIRMED", "remaining_orders": 0}
+                except BinanceAuthenticationError as exc:
+                    adapter.invalidate_authentication()
+                    logger.error("Kill switch release authentication failed: %s", exc)
+                    return {
+                        "status": "UNKNOWN",
+                        "reason": "Testnet authentication failed; kill switch remains active.",
+                    }
+                except Exception as exc:
+                    logger.error("Kill switch release verification is unknown: %s", exc)
+                    return {
+                        "status": "UNKNOWN",
+                        "reason": "Kill switch remains active because exchange release could not be verified.",
+                    }
             self._refresh_engine_state()
             return {"status": "CONFIRMED"}
 
@@ -1024,7 +1109,11 @@ class TradingWorkerApp:
             reconciliation = await self.trigger_reconciliation()
             if remaining or cancel_failures:
                 return {"status": "PARTIAL", "remaining_orders": len(remaining)}
-            if reconciliation != "IN_SYNC" or not adapter.user_stream.is_connected:
+            if (
+                reconciliation != "IN_SYNC"
+                or not adapter.private_stream_healthy
+                or not adapter.authenticated
+            ):
                 return {"status": "PARTIAL", "reconciliation": reconciliation}
             return {"status": "CONFIRMED", "remaining_orders": 0}
         except BinanceAuthenticationError as exc:
@@ -1081,6 +1170,7 @@ class TradingWorkerApp:
                 logger.warning("Error closing failed Testnet adapter: %s", exc)
             self.execution_adapter = None
         self.connection_state = "DISCONNECTED"
+        self.execution_mode = WorkerExecutionMode.PAPER
         self.market_data_healthy = False
         self.private_stream_healthy = False
         self.authenticated = False
@@ -1129,6 +1219,7 @@ class TradingWorkerApp:
                         api_secret=api_secret,
                         env=BinanceEnvironment.TESTNET,
                     )
+                self.execution_adapter.bind_worker_authority(self)
                 connected = await self.execution_adapter.connect()
                 self._sync_adapter_state()
                 if not connected or self.execution_adapter.connection_state != ConnectionState.READY:
@@ -1195,7 +1286,40 @@ class TradingWorkerApp:
         allowed, reason = self._evaluate_execution_gate(decision)
         if not allowed or self.execution_adapter is None:
             raise RuntimeError(f"Decision execution gate blocked manual order: {reason}")
-        return await self.execution_adapter.execute_decision(decision)
+        self.execution_adapter.bind_worker_authority(self)
+        return await self.execution_adapter.execute_decision(decision, authority=self)
+
+    async def amend_testnet_order(
+        self,
+        symbol: str,
+        client_order_id: str,
+        new_price: Decimal,
+        new_qty: Decimal,
+        side: str,
+    ):
+        """Worker-owned wrapper for the verified Testnet LIMIT amendment path."""
+        if self.execution_mode != WorkerExecutionMode.TESTNET or self.execution_adapter is None:
+            return None
+        self.execution_adapter.bind_worker_authority(self)
+        return await self.execution_adapter.modify_order(
+            symbol,
+            client_order_id,
+            new_price,
+            new_qty,
+            side,
+            authority=self,
+        )
+
+    async def cancel_testnet_order(self, symbol: str, client_order_id: str) -> bool:
+        """Worker-owned wrapper for the verified Testnet cancellation path."""
+        if self.execution_mode != WorkerExecutionMode.TESTNET or self.execution_adapter is None:
+            return False
+        self.execution_adapter.bind_worker_authority(self)
+        return await self.execution_adapter.cancel_order(
+            symbol,
+            client_order_id,
+            authority=self,
+        )
 
     async def emergency_flatten(self, symbol: Optional[str] = None):
         """Route an explicitly emergency, Testnet-only flatten through the worker."""
@@ -1203,7 +1327,8 @@ class TradingWorkerApp:
             raise RuntimeError("Emergency flatten is available only for an active Testnet adapter")
         self.pause_new_risk = True
         self._refresh_engine_state()
-        return await self.execution_adapter.emergency_flatten(symbol)
+        self.execution_adapter.bind_worker_authority(self)
+        return await self.execution_adapter.emergency_flatten(symbol, authority=self)
 
     async def handle_market_event(self, event: MarketEvent):
         if not hasattr(self, "last_market_event_at"):
@@ -1260,7 +1385,10 @@ class TradingWorkerApp:
                     self._refresh_engine_state()
                     return # Block execution if no account truth
                     
-                equity = snapshot.wallet_balance + snapshot.unrealized_pnl
+                # Binance totalMarginBalance is the authoritative USDⓈ-M
+                # equity field. Do not recompute it from wallet balance plus
+                # PnL and risk double-counting account adjustments.
+                equity = snapshot.margin_balance
                 
                 # Drawdown tracking
                 if self.session_start_equity is None:
@@ -1285,8 +1413,30 @@ class TradingWorkerApp:
                 )
                 
                 positions = await self.execution_adapter.ledger.get_positions()
-                sym_pos = next((p for p in positions if p.symbol == event.symbol), None)
-                current_position_qty = sym_pos.quantity if sym_pos else Decimal("0.0")
+                normalized_event_symbol = str(event.symbol).upper()
+                symbol_positions = [
+                    position
+                    for position in positions
+                    if str(position.symbol).upper() == normalized_event_symbol
+                ]
+                # positionAmt is signed.  Sum all legs so Hedge Mode cannot
+                # accidentally use whichever LONG/SHORT row happens to appear
+                # first.  The conservative gross check prevents a flat net
+                # value from hiding simultaneous opposing exposure.
+                current_position_qty = sum(
+                    (position.quantity for position in symbol_positions),
+                    Decimal("0.0"),
+                )
+                if self.execution_adapter.capabilities.hedge_mode:
+                    gross_qty = sum(
+                        (abs(position.quantity) for position in symbol_positions),
+                        Decimal("0.0"),
+                    )
+                    if gross_qty != abs(current_position_qty):
+                        logger.warning(
+                            "Hedge Mode has opposing BTCUSDT legs; blocking autonomous decision until explicitly reconciled"
+                        )
+                        return
                 
             except Exception as e:
                 logger.error("Error extracting Testnet risk snapshot: %s", e)

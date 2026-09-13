@@ -13,8 +13,8 @@ import { AppRoute } from '../contracts/system';
 interface ExposureAttributionCardProps {
   account: AccountData;
   baskets: BasketItem[];
-  correlationBtcEth: number;
-  cryptoBetaExposurePct: number;
+  correlationBtcEth: number | null;
+  cryptoBetaExposurePct: number | null;
   liquidationDistancePct: number | null;
   onOpenBalanceModal: () => void;
   onNavigate: (route: AppRoute) => void;
@@ -33,16 +33,20 @@ export const ExposureAttributionCard: React.FC<ExposureAttributionCardProps> = (
   const btcBaskets = baskets.filter((b) => b.instrument.includes('BTC'));
   const ethBaskets = baskets.filter((b) => b.instrument.includes('ETH'));
 
-  const btcNetDelta = btcBaskets.reduce(
-    (sum, b) => sum + (b.direction === 'LONG' ? b.total_size : -b.total_size),
-    0
+  const hasVerifiedAccount = account.verified === true && account.source === 'BINANCE_TESTNET';
+  const hasVerifiedBaskets = baskets.some(
+    (basket) => basket.verified === true && basket.data_source === 'BINANCE_TESTNET',
   );
-  const ethNetDelta = ethBaskets.reduce(
+  const btcNetDelta = hasVerifiedBaskets ? btcBaskets.reduce(
     (sum, b) => sum + (b.direction === 'LONG' ? b.total_size : -b.total_size),
-    0
-  );
+    0,
+  ) : null;
+  const ethNetDelta = hasVerifiedBaskets ? ethBaskets.reduce(
+    (sum, b) => sum + (b.direction === 'LONG' ? b.total_size : -b.total_size),
+    0,
+  ) : null;
 
-  const marginPct = Math.min(100, Math.max(0, account.margin_utilization_pct));
+  const marginPct = hasVerifiedAccount ? Math.min(100, Math.max(0, account.margin_utilization_pct)) : null;
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">
@@ -89,14 +93,14 @@ export const ExposureAttributionCard: React.FC<ExposureAttributionCardProps> = (
           <span className="text-[10px] font-mono text-zinc-400 uppercase">Physical Net Delta</span>
           <div className="flex items-baseline space-x-2">
             <span className="text-sm font-mono font-bold text-zinc-100">
-              {btcNetDelta >= 0 ? '+' : ''}{btcNetDelta.toFixed(3)} BTC
+              {btcNetDelta == null ? 'UNKNOWN' : `${btcNetDelta >= 0 ? '+' : ''}${btcNetDelta.toFixed(3)} BTC`}
             </span>
             <span className="text-xs font-mono text-zinc-400">
-              {ethNetDelta >= 0 ? '+' : ''}{ethNetDelta.toFixed(2)} ETH
+              {ethNetDelta == null ? 'UNKNOWN' : `${ethNetDelta >= 0 ? '+' : ''}${ethNetDelta.toFixed(2)} ETH`}
             </span>
           </div>
           <div className="text-[10px] text-zinc-500">
-            Effective Leverage: <strong className="text-cyan-300">{account.effective_leverage.toFixed(2)}x</strong>
+            Effective Leverage: <strong className="text-cyan-300">{hasVerifiedAccount ? `${account.effective_leverage.toFixed(2)}x` : 'UNKNOWN'}</strong>
           </div>
         </div>
 
@@ -104,22 +108,22 @@ export const ExposureAttributionCard: React.FC<ExposureAttributionCardProps> = (
         <div className="p-3 bg-zinc-950/70 border border-zinc-800/80 rounded-xl space-y-1.5">
           <div className="flex justify-between items-center text-[10px] font-mono">
             <span className="text-zinc-400 uppercase">Margin Utilization</span>
-            <span className={marginPct > 20 ? 'text-amber-400 font-bold' : 'text-emerald-400 font-bold'}>
-              {account.margin_utilization_pct.toFixed(1)}% / 25% max
+            <span className={marginPct == null || marginPct > 20 ? 'text-amber-400 font-bold' : 'text-emerald-400 font-bold'}>
+              {marginPct == null ? 'UNKNOWN' : `${account.margin_utilization_pct.toFixed(1)}%`} / 25% max
             </span>
           </div>
           {/* Progress bar */}
           <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
             <div
               className={`h-full transition-all duration-300 ${
-                marginPct > 20 ? 'bg-amber-500' : 'bg-emerald-500'
+                marginPct == null ? 'bg-amber-500/50' : marginPct > 20 ? 'bg-amber-500' : 'bg-emerald-500'
               }`}
-              style={{ width: `${(marginPct / 25) * 100}%` }}
+              style={{ width: `${marginPct == null ? 0 : Math.min((marginPct / 25) * 100, 100)}%` }}
             />
           </div>
           <div className="flex justify-between text-[10px] text-zinc-500 font-mono">
-            <span>Free: ${Math.round(account.free_margin).toLocaleString()}</span>
-            <span>Used: ${Math.round(account.used_margin).toLocaleString()}</span>
+            <span>Free: {hasVerifiedAccount ? `$${Math.round(account.free_margin).toLocaleString()}` : 'UNKNOWN'}</span>
+            <span>Used: {hasVerifiedAccount ? `$${Math.round(account.used_margin).toLocaleString()}` : 'UNKNOWN'}</span>
           </div>
         </div>
 
@@ -129,11 +133,11 @@ export const ExposureAttributionCard: React.FC<ExposureAttributionCardProps> = (
             <span>Liquidation Distance</span>
             <Shield className={`w-3.5 h-3.5 ${liquidationDistancePct == null ? 'text-amber-400' : 'text-emerald-400'}`} />
           </div>
-          <div className={`text-sm font-mono font-bold ${liquidationDistancePct == null ? 'text-amber-400' : 'text-emerald-400'}`}>
-            {liquidationDistancePct == null ? 'UNKNOWN' : `+${liquidationDistancePct.toFixed(1)}%`}
+          <div className={`text-sm font-mono font-bold ${!hasVerifiedAccount || liquidationDistancePct == null ? 'text-amber-400' : 'text-emerald-400'}`}>
+            {!hasVerifiedAccount || liquidationDistancePct == null ? 'UNKNOWN' : `+${liquidationDistancePct.toFixed(1)}%`}
           </div>
           <div className="text-[10px] text-zinc-500">
-            {liquidationDistancePct == null ? 'Authoritative position risk data unavailable' : 'Survival threshold: &gt; 15.0% required'}
+            {!hasVerifiedAccount || liquidationDistancePct == null ? 'Authoritative position risk data unavailable' : 'Survival threshold: &gt; 15.0% required'}
           </div>
         </div>
 
@@ -145,14 +149,14 @@ export const ExposureAttributionCard: React.FC<ExposureAttributionCardProps> = (
           </div>
           <div className="flex items-baseline space-x-2">
             <span className="text-sm font-mono font-bold text-indigo-300">
-              {cryptoBetaExposurePct.toFixed(1)}% Beta
+              {cryptoBetaExposurePct == null ? 'UNKNOWN' : `${cryptoBetaExposurePct.toFixed(1)}% Beta`}
             </span>
             <span className="text-xs font-mono text-zinc-400">
-              ρ = {correlationBtcEth.toFixed(2)}
+              ρ = {correlationBtcEth == null ? 'UNKNOWN' : correlationBtcEth.toFixed(2)}
             </span>
           </div>
           <div className="text-[10px] text-zinc-500">
-            High co-movement: positions not independent
+            {correlationBtcEth == null ? 'Awaiting verified portfolio factor data' : 'High co-movement: positions not independent'}
           </div>
         </div>
       </div>

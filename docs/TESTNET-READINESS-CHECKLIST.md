@@ -16,7 +16,7 @@ Testnet has been verified.
 | Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
 | Read-only Binance Testnet contract | `NOT_RUN` | No local Testnet credentials were configured in this session |
 | Controlled manual Testnet mutation | `NOT_RUN` | Requires explicit `TESTNET_MANUAL_TRIAL_APPROVED=true` and read-only evidence |
-| GitHub CI | `CI_VERIFIED` | Run 34725398641 passed for SHA `e6e80343b03d8eef9a0d8faea618e0e7363d310e` |
+| GitHub CI for current candidate | `NOT_RUN` | Historical workflows passed for older SHAs only; the current local candidate requires a new branch push and workflow result |
 | Autonomous Testnet execution | `LOCKED` | Requires current-SHA evidence, approval, and runtime readiness; default is false |
 | Mainnet execution | `DISABLED` | LIVE ARM and mutable Mainnet adapter construction are rejected |
 
@@ -47,4 +47,14 @@ non-positive values fall back to these defaults.
 
 All orders pass both the worker decision gate and an individual order gate.
 Market orders require a fresh Testnet market price. No synthetic price is
-used.
+used. Positive limit overrides require `TESTNET_LIMITS_OVERRIDE_APPROVED=true`;
+without that acknowledgement, malformed or larger values remain bounded by
+the first-launch defaults.
+
+## Evidence boundary for this session
+
+No Binance Testnet credentials were present locally, so the signed read-only
+contract, private-stream contract, and controlled mutation trial are
+`NOT_RUN`. No Testnet order was submitted and no Testnet trial artifact exists.
+The local non-secret gates were executed in this working tree; GitHub CI is not
+claimed until the current branch is pushed and its workflow result is observed.

@@ -77,6 +77,38 @@ async def test_malformed_trade_update_is_not_recorded_as_a_fill():
 
     assert ledger.fills == []
 
+
+async def test_trade_update_uses_transaction_time_when_event_time_is_absent():
+    ledger = InMemoryLedger()
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
+
+    await adapter._on_ws_event(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "o": {
+                "s": "BTCUSDT",
+                "c": "BAI-TIMESTAMP-FALLBACK",
+                "X": "FILLED",
+                "x": "TRADE",
+                "t": 1003,
+                "i": 5003,
+                "S": "BUY",
+                "ps": "BOTH",
+                "l": "0.1",
+                "L": "30000.0",
+                "n": "0.0",
+                "N": "USDT",
+                "rp": "0.0",
+                "m": False,
+                "T": 12341,
+            },
+        }
+    )
+
+    assert len(ledger.fills) == 1
+    assert ledger.fills[0].event_time == 12341
+    assert ledger.fills[0].transaction_time == 12341
+
 async def test_account_update_positions():
     ledger = InMemoryLedger()
     ada = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)

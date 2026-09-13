@@ -22,60 +22,24 @@ export const MultiHorizonShockMonitor: React.FC<MultiHorizonShockMonitorProps> =
   instrument,
   symbol,
 }) => {
-  const currentPrice = instrument?.perp_price || 64250;
-  const volAnnual = instrument?.realized_vol_24h_pct || 42.5;
+  const hasVerifiedData =
+    instrument?.verified === true &&
+    instrument.data_source === 'BINANCE_TESTNET';
+  // InstrumentData currently carries no verified multi-horizon velocity,
+  // acceleration, or percentile series. Do not synthesize those values in the
+  // presentation layer; the worker/market-data service must supply them.
+  const horizons: HorizonShockData[] = [];
 
-  // Derive rolling distribution normalized horizons (independent of static dollar values)
-  // Volatility scaled per horizon:
-  // 5s standard deviation ~ vol / sqrt(365 * 24 * 3600 / 5)
-  const horizons: HorizonShockData[] = [
-    {
-      horizon: '5s',
-      velocityPctPerSec: 0.008,
-      accelerationPctPerSec2: 0.0012,
-      rollingPercentile: 74.2,
-      zScore: 0.82,
-      displacementBps: 4.0,
-      isShock: false,
-    },
-    {
-      horizon: '15s',
-      velocityPctPerSec: 0.006,
-      accelerationPctPerSec2: -0.0004,
-      rollingPercentile: 82.5,
-      zScore: 1.15,
-      displacementBps: 9.0,
-      isShock: false,
-    },
-    {
-      horizon: '1m',
-      velocityPctPerSec: 0.004,
-      accelerationPctPerSec2: 0.0002,
-      rollingPercentile: 88.0,
-      zScore: 1.48,
-      displacementBps: 24.0,
-      isShock: false,
-    },
-    {
-      horizon: '5m',
-      velocityPctPerSec: 0.0025,
-      accelerationPctPerSec2: 0.0001,
-      rollingPercentile: 92.4,
-      zScore: 1.72,
-      displacementBps: 75.0,
-      isShock: false,
-    },
-  ];
-
-  const highestPercentile = Math.max(...horizons.map((h) => h.rollingPercentile));
-  const shockState: ShockState =
-    highestPercentile > 98
+  const highestPercentile = horizons.length > 0 ? Math.max(...horizons.map((h) => h.rollingPercentile)) : null;
+  const shockState: ShockState | 'UNKNOWN' = !hasVerifiedData || highestPercentile == null
+    ? 'UNKNOWN'
+    : highestPercentile > 98
       ? 'SHOCK_EXPANSION'
       : highestPercentile > 95
-      ? 'LIQUIDITY_SWEEP'
-      : highestPercentile > 85
-      ? 'ELEVATED'
-      : 'NORMAL';
+        ? 'LIQUIDITY_SWEEP'
+        : highestPercentile > 85
+          ? 'ELEVATED'
+          : 'NORMAL';
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">
@@ -101,6 +65,8 @@ export const MultiHorizonShockMonitor: React.FC<MultiHorizonShockMonitorProps> =
             className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono border ${
               shockState === 'NORMAL'
                 ? 'bg-emerald-950 text-emerald-300 border-emerald-800/80'
+                : shockState === 'UNKNOWN'
+                ? 'bg-amber-950 text-amber-300 border-amber-800/80'
                 : shockState === 'ELEVATED'
                 ? 'bg-amber-950 text-amber-300 border-amber-800/80'
                 : 'bg-rose-950 text-rose-300 border-rose-800'
@@ -113,6 +79,11 @@ export const MultiHorizonShockMonitor: React.FC<MultiHorizonShockMonitorProps> =
 
       {/* 4 Horizons Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+        {horizons.length === 0 && (
+          <div className="sm:col-span-2 lg:col-span-4 p-5 rounded-xl border border-amber-900/60 bg-amber-950/20 text-center text-amber-300">
+            No verified multi-horizon shock snapshot is available for {symbol}.
+          </div>
+        )}
         {horizons.map((h) => {
           const isElevated = h.rollingPercentile >= 90;
           return (

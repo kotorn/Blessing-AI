@@ -30,6 +30,7 @@ import {
   BigQueryQueryResult,
 } from '../lib/bigquery';
 import { useAuth } from '../context/AuthContext';
+import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
 
 export const BigQueryLakehouse: React.FC = () => {
   const { accessToken, user, cloudAudit } = useAuth();
@@ -347,6 +348,13 @@ export const BigQueryLakehouse: React.FC = () => {
         {/* Query Results Table */}
         {queryResult && (
           <div className="space-y-2 pt-2">
+            {queryResult.verified === true && queryResult.data_source === 'BIGQUERY' ? (
+              <div className="rounded-lg border border-emerald-800/70 bg-emerald-950/30 px-3 py-2 text-[11px] text-emerald-200">
+                VERIFIED — result returned from the configured BigQuery source.
+              </div>
+            ) : (
+              <IllustrativeEvidenceBanner message={queryResult.note || 'The query response is not verified as a live BigQuery result.'} />
+            )}
             <div className="flex items-center justify-between text-xs text-zinc-400">
               <span className="font-medium text-zinc-300">
                 Query Results ({queryResult.totalRows} rows)
