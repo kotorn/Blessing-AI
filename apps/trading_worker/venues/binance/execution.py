@@ -39,11 +39,10 @@ from .models import (
     ConnectionState,
     TestnetSafetyLimits,
 )
-from .reconciliation import BinanceReconciliation
+from .reconciliation import BinanceReconciliation, ReconciliationDiff
 from .rest_client import BinanceAPIError, BinanceRestClient
 from .symbol_rules import SymbolTradingRules
 from .user_stream import BinanceUserStream
-
 
 logger = logging.getLogger("blessing.venues.binance.execution")
 
@@ -522,42 +521,33 @@ class BinanceExecutionAdapter:
             self.last_order_event_at[client_order_id] = utc_now()
             status = str(order_info.get("X", "UNKNOWN"))
             existing_order = await self.ledger.get_order_by_client_id(client_order_id)
+            if existing_order is None:
+                # A private event without a local intent/decision lineage may
+                # be a manual order or a different worker instance. Never
+                # adopt it as if this worker authorized it; reconciliation
+                # must remain non-IN_SYNC until the operator resolves it.
+                logger.error(
+                    "Quarantining unowned Testnet order event %s for %s",
+                    client_order_id,
+                    symbol,
+                )
+                await self.ledger.set_account_snapshot(None)
+                self.reconciliation.last_diffs = [
+                    ReconciliationDiff(
+                        code="EXCHANGE_ORDER_EVENT_UNKNOWN_LOCALLY",
+                        symbol=symbol,
+                        local_value=client_order_id,
+                        exchange_value=str(order_info.get("i") or "UNKNOWN"),
+                    )
+                ]
+                self.reconciliation.last_status = "UNKNOWN"
+                return
+
             if existing_order:
                 existing_order.status = status
                 if order_info.get("i") is not None:
                     existing_order.exchange_order_id = str(order_info["i"])
                 await self.ledger.upsert_order(existing_order)
-            else:
-                try:
-                    side = OrderSide(str(order_info.get("S")))
-                except ValueError:
-                    logger.warning("Ignoring order update with invalid side: %s", order_info)
-                    return
-                try:
-                    new_order = ExecutionOrder(
-                        symbol=symbol,
-                        side=side,
-                        quantity=Decimal(str(order_info.get("q", "0"))),
-                        price=Decimal(str(order_info.get("p", "0"))),
-                        order_type=str(order_info.get("ot") or order_info.get("o") or "LIMIT"),
-                        client_order_id=client_order_id,
-                        status=status,
-                        exchange_order_id=str(order_info.get("i", "")),
-                        timestamp=utc_now(),
-                        market_type="USDM_FUTURES",
-                        position_side=PositionSide(str(order_info.get("ps", "BOTH"))),
-                        reduce_only=_exchange_bool(order_info.get("R", False)),
-                        time_in_force=(
-                            TimeInForce.POST_ONLY
-                            if str(order_info.get("f", "GTC")).upper() == "GTX"
-                            else TimeInForce(str(order_info.get("f", "GTC")).upper())
-                        ),
-                    )
-                except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
-                    logger.error("Invalid Testnet order event ignored: %s", exc)
-                    return
-                await self.ledger.upsert_order(new_order)
-                existing_order = new_order
 
             # Every order lifecycle update can change open-order count,
             # exposure, balances, or fills.  Invalidate all prior readiness

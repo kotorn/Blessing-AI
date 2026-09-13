@@ -1,15 +1,41 @@
-import pytest
 from decimal import Decimal
-from domain.models import ExecutionOrder, ExchangeFill, OrderSide, PositionSide
+
+import pytest
+
+from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
-from apps.trading_worker.venues.binance.config import BinanceEnvironment
+from domain.models import ExecutionOrder, OrderSide, PositionSide
 
 pytestmark = pytest.mark.asyncio
+
+
+async def _seed_local_order(
+    ledger: InMemoryLedger,
+    client_order_id: str,
+    *,
+    position_side: PositionSide = PositionSide.BOTH,
+) -> None:
+    await ledger.upsert_order(
+        ExecutionOrder(
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=Decimal("0.1"),
+            price=Decimal("30000"),
+            client_order_id=client_order_id,
+            status="NEW",
+            position_side=position_side,
+            strategy_id="test",
+            decision_id="DEC-TEST",
+            source_intent_ids=["INT-TEST"],
+        )
+    )
+
 
 async def test_duplicate_fills_idempotency():
     ledger = InMemoryLedger()
     ada = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
+    await _seed_local_order(ledger, "BAI-123-1", position_side=PositionSide.LONG)
     
     # Simulate first fill event
     event1 = {
@@ -48,6 +74,7 @@ async def test_duplicate_fills_idempotency():
 async def test_malformed_trade_update_is_not_recorded_as_a_fill():
     ledger = InMemoryLedger()
     adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
+    await _seed_local_order(ledger, "BAI-MALFORMED-1")
 
     await adapter._on_ws_event(
         {
@@ -78,9 +105,36 @@ async def test_malformed_trade_update_is_not_recorded_as_a_fill():
     assert ledger.fills == []
 
 
+async def test_unowned_order_update_is_quarantined_instead_of_adopted():
+    ledger = InMemoryLedger()
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
+
+    await adapter._on_ws_event(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "E": 12345,
+            "o": {
+                "s": "BTCUSDT",
+                "c": "MANUAL-OR-FOREIGN-1",
+                "X": "NEW",
+                "i": 5004,
+                "S": "BUY",
+                "ps": "BOTH",
+            },
+        }
+    )
+
+    assert await ledger.get_order_by_client_id("MANUAL-OR-FOREIGN-1") is None
+    assert adapter.reconciliation.last_status == "UNKNOWN"
+    assert adapter.reconciliation.last_diffs[0].code == (
+        "EXCHANGE_ORDER_EVENT_UNKNOWN_LOCALLY"
+    )
+
+
 async def test_trade_update_uses_transaction_time_when_event_time_is_absent():
     ledger = InMemoryLedger()
     adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
+    await _seed_local_order(ledger, "BAI-TIMESTAMP-FALLBACK")
 
     await adapter._on_ws_event(
         {
