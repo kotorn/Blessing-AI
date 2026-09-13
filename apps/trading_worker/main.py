@@ -17,6 +17,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    computed_field,
     field_validator,
     model_validator,
 )
@@ -157,10 +158,11 @@ class WorkerRuntimeState(BaseModel):
     data_source: str = "SIMULATED"
     exchange_environment: str = "NONE"
 
-    # Engine Operational State
+    model_config = ConfigDict(extra="ignore")
+
+    # Engine Operational State. These are the only stored runtime values;
+    # compatibility names below are computed at the serialization boundary.
     engine_state: WorkerEngineState = WorkerEngineState.DISARMED
-    engine_status: WorkerEngineState = WorkerEngineState.DISARMED
-    connection_status: str = "DISCONNECTED"
     connection_state: str = "DISCONNECTED"
 
     # Stream Health & Connectivity Checks
@@ -172,7 +174,6 @@ class WorkerRuntimeState(BaseModel):
     reconciliation_status: str = "UNKNOWN"
 
     # Safety Controls & Risk Governor Invariants
-    kill_switch_status: bool = False
     kill_switch_active: bool = False
     pause_new_risk: bool = False
     recovery_only: bool = False
@@ -182,7 +183,6 @@ class WorkerRuntimeState(BaseModel):
 
     # Configuration Details & Versioning
     config_version: str = "v0.2.0-beta"
-    configuration_details: Optional[dict] = None
     active_configuration: Optional[dict] = None
 
     # Telemetry, Heartbeat & Timestamps
@@ -190,50 +190,72 @@ class WorkerRuntimeState(BaseModel):
     health_indicators: Optional[HealthIndicators] = None
     updated_at: datetime = Field(default_factory=utc_now)
 
+    @computed_field
+    @property
+    def engine_status(self) -> WorkerEngineState:
+        """Legacy serialization alias for ``engine_state``."""
+        return self.engine_state
+
+    @computed_field
+    @property
+    def connection_status(self) -> str:
+        """Legacy serialization alias for ``connection_state``."""
+        return self.connection_state
+
+    @computed_field
+    @property
+    def kill_switch_status(self) -> bool:
+        """Legacy serialization alias for ``kill_switch_active``."""
+        return self.kill_switch_active
+
+    @computed_field
+    @property
+    def last_heartbeat(self) -> datetime:
+        """Legacy serialization alias for ``heartbeat_at``."""
+        return self.heartbeat_at
+
+    @computed_field
+    @property
+    def configuration_details(self) -> Optional[dict]:
+        """Legacy serialization alias for ``active_configuration``."""
+        return self.active_configuration
+
     @model_validator(mode="before")
     @classmethod
-    def sync_compatibility_fields(cls, data: Any) -> Any:
+    def normalize_compatibility_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            # Sync heartbeat_at / last_heartbeat
-            if "last_heartbeat" in data and "heartbeat_at" not in data:
-                data["heartbeat_at"] = data["last_heartbeat"]
-            elif "heartbeat_at" in data and "last_heartbeat" not in data:
-                data["last_heartbeat"] = data["heartbeat_at"]
-            # Sync engine_status / engine_state
-            if "engine_status" in data and "engine_state" not in data:
-                data["engine_state"] = data["engine_status"]
-            elif "engine_state" in data and "engine_status" not in data:
-                data["engine_status"] = data["engine_state"]
-            # Sync connection_status / connection_state
-            if "connection_status" in data and "connection_state" not in data:
-                data["connection_state"] = data["connection_status"]
-            elif "connection_state" in data and "connection_status" not in data:
-                data["connection_status"] = data["connection_state"]
-            # Sync kill_switch_status / kill_switch_active
-            if "kill_switch_status" in data and "kill_switch_active" not in data:
-                data["kill_switch_active"] = data["kill_switch_status"]
-            elif "kill_switch_active" in data and "kill_switch_status" not in data:
-                data["kill_switch_status"] = data["kill_switch_active"]
-            # Sync configuration_details / active_configuration
-            if "configuration_details" in data and "active_configuration" not in data:
-                data["active_configuration"] = data["configuration_details"]
-            elif "active_configuration" in data and "configuration_details" not in data:
-                data["configuration_details"] = data["active_configuration"]
+            normalized = dict(data)
+            # Accept old request/fixture names, but discard them after mapping
+            # so the model never stores two independently mutable values. When
+            # both names are present, the canonical field wins.
+            compatibility_pairs = (
+                ("heartbeat_at", "last_heartbeat"),
+                ("engine_state", "engine_status"),
+                ("connection_state", "connection_status"),
+                ("kill_switch_active", "kill_switch_status"),
+                ("active_configuration", "configuration_details"),
+            )
+            for canonical, compatibility in compatibility_pairs:
+                if canonical not in normalized and compatibility in normalized:
+                    normalized[canonical] = normalized[compatibility]
+                normalized.pop(compatibility, None)
+
             # Derive provenance and exchange environment if not set
-            if "execution_mode" in data:
-                mode = data["execution_mode"]
+            if "execution_mode" in normalized:
+                mode = normalized["execution_mode"]
                 if mode in (WorkerExecutionMode.TESTNET, "TESTNET"):
-                    data.setdefault("provenance", "BINANCE_TESTNET")
-                    data.setdefault("data_source", "BINANCE")
-                    data.setdefault("exchange_environment", "BINANCE_TESTNET")
+                    normalized.setdefault("provenance", "BINANCE_TESTNET")
+                    normalized.setdefault("data_source", "BINANCE")
+                    normalized.setdefault("exchange_environment", "BINANCE_TESTNET")
                 elif mode in (WorkerExecutionMode.LIVE, "LIVE"):
-                    data.setdefault("provenance", "BINANCE_LIVE")
-                    data.setdefault("data_source", "BINANCE")
-                    data.setdefault("exchange_environment", "BINANCE_MAINNET")
+                    normalized.setdefault("provenance", "BINANCE_LIVE")
+                    normalized.setdefault("data_source", "BINANCE")
+                    normalized.setdefault("exchange_environment", "BINANCE_MAINNET")
                 else:
-                    data.setdefault("provenance", "SIMULATED")
-                    data.setdefault("data_source", "SIMULATED")
-                    data.setdefault("exchange_environment", "NONE")
+                    normalized.setdefault("provenance", "SIMULATED")
+                    normalized.setdefault("data_source", "SIMULATED")
+                    normalized.setdefault("exchange_environment", "NONE")
+            return normalized
         return data
 
 # Global reference to the main execution engine / loop
@@ -308,8 +330,6 @@ def get_default_state() -> WorkerRuntimeState:
         data_source="SIMULATED",
         exchange_environment="NONE",
         engine_state=WorkerEngineState.DISARMED,
-        engine_status=WorkerEngineState.DISARMED,
-        connection_status="DISCONNECTED",
         connection_state="DISCONNECTED",
         market_data_healthy=False,
         private_stream_healthy=False,
@@ -317,14 +337,12 @@ def get_default_state() -> WorkerRuntimeState:
         authenticated=False,
         account_synchronized=False,
         reconciliation_status="DISCONNECTED",
-        kill_switch_status=False,
         kill_switch_active=False,
         pause_new_risk=False,
         recovery_only=False,
         heartbeat_at=now,
         health_indicators=health,
         config_version="v0.2.0-beta",
-        configuration_details=None,
         active_configuration=None,
         updated_at=utc_now()
     )
@@ -873,7 +891,7 @@ class TradingWorkerApp:
             heartbeat_at=self.heartbeat_at,
             health_indicators=health,
             config_version="v0.2.0-beta",
-            configuration_details=self.active_configuration,
+            active_configuration=self.active_configuration,
             updated_at=utc_now()
         )
         

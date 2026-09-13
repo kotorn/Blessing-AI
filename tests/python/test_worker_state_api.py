@@ -106,14 +106,18 @@ def test_worker_runtime_state_model_contract():
     state = WorkerRuntimeState(
         execution_mode=WorkerExecutionMode.TESTNET,
         engine_state=WorkerEngineState.ARMED,
-        connection_status="READY",
+        engine_status=WorkerEngineState.DISARMED,
+        connection_state="READY",
+        connection_status="DEGRADED",
         market_data_healthy=True,
         private_stream_healthy=True,
         trading_connection_healthy=True,
         authenticated=True,
         reconciliation_status="IN_SYNC",
-        kill_switch_status=False,
-        configuration_details={"symbol": "BTCUSDT", "leverage": 5},
+        kill_switch_active=False,
+        kill_switch_status=True,
+        active_configuration={"symbol": "BTCUSDT", "leverage": 5},
+        configuration_details={"legacy": True},
     )
 
     assert state.execution_authority == "PYTHON_TRADING_WORKER"
@@ -133,13 +137,30 @@ def test_worker_runtime_state_model_contract():
     assert state.active_configuration == {"symbol": "BTCUSDT", "leverage": 5}
     assert state.heartbeat_at is not None
 
+    # Compatibility names are serialization aliases, not independently
+    # mutable runtime fields. Canonical values win if both names are supplied.
+    assert "engine_status" not in WorkerRuntimeState.model_fields
+    assert "connection_status" not in WorkerRuntimeState.model_fields
+    assert "kill_switch_status" not in WorkerRuntimeState.model_fields
+    assert "configuration_details" not in WorkerRuntimeState.model_fields
+    state.engine_state = WorkerEngineState.DEGRADED
+    state.connection_state = "DEGRADED"
+    state.kill_switch_active = True
+    state.active_configuration = {"canonical": True}
+    assert state.engine_status == WorkerEngineState.DEGRADED
+    assert state.connection_status == "DEGRADED"
+    assert state.kill_switch_status is True
+    assert state.configuration_details == {"canonical": True}
+
     dumped = state.model_dump()
     assert dumped["execution_mode"] == "TESTNET"
-    assert dumped["engine_state"] == "ARMED"
-    assert dumped["engine_status"] == "ARMED"
-    assert dumped["connection_status"] == "READY"
-    assert dumped["kill_switch_status"] == False
-    assert dumped["configuration_details"] == {"symbol": "BTCUSDT", "leverage": 5}
+    assert dumped["engine_state"] == "DEGRADED"
+    assert dumped["engine_status"] == WorkerEngineState.DEGRADED
+    assert dumped["connection_state"] == "DEGRADED"
+    assert dumped["connection_status"] == "DEGRADED"
+    assert dumped["kill_switch_active"] is True
+    assert dumped["kill_switch_status"] is True
+    assert dumped["configuration_details"] == {"canonical": True}
     assert "heartbeat_at" in dumped
 
 
