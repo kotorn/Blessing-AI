@@ -14,6 +14,7 @@ Testnet has been verified.
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
 | Binance CLI research cross-check boundary | `UNIT_TESTED; LOCAL_VERIFIED` | The isolated wrapper allowlists read-only USDⓈ-M checks and blocks Mainnet/mutations; no CLI binary or credentials were present |
+| Public Testnet BTCUSDT rule spot-check | `LOCAL_VERIFIED` | Current public `exchangeInfo` reports `TRADING`, `MIN_NOTIONAL=50 USDT`, `tickSize=0.10`, and `stepSize=0.0001`; this does not authenticate or authorize execution |
 | Account snapshot, liquidation math, and derived risk state | `UNIT_TESTED; LOCAL_VERIFIED` | Uses Binance account/position-risk fields; liquidation is `UNKNOWN` when unusable and unsafe account metrics set `NO_NEW_RISK` |
 | Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
 | Read-only Binance Testnet contract | `NOT_RUN` | No local Testnet credentials were configured in this session |
@@ -60,5 +61,9 @@ the first-launch defaults.
 No Binance Testnet credentials were present locally, so the signed read-only
 contract, private-stream contract, and controlled mutation trial are
 `NOT_RUN`. No Testnet order was submitted and no Testnet trial artifact exists.
+The current public Testnet BTCUSDT rules require a 50 USDT minimum notional,
+which exceeds the configured 25 USDT first-launch cap; the manual trial must
+abort until the exchange rule changes or an explicitly approved cap change is
+made. The cap was not raised automatically.
 The local non-secret gates were rerun for the safety/research candidate. GitHub
 CI verified that candidate `436b1b8` in run `34760374245`.
