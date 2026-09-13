@@ -3,7 +3,6 @@ import json
 import logging
 import math
 import os
-import signal
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -22,8 +21,8 @@ from pydantic import (
     model_validator,
 )
 
-from domain.enums import EconomicRiskClass, RiskState
-from domain.models import MarketEvent, MarketType, RiskSnapshot, utc_now
+from domain.enums import RiskState
+from domain.models import MarketEvent, RiskSnapshot, utc_now
 
 from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
 from apps.trading_worker.engines.funding_carry import (
