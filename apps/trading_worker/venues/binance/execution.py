@@ -615,9 +615,55 @@ class BinanceExecutionAdapter:
                 logger.error("Invalid Testnet fill event ignored: %s", exc)
         elif event_type == "ACCOUNT_UPDATE":
             update_data = event.get("a", {})
-            for position in update_data.get("P", []):
+            if not isinstance(update_data, dict):
+                await self.ledger.set_account_snapshot(None)
+                self.reconciliation.last_diffs = [
+                    ReconciliationDiff(
+                        code="ACCOUNT_UPDATE_INVALID",
+                        exchange_value="account_update_data_not_object",
+                    )
+                ]
+                self.reconciliation.last_status = "UNKNOWN"
+                return
+
+            account_update_diffs: List[ReconciliationDiff] = []
+
+            def mark_account_update_unknown(diff: ReconciliationDiff) -> None:
+                account_update_diffs.append(diff)
+                self.reconciliation.last_diffs = account_update_diffs
+                self.reconciliation.last_status = "UNKNOWN"
+
+            raw_positions = update_data.get("P", [])
+            if not isinstance(raw_positions, list):
+                raw_positions = []
+                mark_account_update_unknown(
+                    ReconciliationDiff(
+                        code="ACCOUNT_POSITION_UPDATE_INVALID",
+                        exchange_value="positions_not_list",
+                    )
+                )
+
+            for position in raw_positions:
+                if not isinstance(position, dict):
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_POSITION_UPDATE_INVALID",
+                            exchange_value="position_not_object",
+                        )
+                    )
+                    continue
                 symbol = str(position.get("s", "")).upper()
-                position_side = str(position.get("ps", "BOTH")).upper()
+                raw_position_side = position.get("ps")
+                position_side = str(raw_position_side or "").upper()
+                if not symbol or not position_side or position.get("pa") in (None, ""):
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_POSITION_UPDATE_INCOMPLETE",
+                            symbol=symbol or None,
+                            exchange_value="symbol_positionSide_positionAmt_required",
+                        )
+                    )
+                    continue
                 # ACCOUNT_UPDATE is a delta.  Binance does not include every
                 # position-risk field (notably mark/liquidation price and
                 # leverage) in every event.  Preserve the last authoritative
@@ -637,12 +683,15 @@ class BinanceExecutionAdapter:
                     "positionAmt": position.get("pa"),
                     "entryPrice": position.get("ep"),
                     "unRealizedProfit": position.get("up"),
-                    "marginType": position.get("mt", "cross"),
+                    "marginType": position.get("mt"),
                     "eventTime": event.get("E"),
                     "source": "BINANCE_TESTNET",
                 }
                 if existing_position is not None:
                     for raw_name, attribute in (
+                        ("entryPrice", "entry_price"),
+                        ("unRealizedProfit", "unrealized_pnl"),
+                        ("marginType", "margin_type"),
                         ("markPrice", "mark_price"),
                         ("liquidationPrice", "liquidation_price"),
                         ("leverage", "leverage"),
@@ -651,30 +700,81 @@ class BinanceExecutionAdapter:
                             previous_value = getattr(existing_position, attribute, None)
                             if previous_value is not None:
                                 merged_position[raw_name] = str(previous_value)
-                await self.ledger.upsert_position(
-                    merged_position
+                try:
+                    await self.ledger.upsert_position(merged_position)
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    # A new active delta without a complete authoritative
+                    # position-risk record is not an exposure of zero and is
+                    # not safe to promote into the ledger. REST reconciliation
+                    # must obtain the complete positionRisk row first.
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_POSITION_UPDATE_INCOMPLETE",
+                            symbol=symbol,
+                            exchange_value=str(exc),
+                        )
+                    )
+            raw_balances = update_data.get("B", [])
+            if not isinstance(raw_balances, list):
+                raw_balances = []
+                mark_account_update_unknown(
+                    ReconciliationDiff(
+                        code="ACCOUNT_BALANCE_UPDATE_INVALID",
+                        exchange_value="balances_not_list",
+                    )
                 )
-            for balance in update_data.get("B", []):
-                if balance.get("a") == "USDT":
-                    try:
-                        wallet_balance = Decimal(str(balance.get("wb")))
-                        margin_balance = Decimal(str(balance.get("cw")))
-                    except (InvalidOperation, TypeError, ValueError):
-                        logger.error("Ignoring ACCOUNT_UPDATE with invalid USDT balances")
-                        continue
-                    if (
-                        not wallet_balance.is_finite()
-                        or not margin_balance.is_finite()
-                        or wallet_balance < 0
-                        or margin_balance < 0
-                    ):
-                        logger.error("Ignoring ACCOUNT_UPDATE with unusable USDT balances")
-                        continue
-                    await self.ledger.update_balances(wallet_balance, margin_balance)
+
+            for balance in raw_balances:
+                if not isinstance(balance, dict):
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_BALANCE_UPDATE_INVALID",
+                            exchange_value="balance_not_object",
+                        )
+                    )
+                    continue
+                missing_balance_fields = [
+                    field
+                    for field in ("a", "wb", "cw")
+                    if balance.get(field) in (None, "")
+                ]
+                if missing_balance_fields:
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_BALANCE_UPDATE_INCOMPLETE",
+                            exchange_value="missing=" + ",".join(missing_balance_fields),
+                        )
+                    )
+                    continue
+                try:
+                    wallet_balance = Decimal(str(balance["wb"]))
+                    cross_wallet_balance = Decimal(str(balance["cw"]))
+                except (InvalidOperation, TypeError, ValueError):
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_BALANCE_UPDATE_INVALID",
+                            symbol=str(balance.get("a") or "").upper() or None,
+                            exchange_value="wallet_or_cross_wallet_not_decimal",
+                        )
+                    )
+                    continue
+                if not wallet_balance.is_finite() or not cross_wallet_balance.is_finite():
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_BALANCE_UPDATE_INVALID",
+                            symbol=str(balance.get("a") or "").upper() or None,
+                            exchange_value="wallet_or_cross_wallet_not_finite",
+                        )
+                    )
+            # B contains per-asset deltas, not the USDⓈ-M aggregate totals used
+            # by ExchangeAccountSnapshot. Do not project one asset (for example
+            # USDT) into wallet/margin totals. The next signed REST reconcile
+            # must provide the authoritative aggregate account snapshot.
             # A delta event is not a complete account snapshot and cannot
             # prove reconciliation.  Force the next authoritative REST
             # snapshot/reconcile before any risk-increasing order.
             await self.ledger.set_account_snapshot(None)
+            self.reconciliation.last_diffs = account_update_diffs
             self.reconciliation.last_status = "UNKNOWN"
 
     def _generate_client_order_id(

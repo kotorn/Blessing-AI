@@ -33,6 +33,7 @@ from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
 from apps.trading_worker.venues.binance.manual_testnet import (
+    _cleanup_trial_open_orders,
     _passive_order,
     _require_current_readonly_evidence,
 )
@@ -530,6 +531,60 @@ def test_manual_trial_requires_matching_readonly_build_evidence(monkeypatch, tmp
     evidence = _require_current_readonly_evidence("build-123")
 
     assert evidence.readonly_contract_verified is True
+
+
+@pytest.mark.asyncio
+async def test_manual_failure_cleanup_cancels_and_verifies_only_trial_orders():
+    open_order = {
+        "symbol": "BTCUSDT",
+        "orderId": "7",
+        "clientOrderId": "BAI-MANUAL-1",
+    }
+    responses = [[open_order], []]
+
+    async def handler(method, path, kwargs):
+        assert method == "GET"
+        assert path == "/fapi/v1/openOrders"
+        return responses.pop(0)
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    cancelled: list[str] = []
+
+    class CleanupWorker:
+        execution_adapter = adapter
+
+        async def cancel_testnet_order(self, symbol, client_order_id):
+            assert symbol == "BTCUSDT"
+            cancelled.append(client_order_id)
+            return True
+
+    assert await _cleanup_trial_open_orders(CleanupWorker(), {"BAI-MANUAL-1"}) is True
+    assert cancelled == ["BAI-MANUAL-1"]
+
+
+@pytest.mark.asyncio
+async def test_manual_failure_cleanup_does_not_cancel_unknown_open_order():
+    open_order = {
+        "symbol": "BTCUSDT",
+        "orderId": "8",
+        "clientOrderId": "FOREIGN-ORDER",
+    }
+
+    async def handler(method, path, kwargs):
+        return [open_order]
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    cancelled: list[str] = []
+
+    class CleanupWorker:
+        execution_adapter = adapter
+
+        async def cancel_testnet_order(self, symbol, client_order_id):
+            cancelled.append(client_order_id)
+            return True
+
+    assert await _cleanup_trial_open_orders(CleanupWorker(), {"BAI-MANUAL-1"}) is False
+    assert cancelled == []
 
 
 @pytest.mark.asyncio
@@ -1742,6 +1797,36 @@ async def test_bootstrap_rejects_unowned_exchange_position():
     assert reconciliation.last_status == "UNKNOWN"
     assert any(diff.code == "EXCHANGE_STATE_UNOWNED" for diff in reconciliation.last_diffs)
     assert await ledger.is_initialized() is False
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_invalid_active_position_does_not_mutate_ledger():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v2/positionRisk":
+            return [
+                {
+                    "symbol": "BTCUSDT",
+                    "positionSide": "BOTH",
+                    "positionAmt": "0.001",
+                    "entryPrice": "10000",
+                    "liquidationPrice": "9000",
+                    "notional": "10",
+                }
+            ]
+        if path == "/fapi/v1/openOrders":
+            return []
+        if path == "/fapi/v2/account":
+            return account_payload()
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    ledger = InMemoryLedger()
+    reconciliation = BinanceReconciliation(ScriptedRest(handler), ledger)
+
+    assert await reconciliation.bootstrap() is False
+    assert reconciliation.last_status == "UNKNOWN"
+    assert await ledger.is_initialized() is False
+    assert await ledger.get_positions() == []
+    assert await ledger.get_account_snapshot() is None
 
 
 def test_account_snapshot_rejects_inconsistent_position_notional():

@@ -5,7 +5,7 @@ import pytest
 from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
-from domain.models import ExecutionOrder, OrderSide, PositionSide
+from domain.models import ExecutionOrder, ExchangePosition, OrderSide, PositionSide
 
 pytestmark = pytest.mark.asyncio
 
@@ -163,7 +163,7 @@ async def test_trade_update_uses_transaction_time_when_event_time_is_absent():
     assert ledger.fills[0].event_time == 12341
     assert ledger.fills[0].transaction_time == 12341
 
-async def test_account_update_positions():
+async def test_incomplete_active_account_update_is_quarantined():
     ledger = InMemoryLedger()
     ada = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
     
@@ -184,8 +184,106 @@ async def test_account_update_positions():
     }
     
     await ada._on_ws_event(event)
-    
+
+    assert ledger.positions == []
+    assert ada.reconciliation.last_status == "UNKNOWN"
+    assert ada.reconciliation.last_diffs[0].code == (
+        "ACCOUNT_POSITION_UPDATE_INCOMPLETE"
+    )
+
+
+async def test_account_update_merges_delta_into_authoritative_position():
+    ledger = InMemoryLedger()
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
+    await ledger.upsert_position(
+        ExchangePosition(
+            symbol="BTCUSDT",
+            position_side=PositionSide.LONG,
+            quantity=Decimal("1.0"),
+            entry_price=Decimal("29000"),
+            mark_price=Decimal("30000"),
+            unrealized_pnl=Decimal("100"),
+            leverage=Decimal("2"),
+            margin_type="cross",
+        )
+    )
+
+    await adapter._on_ws_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "E": 12346,
+            "a": {
+                "P": [
+                    {
+                        "s": "BTCUSDT",
+                        "ps": "LONG",
+                        "pa": "1.5",
+                        "ep": "30000",
+                        "up": "150",
+                        "mt": "cross",
+                    }
+                ]
+            },
+        }
+    )
+
     assert len(ledger.positions) == 1
-    assert ledger.positions[0]["symbol"] == "BTCUSDT"
-    assert ledger.positions[0]["positionSide"] == "LONG"
     assert ledger.positions[0]["positionAmt"] == "1.5"
+    assert ledger.positions[0].mark_price == Decimal("30000")
+    assert ledger.positions[0].leverage == Decimal("2")
+
+
+async def test_ledger_rejects_active_raw_position_without_mark_price():
+    ledger = InMemoryLedger()
+
+    with pytest.raises(ValueError, match="markPrice"):
+        await ledger.upsert_position(
+            {
+                "symbol": "BTCUSDT",
+                "positionSide": "LONG",
+                "positionAmt": "1.5",
+                "entryPrice": "30000",
+                "unRealizedProfit": "150",
+                "marginType": "cross",
+                "leverage": "2",
+            }
+        )
+
+
+async def test_account_update_does_not_treat_per_asset_balance_as_aggregate():
+    ledger = InMemoryLedger()
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
+    ledger.wallet_balance = Decimal("100")
+    ledger.margin_balance = Decimal("100")
+
+    await adapter._on_ws_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "a": {
+                "P": [],
+                "B": [{"a": "USDT", "wb": "12", "cw": "11"}],
+            },
+        }
+    )
+
+    assert await ledger.get_balances() == (Decimal("100"), Decimal("100"))
+    assert ledger.account_snapshot is None
+    assert adapter.reconciliation.last_status == "UNKNOWN"
+    assert adapter.reconciliation.last_diffs == []
+
+
+async def test_malformed_account_update_balance_fails_closed_without_raising():
+    ledger = InMemoryLedger()
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
+
+    await adapter._on_ws_event(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "a": {"P": [], "B": {"a": "USDT", "wb": "12", "cw": "11"}},
+        }
+    )
+
+    assert adapter.reconciliation.last_status == "UNKNOWN"
+    assert adapter.reconciliation.last_diffs[0].code == (
+        "ACCOUNT_BALANCE_UPDATE_INVALID"
+    )

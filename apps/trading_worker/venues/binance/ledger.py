@@ -172,37 +172,112 @@ class InMemoryLedger:
     def _to_exchange_position(self, pos: Union[dict, ExchangePosition]) -> ExchangePosition:
         if isinstance(pos, ExchangePosition):
             return pos
+        if not isinstance(pos, dict):
+            raise ValueError("Exchange position must be an object")
         required_fields = ("symbol", "positionAmt")
         missing = [field for field in required_fields if pos.get(field) in (None, "")]
         if missing:
             raise ValueError(
                 f"Exchange position is missing required fields: {', '.join(missing)}"
             )
+
+        try:
+            quantity = Decimal(str(pos["positionAmt"]))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("Exchange position has an invalid positionAmt") from exc
+        if not quantity.is_finite():
+            raise ValueError("Exchange position has a non-finite positionAmt")
+
+        is_active = quantity != 0
+        if is_active:
+            active_required = (
+                "positionSide",
+                "markPrice",
+            )
+            active_missing = [
+                field for field in active_required if pos.get(field) in (None, "")
+            ]
+            if active_missing:
+                raise ValueError(
+                    "Active exchange position is missing required fields: "
+                    + ", ".join(active_missing)
+                )
+
         ps_str = str(pos.get("positionSide", "BOTH")).upper()
         try:
             ps = PositionSide(ps_str)
         except ValueError as exc:
             raise ValueError(f"Unsupported exchange position side: {ps_str}") from exc
+
+        def parse_decimal(
+            field: str,
+            *,
+            default: Optional[Decimal] = None,
+            positive: bool = False,
+            nonnegative: bool = False,
+        ) -> Decimal:
+            raw_value = pos.get(field)
+            if raw_value in (None, ""):
+                if default is not None:
+                    return default
+                raise ValueError(f"Exchange position is missing required field: {field}")
+            try:
+                parsed = Decimal(str(raw_value))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise ValueError(f"Exchange position has invalid {field}") from exc
+            if not parsed.is_finite():
+                raise ValueError(f"Exchange position has non-finite {field}")
+            if positive and parsed <= 0:
+                raise ValueError(f"Exchange position has unusable {field}")
+            if nonnegative and parsed < 0:
+                raise ValueError(f"Exchange position has negative {field}")
+            return parsed
+
+        entry_price = parse_decimal(
+            "entryPrice", default=Decimal("0"), positive=is_active
+        )
+        raw_mark_price = pos.get("markPrice")
+        mark_price = (
+            None
+            if raw_mark_price in (None, "") and not is_active
+            else parse_decimal("markPrice", positive=is_active, nonnegative=not is_active)
+        )
+        unrealized_pnl = parse_decimal(
+            "unRealizedProfit", default=Decimal("0")
+        )
+        raw_margin_type = pos.get("marginType")
+        if raw_margin_type in (None, ""):
+            margin_type = "cross"
+        elif not isinstance(raw_margin_type, str) or not raw_margin_type.strip():
+            raise ValueError("Exchange position has invalid marginType")
+        else:
+            margin_type = raw_margin_type
+        leverage = parse_decimal(
+            "leverage", default=Decimal("0"), positive=is_active, nonnegative=True
+        )
+        raw_liquidation_price = pos.get("liquidationPrice")
+        liquidation_price = None
+        if raw_liquidation_price not in (None, ""):
+            parsed_liquidation_price = parse_decimal(
+                "liquidationPrice", nonnegative=True
+            )
+            # Binance uses zero to signal that a liquidation price is not
+            # available. Keep that as UNKNOWN rather than a fake usable price.
+            if parsed_liquidation_price > 0:
+                liquidation_price = parsed_liquidation_price
+
         return ExchangePosition(
             symbol=str(pos.get("symbol", "")).upper(),
             position_side=ps,
-            quantity=Decimal(str(pos.get("positionAmt", "0"))),
-            entry_price=Decimal(str(pos.get("entryPrice", "0"))),
-            mark_price=Decimal(str(pos.get("markPrice", "0"))) if pos.get("markPrice") is not None else None,
-            unrealized_pnl=Decimal(str(pos.get("unRealizedProfit", "0"))),
-            margin_type=pos.get("marginType", "cross"),
+            quantity=quantity,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            unrealized_pnl=unrealized_pnl,
+            margin_type=margin_type,
             event_time=pos.get("eventTime"),
             source=pos.get("source", "BINANCE_TESTNET"),
-            liquidation_price=(
-                Decimal(str(pos["liquidationPrice"]))
-                if pos.get("liquidationPrice") not in (None, "")
-                else None
-            ),
-            leverage=(
-                Decimal(str(pos["leverage"]))
-                if pos.get("leverage") not in (None, "")
-                else Decimal("0")
-            ),
+            liquidation_price=liquidation_price,
+            leverage=leverage,
         )
 
     async def replace_positions(

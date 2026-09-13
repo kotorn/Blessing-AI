@@ -127,6 +127,52 @@ async def _exchange_open_orders(adapter, symbol: str) -> List[dict]:
     return payload
 
 
+async def _cleanup_trial_open_orders(
+    worker: TradingWorkerApp,
+    trial_client_order_ids: set[str],
+) -> bool:
+    """Cancel and verify only the manual trial's still-open orders.
+
+    The preflight requires BTCUSDT to be clear, so an order observed after the
+    trial starts must belong to this bounded workflow.  An order without a
+    verifiable client ID is left untouched and causes cleanup to fail closed;
+    it must never be guessed or silently adopted.
+    """
+
+    adapter = worker.execution_adapter
+    if adapter is None:
+        return False
+    known_ids = {str(order_id) for order_id in trial_client_order_ids if order_id}
+    try:
+        open_orders = await _exchange_open_orders(adapter, "BTCUSDT")
+        cancellation_failed = False
+        for raw_order in open_orders:
+            if not isinstance(raw_order, dict):
+                cancellation_failed = True
+                continue
+            client_order_id = str(raw_order.get("clientOrderId") or "")
+            # Binance amendments normally retain the original client ID. Keep
+            # the prefix check as a bounded fallback for a Testnet-generated
+            # replacement ID, while still rejecting unknown IDs.
+            belongs_to_trial = client_order_id in known_ids or client_order_id.startswith(
+                "BAI-MANUAL-"
+            )
+            if not belongs_to_trial or not client_order_id:
+                cancellation_failed = True
+                continue
+            known_ids.add(client_order_id)
+            if not await worker.cancel_testnet_order("BTCUSDT", client_order_id):
+                cancellation_failed = True
+
+        remaining = await _exchange_open_orders(adapter, "BTCUSDT")
+        if remaining:
+            cancellation_failed = True
+        return not cancellation_failed
+    except Exception as exc:
+        logger.error("Manual Testnet trial open-order cleanup is unknown: %s", exc)
+        return False
+
+
 async def _flatten_unexpected_testnet_exposure(
     worker: TradingWorkerApp,
     artifact: Dict[str, Any],
@@ -230,6 +276,8 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
         "diff_count": 0,
         "status": "FAIL",
     }
+    trial_client_order_ids: set[str] = set()
+    unexpected_fill_observed = False
 
     try:
         armed, reason = await worker.arm(
@@ -263,6 +311,7 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
         passive_price, quantity = _passive_order(adapter, "BTCUSDT", *quote)
         position_side = PositionSide.LONG if adapter.capabilities.hedge_mode else PositionSide.BOTH
         client_order_id = f"BAI-MANUAL-{int(time.time() * 1000)}"
+        trial_client_order_ids.add(client_order_id)
         artifact["client_order_id"] = client_order_id
         intent = OrderIntent(
             client_order_id=client_order_id,
@@ -316,6 +365,7 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
         if order_status in {"FILLED", "PARTIALLY_FILLED"}:
             # An unexpected fill is handled only on Testnet and only through
             # the worker-owned emergency path.
+            unexpected_fill_observed = True
             artifact["order_lifecycle"].append("UNEXPECTED_FILL")
             await _flatten_unexpected_testnet_exposure(worker, artifact)
         else:
@@ -330,6 +380,7 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
             artifact["modify_result"] = "VERIFIED"
             artifact["order_lifecycle"].append("MODIFY_ACK")
             active_client_id = amended.client_order_id or client_order_id
+            trial_client_order_ids.add(active_client_id)
             queried = await adapter.query_order("BTCUSDT", active_client_id)
             if not queried or queried.get("status") not in {"NEW", "PARTIALLY_FILLED"}:
                 raise RuntimeError("Amended Testnet order was not verified as open")
@@ -341,6 +392,7 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
                     "FILLED",
                     "PARTIALLY_FILLED",
                 }:
+                    unexpected_fill_observed = True
                     artifact["order_lifecycle"].append("UNEXPECTED_FILL")
                     await _flatten_unexpected_testnet_exposure(worker, artifact)
                 else:
@@ -366,6 +418,7 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
         artifact["position_after"] = _sanitized_positions(after)
         artifact["fill_count"] = len(adapter.ledger.fills)
         if artifact["position_after"]:
+            unexpected_fill_observed = True
             if "UNEXPECTED_FILL" not in artifact["order_lifecycle"]:
                 artifact["order_lifecycle"].append("UNEXPECTED_FILL")
             await _flatten_unexpected_testnet_exposure(worker, artifact)
@@ -377,6 +430,12 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
             artifact["fill_count"] = len(adapter.ledger.fills)
         if reconciliation_status != "IN_SYNC" or artifact["position_after"]:
             raise RuntimeError("Final Testnet reconciliation did not prove zero exposure")
+        if unexpected_fill_observed:
+            raise RuntimeError(
+                "Manual Testnet lifecycle failed closed because the passive order filled unexpectedly"
+            )
+        if artifact["modify_result"] != "VERIFIED" or artifact["cancel_result"] != "VERIFIED":
+            raise RuntimeError("Manual Testnet lifecycle did not verify modify and cancel")
         artifact["status"] = "PASS"
         return artifact
     except Exception:
@@ -390,6 +449,14 @@ async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
             and artifact["client_order_id"] != "NOT_CREATED"
         ):
             try:
+                cleanup_verified = await _cleanup_trial_open_orders(
+                    worker, trial_client_order_ids
+                )
+                artifact["order_lifecycle"].append(
+                    "FAILURE_CLEANUP_OPEN_ORDERS_VERIFIED"
+                    if cleanup_verified
+                    else "FAILURE_CLEANUP_OPEN_ORDERS_UNKNOWN"
+                )
                 after_failure = await _exchange_positions(worker.execution_adapter)
                 if _sanitized_positions(after_failure):
                     if "UNEXPECTED_FILL" not in artifact["order_lifecycle"]:

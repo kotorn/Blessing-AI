@@ -876,6 +876,10 @@ class BinanceReconciliation:
             account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
             if not isinstance(positions, list) or not isinstance(open_orders, list):
                 raise ValueError("Binance bootstrap response is invalid")
+            # Validate account math and every active position before any
+            # recovery/ledger mutation. A malformed mark/notional row must not
+            # leave a partial position with fabricated zero fields behind.
+            snapshot = build_account_snapshot(account, positions)
 
             active_positions = [p for p in positions if _position_amount(p) != 0]
             # Bootstrap never silently adopts exchange exposure or orders that
@@ -940,7 +944,6 @@ class BinanceReconciliation:
             )
             for order_data in open_orders:
                 await self.ledger.upsert_raw_exchange_order(order_data)
-            snapshot = build_account_snapshot(account, positions)
             await self.ledger.set_account_snapshot(snapshot)
             await self.ledger.mark_initialized()
             self._set_status("IN_SYNC", [])
@@ -985,6 +988,9 @@ class BinanceReconciliation:
             account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
             if not isinstance(exchange_positions, list) or not isinstance(exchange_open_orders, list):
                 raise ValueError("Binance reconciliation response is invalid")
+            # Validate the authoritative account/position snapshot before
+            # _collect_diffs can seed any recovered position into the ledger.
+            snapshot = build_account_snapshot(account, exchange_positions)
 
             symbols = {
                 str(position.get("symbol"))
@@ -1013,7 +1019,6 @@ class BinanceReconciliation:
                 self._set_status("MISMATCH", diffs)
                 return self.last_status
 
-            snapshot = build_account_snapshot(account, exchange_positions)
             # Keep the local position-risk fields (mark, liquidation price,
             # leverage, and quantity) authoritative after every successful
             # reconciliation, not only during bootstrap.
