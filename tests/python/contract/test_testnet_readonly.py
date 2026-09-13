@@ -18,7 +18,10 @@ def api_credentials():
     api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "").strip()
     if not api_key or not api_secret:
         pytest.skip("Testnet credentials not found. Skipping contract test.")
-    return api_key, api_secret
+    # Never return credentials from a fixture. Pytest includes fixture values
+    # in failure reports, so returning the tuple would disclose secrets when
+    # a read-only contract assertion fails.
+    return True
 
 
 async def test_worker_testnet_readonly_lifecycle(api_credentials):
