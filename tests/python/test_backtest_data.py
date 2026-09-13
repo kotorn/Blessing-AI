@@ -1,9 +1,20 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
-from apps.trading_worker.backtest.data_downloader import _parse_kline_row
-from apps.trading_worker.backtest.data_downloader import BinanceDataDownloader
+from apps.trading_worker.backtest.data_downloader import (
+    BinanceDataDownloader,
+    _parse_kline_row,
+)
+from apps.trading_worker.backtest.economic import (
+    BacktestTrade,
+    EconomicCostModel,
+    WalkForwardConfig,
+    cost_trade,
+    evaluate_trades,
+    walk_forward_splits,
+)
 from apps.trading_worker.backtest.vector_backtester import validate_research_provenance
 
 
@@ -43,7 +54,7 @@ def test_kline_parser_drops_unfinished_candle_and_keeps_real_provenance_slot():
     assert closed["symbol"] == "BTCUSDT"
     assert closed["data_source"] == ""
     assert unfinished is None
-    assert closed["timestamp"].tzinfo == timezone.utc
+    assert closed["timestamp"].tzinfo == UTC
 
 
 def test_kline_parser_rejects_invalid_ohlc():
@@ -130,3 +141,85 @@ async def test_mocked_downloader_writes_closed_rows_with_public_provenance(tmp_p
     ]
     assert session.calls[0][1]["limit"] == 1500
     assert session.calls[0][1]["symbol"] == "BTCUSDT"
+
+
+def _research_trade(index: int, *, gross_pnl: str = "10") -> BacktestTrade:
+    return BacktestTrade(
+        trade_id=f"T-{index}",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index),
+        symbol="BTCUSDT",
+        strategy_id="research_fixture_input",
+        data_source="BINANCE_PUBLIC_TESTNET_READ_ONLY",
+        gross_pnl=Decimal(gross_pnl),
+        funding_pnl=Decimal(-1),
+        entry_notional=Decimal(1000),
+        exit_notional=Decimal(1000),
+        entry_maker=True,
+        exit_maker=False,
+        entry_spread_bps=Decimal(4),
+        exit_spread_bps=Decimal(4),
+        entry_slippage_bps=Decimal(2),
+        exit_slippage_bps=Decimal(2),
+    )
+
+
+def test_economic_cost_accounting_deducts_each_explicit_component():
+    model = EconomicCostModel(
+        maker_fee_rate=Decimal("0.0002"),
+        taker_fee_rate=Decimal("0.0005"),
+    )
+
+    result = cost_trade(_research_trade(1), model)
+
+    assert result.trading_fees == Decimal("0.7")
+    assert result.spread_cost == Decimal("0.4")
+    assert result.slippage_cost == Decimal("0.4")
+    assert result.funding_pnl == Decimal(-1)
+    assert result.net_pnl == Decimal("7.5")
+
+
+def test_economic_backtest_result_is_not_launch_evidence():
+    model = EconomicCostModel(
+        maker_fee_rate=Decimal("0.0002"),
+        taker_fee_rate=Decimal("0.0005"),
+    )
+
+    result = evaluate_trades(
+        [_research_trade(1), _research_trade(2, gross_pnl="20")],
+        initial_capital=Decimal(1000),
+        cost_model=model,
+    )
+
+    assert result.net_pnl == Decimal("25.0")
+    assert result.positive_net_expectancy is True
+    assert result.evidence_status == "RESEARCH_CALCULATION_ONLY"
+    assert result.launch_eligible is False
+
+
+def test_walk_forward_split_has_purge_and_embargo_gaps():
+    records = [_research_trade(index) for index in range(14)]
+    folds = walk_forward_splits(
+        records,
+        WalkForwardConfig(train_size=3, test_size=2, purge_size=1, embargo_size=1),
+    )
+
+    assert len(folds) == 2
+    assert (folds[0].train_start, folds[0].train_end) == (0, 3)
+    assert (folds[0].test_start, folds[0].test_end) == (4, 6)
+    assert (folds[1].train_start, folds[1].train_end) == (7, 10)
+    assert (folds[1].test_start, folds[1].test_end) == (11, 13)
+    assert folds[0].train_end < folds[0].test_start
+    assert folds[0].test_end + 1 == folds[1].train_start
+
+
+def test_walk_forward_rejects_out_of_order_records():
+    first = _research_trade(1)
+    second = _research_trade(2).model_copy(
+        update={"timestamp": datetime(2025, 12, 31, tzinfo=UTC)}
+    )
+
+    with pytest.raises(ValueError, match="chronologically"):
+        walk_forward_splits(
+            [first, second],
+            WalkForwardConfig(train_size=1, test_size=1),
+        )

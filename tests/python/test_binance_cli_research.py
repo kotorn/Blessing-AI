@@ -1,0 +1,164 @@
+import subprocess
+
+import pytest
+
+from apps.trading_worker.research.binance_cli import (
+    BinanceCliPolicyError,
+    BinanceCliResearchRunner,
+    ReadOnlyCheck,
+    build_read_only_command,
+)
+
+
+def test_only_allowlisted_read_command_can_be_built():
+    assert build_read_only_command("server_time") == (
+        "futures-usds",
+        "check-server-time",
+    )
+    assert build_read_only_command("positions", symbol="btcusdt")[-2:] == (
+        "--symbol",
+        "BTCUSDT",
+    )
+
+    with pytest.raises(BinanceCliPolicyError, match="mutation/custom requests"):
+        build_read_only_command("new_order")
+
+
+def test_mainnet_or_demo_environment_is_blocked():
+    for api_env, base_url in (
+        ("prod", "https://api.binance.com"),
+        ("demo", "https://demo-api Binance"),
+        ("testnet", "https://api.binance.com"),
+    ):
+        runner = BinanceCliResearchRunner(
+            environ={
+                "BINANCE_API_ENV": api_env,
+                "BINANCE_FUTURES_USDS_BASE_PATH": base_url,
+            }
+        )
+        with pytest.raises(BinanceCliPolicyError):
+            runner.run(ReadOnlyCheck.SERVER_TIME)
+
+
+def test_public_check_uses_explicit_testnet_environment(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda binary: "C:/tools/binance-cli.exe" if binary == "binance-cli" else None,
+    )
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"serverTime": 1700000000000}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("apps.trading_worker.research.binance_cli.subprocess.run", fake_run)
+
+    result = BinanceCliResearchRunner(
+        environ={
+            "PATH": "C:/tools",
+            "BINANCE_API_ENV": "testnet",
+            "BINANCE_FUTURES_USDS_BASE_PATH": "https://testnet.binancefuture.com/",
+            "BINANCE_PROFILE": "a-profile-that-must-not-be-used",
+        }
+    ).run(ReadOnlyCheck.SERVER_TIME)
+
+    assert result.status == "PASS"
+    assert result.payload == {"serverTime": 1700000000000}
+    assert result.base_url == "https://testnet.binancefuture.com"
+    assert calls[0][0] == [
+        "C:/tools/binance-cli.exe",
+        "futures-usds",
+        "check-server-time",
+    ]
+    child_env = calls[0][1]["env"]
+    assert child_env["BINANCE_API_ENV"] == "testnet"
+    assert child_env["BINANCE_FUTURES_USDS_BASE_PATH"] == "https://testnet.binancefuture.com"
+    assert "BINANCE_PROFILE" not in child_env
+
+
+def test_signed_check_without_credentials_is_not_run(monkeypatch):
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda _: pytest.fail("credential-gated checks must not start the CLI"),
+    )
+    result = BinanceCliResearchRunner(
+        environ={"BINANCE_API_ENV": "testnet"}
+    ).run(ReadOnlyCheck.ACCOUNT)
+
+    assert result.status == "NOT_RUN"
+    assert result.credential_source == "NONE"
+
+
+def test_worker_testnet_credentials_are_mapped_without_leaking_worker_names(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda _: "binance-cli",
+    )
+
+    def fake_run(command, **kwargs):
+        calls.append(kwargs["env"])
+        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr("apps.trading_worker.research.binance_cli.subprocess.run", fake_run)
+    result = BinanceCliResearchRunner(
+        environ={
+            "BINANCE_API_ENV": "testnet",
+            "BINANCE_TESTNET_API_KEY": "testnet-key-fixture",
+            "BINANCE_TESTNET_API_SECRET": "testnet-secret-fixture",
+        }
+    ).run(ReadOnlyCheck.ACCOUNT)
+
+    assert result.status == "PASS"
+    assert result.credential_source == "WORKER_TESTNET_ENV"
+    assert calls[0]["BINANCE_API_KEY"] == "testnet-key-fixture"
+    assert calls[0]["BINANCE_SECRET_KEY"] == "testnet-secret-fixture"
+    assert "BINANCE_TESTNET_API_KEY" not in calls[0]
+    assert "BINANCE_TESTNET_API_SECRET" not in calls[0]
+
+
+def test_cli_result_redacts_credential_values_from_stdout(monkeypatch):
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda _: "binance-cli",
+    )
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"apiKey":"cli-key-fixture","secret":"cli-secret-fixture"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("apps.trading_worker.research.binance_cli.subprocess.run", fake_run)
+    result = BinanceCliResearchRunner(
+        environ={
+            "BINANCE_API_ENV": "testnet",
+            "BINANCE_API_KEY": "cli-key-fixture",
+            "BINANCE_SECRET_KEY": "cli-secret-fixture",
+        }
+    ).run(ReadOnlyCheck.ACCOUNT)
+
+    rendered = str(result.as_dict())
+    assert "cli-key-fixture" not in rendered
+    assert "cli-secret-fixture" not in rendered
+    assert "[REDACTED]" in rendered
+
+
+def test_query_order_requires_a_reference_and_never_accepts_mutation_flags():
+    with pytest.raises(BinanceCliPolicyError, match="requires order_id"):
+        build_read_only_command("query_order", symbol="BTCUSDT")
+
+    assert build_read_only_command(
+        "query_order", symbol="BTCUSDT", order_id=42
+    )[-2:] == ("--order-id", "42")
+    assert build_read_only_command(
+        "query_order", symbol="BTCUSDT", client_order_id="research-42"
+    )[-2:] == ("--orig-client-order-id", "research-42")
