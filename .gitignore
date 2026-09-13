@@ -28,6 +28,8 @@ __pycache__/
 .Python
 .pytest_cache/
 .pytest-tmp*/
+.ruff_cache/
+.mypy_cache/
 env/
 venv/
 .venv/
