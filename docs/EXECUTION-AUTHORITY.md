@@ -104,8 +104,8 @@ mutable CLI commands; details and commands are in
 
 ## Current evidence status
 
-The latest safety code candidate `c007475` passed the non-secret unit and frontend gates
-in GitHub Actions run `34758661365`. The credentialed contract workflow records
+The latest safety code candidate `5db4c85` passed the non-secret unit and frontend gates
+in GitHub Actions run `34763466902`. The credentialed contract workflow records
 current-SHA sanitized evidence after
 read-only success and only marks the manual trial verified after the mutating
 test passes; that workflow was not run here. Credentialed Binance Testnet
