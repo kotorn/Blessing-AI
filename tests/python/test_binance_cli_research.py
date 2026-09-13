@@ -83,6 +83,35 @@ def test_public_check_uses_explicit_testnet_environment(monkeypatch):
     assert "BINANCE_PROFILE" not in child_env
 
 
+def test_public_check_never_forwards_credentials(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda _: "binance-cli",
+    )
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs["env"])
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("apps.trading_worker.research.binance_cli.subprocess.run", fake_run)
+    result = BinanceCliResearchRunner(
+        environ={
+            "BINANCE_API_ENV": "testnet",
+            "BINANCE_FUTURES_USDS_BASE_PATH": "https://testnet.binancefuture.com",
+            "BINANCE_TESTNET_API_KEY": "testnet-key-fixture",
+            "BINANCE_TESTNET_API_SECRET": "testnet-secret-fixture",
+        }
+    ).run(ReadOnlyCheck.MARK_PRICE, symbol="BTCUSDT")
+
+    assert result.status == "PASS"
+    assert result.credential_source == "NONE"
+    assert "BINANCE_API_KEY" not in captured
+    assert "BINANCE_SECRET_KEY" not in captured
+    assert "BINANCE_TESTNET_API_KEY" not in captured
+    assert "BINANCE_TESTNET_API_SECRET" not in captured
+
+
 def test_signed_check_without_credentials_is_not_run(monkeypatch):
     monkeypatch.setattr(
         "apps.trading_worker.research.binance_cli.shutil.which",

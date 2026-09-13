@@ -262,7 +262,9 @@ def _credential_pair(environ: Mapping[str, str]) -> tuple[str, str, str] | None:
     return None
 
 
-def _prepare_environment(environ: Mapping[str, str]) -> tuple[dict[str, str], str]:
+def _prepare_environment(
+    environ: Mapping[str, str], *, include_credentials: bool
+) -> tuple[dict[str, str], str]:
     """Return a child environment with only the explicit Testnet route/keys."""
 
     if environ.get("BINANCE_API_ENV") != "testnet":
@@ -283,7 +285,7 @@ def _prepare_environment(environ: Mapping[str, str]) -> tuple[dict[str, str], st
     child_env["BINANCE_API_ENV"] = "testnet"
     child_env["BINANCE_FUTURES_USDS_BASE_PATH"] = base_url
     credential_source = "NONE"
-    if credentials is not None:
+    if include_credentials and credentials is not None:
         api_key, secret_key, credential_source = credentials
         child_env["BINANCE_API_KEY"] = api_key
         child_env["BINANCE_SECRET_KEY"] = secret_key
@@ -388,8 +390,11 @@ class BinanceCliResearchRunner:
             order_id=order_id,
             client_order_id=client_order_id,
         )
-        child_env, credential_source = _prepare_environment(self.environ)
         spec = _CHECKS[normalized_check]
+        child_env, credential_source = _prepare_environment(
+            self.environ,
+            include_credentials=spec.requires_credentials,
+        )
         if spec.requires_credentials and credential_source == "NONE":
             return BinanceCliResult(
                 check=normalized_check.value,
