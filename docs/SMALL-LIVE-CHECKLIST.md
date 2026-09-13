@@ -14,9 +14,9 @@ operational approval before any Mainnet implementation is considered.
 
 ## Required future evidence
 
-- [x] Code checkpoint `6044474346884d2068d81c8024acc3daf05a7c37` Testnet
+- [x] Code checkpoint `76195a79b2e5d75f3578333b185f91ae8a257f88` Testnet
       read-only contract: `LOCAL_VERIFIED; CONTRACT_TESTED` (1 passed,
-      1 deselected; no mutation).
+      2 deselected; no mutation).
 - [ ] Current-SHA controlled Testnet mutation and sanitized artifact:
       `MANUAL_TESTNET_VERIFIED` (blocked: 50 USDT exchange minimum exceeds
       the hard 25 USDT first-launch cap).
@@ -31,11 +31,11 @@ operational approval before any Mainnet implementation is considered.
 
 Current sprint evidence: local non-secret gates are `LOCAL_VERIFIED` and
 verified safety/research implementation checkpoint
-`6044474346884d2068d81c8024acc3daf05a7c37` is `CI_VERIFIED` by GitHub Actions
-run `34769924794`. Testnet read-only is `LOCAL_VERIFIED; CONTRACT_TESTED`;
+`76195a79b2e5d75f3578333b185f91ae8a257f88` is `CI_VERIFIED` by GitHub Actions
+run `34774313266`. Testnet read-only is `LOCAL_VERIFIED; CONTRACT_TESTED`;
 manual mutation is `NOT_RUN` because the 50 USDT exchange minimum exceeds the
-hard 25 USDT cap; autonomous Testnet is locked. No Mainnet order has been
-created or tested.
+hard 25 USDT cap; the supervised soak runner is not approved or run; autonomous
+Testnet is locked. No Mainnet order has been created or tested.
 
 ## MVP infrastructure boundary
 

@@ -116,11 +116,12 @@ mutable CLI commands; details and commands are in
 ## Current evidence status
 
 The verified safety/research implementation checkpoint
-`6044474346884d2068d81c8024acc3daf05a7c37` passed the non-secret unit and
-frontend gates in GitHub Actions run `34769924794`. The credentialed contract
+`76195a79b2e5d75f3578333b185f91ae8a257f88` passed the non-secret unit and
+frontend gates in GitHub Actions run `34774313266`. The credentialed contract
 workflow records current-SHA sanitized evidence after read-only success and
 only marks the manual trial verified after the mutating test passes. The
-read-only contract passed locally; the controlled mutation trial remains
-`NOT_RUN` because the live BTCUSDT minimum notional observed on Testnet was
-50 USDT while the hard first-launch cap is 25 USDT. Autonomous Testnet
-execution remains locked, and Mainnet execution remains disabled.
+read-only contract passed locally on 2026-09-14; the controlled mutation trial
+remains `NOT_RUN` because the live BTCUSDT minimum notional observed on Testnet
+was 50 USDT while the hard first-launch cap is 25 USDT. The supervised soak
+runner is implemented and unit-tested but was not approved or run. Autonomous
+Testnet execution remains locked, and Mainnet execution remains disabled.
