@@ -87,6 +87,11 @@ private stream, and returns to `READY` only after all evidence is consistent.
 Recovered fills use the canonical `domain.models.ExchangeFill` model and are
 deduplicated by symbol plus exchange trade ID.
 
+An `ORDER_TRADE_UPDATE` without a local Worker order record is quarantined and
+sets reconciliation to `UNKNOWN`; it is never adopted as a local strategy
+order. This preserves the required StrategyIntent -> Risk Decision -> Order
+lineage, including when an exchange event races a REST acknowledgement.
+
 ## Optional Binance CLI research cross-check
 
 The official Binance CLI may be used through the isolated
@@ -99,8 +104,8 @@ mutable CLI commands; details and commands are in
 
 ## Current evidence status
 
-The current candidate `b432273` passed the non-secret unit and frontend gates
-in GitHub Actions run `34756621676`. The credentialed contract workflow records
+The latest safety code candidate `c007475` passed the non-secret unit and frontend gates
+in GitHub Actions run `34758661365`. The credentialed contract workflow records
 current-SHA sanitized evidence after
 read-only success and only marks the manual trial verified after the mutating
 test passes; that workflow was not run here. Credentialed Binance Testnet
