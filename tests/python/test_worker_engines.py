@@ -1,6 +1,6 @@
 import pytest
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from domain.models import (
     StrategyIntent,
     MarketEvent,
@@ -11,7 +11,7 @@ from domain.models import (
     ExecutionDecision,
     PriceActionState,
 )
-from domain.enums import RegimeType, RiskState
+from domain.enums import EconomicRiskClass, RegimeType, RiskState
 from apps.trading_worker.engines.funding_carry import (
     FundingCarryCostInputs,
     FundingCarryEngine,
@@ -73,10 +73,61 @@ def test_meta_allocator_conflict_resolution():
     assert decision.source_intent_ids == ["G1", "T1"]
     assert decision.orders[0].source_intent_ids == ["G1", "T1"]
 
+
+def test_meta_allocator_rejects_mixed_symbol_intents():
+    intent = StrategyIntent(
+        intent_id="G1",
+        strategy_id="grid",
+        symbol="ETHUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        direction=PositionSide.LONG,
+        desired_delta_qty=Decimal("0.1"),
+        opportunity_score=Decimal("1"),
+        confidence=Decimal("1"),
+        expected_holding_horizon_sec=60,
+    )
+
+    with pytest.raises(ValueError, match="symbol"):
+        MetaAllocator().allocate([intent], "BTCUSDT")
+
+
+def test_meta_allocator_rejects_duplicate_intent_ids():
+    intent = StrategyIntent(
+        intent_id="DUPLICATE",
+        strategy_id="grid",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        direction=PositionSide.LONG,
+        desired_delta_qty=Decimal("0.1"),
+        opportunity_score=Decimal("1"),
+        confidence=Decimal("1"),
+        expected_holding_horizon_sec=60,
+    )
+
+    with pytest.raises(ValueError, match="unique"):
+        MetaAllocator().allocate([intent, intent], "BTCUSDT")
+
+
+def test_meta_allocator_rejects_direction_delta_mismatch():
+    intent = StrategyIntent(
+        intent_id="BAD-DIRECTION",
+        strategy_id="trend",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        direction=PositionSide.SHORT,
+        desired_delta_qty=Decimal("0.1"),
+        opportunity_score=Decimal("1"),
+        confidence=Decimal("1"),
+        expected_holding_horizon_sec=60,
+    )
+
+    with pytest.raises(ValueError, match="direction"):
+        MetaAllocator().allocate([intent], "BTCUSDT")
+
 def test_risk_governor_veto():
     governor = RiskGovernor()
     
-    target = TargetExposure(symbol="BTCUSDT", market_type=MarketType.USDM_FUTURES, target_net_delta_qty=Decimal("1.0"), target_gross_limit_qty=Decimal("1.0"), strategy_attributions={}, expires_at=datetime.now(timezone.utc))
+    target = TargetExposure(symbol="BTCUSDT", market_type=MarketType.USDM_FUTURES, target_net_delta_qty=Decimal("1.0"), target_gross_limit_qty=Decimal("1.0"), strategy_attributions={}, expires_at=datetime.now(timezone.utc) + timedelta(minutes=1))
     
     # Snapshot shows dangerously high margin utilization
     danger_risk = RiskSnapshot(
@@ -94,6 +145,7 @@ def test_risk_governor_veto():
     
     # The governor should override and emit NOOP or reduce_only
     assert decision.action == "NOOP"
+    assert "drawdown" in decision.rational.lower()
 
 
 def test_risk_governor_allows_deleveraging_during_hard_stop():
@@ -104,7 +156,7 @@ def test_risk_governor_allows_deleveraging_during_hard_stop():
         target_net_delta_qty=Decimal("-0.5"),
         target_gross_limit_qty=Decimal("0.5"),
         strategy_attributions={"recovery": Decimal("-0.5")},
-        expires_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
     hard_stop = RiskSnapshot(
         portfolio_equity=Decimal("100"),
@@ -132,7 +184,7 @@ def test_risk_governor_vetoes_high_margin_utilization():
         target_net_delta_qty=Decimal("0.1"),
         target_gross_limit_qty=Decimal("0.1"),
         strategy_attributions={"grid": Decimal("0.1")},
-        expires_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
     risk = RiskSnapshot(
         portfolio_equity=Decimal("100"),
@@ -149,6 +201,98 @@ def test_risk_governor_vetoes_high_margin_utilization():
 
     assert decision.action == "NOOP"
     assert "margin" in decision.rational.lower()
+
+
+@pytest.mark.parametrize(
+    "risk_state",
+    [
+        RiskState.NO_NEW_RISK,
+        RiskState.RECOVERY_ONLY,
+        RiskState.DELEVERAGE,
+        RiskState.LIQUIDATING,
+        RiskState.EMERGENCY,
+    ],
+)
+def test_risk_governor_blocks_risk_increase_for_restricted_risk_states(risk_state):
+    governor = RiskGovernor()
+    target = TargetExposure(
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        target_net_delta_qty=Decimal("0.1"),
+        target_gross_limit_qty=Decimal("0.1"),
+        strategy_attributions={"grid": Decimal("0.1")},
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+    risk = RiskSnapshot(
+        portfolio_equity=Decimal("100"),
+        unrealized_pnl=Decimal("0"),
+        realized_pnl_24h=Decimal("0"),
+        margin_utilization_pct=Decimal("1"),
+        effective_leverage=Decimal("0"),
+        current_drawdown_pct=Decimal("0"),
+        liquidation_distance_pct=Decimal("50"),
+        risk_state=risk_state,
+    )
+
+    decision = governor.evaluate(target, risk, Decimal("0"))
+
+    assert decision.action == "NOOP"
+    assert "blocked" in decision.rational.lower()
+
+
+def test_risk_governor_keeps_reduction_available_in_recovery_only():
+    governor = RiskGovernor()
+    target = TargetExposure(
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        target_net_delta_qty=Decimal("-0.1"),
+        target_gross_limit_qty=Decimal("0.1"),
+        strategy_attributions={"recovery": Decimal("-0.1")},
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+    risk = RiskSnapshot(
+        portfolio_equity=Decimal("100"),
+        unrealized_pnl=Decimal("-1"),
+        realized_pnl_24h=Decimal("0"),
+        margin_utilization_pct=Decimal("1"),
+        effective_leverage=Decimal("0.5"),
+        current_drawdown_pct=Decimal("1"),
+        liquidation_distance_pct=Decimal("2"),
+        risk_state=RiskState.RECOVERY_ONLY,
+    )
+
+    decision = governor.evaluate(target, risk, Decimal("0.5"))
+
+    assert decision.action == "SUBMIT_ORDER"
+    assert decision.risk_class == EconomicRiskClass.REDUCE_RISK
+    assert decision.orders[0].reduce_only is True
+
+
+def test_risk_governor_rejects_expired_target():
+    governor = RiskGovernor()
+    target = TargetExposure(
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        target_net_delta_qty=Decimal("0.1"),
+        target_gross_limit_qty=Decimal("0.1"),
+        strategy_attributions={"grid": Decimal("0.1")},
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    risk = RiskSnapshot(
+        portfolio_equity=Decimal("100"),
+        unrealized_pnl=Decimal("0"),
+        realized_pnl_24h=Decimal("0"),
+        margin_utilization_pct=Decimal("1"),
+        effective_leverage=Decimal("0"),
+        current_drawdown_pct=Decimal("0"),
+        liquidation_distance_pct=Decimal("50"),
+        risk_state=RiskState.NORMAL,
+    )
+
+    decision = governor.evaluate(target, risk, Decimal("0"))
+
+    assert decision.action == "NOOP"
+    assert "expired" in decision.rational.lower()
 
 
 def test_exposure_recovery_grid_brake():

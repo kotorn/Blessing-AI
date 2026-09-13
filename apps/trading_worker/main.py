@@ -1496,7 +1496,18 @@ class TradingWorkerApp:
             )
             current_position_qty = Decimal("1.2") # [RESEARCH] Mock
         
-        raw_target_exposure = self.meta_allocator.allocate(intents, event.symbol)
+        try:
+            raw_target_exposure = self.meta_allocator.allocate(intents, event.symbol)
+        except (TypeError, ValueError) as exc:
+            # A malformed or conflicting strategy intent must stop this
+            # decision before it can become a TargetExposure.  On Testnet,
+            # keep the worker in pause-new-risk until an operator explicitly
+            # clears the condition; reductions remain available at the gates.
+            logger.error("Strategy intent pipeline rejected the event: %s", exc)
+            if self.execution_mode == WorkerExecutionMode.TESTNET:
+                self.pause_new_risk = True
+                self._refresh_engine_state()
+            return
         
         target_exposure = self.recovery_engine.process(
             target=raw_target_exposure,

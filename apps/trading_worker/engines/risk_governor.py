@@ -1,12 +1,22 @@
 import logging
-from decimal import Decimal
-from typing import Optional, List
+from decimal import Decimal, InvalidOperation
+from typing import Optional
 from domain.models import TargetExposure, RiskSnapshot, ExecutionDecision, OrderIntent, OrderSide, PositionSide, OrderType, TimeInForce, utc_now
 from domain.enums import EconomicRiskClass, RiskState
 
 logger = logging.getLogger("blessing.engines.risk_governor")
 
 class RiskGovernor:
+    _RISK_OFF_STATES = frozenset(
+        {
+            RiskState.NO_NEW_RISK,
+            RiskState.RECOVERY_ONLY,
+            RiskState.DELEVERAGE,
+            RiskState.LIQUIDATING,
+            RiskState.EMERGENCY,
+        }
+    )
+
     def __init__(
         self,
         max_leverage: Decimal = Decimal("2.0"),
@@ -20,16 +30,66 @@ class RiskGovernor:
         self.hedge_mode = hedge_mode
 
     def evaluate(self, target: TargetExposure, risk_snapshot: RiskSnapshot, current_position_qty: Decimal) -> ExecutionDecision:
-        # TargetExposure is a relative signed delta. De-risking must remain
-        # available during a hard-stop state so the system can flatten rather
-        # than becoming trapped with toxic inventory.
-        required_delta = target.target_net_delta_qty
+        """Turn one relative target delta into a gated execution decision.
+
+        ``TargetExposure.target_net_delta_qty`` is intentionally a *relative*
+        signed quantity for the current evaluation tick.  It is not an
+        absolute target position.  Keeping that meaning here prevents a
+        caller from accidentally doubling exposure while trying to reach an
+        absolute target.
+        """
+
+        try:
+            required_delta = Decimal(str(target.target_net_delta_qty))
+            current_position_qty = Decimal(str(current_position_qty))
+        except (InvalidOperation, TypeError, ValueError):
+            return self._reject(target, "Target delta or current position is invalid")
+        if not required_delta.is_finite() or not current_position_qty.is_finite():
+            return self._reject(target, "Target delta or current position is non-finite")
+
+        try:
+            target_expiry = target.expires_at
+            if target_expiry.tzinfo is None or target_expiry <= utc_now():
+                return self._reject(target, "Target exposure is expired or has no timezone")
+        except (AttributeError, TypeError):
+            return self._reject(target, "Target exposure expiry is invalid")
+
+        # De-risking must remain available during a hard-stop state so the
+        # system can flatten rather than becoming trapped with toxic inventory.
         is_reducing = self._is_position_reduction(required_delta, current_position_qty)
 
-        # 1. Hard Constraints
-        if risk_snapshot.risk_state in [RiskState.EMERGENCY, RiskState.LIQUIDATING]:
+        try:
+            risk_state = (
+                risk_snapshot.risk_state
+                if isinstance(risk_snapshot.risk_state, RiskState)
+                else RiskState(str(risk_snapshot.risk_state))
+            )
+        except (AttributeError, TypeError, ValueError):
+            # Unknown exchange/risk state can never authorize new exposure,
+            # but a known signed reduction remains available for recovery.
             if not is_reducing:
-                return self._reject(target, "System is in EMERGENCY state. No new risk allowed.")
+                return self._reject(target, "Risk state is unknown; new risk is blocked")
+            risk_state = None
+
+        for field_name in (
+            "current_drawdown_pct",
+            "effective_leverage",
+            "margin_utilization_pct",
+        ):
+            try:
+                value = Decimal(str(getattr(risk_snapshot, field_name)))
+            except (AttributeError, InvalidOperation, TypeError, ValueError):
+                return self._reject(target, f"Risk snapshot field is invalid: {field_name}")
+            if not value.is_finite() or value < 0:
+                return self._reject(target, f"Risk snapshot field is invalid: {field_name}")
+
+        # 1. Hard Constraints
+        if risk_state in self._RISK_OFF_STATES:
+            if not is_reducing:
+                return self._reject(
+                    target,
+                    f"Risk state is {risk_state.value}; new or increased risk is blocked.",
+                )
             
         if risk_snapshot.current_drawdown_pct >= self.max_drawdown_pct:
             if not is_reducing:
@@ -49,13 +109,9 @@ class RiskGovernor:
                     f"({self.max_margin_utilization_pct}%). Cannot increase exposure.",
                 )
                 
-        # 3. Calculate required order to reach target delta
-        # Simplified: target_net_delta_qty represents the ABSOLUTE target exposure we want.
-        # Wait, strategy intents gave desired_delta_qty which is usually relative, but the meta allocator
-        # aggregated them into target_net_delta_qty. For Blessing AI, we treat target_net_delta_qty as the 
-        # relative change wanted by the strategies this tick, OR the absolute portfolio target?
-        # Let's assume TargetExposure from MetaAllocator is relative to CURRENT position for now to make it a delta.
-        
+        # 3. Generate a decision for the relative delta.  Crossing zero is
+        # deliberately rejected so close and reopen are separate traceable
+        # decisions with independent gates.
         if abs(required_delta) < Decimal("0.001"):
             return ExecutionDecision(
                 decision_id=f"DEC-{utc_now().timestamp()}",
@@ -104,7 +160,7 @@ class RiskGovernor:
             action="SUBMIT_ORDER",
             risk_class=risk_class,
             orders=[order],
-            rational=f"Approved target delta of {required_delta} with expected edge.",
+            rational=f"Approved relative target delta of {required_delta} after risk checks.",
             net_exposure_delta=required_delta,
             target_exposure_id=target.exposure_id,
             source_intent_ids=target.source_intent_ids,
