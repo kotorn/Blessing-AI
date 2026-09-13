@@ -662,6 +662,78 @@ class TradingWorkerApp:
         except (InvalidOperation, TypeError, ValueError):
             return False
 
+    def _derive_testnet_risk_state(
+        self,
+        snapshot: Any,
+        drawdown_pct: Decimal,
+    ) -> RiskState:
+        """Derive the Testnet risk state from authoritative account metrics.
+
+        A valid snapshot is not automatically safe for more exposure.  This
+        state is consumed by ``RiskGovernor`` so an unsafe account blocks
+        ``NEW_RISK``/``INCREASE_RISK`` while explicit reductions remain
+        available.  Unknown or malformed risk data fails closed.
+        """
+
+        try:
+            drawdown = Decimal(str(drawdown_pct))
+            available_balance = Decimal(str(snapshot.available_balance))
+            effective_leverage = Decimal(str(snapshot.effective_leverage))
+            margin_utilization = Decimal(str(snapshot.margin_utilization_pct))
+            total_notional = Decimal(str(snapshot.total_position_notional))
+            liquidation_safety = str(snapshot.liquidation_safety).upper()
+            liquidation_distance = snapshot.min_liquidation_distance_pct
+            if liquidation_distance is not None:
+                liquidation_distance = Decimal(str(liquidation_distance))
+
+            max_drawdown = Decimal(str(self.risk_governor.max_drawdown_pct))
+            max_leverage = Decimal(str(self.risk_governor.max_leverage))
+            max_margin_raw = os.getenv("MAX_MARGIN_UTILIZATION_PCT", "")
+            max_margin = Decimal(
+                max_margin_raw.strip()
+                if max_margin_raw.strip()
+                else str(self.risk_governor.max_margin_utilization_pct)
+            )
+        except (AttributeError, InvalidOperation, TypeError, ValueError):
+            return RiskState.NO_NEW_RISK
+
+        numeric_values = (
+            drawdown,
+            available_balance,
+            effective_leverage,
+            margin_utilization,
+            total_notional,
+            max_drawdown,
+            max_leverage,
+            max_margin,
+        )
+        if any(not value.is_finite() or value < 0 for value in numeric_values):
+            return RiskState.NO_NEW_RISK
+        if max_drawdown <= 0 or max_leverage <= 0 or max_margin <= 0 or max_margin > 100:
+            return RiskState.NO_NEW_RISK
+
+        if (
+            available_balance <= 0
+            or drawdown >= max_drawdown
+            or effective_leverage >= max_leverage
+            or margin_utilization >= max_margin
+        ):
+            return RiskState.NO_NEW_RISK
+
+        if liquidation_safety != "KNOWN":
+            return RiskState.NO_NEW_RISK
+        if liquidation_distance is None:
+            # A missing distance is only meaningful for a proven flat account.
+            if total_notional != 0:
+                return RiskState.NO_NEW_RISK
+        elif (
+            not liquidation_distance.is_finite()
+            or liquidation_distance <= 0
+        ):
+            return RiskState.NO_NEW_RISK
+
+        return RiskState.NORMAL
+
     def is_market_data_fresh(self, symbols: Optional[List[str]] = None) -> bool:
         if not self.market_data_healthy:
             return False
@@ -1517,7 +1589,10 @@ class TradingWorkerApp:
                     effective_leverage=snapshot.effective_leverage,
                     current_drawdown_pct=max(Decimal("0.0"), drawdown_pct),
                     liquidation_distance_pct=snapshot.min_liquidation_distance_pct,
-                    risk_state=RiskState.NORMAL
+                    risk_state=self._derive_testnet_risk_state(
+                        snapshot,
+                        max(Decimal("0.0"), drawdown_pct),
+                    ),
                 )
                 
                 positions = await self.execution_adapter.ledger.get_positions()
@@ -1553,6 +1628,9 @@ class TradingWorkerApp:
                 self._refresh_engine_state()
                 return # Block execution without fake fallback
         else:
+            # Paper mode is an explicit simulation boundary.  Keep its
+            # account fixture local to Paper and start flat; no simulated
+            # position may be mistaken for exchange inventory or readiness.
             risk_snapshot = RiskSnapshot(
                 portfolio_equity=Decimal("100000.0"),
                 unrealized_pnl=Decimal("0.0"),
@@ -1563,7 +1641,7 @@ class TradingWorkerApp:
                 liquidation_distance_pct=Decimal("45.0"),
                 risk_state=RiskState.NORMAL
             )
-            current_position_qty = Decimal("1.2") # [RESEARCH] Mock
+            current_position_qty = Decimal("0.0")
         
         try:
             raw_target_exposure = self.meta_allocator.allocate(intents, event.symbol)

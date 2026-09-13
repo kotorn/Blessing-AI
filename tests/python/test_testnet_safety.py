@@ -4,7 +4,15 @@ from decimal import Decimal
 
 import pytest
 
-from domain.enums import EconomicRiskClass, MarketType, OrderSide, OrderType, PositionSide, TimeInForce
+from domain.enums import (
+    EconomicRiskClass,
+    MarketType,
+    OrderSide,
+    OrderType,
+    PositionSide,
+    RiskState,
+    TimeInForce,
+)
 from domain.models import (
     ExchangeFill,
     ExchangePosition,
@@ -330,6 +338,50 @@ async def test_decision_gate_fails_closed_on_restricted_state_flag_mismatch(
 
     assert result.allowed is False
     assert "paused" in result.reason.lower() or "recovery" in result.reason.lower()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("available_balance", Decimal("0")),
+        ("effective_leverage", Decimal("2")),
+        ("margin_utilization_pct", Decimal("70")),
+        ("total_position_notional", Decimal("100")),
+    ],
+)
+def test_testnet_risk_state_blocks_unsafe_account_metrics(monkeypatch, field, value):
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+    snapshot = make_snapshot()
+    setattr(snapshot, field, value)
+
+    assert (
+        worker._derive_testnet_risk_state(snapshot, Decimal("0"))
+        == RiskState.NO_NEW_RISK
+    )
+
+
+def test_testnet_risk_state_blocks_drawdown_and_unknown_liquidation(monkeypatch):
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+
+    assert (
+        worker._derive_testnet_risk_state(make_snapshot(), Decimal("6"))
+        == RiskState.NO_NEW_RISK
+    )
+    assert (
+        worker._derive_testnet_risk_state(
+            make_snapshot(liquidation_safety="UNKNOWN"), Decimal("0")
+        )
+        == RiskState.NO_NEW_RISK
+    )
+
+
+def test_flat_testnet_account_with_known_liquidation_state_is_normal(monkeypatch):
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+
+    assert (
+        worker._derive_testnet_risk_state(make_snapshot(), Decimal("0"))
+        == RiskState.NORMAL
+    )
 
 
 @pytest.mark.asyncio
