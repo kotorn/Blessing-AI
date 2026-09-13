@@ -114,6 +114,11 @@ class BinanceExecutionAdapter:
         return self.state
 
     @property
+    def mutation_lock(self) -> asyncio.Lock:
+        """Serialize all mutable Testnet REST operations with kill switch."""
+        return self._mutation_lock
+
+    @property
     def authenticated(self) -> bool:
         """Authentication is true only after signed account capability discovery."""
         return bool(
@@ -962,6 +967,15 @@ class BinanceExecutionAdapter:
             logger.warning("Worker decision gate blocked adapter mutation: %s", reason)
             return []
         async with self._mutation_lock:
+            # The first gate check may have happened while another mutation was
+            # in flight. Re-evaluate after acquiring the single-flight lock so
+            # a kill switch or degraded state cannot release a queued order.
+            allowed, reason = gate(decision)
+            if not allowed:
+                logger.warning(
+                    "Worker decision gate blocked queued adapter mutation: %s", reason
+                )
+                return []
             return await self._execute_decision(decision, authority=authority)
 
     async def _execute_decision(
@@ -988,6 +1002,12 @@ class BinanceExecutionAdapter:
         reserved_open_orders = 0
         reserved_notional = Decimal("0")
         for index, intent in enumerate(decision.orders):
+            if not allow_emergency_fallback and getattr(
+                authority, "kill_switch_active", False
+            ):
+                self.state = ConnectionState.DEGRADED
+                logger.warning("Kill switch blocked remaining Testnet order mutations")
+                return executed_orders
             gate_result = await self.order_gate.check(
                 intent,
                 decision.risk_class,
@@ -1095,7 +1115,109 @@ class BinanceExecutionAdapter:
                 return None
             raise
 
+    async def cancel_all_open_orders(
+        self,
+        *,
+        authority: Optional[object] = None,
+    ) -> Dict[str, Any]:
+        """Cancel and verify all authoritative Testnet open orders.
+
+        This is the kill-switch mutation path. It shares the adapter's
+        single-flight lock with submit, cancel, amend, and emergency flatten so
+        a queued normal mutation cannot overtake local kill-switch activation.
+        """
+
+        if not self._worker_authorized(authority):
+            return {
+                "status": "UNKNOWN",
+                "reason": "Worker authority is required for Testnet cancellation",
+            }
+        async with self._mutation_lock:
+            try:
+                open_orders = await self.rest_client.request(
+                    "GET", "/fapi/v1/openOrders", signed=True
+                )
+                if not isinstance(open_orders, list):
+                    return {
+                        "status": "UNKNOWN",
+                        "reason": "Authoritative openOrders response is invalid",
+                    }
+
+                cancel_failures = 0
+                for order in open_orders:
+                    symbol = str(order.get("symbol", "")).upper()
+                    order_id = order.get("orderId")
+                    if not symbol or order_id in (None, ""):
+                        cancel_failures += 1
+                        continue
+                    try:
+                        response = await self.rest_client.request(
+                            "DELETE",
+                            "/fapi/v1/order",
+                            signed=True,
+                            params={"symbol": symbol, "orderId": order_id},
+                        )
+                        if not isinstance(response, dict) or str(
+                            response.get("status", "")
+                        ).upper() not in {"CANCELED", "CANCELLED"}:
+                            cancel_failures += 1
+                    except BinanceAuthenticationError:
+                        self.invalidate_authentication()
+                        return {
+                            "status": "UNKNOWN",
+                            "reason": "Testnet authentication failed; exchange cancellation is unknown",
+                        }
+                    except Exception as exc:
+                        logger.error("Testnet kill-switch cancellation failed: %s", exc)
+                        cancel_failures += 1
+
+                remaining = await self.rest_client.request(
+                    "GET", "/fapi/v1/openOrders", signed=True
+                )
+                if not isinstance(remaining, list):
+                    return {
+                        "status": "UNKNOWN",
+                        "reason": "Open-order verification response is invalid",
+                    }
+                if remaining or cancel_failures:
+                    return {
+                        "status": "PARTIAL",
+                        "remaining_orders": len(remaining),
+                        "cancel_failures": cancel_failures,
+                    }
+                return {"status": "CONFIRMED", "remaining_orders": 0}
+            except BinanceAuthenticationError:
+                self.invalidate_authentication()
+                return {
+                    "status": "UNKNOWN",
+                    "reason": "Testnet authentication failed; exchange cancellation is unknown",
+                }
+            except Exception as exc:
+                logger.error("Testnet kill-switch exchange cancellation is unknown: %s", exc)
+                return {
+                    "status": "UNKNOWN",
+                    "reason": "Exchange cancellation could not be verified",
+                }
+
     async def cancel_order(
+        self,
+        symbol: str,
+        orig_client_order_id: str,
+        *,
+        authority: Optional[object] = None,
+    ) -> bool:
+        if not self._worker_authorized(authority):
+            logger.error("Blocked direct Testnet cancel outside the Trading Worker")
+            return False
+        async with self._mutation_lock:
+            if getattr(authority, "kill_switch_active", False):
+                logger.warning("Kill switch blocked Testnet cancel mutation")
+                return False
+            return await self._cancel_order(
+                symbol, orig_client_order_id, authority=authority
+            )
+
+    async def _cancel_order(
         self,
         symbol: str,
         orig_client_order_id: str,
@@ -1183,6 +1305,32 @@ class BinanceExecutionAdapter:
             return False
 
     async def modify_order(
+        self,
+        symbol: str,
+        orig_client_order_id: str,
+        new_price: Decimal,
+        new_qty: Decimal,
+        side: str,
+        *,
+        authority: Optional[object] = None,
+    ) -> Optional[ExecutionOrder]:
+        if not self._worker_authorized(authority):
+            logger.error("Blocked direct Testnet amendment outside the Trading Worker")
+            return None
+        async with self._mutation_lock:
+            if getattr(authority, "kill_switch_active", False):
+                logger.warning("Kill switch blocked Testnet amendment mutation")
+                return None
+            return await self._modify_order(
+                symbol,
+                orig_client_order_id,
+                new_price,
+                new_qty,
+                side,
+                authority=authority,
+            )
+
+    async def _modify_order(
         self,
         symbol: str,
         orig_client_order_id: str,
@@ -1375,6 +1523,22 @@ class BinanceExecutionAdapter:
         return order_status
 
     async def emergency_flatten(
+        self,
+        symbol: Optional[str] = None,
+        *,
+        authority: Optional[object] = None,
+    ) -> List[ExecutionOrder]:
+        if not self._worker_authorized(authority):
+            logger.error("Blocked direct emergency flatten outside the Trading Worker")
+            self.last_emergency_result = {
+                "status": "UNKNOWN",
+                "reason": "Worker authority is required for emergency execution",
+            }
+            return []
+        async with self._mutation_lock:
+            return await self._emergency_flatten(symbol, authority=authority)
+
+    async def _emergency_flatten(
         self,
         symbol: Optional[str] = None,
         *,

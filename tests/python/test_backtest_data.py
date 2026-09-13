@@ -15,6 +15,10 @@ from apps.trading_worker.backtest.economic import (
     evaluate_trades,
     walk_forward_splits,
 )
+from apps.trading_worker.backtest.evidence import (
+    ParameterVariantResult,
+    evaluate_walk_forward_evidence,
+)
 from apps.trading_worker.backtest.vector_backtester import validate_research_provenance
 
 
@@ -178,6 +182,21 @@ def test_economic_cost_accounting_deducts_each_explicit_component():
     assert result.net_pnl == Decimal("7.5")
 
 
+def test_research_trade_requires_explicit_funding_spread_and_slippage_observations():
+    payload = _research_trade(1).model_dump()
+    for field in (
+        "funding_pnl",
+        "entry_spread_bps",
+        "exit_spread_bps",
+        "entry_slippage_bps",
+        "exit_slippage_bps",
+    ):
+        incomplete = dict(payload)
+        incomplete.pop(field)
+        with pytest.raises(ValueError):
+            BacktestTrade.model_validate(incomplete)
+
+
 def test_economic_backtest_result_is_not_launch_evidence():
     model = EconomicCostModel(
         maker_fee_rate=Decimal("0.0002"),
@@ -223,3 +242,134 @@ def test_walk_forward_rejects_out_of_order_records():
             [first, second],
             WalkForwardConfig(train_size=1, test_size=1),
         )
+
+
+def test_evaluate_trades_rejects_duplicate_research_trade_ids():
+    first = _research_trade(1)
+    duplicate = _research_trade(2).model_copy(update={"trade_id": first.trade_id})
+
+    with pytest.raises(ValueError, match="duplicate research trade_id"):
+        evaluate_trades(
+            [first, duplicate],
+            initial_capital=Decimal("1000"),
+            cost_model=EconomicCostModel(
+                maker_fee_rate=Decimal("0.0002"),
+                taker_fee_rate=Decimal("0.0005"),
+            ),
+        )
+
+
+def test_walk_forward_evidence_requires_net_oos_regimes_and_parameter_plateau():
+    trades = [
+        _research_trade(index).model_copy(
+            update={
+                "regime": {
+                    3: "R1_RANGE",
+                    4: "R3_STRONG_TREND",
+                    9: "R5_VOLATILITY_SHOCK",
+                    10: "R1_RANGE",
+                    15: "R3_STRONG_TREND",
+                    16: "R5_VOLATILITY_SHOCK",
+                }.get(index, "R1_RANGE")
+            }
+        )
+        for index in range(20)
+    ]
+    variants = [
+        ParameterVariantResult(
+            variant_id=f"variant-{index}",
+            oos_net_return_pct=Decimal(value),
+            oos_average_net_pnl=Decimal("1"),
+            max_drawdown_pct=Decimal("2"),
+            oos_trade_count=10,
+        )
+        for index, value in enumerate(("1.0", "1.2", "0.9"))
+    ]
+
+    evidence = evaluate_walk_forward_evidence(
+        trades,
+        config=WalkForwardConfig(
+            train_size=2,
+            test_size=2,
+            purge_size=1,
+            embargo_size=1,
+        ),
+        initial_capital=Decimal("1000"),
+        cost_model=EconomicCostModel(
+            maker_fee_rate=Decimal("0.0002"),
+            taker_fee_rate=Decimal("0.0005"),
+        ),
+        required_regimes=("R1_RANGE", "R3_STRONG_TREND", "R5_VOLATILITY_SHOCK"),
+        parameter_variants=variants,
+    )
+
+    assert evidence.fold_count == 3
+    assert evidence.positive_oos_expectancy is True
+    assert evidence.regime_coverage_passed is True
+    assert evidence.parameter_plateau_passed is True
+    assert evidence.research_quality_passed is True
+    assert evidence.evidence_status == "RESEARCH_ONLY"
+    assert evidence.launch_eligible is False
+
+
+def test_walk_forward_evidence_fails_quality_without_plateau_or_regime_coverage():
+    trades = [_research_trade(index) for index in range(20)]
+    evidence = evaluate_walk_forward_evidence(
+        trades,
+        config=WalkForwardConfig(train_size=2, test_size=2, purge_size=1, embargo_size=1),
+        initial_capital=Decimal("1000"),
+        cost_model=EconomicCostModel(
+            maker_fee_rate=Decimal("0.0002"),
+            taker_fee_rate=Decimal("0.0005"),
+        ),
+        required_regimes=("R1_RANGE", "R3_STRONG_TREND"),
+        parameter_variants=(),
+    )
+
+    assert evidence.positive_oos_expectancy is True
+    assert evidence.regime_coverage_passed is False
+    assert evidence.unknown_oos_trade_count == evidence.oos_trade_count
+    assert evidence.parameter_plateau_passed is False
+    assert evidence.research_quality_passed is False
+    assert evidence.launch_eligible is False
+
+
+def test_unknown_oos_regime_blocks_quality_even_when_required_regime_is_present():
+    trades = [
+        _research_trade(index).model_copy(
+            update={
+                "regime": (
+                    "UNKNOWN"
+                    if index == 16
+                    else "R1_RANGE"
+                )
+            }
+        )
+        for index in range(20)
+    ]
+    variants = [
+        ParameterVariantResult(
+            variant_id=f"variant-{index}",
+            oos_net_return_pct=Decimal("1"),
+            oos_average_net_pnl=Decimal("1"),
+            max_drawdown_pct=Decimal("2"),
+            oos_trade_count=10,
+        )
+        for index in range(3)
+    ]
+
+    evidence = evaluate_walk_forward_evidence(
+        trades,
+        config=WalkForwardConfig(train_size=2, test_size=2, purge_size=1, embargo_size=1),
+        initial_capital=Decimal("1000"),
+        cost_model=EconomicCostModel(
+            maker_fee_rate=Decimal("0.0002"),
+            taker_fee_rate=Decimal("0.0005"),
+        ),
+        required_regimes=("R1_RANGE",),
+        parameter_variants=variants,
+    )
+
+    assert evidence.regime_coverage_passed is True
+    assert evidence.unknown_oos_trade_count == 1
+    assert evidence.research_quality_passed is False

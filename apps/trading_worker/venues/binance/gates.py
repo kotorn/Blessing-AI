@@ -178,9 +178,18 @@ class DecisionExecutionGate:
             return GateResult(False, "NOOP decisions cannot reach execution")
 
         if _is_risk_increasing(risk_class):
-            if getattr(self.worker, "pause_new_risk", False):
+            # Treat canonical engine state as a safety input as well as the
+            # compatibility flags. Any disagreement fails closed instead of
+            # allowing a stale control-plane flag to authorize new exposure.
+            if (
+                getattr(self.worker, "pause_new_risk", False)
+                or engine_state == "PAUSED_NEW_RISK"
+            ):
                 return GateResult(False, "Paused new risk")
-            if getattr(self.worker, "recovery_only", False):
+            if (
+                getattr(self.worker, "recovery_only", False)
+                or engine_state == "RECOVERY_ONLY"
+            ):
                 return GateResult(False, "Recovery only mode active")
 
         account_snapshot_ready = self.worker.is_account_snapshot_ready()

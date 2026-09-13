@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -108,6 +109,7 @@ def test_worker_testnet_credentials_are_mapped_without_leaking_worker_names(monk
 
     monkeypatch.setattr("apps.trading_worker.research.binance_cli.subprocess.run", fake_run)
     result = BinanceCliResearchRunner(
+        binary=str(Path.cwd() / "binance-cli"),
         environ={
             "BINANCE_API_ENV": "testnet",
             "BINANCE_TESTNET_API_KEY": "testnet-key-fixture",
@@ -139,6 +141,7 @@ def test_cli_result_redacts_credential_values_from_stdout(monkeypatch):
 
     monkeypatch.setattr("apps.trading_worker.research.binance_cli.subprocess.run", fake_run)
     result = BinanceCliResearchRunner(
+        binary=str(Path.cwd() / "binance-cli"),
         environ={
             "BINANCE_API_ENV": "testnet",
             "BINANCE_API_KEY": "cli-key-fixture",
@@ -150,6 +153,47 @@ def test_cli_result_redacts_credential_values_from_stdout(monkeypatch):
     assert "cli-key-fixture" not in rendered
     assert "cli-secret-fixture" not in rendered
     assert "[REDACTED]" in rendered
+
+
+def test_signed_check_without_explicit_official_binary_path_is_not_run(monkeypatch):
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda _: pytest.fail("signed checks must not use an implicit PATH binary"),
+    )
+    result = BinanceCliResearchRunner(
+        environ={
+            "BINANCE_API_ENV": "testnet",
+            "BINANCE_TESTNET_API_KEY": "testnet-key-fixture",
+            "BINANCE_TESTNET_API_SECRET": "testnet-secret-fixture",
+        }
+    ).run(ReadOnlyCheck.ACCOUNT)
+
+    assert result.status == "NOT_RUN"
+    assert "absolute" in result.error
+
+
+def test_child_process_uses_isolated_cli_config_home(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda _: "binance-cli",
+    )
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs["env"])
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("apps.trading_worker.research.binance_cli.subprocess.run", fake_run)
+    result = BinanceCliResearchRunner(
+        environ={
+            "BINANCE_API_ENV": "testnet",
+            "BINANCE_FUTURES_USDS_BASE_PATH": "https://testnet.binancefuture.com",
+        }
+    ).run(ReadOnlyCheck.SERVER_TIME)
+
+    assert result.status == "PASS"
+    assert captured["HOME"] == captured["XDG_CONFIG_HOME"]
+    assert captured["APPDATA"] == captured["LOCALAPPDATA"]
 
 
 def test_query_order_requires_a_reference_and_never_accepts_mutation_flags():

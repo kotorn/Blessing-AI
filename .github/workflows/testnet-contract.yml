@@ -11,6 +11,15 @@ on:
         options:
         - 'false'
         - 'true'
+      confirm_mutation:
+        description: 'Type I_UNDERSTAND_TESTNET_MUTATION to authorize the one-order trial'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: testnet-contract-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -19,6 +28,7 @@ jobs:
   contract_tests:
     runs-on: ubuntu-latest
     environment: testnet
+    timeout-minutes: 20
     
     steps:
     - uses: actions/checkout@v4
@@ -83,19 +93,29 @@ jobs:
         path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         PY
         
-    - name: Run Mutating Contract Tests
+    - name: Require explicit mutation confirmation
       if: github.event.inputs.allow_mutation == 'true'
+      env:
+        CONFIRM_MUTATION: ${{ github.event.inputs.confirm_mutation }}
+      run: |
+        if [ "$CONFIRM_MUTATION" != "I_UNDERSTAND_TESTNET_MUTATION" ]; then
+          echo "::error::Mutating tests require the exact confirmation phrase"
+          exit 1
+        fi
+
+    - name: Run Mutating Contract Tests
+      if: github.event.inputs.allow_mutation == 'true' && github.event.inputs.confirm_mutation == 'I_UNDERSTAND_TESTNET_MUTATION'
       env:
         PYTHONPATH: .
         BINANCE_TESTNET: 'true'
-        TESTNET_MANUAL_TRIAL_APPROVED: ${{ github.event.inputs.allow_mutation == 'true' }}
+        TESTNET_MANUAL_TRIAL_APPROVED: ${{ github.event.inputs.allow_mutation == 'true' && github.event.inputs.confirm_mutation == 'I_UNDERSTAND_TESTNET_MUTATION' }}
         BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
         BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
       run: |
         pytest -m "contract_mutating" tests/python/contract/
 
     - name: Record Successful Current-SHA Manual Trial Evidence
-      if: success() && github.event.inputs.allow_mutation == 'true'
+      if: success() && github.event.inputs.allow_mutation == 'true' && github.event.inputs.confirm_mutation == 'I_UNDERSTAND_TESTNET_MUTATION'
       env:
         BUILD_SHA: ${{ github.sha }}
       run: |
@@ -116,5 +136,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: testnet-contract-evidence-${{ github.sha }}
-        path: artifacts/
+        path: |
+          artifacts/build-evidence.json
+          artifacts/testnet-trial-*.json
         if-no-files-found: ignore

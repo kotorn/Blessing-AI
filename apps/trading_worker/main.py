@@ -26,7 +26,10 @@ from domain.enums import EconomicRiskClass, RiskState
 from domain.models import MarketEvent, MarketType, RiskSnapshot, utc_now
 
 from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
-from apps.trading_worker.engines.funding_carry import FundingCarryEngine
+from apps.trading_worker.engines.funding_carry import (
+    FundingCarryCostInputs,
+    FundingCarryEngine,
+)
 from apps.trading_worker.engines.grid_strategy import GridStrategyEngine
 from apps.trading_worker.engines.market_scanner import MarketScannerEngine
 from apps.trading_worker.engines.market_state import MarketStateClassifier
@@ -440,7 +443,9 @@ class TradingWorkerApp:
         self.grid_engine = GridStrategyEngine()
         self.trend_engine = TrendStrategyEngine()
         self.shock_engine = ShockStrategyEngine()
-        self.carry_engine = FundingCarryEngine()
+        self.carry_engine = FundingCarryEngine(
+            cost_inputs=FundingCarryCostInputs.from_environment()
+        )
         self.recovery_engine = ExposureRecoveryEngine()
         self.meta_allocator = MetaAllocator()
         self.risk_governor = RiskGovernor()
@@ -673,7 +678,18 @@ class TradingWorkerApp:
         self._sync_adapter_state()
             
         uptime = (utc_now() - self.start_time).total_seconds()
-        trading_healthy = self.connection_state == "READY"
+        trading_healthy = bool(
+            self.connection_state == "READY"
+            and not self.kill_switch_active
+            and (
+                self.execution_mode == WorkerExecutionMode.PAPER
+                or (
+                    self.authenticated
+                    and self.private_stream_healthy
+                    and self.reconciliation_status == "IN_SYNC"
+                )
+            )
+        )
         health = HealthIndicators(
             market_data_healthy=self.market_data_healthy,
             private_stream_healthy=self.private_stream_healthy,
@@ -1103,61 +1119,33 @@ class TradingWorkerApp:
             }
         if adapter is None:
             return {"status": "UNKNOWN", "reason": "Testnet exchange adapter is unavailable."}
+        adapter.bind_worker_authority(self)
 
+        cancellation = await adapter.cancel_all_open_orders(authority=self)
+        if cancellation.get("status") != "CONFIRMED":
+            return cancellation
         try:
-            open_orders = await adapter.rest_client.request(
-                "GET", "/fapi/v1/openOrders", signed=True
-            )
-            if not isinstance(open_orders, list):
-                return {"status": "UNKNOWN", "reason": "Authoritative openOrders response is invalid."}
-
-            cancel_failures = 0
-            for order in open_orders:
-                try:
-                    response = await adapter.rest_client.request(
-                        "DELETE",
-                        "/fapi/v1/order",
-                        signed=True,
-                        params={"symbol": order["symbol"], "orderId": order["orderId"]},
-                    )
-                    if not isinstance(response, dict) or response.get("status") != "CANCELED":
-                        cancel_failures += 1
-                except BinanceAuthenticationError as exc:
-                    adapter.invalidate_authentication()
-                    logger.error("Kill switch cancellation authentication failed: %s", exc)
-                    return {
-                        "status": "UNKNOWN",
-                        "reason": "Testnet authentication failed; exchange cancellation is unknown.",
-                    }
-                except Exception as exc:
-                    logger.error("Kill switch cancellation failed: %s", exc)
-                    cancel_failures += 1
-
-            remaining = await adapter.rest_client.request(
-                "GET", "/fapi/v1/openOrders", signed=True
-            )
-            if not isinstance(remaining, list):
-                return {"status": "UNKNOWN", "reason": "Open-order verification response is invalid."}
             reconciliation = await self.trigger_reconciliation()
-            if remaining or cancel_failures:
-                return {"status": "PARTIAL", "remaining_orders": len(remaining)}
-            if (
-                reconciliation != "IN_SYNC"
-                or not adapter.private_stream_healthy
-                or not adapter.authenticated
-            ):
-                return {"status": "PARTIAL", "reconciliation": reconciliation}
-            return {"status": "CONFIRMED", "remaining_orders": 0}
         except BinanceAuthenticationError as exc:
             adapter.invalidate_authentication()
-            logger.error("Kill switch authentication failed: %s", exc)
+            logger.error("Kill switch reconciliation authentication failed: %s", exc)
             return {
                 "status": "UNKNOWN",
                 "reason": "Testnet authentication failed; exchange cancellation is unknown.",
             }
         except Exception as exc:
-            logger.error("Kill switch exchange cancellation is unknown: %s", exc)
-            return {"status": "UNKNOWN", "reason": "Exchange cancellation could not be verified."}
+            logger.error("Kill switch reconciliation is unknown: %s", exc)
+            return {
+                "status": "UNKNOWN",
+                "reason": "Exchange cancellation was verified but reconciliation is unknown.",
+            }
+        if (
+            reconciliation != "IN_SYNC"
+            or not adapter.private_stream_healthy
+            or not adapter.authenticated
+        ):
+            return {"status": "PARTIAL", "reconciliation": reconciliation}
+        return {"status": "CONFIRMED", "remaining_orders": 0}
             
     async def trigger_reconciliation(self) -> str:
         if self.execution_adapter is not None:
@@ -1284,6 +1272,22 @@ class TradingWorkerApp:
             logger.info("Worker ARMED in TESTNET mode")
             return True, ""
         else:
+            # Switching from Testnet back to Paper must tear down the previous
+            # exchange adapter first. Otherwise stale signed/account/stream
+            # state could be projected into a Paper runtime.
+            if self.execution_adapter is not None:
+                try:
+                    await self.execution_adapter.close()
+                except Exception as exc:
+                    logger.warning("Error closing Testnet adapter before Paper ARM: %s", exc)
+                self.execution_adapter = None
+            self.connection_state = "DISCONNECTED"
+            self.market_data_healthy = False
+            self.private_stream_healthy = False
+            self.authenticated = False
+            self.reconciliation_status = "UNKNOWN"
+            self.last_market_event_at.clear()
+            self.risk_governor.hedge_mode = False
             self.engine_state = WorkerEngineState.ARMED
             self.active_configuration = req.model_dump()
             logger.info("Worker ARMED in PAPER mode")

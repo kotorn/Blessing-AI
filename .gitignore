@@ -12,8 +12,13 @@ patch_*.cjs
 patch_*.js
 patch_*.py
 fix_*.cjs
+fix_*.js
 fix_*.py
 update_*.cjs
+*.tmp
+*.bak
+*.orig
+artifacts/
 
 # Python
 __pycache__/

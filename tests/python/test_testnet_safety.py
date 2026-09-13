@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 from decimal import Decimal
 
@@ -59,6 +60,16 @@ class GateAuthority:
 class BlockingGateAuthority:
     def _evaluate_execution_gate(self, decision):
         return False, "blocked by unit-test decision gate"
+
+
+class MutableGateAuthority:
+    def __init__(self):
+        self.kill_switch_active = False
+
+    def _evaluate_execution_gate(self, decision):
+        if self.kill_switch_active:
+            return False, "kill switch active in unit-test authority"
+        return True, "unit-test gate"
 
 
 class FakeReconciliation:
@@ -298,6 +309,58 @@ async def test_testnet_readiness_does_not_depend_on_engine_armed(monkeypatch):
     assert capabilities["testnetExecutionReady"] is True
     assert capabilities["testnetAccountSnapshotReady"] is True
     assert capabilities["testnetMarketDataFresh"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restricted_state", [
+    WorkerEngineState.PAUSED_NEW_RISK,
+    WorkerEngineState.RECOVERY_ONLY,
+])
+async def test_decision_gate_fails_closed_on_restricted_state_flag_mismatch(
+    monkeypatch, restricted_state
+):
+    worker = await make_ready_worker(monkeypatch)
+    worker.engine_state = restricted_state
+    worker.pause_new_risk = False
+    worker.recovery_only = False
+
+    result = worker.decision_execution_gate.check(
+        make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
+    )
+
+    assert result.allowed is False
+    assert "paused" in result.reason.lower() or "recovery" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_switching_from_testnet_to_paper_closes_and_clears_adapter():
+    class CloseTrackingAdapter:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+    worker.execution_mode = WorkerExecutionMode.TESTNET
+    adapter = CloseTrackingAdapter()
+    worker.execution_adapter = adapter
+
+    armed, error = await worker.arm(
+        {
+            "executionMode": "PAPER",
+            "instruments": ["BTCUSDT"],
+            "strategies": {"grid": True, "trend": False, "shock": False, "carry": False},
+            "riskProfile": "CONSERVATIVE",
+        }
+    )
+
+    assert armed is True, error
+    assert adapter.closed is True
+    assert worker.execution_adapter is None
+    assert worker.authenticated is False
+    assert worker.private_stream_healthy is False
+    assert worker.connection_state == "DISCONNECTED"
 
 
 @pytest.mark.asyncio
@@ -1250,6 +1313,49 @@ async def test_kill_switch_stays_active_when_exchange_is_unreachable(monkeypatch
     assert result["status"] == "UNKNOWN"
     assert worker.kill_switch_active is True
     assert worker.engine_state == WorkerEngineState.EMERGENCY
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_blocks_queued_mutation_after_local_activation():
+    first_post_started = asyncio.Event()
+    release_first_post = asyncio.Event()
+    post_calls = 0
+
+    async def handler(method, path, kwargs):
+        nonlocal post_calls
+        if method == "POST" and path == "/fapi/v1/order":
+            post_calls += 1
+            first_post_started.set()
+            await release_first_post.wait()
+            return {
+                "orderId": 77,
+                "clientOrderId": kwargs["params"]["newClientOrderId"],
+                "status": "NEW",
+                "symbol": "BTCUSDT",
+                "side": "BUY",
+                "positionSide": "BOTH",
+                "price": "10000",
+                "origQty": "0.001",
+            }
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    authority = MutableGateAuthority()
+    adapter.bind_worker_authority(authority)
+    decision = make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
+
+    first = asyncio.create_task(adapter.execute_decision(decision, authority=authority))
+    await asyncio.wait_for(first_post_started.wait(), timeout=1)
+    queued = asyncio.create_task(adapter.execute_decision(decision, authority=authority))
+    await asyncio.sleep(0)
+    authority.kill_switch_active = True
+    release_first_post.set()
+
+    first_result, queued_result = await asyncio.gather(first, queued)
+
+    assert len(first_result) == 1
+    assert queued_result == []
+    assert post_calls == 1
 
 
 @pytest.mark.asyncio

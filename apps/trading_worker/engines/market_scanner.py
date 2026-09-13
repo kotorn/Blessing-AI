@@ -1,8 +1,8 @@
-import logging
 import asyncio
-import os
-from typing import List, Dict, Any
-from decimal import Decimal
+import logging
+from typing import List
+
+from apps.trading_worker.venues.binance.config import BinanceEnvironment, get_rest_url
 
 logger = logging.getLogger("blessing.engines.market_scanner")
 
@@ -11,30 +11,40 @@ class MarketScannerEngine:
     Dynamically scans the market to discover the most active and volatile trading pairs.
     Filters by volume, filters out stablecoin pairs, and ranks by combination of liquidity and price action.
     """
-    def __init__(self, top_n: int = 10, min_volume_usd: float = 100_000_000.0, refresh_interval_sec: int = 3600):
+    def __init__(
+        self,
+        top_n: int = 10,
+        min_volume_usd: float = 100_000_000.0,
+        refresh_interval_sec: int = 3600,
+        *,
+        allow_dynamic_symbols: bool = False,
+    ):
         self.top_n = top_n
         self.min_volume_usd = min_volume_usd
         self.refresh_interval_sec = refresh_interval_sec
-        self.base_url = (
-            "https://testnet.binancefuture.com/fapi/v1/ticker/24hr"
-            if os.getenv("BINANCE_TESTNET", "true").strip().lower()
-            in {"1", "true", "yes", "on"}
-            else "https://fapi.binance.com/fapi/v1/ticker/24hr"
-        )
-        self.active_symbols = ["BTCUSDT", "ETHUSDT"] # Always start with core pairs
+        self.allow_dynamic_symbols = allow_dynamic_symbols
+        # This is a worker/runtime scanner.  It must never silently switch to
+        # a Mainnet market-data endpoint; public research downloads have their
+        # own explicitly read-only module.
+        self.base_url = f"{get_rest_url(BinanceEnvironment.TESTNET)}/fapi/v1/ticker/24hr"
+        self.active_symbols = ["BTCUSDT"]
         
     async def scan_active_symbols(self) -> List[str]:
         """
         Polls Binance REST API to rank USDT-M Futures pairs.
-        In a production environment, this requires ccxt or httpx. We mock the HTTP logic for stability here,
-        but return a dynamic list simulating a real scan result.
+        Dynamic discovery is opt-in.  The default path does not perform a
+        network call and returns the bounded first-launch universe.
         """
+        if not self.allow_dynamic_symbols:
+            logger.info("Dynamic symbol discovery is disabled; using BTCUSDT launch universe")
+            return list(self.active_symbols)
+
         try:
             logger.info("Scanning Binance USD-M Futures for active pairs (Volume > %s)...", self.min_volume_usd)
             
             # Using standard library urllib or a mock due to httpx availability
-            import urllib.request
             import json
+            import urllib.request
             
             # We use an executor to prevent blocking the async loop with urllib
             def fetch_data():
@@ -70,10 +80,11 @@ class MarketScannerEngine:
             sorted_by_vol = sorted(valid_pairs, key=lambda x: x['volume'], reverse=True)
             top_symbols = [x['symbol'] for x in sorted_by_vol[:self.top_n]]
             
-            # Always ensure BTC and ETH are in the mix
-            for core in ["BTCUSDT", "ETHUSDT"]:
-                if core not in top_symbols:
-                    top_symbols.insert(0, core)
+            # The first-launch universe has one explicit instrument.  Dynamic
+            # discovery is opt-in for research/paper runs and still keeps the
+            # Testnet anchor symbol present.
+            if "BTCUSDT" not in top_symbols:
+                top_symbols.insert(0, "BTCUSDT")
                     
             # Deduplicate and trim
             top_symbols = list(dict.fromkeys(top_symbols))[:self.top_n]
@@ -83,6 +94,6 @@ class MarketScannerEngine:
             return self.active_symbols
             
         except Exception as e:
-            logger.error("Market Scanner failed (fallback to core): %s", e)
-            self.active_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+            logger.error("Market Scanner failed; keeping the bounded launch universe: %s", e)
+            self.active_symbols = ["BTCUSDT"]
             return self.active_symbols

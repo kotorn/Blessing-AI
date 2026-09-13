@@ -12,10 +12,14 @@ from domain.models import (
     PriceActionState,
 )
 from domain.enums import RegimeType, RiskState
-from apps.trading_worker.engines.funding_carry import FundingCarryEngine
+from apps.trading_worker.engines.funding_carry import (
+    FundingCarryCostInputs,
+    FundingCarryEngine,
+)
 from apps.trading_worker.engines.grid_strategy import GridStrategyEngine
 from apps.trading_worker.engines.market_state import MarketStateClassifier
 from apps.trading_worker.engines.meta_allocator import MetaAllocator
+from apps.trading_worker.engines.market_scanner import MarketScannerEngine
 from apps.trading_worker.engines.risk_governor import RiskGovernor
 from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
 
@@ -298,7 +302,19 @@ def test_carry_requires_current_funding_rate():
 
 
 def test_carry_intent_uses_bounded_score_and_explicit_rate():
-    engine = FundingCarryEngine()
+    engine = FundingCarryEngine(
+        cost_inputs=FundingCarryCostInputs(
+            maker_fee_rate=Decimal("0.0002"),
+            taker_fee_rate=Decimal("0.0005"),
+            entry_spread_bps=Decimal("4"),
+            exit_spread_bps=Decimal("4"),
+            entry_slippage_bps=Decimal("2"),
+            exit_slippage_bps=Decimal("2"),
+            annual_financing_rate=Decimal("0.05"),
+            funding_intervals_per_day=3,
+            holding_horizon_sec=86400 * 7,
+        )
+    )
     market_state = type("MarketStateStub", (), _carry_market_state())()
 
     intent = engine.evaluate(_carry_event(Decimal("0.0005")), market_state)
@@ -307,6 +323,43 @@ def test_carry_intent_uses_bounded_score_and_explicit_rate():
     assert Decimal("0") <= intent.opportunity_score <= Decimal("1")
     assert intent.direction == PositionSide.SHORT
     assert intent.evidence["raw_funding"] == "0.0005"
+    assert Decimal(intent.evidence["net_horizon_pct"]) > 0
+
+
+def test_carry_without_explicit_cost_inputs_is_disabled():
+    engine = FundingCarryEngine()
+    market_state = type("MarketStateStub", (), _carry_market_state())()
+
+    assert engine.evaluate(_carry_event(Decimal("0.01")), market_state) is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_scanner_defaults_to_bounded_testnet_launch_universe():
+    scanner = MarketScannerEngine()
+
+    assert scanner.base_url == "https://testnet.binancefuture.com/fapi/v1/ticker/24hr"
+    assert await scanner.scan_active_symbols() == ["BTCUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_scanner_failure_does_not_expand_symbol_universe(monkeypatch):
+    import urllib.request
+
+    def fail_urlopen(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+    scanner = MarketScannerEngine(allow_dynamic_symbols=True)
+
+    assert await scanner.scan_active_symbols() == ["BTCUSDT"]
+
+
+def test_ml_scorer_never_returns_a_fabricated_live_score():
+    from apps.trading_worker.engines.ml_scorer import GridSafetyScorerML
+
+    scorer = GridSafetyScorerML()
+    with pytest.raises(RuntimeError, match="verified"):
+        scorer.predict_safety_score(None, None)
 
 
 def test_live_grid_engine_does_not_instantiate_ml_authority():

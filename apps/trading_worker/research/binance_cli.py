@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -30,6 +31,8 @@ TESTNET_FUTURES_HOST = "testnet.binancefuture.com"
 DEFAULT_TIMEOUT_SEC = 15.0
 DEFAULT_SYMBOL = "BTCUSDT"
 DEFAULT_RECV_WINDOW = "5000"
+DEFAULT_BINARY = "binance-cli"
+ALLOWED_BINARY_NAMES = frozenset({"binance-cli", "binance-cli.exe"})
 
 
 class BinanceCliResearchError(RuntimeError):
@@ -343,15 +346,32 @@ class BinanceCliResearchRunner:
     def __init__(
         self,
         *,
-        binary: str = "binance-cli",
+        binary: str | None = None,
         timeout_sec: float = DEFAULT_TIMEOUT_SEC,
         environ: Mapping[str, str] | None = None,
     ) -> None:
         if timeout_sec <= 0 or timeout_sec > 120:
             raise ValueError("timeout_sec must be between 0 and 120 seconds")
-        self.binary = binary
         self.timeout_sec = timeout_sec
         self.environ = dict(os.environ if environ is None else environ)
+        self.binary = (
+            binary or self.environ.get("BINANCE_CLI_PATH") or DEFAULT_BINARY
+        ).strip()
+        if not self.binary:
+            raise ValueError("binance-cli binary path must not be empty")
+
+    def _validate_binary_for_credentials(self) -> None:
+        """Prevent PATH hijacking or arbitrary tools from receiving secrets."""
+
+        if not os.path.isabs(self.binary):
+            raise BinanceCliPolicyError(
+                "signed checks require an absolute BINANCE_CLI_PATH to the official binance-cli binary"
+            )
+        binary_name = os.path.basename(self.binary).lower()
+        if binary_name not in ALLOWED_BINARY_NAMES:
+            raise BinanceCliPolicyError(
+                "signed checks only allow an executable named binance-cli or binance-cli.exe"
+            )
 
     def run(
         self,
@@ -378,6 +398,17 @@ class BinanceCliResearchRunner:
                 credential_source=credential_source,
                 error="signed read-only check requires explicit Testnet credentials",
             )
+        if spec.requires_credentials:
+            try:
+                self._validate_binary_for_credentials()
+            except BinanceCliPolicyError as exc:
+                return BinanceCliResult(
+                    check=normalized_check.value,
+                    status="NOT_RUN",
+                    command=command,
+                    credential_source=credential_source,
+                    error=str(exc),
+                )
 
         resolved_binary = shutil.which(self.binary)
         if resolved_binary is None:
@@ -389,16 +420,28 @@ class BinanceCliResearchRunner:
                 error="binance-cli is not installed or not on PATH",
             )
 
+        # The official CLI supports local profiles.  An isolated config home
+        # ensures a profile cannot silently replace the explicit Testnet route
+        # or credential namespace supplied above.
         try:
-            completed = subprocess.run(
-                [resolved_binary, *command],
-                env=child_env,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_sec,
-                check=False,
-                shell=False,
-            )
+            with tempfile.TemporaryDirectory(prefix="blessing-binance-cli-") as config_dir:
+                for config_key in (
+                    "HOME",
+                    "USERPROFILE",
+                    "APPDATA",
+                    "LOCALAPPDATA",
+                    "XDG_CONFIG_HOME",
+                ):
+                    child_env[config_key] = config_dir
+                completed = subprocess.run(
+                    [resolved_binary, *command],
+                    env=child_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_sec,
+                    check=False,
+                    shell=False,
+                )
         except subprocess.TimeoutExpired:
             return BinanceCliResult(
                 check=normalized_check.value,
@@ -439,7 +482,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
     parser.add_argument("--order-id", type=int)
     parser.add_argument("--client-order-id")
-    parser.add_argument("--binary", default="binance-cli")
+    parser.add_argument(
+        "--binary",
+        default=None,
+        help="optional binary path for public checks; signed checks require an absolute official binance-cli path",
+    )
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
     return parser
 

@@ -28,10 +28,11 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
   const fundingRate8h = hasVerifiedData ? instrument?.funding_rate ?? null : null;
   const fundingAnnualizedPct = hasVerifiedData ? instrument?.funding_annualized_pct ?? null : null;
 
-  // Realistic cost accounting: taker fee (0.05% * 2 legs = 0.10%) + slippage (0.02%) = 0.12% round trip
-  const roundTripCostPct = 0.12;
-  const netExpectedCarryAnnualized = fundingAnnualizedPct == null ? null : fundingAnnualizedPct - roundTripCostPct * 365 / 30;
-  const isCarryViable = netExpectedCarryAnnualized != null && basisZScore != null && netExpectedCarryAnnualized > 5.0 && Math.abs(basisZScore) < 2.0;
+  // The UI has no verified, timestamped fee/spread/slippage/financing model
+  // attached to this instrument snapshot. Never turn a gross funding print
+  // into a positive net-carry claim with a hard-coded cost assumption.
+  const netExpectedCarryAnnualized = null;
+  const isCarryViable = false;
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">
@@ -60,7 +61,9 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
                 : 'bg-zinc-800 text-zinc-400 border-zinc-700'
             }`}
           >
-            {hasVerifiedData ? (isCarryViable ? 'VIABLE (POSITIVE NET SPREAD)' : 'MARGINAL (FEES DILUTE)') : 'UNKNOWN (NO VERIFIED DATA)'}
+            {hasVerifiedData && netExpectedCarryAnnualized != null
+              ? (isCarryViable ? 'VIABLE (VERIFIED NET MODEL)' : 'MARGINAL (FEES DILUTE)')
+              : 'UNKNOWN (VERIFIED COST MODEL REQUIRED)'}
           </span>
         </div>
       </div>
@@ -119,7 +122,7 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
             {netExpectedCarryAnnualized == null ? 'UNKNOWN' : `+${netExpectedCarryAnnualized.toFixed(2)}% Net`}
           </div>
           <div className="text-[10px] text-zinc-400">
-            Deducts 12 bps round-trip fees/slip
+            Requires verified fee, funding, spread, slippage, and financing inputs
           </div>
         </div>
       </div>

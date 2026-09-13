@@ -15,6 +15,10 @@ bridge in `apps/trading_worker/research/binance_cli.py`:
   all order/margin/leverage/position mutations;
 - requires `BINANCE_API_ENV=testnet` and pins the USDⓈ-M route to
   `https://testnet.binancefuture.com`;
+- requires an explicit absolute `BINANCE_CLI_PATH` whose filename is
+  `binance-cli`/`binance-cli.exe` before any signed check can receive keys;
+- launches the child with isolated home/config directories so an existing
+  local profile cannot silently replace the explicit Testnet settings;
 - passes credentials through child-process environment variables only, never
   command arguments, output records, or logs; and
 - labels every result `verified=false` and
@@ -64,6 +68,8 @@ PowerShell example for a public research cross-check:
 ```powershell
 $env:BINANCE_API_ENV = "testnet"
 $env:BINANCE_FUTURES_USDS_BASE_PATH = "https://testnet.binancefuture.com"
+$env:BINANCE_CLI_PATH = (Get-Command binance-cli).Source
+binance-cli --version
 python -m apps.trading_worker.research.binance_cli --check exchange_info
 python -m apps.trading_worker.research.binance_cli --check book_ticker --symbol BTCUSDT
 python -m apps.trading_worker.research.binance_cli --check mark_price --symbol BTCUSDT
@@ -74,6 +80,11 @@ the official CLI names (`BINANCE_API_KEY` and `BINANCE_SECRET_KEY`) or the
 Worker's existing Testnet names (`BINANCE_TESTNET_API_KEY` and
 `BINANCE_TESTNET_API_SECRET`). Presence is enough for local gating; values
 must never be printed or committed.
+
+Signed checks additionally require `BINANCE_CLI_PATH` to be an absolute path
+to the official executable. This prevents an implicit PATH binary from ever
+receiving credentials. Verify the installed version and provenance separately;
+the wrapper still labels its response `verified=false`.
 
 ```powershell
 python -m apps.trading_worker.research.binance_cli --check account

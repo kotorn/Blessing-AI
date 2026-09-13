@@ -81,7 +81,7 @@ export const ExecutionSensitivityCard: React.FC = () => {
             +{analysis.realisticMicrostructureReturnPct.toFixed(1)}% ROI
           </div>
           <div className="text-[10px] text-zinc-400 font-sans">
-            Authoritative production metric with full microstructure drag
+            Static illustrative fixture; no current-build artifact is attached
           </div>
         </div>
 

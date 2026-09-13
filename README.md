@@ -44,6 +44,7 @@ docker compose up -d
 # Install dependencies
 pip install -e ".[dev]"
 
-# Run unit and failure simulation tests
-pytest tests/ -v --cov=core
+# Run only the non-secret unit/failure-simulation suite.
+# Credentialed Testnet and mutating tests are deliberately excluded.
+pytest tests/python/ -m "not contract_readonly and not contract_mutating" -v
 ```

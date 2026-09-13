@@ -76,20 +76,21 @@ class BacktestTrade(BaseModel):
     symbol: str = Field(min_length=2)
     strategy_id: str = Field(min_length=1)
     data_source: str
+    regime: str = "UNKNOWN"
 
     # ``gross_pnl`` is the pre-friction result produced by a separate,
     # causal strategy simulator. This module does not invent signals or PnL.
     gross_pnl: Decimal
-    funding_pnl: Decimal = Decimal(0)
+    funding_pnl: Decimal
 
     entry_notional: Decimal
     exit_notional: Decimal
     entry_maker: bool = False
     exit_maker: bool = False
-    entry_spread_bps: Decimal = Decimal(0)
-    exit_spread_bps: Decimal = Decimal(0)
-    entry_slippage_bps: Decimal = Decimal(0)
-    exit_slippage_bps: Decimal = Decimal(0)
+    entry_spread_bps: Decimal
+    exit_spread_bps: Decimal
+    entry_slippage_bps: Decimal
+    exit_slippage_bps: Decimal
 
     @field_validator("timestamp")
     @classmethod
@@ -105,6 +106,12 @@ class BacktestTrade(BaseModel):
         if not normalized:
             raise ValueError("symbol must not be empty")
         return normalized
+
+    @field_validator("regime")
+    @classmethod
+    def normalize_regime(cls, value: str) -> str:
+        normalized = str(value).strip().upper()
+        return normalized or "UNKNOWN"
 
     @field_validator("data_source")
     @classmethod
@@ -233,9 +240,13 @@ def evaluate_trades(
     normalized_trades = list(trades)
     source = normalized_trades[0].data_source
     previous_timestamp: datetime | None = None
+    trade_ids: set[str] = set()
     for trade in normalized_trades:
         if trade.data_source != source:
             raise ValueError("all trades must use one consistent data_source")
+        if trade.trade_id in trade_ids:
+            raise ValueError(f"duplicate research trade_id: {trade.trade_id}")
+        trade_ids.add(trade.trade_id)
         if previous_timestamp is not None and trade.timestamp <= previous_timestamp:
             raise ValueError("trades must be strictly ordered chronologically")
         previous_timestamp = trade.timestamp
