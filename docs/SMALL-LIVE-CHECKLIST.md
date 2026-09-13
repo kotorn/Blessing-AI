@@ -14,9 +14,12 @@ operational approval before any Mainnet implementation is considered.
 
 ## Required future evidence
 
-- [ ] Current-SHA Testnet read-only contract: `CONTRACT_TESTED`.
+- [x] Code checkpoint `6044474346884d2068d81c8024acc3daf05a7c37` Testnet
+      read-only contract: `LOCAL_VERIFIED; CONTRACT_TESTED` (1 passed,
+      1 deselected; no mutation).
 - [ ] Current-SHA controlled Testnet mutation and sanitized artifact:
-      `MANUAL_TESTNET_VERIFIED`.
+      `MANUAL_TESTNET_VERIFIED` (blocked: 50 USDT exchange minimum exceeds
+      the hard 25 USDT first-launch cap).
 - [ ] Long-duration Testnet soak with zero unhandled execution exceptions.
 - [ ] Independent risk and operations sign-off.
 - [ ] Durable operational persistence on **Cloud SQL PostgreSQL** for orders,
@@ -27,10 +30,12 @@ operational approval before any Mainnet implementation is considered.
       approved change.
 
 Current sprint evidence: local non-secret gates are `LOCAL_VERIFIED` and
-verified safety/research implementation candidate
-`d109f3ab46dca5ba7c966cb34ff6502e994f9943` is `CI_VERIFIED` by GitHub Actions
-run `34767576411`. Testnet read-only and manual mutation are `NOT_RUN`;
-autonomous Testnet is locked. No Mainnet order has been created or tested.
+verified safety/research implementation checkpoint
+`6044474346884d2068d81c8024acc3daf05a7c37` is `CI_VERIFIED` by GitHub Actions
+run `34769924794`. Testnet read-only is `LOCAL_VERIFIED; CONTRACT_TESTED`;
+manual mutation is `NOT_RUN` because the 50 USDT exchange minimum exceeds the
+hard 25 USDT cap; autonomous Testnet is locked. No Mainnet order has been
+created or tested.
 
 ## MVP infrastructure boundary
 

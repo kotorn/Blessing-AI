@@ -115,12 +115,12 @@ mutable CLI commands; details and commands are in
 
 ## Current evidence status
 
-The verified safety/research implementation candidate
-`d109f3ab46dca5ba7c966cb34ff6502e994f9943` passed the non-secret unit and
-frontend gates in GitHub Actions run `34767576411`. The credentialed contract
-workflow records current-SHA sanitized evidence after
-read-only success and only marks the manual trial verified after the mutating
-test passes; that workflow was not run here. Credentialed Binance Testnet
-read-only and mutation trials are `NOT_RUN` because no Testnet credentials were
-configured. Autonomous Testnet execution remains locked, and Mainnet
-execution remains disabled.
+The verified safety/research implementation checkpoint
+`6044474346884d2068d81c8024acc3daf05a7c37` passed the non-secret unit and
+frontend gates in GitHub Actions run `34769924794`. The credentialed contract
+workflow records current-SHA sanitized evidence after read-only success and
+only marks the manual trial verified after the mutating test passes. The
+read-only contract passed locally; the controlled mutation trial remains
+`NOT_RUN` because the live BTCUSDT minimum notional observed on Testnet was
+50 USDT while the hard first-launch cap is 25 USDT. Autonomous Testnet
+execution remains locked, and Mainnet execution remains disabled.
