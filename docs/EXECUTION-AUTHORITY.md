@@ -85,7 +85,8 @@ deduplicated by symbol plus exchange trade ID.
 
 ## Current evidence status
 
-For the current local candidate, non-secret unit and frontend gates are
-`LOCAL_VERIFIED`. Credentialed Binance Testnet read-only and mutation trials
-are `NOT_RUN` because no Testnet credentials were configured. Autonomous
-Testnet execution remains locked, and Mainnet execution remains disabled.
+For candidate `42e082418ef0e5360e74d586942a4fa176113288`, non-secret unit and
+frontend gates are `LOCAL_VERIFIED` and `CI_VERIFIED` by GitHub Actions run
+`34746139860`. Credentialed Binance Testnet read-only and mutation trials are
+`NOT_RUN` because no Testnet credentials were configured. Autonomous Testnet
+execution remains locked, and Mainnet execution remains disabled.
