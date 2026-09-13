@@ -30,6 +30,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e ".[dev]"
 
+    - name: Run Non-Secret Unit Tests
+      if: github.event.inputs.allow_mutation == 'true'
+      env:
+        PYTHONPATH: .
+      run: |
+        pytest tests/python/ -m "not contract_readonly and not contract_mutating"
+
     - name: Verify Testnet credentials are configured
       env:
         BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
@@ -48,6 +55,30 @@ jobs:
         BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
       run: |
         pytest -m "contract_readonly" tests/python/contract/
+
+    - name: Record Current-SHA Testnet Evidence
+      if: github.event.inputs.allow_mutation == 'true'
+      env:
+        BUILD_SHA: ${{ github.sha }}
+      run: |
+        python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        evidence = {
+            "build_sha": os.environ["BUILD_SHA"],
+            "local_non_secret_tests_verified": True,
+            "github_ci_verified": False,
+            "readonly_contract_verified": True,
+            "manual_trial_verified": False,
+            "manual_trial_sha": None,
+            "testnet_soak_verified": False,
+        }
+        path = Path("artifacts") / "build-evidence.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        PY
         
     - name: Run Mutating Contract Tests
       if: github.event.inputs.allow_mutation == 'true'
@@ -59,3 +90,28 @@ jobs:
         BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
       run: |
         pytest -m "contract_mutating" tests/python/contract/
+
+    - name: Record Successful Current-SHA Manual Trial Evidence
+      if: success() && github.event.inputs.allow_mutation == 'true'
+      env:
+        BUILD_SHA: ${{ github.sha }}
+      run: |
+        python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        path = Path("artifacts") / "build-evidence.json"
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+        evidence["manual_trial_verified"] = True
+        evidence["manual_trial_sha"] = os.environ["BUILD_SHA"]
+        path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        PY
+
+    - name: Upload Sanitized Testnet Evidence
+      if: always() && github.event.inputs.allow_mutation == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: testnet-contract-evidence-${{ github.sha }}
+        path: artifacts/
+        if-no-files-found: ignore
