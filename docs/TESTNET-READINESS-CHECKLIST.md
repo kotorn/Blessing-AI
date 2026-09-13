@@ -8,8 +8,8 @@ Testnet has been verified.
 
 | Gate | Status | Evidence boundary |
 |---|---|---|
-| Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED` | Current checkpoint `9398c3d711f86bc9ef8f728d4929789544dc95ac`; GitHub Actions run `34785048703` passed Node install/lint/tests/build. |
-| Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED` | Current checkpoint `9398c3d711f86bc9ef8f728d4929789544dc95ac`; GitHub Actions run `34785048703` passed Python install/tests and hygiene. |
+| Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED` | The exact clean commit SHA is recorded in the generated `build-evidence.json`; the exact-SHA GitHub Actions check must pass Node install/lint/tests/build. |
+| Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED` | The exact clean commit SHA is recorded in the generated `build-evidence.json`; the exact-SHA GitHub Actions check must pass Python install/tests and hygiene. |
 | Net economics and WFO/OOS research evaluator | `LOCAL_VERIFIED; RESEARCH_ONLY` | Explicit fees/funding/spread/slippage inputs, contiguous complete-horizon research candles, purged/embargoed OOS folds, regime coverage, parameter plateau, common OOS-fold coverage, and train-only selection binding; never launch evidence |
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
@@ -22,7 +22,7 @@ Testnet has been verified.
 | Controlled manual Testnet mutation | `NOT_RUN` | Live BTCUSDT rules reported `MIN_NOTIONAL=50 USDT`, above the hard 25 USDT cap; manual approval remains disabled |
 | Credentialed contract evidence handoff | `CODE_PRESENT` | The workflow runs non-secret tests first, records current-SHA evidence after read-only success in either mode, and promotes manual evidence only after the mutating trial passes |
 | Supervised bounded Testnet soak runner | `UNIT_TESTED` | Worker-owned market-event path, explicit caps, fill bounds, cleanup, and reconciliation are implemented; no soak approval or mutation was run |
-| GitHub CI for verified safety/research implementation candidate `9398c3d` | `CI_VERIFIED` | Run `34785048703` passed Node install/lint/tests/build, Python install/tests, and hygiene |
+| GitHub CI for verified safety/research implementation candidate | `CI_VERIFIED` | The PR check and generated evidence artifact must report success for the same clean commit SHA; the workflow is the authoritative run record. |
 | Autonomous Testnet execution | `LOCKED` | Requires current-SHA evidence, successful manual trial, both explicit autonomous flags, approval, and runtime readiness; defaults are false |
 | Mainnet execution | `DISABLED` | LIVE ARM and mutable Mainnet adapter construction are rejected |
 
@@ -81,6 +81,7 @@ The recorded public Testnet BTCUSDT spot-check from 2026-09-14 reported a 50 USD
 which exceeds the configured 25 USDT first-launch cap; the manual trial must
 abort until the exchange rule changes or an explicitly approved cap change is
 made. The cap was not raised automatically.
-The local non-secret gates were rerun for current code checkpoint
-`9398c3d711f86bc9ef8f728d4929789544dc95ac`. GitHub CI verified that same code
-checkpoint in run `34785048703`.
+The local non-secret gates were rerun for the current clean checkout. The
+generated `artifacts/build-evidence.json` records the exact commit SHA and the
+exact-SHA GitHub CI result; the workflow artifact is the authoritative handoff
+when this document is viewed from a clean checkout.
