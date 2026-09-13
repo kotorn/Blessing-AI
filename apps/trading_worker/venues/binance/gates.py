@@ -154,6 +154,10 @@ class DecisionExecutionGate:
             return GateResult(False, "Adapter not READY")
         if not bool(getattr(adapter, "authenticated", False)):
             return GateResult(False, "Adapter is not authenticated")
+        if not bool(
+            getattr(getattr(adapter, "capabilities", None), "trade_authorized", False)
+        ):
+            return GateResult(False, "Testnet trade permission is not verified")
         stream_health = getattr(adapter, "private_stream_healthy", None)
         if stream_health is None:
             stream_health = bool(
@@ -251,6 +255,10 @@ class OrderExecutionGate:
             return GateResult(False, "Adapter not READY")
         if not bool(getattr(self.adapter, "authenticated", False)):
             return GateResult(False, "Adapter is not authenticated")
+        if not bool(
+            getattr(getattr(self.adapter, "capabilities", None), "trade_authorized", False)
+        ):
+            return GateResult(False, "Testnet trade permission is not verified")
         stream_health = getattr(self.adapter, "private_stream_healthy", None)
         if stream_health is None:
             stream_health = bool(

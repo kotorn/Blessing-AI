@@ -36,6 +36,10 @@ false.
 The worker requires `BINANCE_TESTNET=true` plus dedicated Testnet credentials.
 Authentication is authoritative only after capability discovery has succeeded
 and a signed `/fapi/v2/account` request has returned a valid account payload.
+Execution authorization additionally requires that payload's `canTrade`
+permission to be explicitly true. A connected user stream must also pass a
+recent WebSocket ping/pong or private-event freshness check; socket
+establishment alone is not a readiness signal.
 
 ## Readiness and reconciliation
 
@@ -83,13 +87,24 @@ private stream, and returns to `READY` only after all evidence is consistent.
 Recovered fills use the canonical `domain.models.ExchangeFill` model and are
 deduplicated by symbol plus exchange trade ID.
 
+## Optional Binance CLI research cross-check
+
+The official Binance CLI may be used through the isolated
+`apps/trading_worker/research/binance_cli.py` wrapper for read-only USDⓈ-M
+Testnet observations. It is not an execution authority, does not replace the
+Worker's private stream or reconciliation, and cannot promote readiness. The
+wrapper rejects Mainnet/demo routes, profiles, custom requests, and all
+mutable CLI commands; details and commands are in
+`docs/BINANCE-CLI-RESEARCH.md`.
+
 ## Current evidence status
 
-For runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac`, non-secret
-unit and frontend gates are `LOCAL_VERIFIED` and `CI_VERIFIED` by GitHub
-Actions run `34747554913`. The credentialed contract workflow now records
+For historical runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac`,
+non-secret unit and frontend gates are `LOCAL_VERIFIED` and `CI_VERIFIED` by
+GitHub Actions run `34747554913`. The credentialed contract workflow now records
 current-SHA sanitized evidence after read-only success and only marks the
 manual trial verified after the mutating test passes; that workflow was not
 run here. Credentialed Binance Testnet read-only and mutation trials are
-`NOT_RUN` because no Testnet credentials were configured. Autonomous Testnet
-execution remains locked, and Mainnet execution remains disabled.
+`NOT_RUN` because no Testnet credentials were configured. Current local
+research/stream changes need a new current-SHA workflow result. Autonomous
+Testnet execution remains locked, and Mainnet execution remains disabled.

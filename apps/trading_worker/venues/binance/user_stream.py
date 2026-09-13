@@ -17,6 +17,8 @@ logger = logging.getLogger("blessing.binance.user_stream")
 
 class BinanceUserStream:
     BACKOFF_STEPS = [1.0, 2.0, 4.0, 8.0, 15.0, 30.0]
+    STREAM_HEARTBEAT_INTERVAL_SEC = 15.0
+    STREAM_HEARTBEAT_TIMEOUT_SEC = 5.0
 
     def __init__(
         self,
@@ -39,6 +41,7 @@ class BinanceUserStream:
         self.is_connected = False
         self.connected_at: datetime | None = None
         self.last_event_at: datetime | None = None
+        self.last_transport_heartbeat_at: datetime | None = None
         self.last_keepalive_at: datetime | None = None
         self.on_event = None
         self.on_disconnect = on_disconnect
@@ -48,10 +51,13 @@ class BinanceUserStream:
         self.authentication_failed = False
 
     def is_healthy(self) -> bool:
-        """Require a connected stream with a bounded recent event heartbeat."""
-        if not self.is_connected:
+        """Require a connected stream with a bounded transport/event heartbeat."""
+        if not self.is_connected or not self.running:
             return False
-        timestamp = self.last_event_at or self.connected_at
+        # Socket establishment alone is not proof that the connection remains
+        # usable. A received private event or a successful WebSocket
+        # ping/pong is required before the execution readiness gate passes.
+        timestamp = self.last_event_at or self.last_transport_heartbeat_at
         if timestamp is None:
             return False
         if timestamp.tzinfo is None:
@@ -86,6 +92,12 @@ class BinanceUserStream:
             
         try:
             self.ws = await websockets.connect(ws_url)
+            self.last_event_at = None
+            self.last_transport_heartbeat_at = None
+            if not await self._transport_heartbeat():
+                await self.ws.close()
+                self.ws = None
+                return False
             self.is_connected = True
             self.connected_at = datetime.now(timezone.utc)
             logger.info("User stream connected.")
@@ -102,6 +114,19 @@ class BinanceUserStream:
             logger.error("User stream connection failed: %s", e)
             self.is_connected = False
             return False
+
+    async def _transport_heartbeat(self) -> bool:
+        if self.ws is None:
+            return False
+        try:
+            await asyncio.wait_for(
+                self.ws.ping(), timeout=self.STREAM_HEARTBEAT_TIMEOUT_SEC
+            )
+        except Exception as exc:
+            logger.warning("Private stream ping/pong failed: %s", exc)
+            return False
+        self.last_transport_heartbeat_at = datetime.now(timezone.utc)
+        return True
 
     async def _get_listen_key(self):
         try:
@@ -130,8 +155,21 @@ class BinanceUserStream:
             logger.error("Error in user-stream authentication failure handler: %s", exc)
 
     async def _keepalive_loop(self):
+        keepalive_elapsed = 0.0
         while self.is_connected and self.running:
-            await asyncio.sleep(1800) # 30 mins
+            await asyncio.sleep(self.STREAM_HEARTBEAT_INTERVAL_SEC)
+            if not await self._transport_heartbeat():
+                logger.error("Private stream heartbeat failed.")
+                self.is_connected = False
+                if self.ws:
+                    await self.ws.close()
+                self._trigger_reconnect()
+                break
+
+            keepalive_elapsed += self.STREAM_HEARTBEAT_INTERVAL_SEC
+            if keepalive_elapsed < 1800:
+                continue
+            keepalive_elapsed = 0.0
             if await self.keepalive():
                 logger.info("listenKey keepalive successful.")
                 continue

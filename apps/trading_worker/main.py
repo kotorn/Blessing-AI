@@ -123,6 +123,7 @@ class LaunchReadiness(BaseModel):
     local_non_secret_tests_verified: bool
     ci_verified: bool
     testnet_credentials_verified: bool
+    testnet_trade_authorized: bool = False
     testnet_readonly_contract_verified: bool
     testnet_manual_trial_verified: bool
     testnet_soak_verified: bool
@@ -630,6 +631,13 @@ class TradingWorkerApp:
         )
         self._refresh_engine_state()
 
+    def _adapter_trade_authorized(self) -> bool:
+        adapter = self.execution_adapter
+        return bool(
+            adapter
+            and getattr(getattr(adapter, "capabilities", None), "trade_authorized", False)
+        )
+
     def _refresh_engine_state(self) -> None:
         """Derive the single operational state from canonical control flags."""
         if self.kill_switch_active:
@@ -640,6 +648,7 @@ class TradingWorkerApp:
             and (
                 self.connection_state != ConnectionState.READY.value
                 or not self.authenticated
+                or not self._adapter_trade_authorized()
                 or not self.private_stream_healthy
                 or self.reconciliation_status != "IN_SYNC"
             )
@@ -719,7 +728,9 @@ class TradingWorkerApp:
         adapter_ready = (
             self.execution_adapter is not None
             and self.execution_adapter.connection_state == ConnectionState.READY
+            and self._adapter_trade_authorized()
         )
+        trade_authorized = self._adapter_trade_authorized()
         symbol_rules_loaded = self._symbol_rules_ready()
         account_snapshot_ready = self.is_account_snapshot_ready()
         market_data_fresh = self.is_market_data_fresh()
@@ -727,6 +738,7 @@ class TradingWorkerApp:
             self.execution_mode == WorkerExecutionMode.TESTNET
             and testnet_configured
             and self.authenticated
+            and trade_authorized
             and adapter_ready
             and symbol_rules_loaded
             and self.private_stream_healthy
@@ -739,6 +751,7 @@ class TradingWorkerApp:
             "paper": True,
             "testnetConfigured": testnet_configured,
             "testnetAuthenticated": self.authenticated,
+            "testnetTradeAuthorized": trade_authorized,
             "testnetPrivateStreamHealthy": self.private_stream_healthy,
             "testnetReconciliationInSync": self.reconciliation_status == "IN_SYNC",
             "testnetSymbolRulesLoaded": symbol_rules_loaded,
@@ -824,7 +837,9 @@ class TradingWorkerApp:
         adapter_ready = bool(
             self.execution_adapter
             and self.execution_adapter.connection_state == ConnectionState.READY
+            and self._adapter_trade_authorized()
         )
+        trade_authorized = self._adapter_trade_authorized()
         rules_ready = self._symbol_rules_ready()
         account_ready = self.is_account_snapshot_ready()
         market_data_fresh = self.is_market_data_fresh()
@@ -834,6 +849,7 @@ class TradingWorkerApp:
             local_non_secret_tests_verified=local_non_secret_tests_verified,
             ci_verified=ci_verified,
             testnet_credentials_verified=testnet_configured and self.authenticated,
+            testnet_trade_authorized=trade_authorized,
             testnet_readonly_contract_verified=readonly_contract_verified,
             testnet_manual_trial_verified=manual_trial_verified,
             testnet_soak_verified=soak_verified,
@@ -854,6 +870,7 @@ class TradingWorkerApp:
             readiness.local_non_secret_tests_verified and
             readiness.ci_verified and
             readiness.testnet_credentials_verified and
+            readiness.testnet_trade_authorized and
             self.authenticated and
             readiness.testnet_readonly_contract_verified and
             readiness.testnet_manual_trial_verified and
@@ -894,7 +911,9 @@ class TradingWorkerApp:
             adapter_ready = bool(
                 self.execution_adapter
                 and self.execution_adapter.connection_state == ConnectionState.READY
+                and self._adapter_trade_authorized()
             )
+            trade_authorized = self._adapter_trade_authorized()
             rules_ready = self._symbol_rules_ready()
             account_ready = self.is_account_snapshot_ready()
             market_data_fresh = self.is_market_data_fresh()
@@ -919,6 +938,19 @@ class TradingWorkerApp:
                     "required": True,
                     "status": "PASS" if self.authenticated else "FAIL",
                     "message": "Signed Testnet account request succeeded" if self.authenticated else "Not authenticated",
+                },
+                {
+                    "id": "CHK-TRADE-PERMISSION",
+                    "name": "Testnet Trade Permission",
+                    "required": True,
+                    "status": "PASS"
+                    if bool(
+                        trade_authorized
+                    )
+                    else "FAIL",
+                    "message": "Account canTrade is true"
+                    if trade_authorized
+                    else "Account canTrade is false or unverified",
                 },
                 {
                     "id": "CHK-RULES",
@@ -1143,8 +1175,11 @@ class TradingWorkerApp:
         else:
             self.reconciliation_status = "SIMULATED_SYNC"
             self.connection_state = "READY"
-            self.private_stream_healthy = True
-            self.authenticated = True
+            # PAPER is a local simulation, not exchange authentication or a
+            # private Binance stream. Never project simulated state as
+            # Testnet evidence.
+            self.private_stream_healthy = False
+            self.authenticated = False
             return self.reconciliation_status
 
     def _validate_arm_request(self, req: ArmRequest) -> Optional[str]:

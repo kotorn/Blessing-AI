@@ -58,6 +58,7 @@ def adapter():
     ada.rest_client = MockRestClient()
     ada.capabilities.account_request_succeeded = True
     ada.capabilities.authenticated = True
+    ada.capabilities.trade_authorized = True
     ada.capabilities.hedge_mode = False
     ada.user_stream = MockUserStream()
     ada.reconciliation = MockReconciliation()

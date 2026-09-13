@@ -132,6 +132,7 @@ async def make_adapter(snapshot=None, rest=None):
     adapter.state = ConnectionState.READY
     adapter.capabilities.account_request_succeeded = True
     adapter.capabilities.authenticated = True
+    adapter.capabilities.trade_authorized = True
     adapter.capabilities.hedge_mode = False
     adapter.capabilities.symbol_rules["BTCUSDT"] = make_rules()
     adapter.user_stream = FakeStream()
@@ -241,6 +242,7 @@ def test_worker_adapter_state_contract_has_no_attribute_error(monkeypatch):
     adapter.state = ConnectionState.READY
     adapter.capabilities.account_request_succeeded = True
     adapter.capabilities.authenticated = True
+    adapter.capabilities.trade_authorized = True
     adapter.user_stream = FakeStream()
     adapter.reconciliation = FakeReconciliation()
     worker.execution_adapter = adapter
@@ -262,6 +264,7 @@ def test_worker_becomes_degraded_when_ready_adapter_health_truth_is_not_ready():
     adapter.state = ConnectionState.READY
     adapter.capabilities.account_request_succeeded = True
     adapter.capabilities.authenticated = True
+    adapter.capabilities.trade_authorized = True
     adapter.user_stream = FakeStream()
     adapter.reconciliation = FakeReconciliation("MISMATCH")
     worker.execution_adapter = adapter
@@ -300,7 +303,17 @@ async def test_testnet_readiness_does_not_depend_on_engine_armed(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "broken_component",
-    ["adapter", "auth", "rules", "stream", "reconciliation", "account", "market", "kill"],
+    [
+        "adapter",
+        "auth",
+        "trade_permission",
+        "rules",
+        "stream",
+        "reconciliation",
+        "account",
+        "market",
+        "kill",
+    ],
 )
 async def test_each_testnet_readiness_prerequisite_fails_closed(monkeypatch, broken_component):
     worker = await make_ready_worker(monkeypatch)
@@ -310,6 +323,8 @@ async def test_each_testnet_readiness_prerequisite_fails_closed(monkeypatch, bro
         adapter.state = ConnectionState.DEGRADED
     elif broken_component == "auth":
         adapter.capabilities.authenticated = False
+    elif broken_component == "trade_permission":
+        adapter.capabilities.trade_authorized = False
     elif broken_component == "rules":
         adapter.capabilities.symbol_rules.clear()
     elif broken_component == "stream":

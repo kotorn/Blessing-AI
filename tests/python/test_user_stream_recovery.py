@@ -1,12 +1,32 @@
+from datetime import UTC, datetime
+
 import pytest
-import asyncio
+
 from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
 from apps.trading_worker.venues.binance.models import ConnectionState
 from apps.trading_worker.venues.binance.models import BinanceAuthenticationError
+from apps.trading_worker.venues.binance.user_stream import BinanceUserStream
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_private_stream_needs_event_or_transport_heartbeat():
+    stream = BinanceUserStream(None, BinanceEnvironment.TESTNET)
+    stream.running = True
+    stream.is_connected = True
+    stream.connected_at = datetime.now(UTC)
+
+    assert stream.is_healthy() is False
+
+    stream.last_event_at = datetime.now(UTC)
+    assert stream.is_healthy() is True
+
+    stream.last_event_at = None
+    stream.last_transport_heartbeat_at = datetime.now(UTC)
+    assert stream.is_healthy() is True
+
 
 class MockUserStream:
     def __init__(self):
@@ -62,6 +82,7 @@ async def test_user_stream_reconnect_requires_stream_auth_and_sync(adapter):
     adapter.state = ConnectionState.DEGRADED
     adapter.capabilities.account_request_succeeded = True
     adapter.capabilities.authenticated = True
+    adapter.capabilities.trade_authorized = True
     adapter.user_stream.is_connected = True
     adapter.user_stream.on_reconnected = adapter._on_user_stream_reconnected
 
@@ -78,6 +99,7 @@ async def test_user_stream_authentication_failure_clears_adapter_truth():
     adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET)
     adapter.capabilities.account_request_succeeded = True
     adapter.capabilities.authenticated = True
+    adapter.capabilities.trade_authorized = True
     adapter.state = ConnectionState.READY
     adapter.user_stream.rest_client = AuthFailureRest()
 

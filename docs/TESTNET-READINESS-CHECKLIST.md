@@ -8,10 +8,11 @@ Testnet has been verified.
 
 | Gate | Status | Evidence boundary |
 |---|---|---|
-| Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED` | Local checkout plus GitHub Actions run `34747554913` for runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac` |
-| Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED` | Local checkout plus GitHub Actions run `34747554913` for runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac` |
+| Reproducible `npm ci`, TypeScript lint/tests/build | `LOCAL_VERIFIED; CI_VERIFIED (historical)` | Committed runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac`; GitHub Actions run `34747554913`. Current working-tree changes require a new CI result. |
+| Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED (historical)` | Committed runtime candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac`; GitHub Actions run `34747554913`. Current working-tree changes require a new CI result. |
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
+| Binance CLI research cross-check boundary | `UNIT_TESTED; LOCAL_VERIFIED` | The isolated wrapper allowlists read-only USDⓈ-M checks and blocks Mainnet/mutations; no CLI binary or credentials were present |
 | Account snapshot and liquidation math | `UNIT_TESTED` | Uses Binance account/position-risk fields; liquidation is `UNKNOWN` when unusable |
 | Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
 | Read-only Binance Testnet contract | `NOT_RUN` | No local Testnet credentials were configured in this session |
@@ -28,6 +29,7 @@ Testnet has been verified.
 ```text
 Testnet configured
 AND signed account authentication succeeded
+AND signed account permission reports `canTrade == true`
 AND adapter READY
 AND active symbol rules are complete and TRADING
 AND private user stream is connected
@@ -57,6 +59,7 @@ the first-launch defaults.
 No Binance Testnet credentials were present locally, so the signed read-only
 contract, private-stream contract, and controlled mutation trial are
 `NOT_RUN`. No Testnet order was submitted and no Testnet trial artifact exists.
-The local non-secret gates and GitHub CI were verified for runtime candidate
-`cd4e2f91f60527e52d738c0f6ae63e53da7253ac` by run `34747554913`. Any later
-runtime or workflow source change requires a new current-SHA workflow result.
+The local non-secret gates and GitHub CI were verified for historical runtime
+candidate `cd4e2f91f60527e52d738c0f6ae63e53da7253ac` by run `34747554913`.
+The current local research/stream changes require a new current-SHA workflow
+result before they can be called `CI_VERIFIED`.

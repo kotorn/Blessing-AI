@@ -51,7 +51,9 @@ async def test_worker_testnet_readonly_lifecycle(api_credentials):
 
         account = await adapter.rest_client.request("GET", "/fapi/v2/account", signed=True)
         assert "totalWalletBalance" in account
+        assert account.get("canTrade") is True
         assert adapter.authenticated is True
+        assert adapter.capabilities.trade_authorized is True
         assert adapter.capabilities.hedge_mode in {True, False}
 
         position_mode = await adapter.rest_client.request(

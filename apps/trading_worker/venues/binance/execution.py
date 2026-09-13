@@ -199,6 +199,7 @@ class BinanceExecutionAdapter:
         """Drop authentication immediately after any signed-request auth failure."""
         self.capabilities.authenticated = False
         self.capabilities.account_request_succeeded = False
+        self.capabilities.trade_authorized = False
         self.state = ConnectionState.DEGRADED
 
     def bind_worker_authority(self, worker: object) -> None:
@@ -1513,4 +1514,5 @@ class BinanceExecutionAdapter:
         await self.rest_client.close()
         self.capabilities.authenticated = False
         self.capabilities.account_request_succeeded = False
+        self.capabilities.trade_authorized = False
         self.state = ConnectionState.DISCONNECTED

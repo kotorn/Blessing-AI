@@ -22,6 +22,7 @@ class BinanceCapabilities:
     def __init__(self):
         self.authenticated = False
         self.account_request_succeeded = False
+        self.trade_authorized = False
         self.environment = BinanceEnvironment.TESTNET
         self.usdm_futures = True
         self.hedge_mode = False
@@ -30,6 +31,7 @@ class BinanceCapabilities:
     async def discover(self, rest_client: BinanceRestClient) -> bool:
         self.authenticated = False
         self.account_request_succeeded = False
+        self.trade_authorized = False
         self.hedge_mode = False
         self.symbol_rules.clear()
         self.environment = rest_client.env
@@ -40,9 +42,14 @@ class BinanceCapabilities:
         try:
             # Authentication truth starts with a successful signed account call.
             account = await rest_client.request("GET", "/fapi/v2/account", signed=True)
-            if not isinstance(account, dict) or "totalWalletBalance" not in account:
+            if (
+                not isinstance(account, dict)
+                or "totalWalletBalance" not in account
+                or "canTrade" not in account
+            ):
                 raise ValueError("Signed account response is not a valid USDⓈ-M account snapshot")
             self.account_request_succeeded = True
+            self.trade_authorized = _exchange_bool(account["canTrade"])
             
             # Check position mode
             pos_mode = await rest_client.request("GET", "/fapi/v1/positionSide/dual", signed=True)
@@ -63,11 +70,17 @@ class BinanceCapabilities:
                 self.symbol_rules[str(symbol_name).upper()] = rules
 
             self.authenticated = self.account_request_succeeded and bool(self.symbol_rules)
-            logger.info("Capability discovery complete. Hedge Mode: %s, Symbols loaded: %d", self.hedge_mode, len(self.symbol_rules))
-            return self.authenticated
+            logger.info(
+                "Capability discovery complete. Hedge Mode: %s, canTrade: %s, Symbols loaded: %d",
+                self.hedge_mode,
+                self.trade_authorized,
+                len(self.symbol_rules),
+            )
+            return self.authenticated and self.trade_authorized
         except Exception as e:
             logger.error("Failed to discover capabilities: %s", e)
             self.authenticated = False
             self.account_request_succeeded = False
+            self.trade_authorized = False
             self.symbol_rules.clear()
             return False
