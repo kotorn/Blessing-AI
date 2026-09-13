@@ -83,6 +83,27 @@ class ExposureRecoveryEngine:
             state.locked_toxicity_level = risk.current_drawdown_pct
             
         state.last_update = utc_now()
+
+        # A recovery state must never manufacture exposure.  With no existing
+        # position there is nothing to hedge or unwind, so every strategy
+        # target is treated as NEW_RISK and suppressed until drawdown recovers.
+        if abs_qty == 0:
+            state.action_type = RecoveryActionType.HOLD
+            logger.info(
+                "Recovery is blocking new exposure for flat symbol %s until drawdown recovers",
+                symbol,
+            )
+            return TargetExposure(
+                symbol=target.symbol,
+                market_type=target.market_type,
+                target_net_delta_qty=Decimal("0.0"),
+                target_gross_limit_qty=target.target_gross_limit_qty,
+                strategy_attributions=target.strategy_attributions,
+                created_at=target.created_at,
+                expires_at=target.expires_at,
+                exposure_id=target.exposure_id,
+                source_intent_ids=target.source_intent_ids,
+            )
         
         # Grid Brake: ALWAYS prevent adding to toxic inventory
         new_target_delta = target.target_net_delta_qty

@@ -1,5 +1,5 @@
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType, utc_now
 from domain.enums import RegimeType
@@ -50,6 +50,43 @@ class GridStrategyEngine:
             expected_holding_horizon_sec=0,
             evidence={"brake_reason": reason},
         )
+
+    def observed_depth(
+        self,
+        *,
+        position_qty: Decimal,
+        open_grid_orders: int,
+        filled_grid_orders: int,
+    ) -> int:
+        """Return a conservative depth observed from authoritative lineage.
+
+        A non-flat position with no identifiable grid lineage is treated as
+        fully capped: the worker must not add grid risk on top of inventory
+        owned by another strategy or an unknown exchange event.  Historical
+        grid fills do not keep depth alive after the symbol is flat and has no
+        working grid order.
+        """
+
+        try:
+            quantity = Decimal(str(position_qty))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("position_qty must be Decimal-compatible") from exc
+        if not quantity.is_finite() or quantity < 0:
+            raise ValueError("position_qty must be finite and non-negative")
+        if (
+            not isinstance(open_grid_orders, int)
+            or isinstance(open_grid_orders, bool)
+            or open_grid_orders < 0
+            or not isinstance(filled_grid_orders, int)
+            or isinstance(filled_grid_orders, bool)
+            or filled_grid_orders < 0
+        ):
+            raise ValueError("grid order counts must be non-negative integers")
+        if quantity == 0 and open_grid_orders == 0:
+            return 0
+        if quantity > 0 and open_grid_orders + filled_grid_orders == 0:
+            return self.max_grid_levels
+        return min(self.max_grid_levels, open_grid_orders + filled_grid_orders)
 
     def evaluate(
         self,

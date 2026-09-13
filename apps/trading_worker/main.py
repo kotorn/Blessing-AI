@@ -515,6 +515,72 @@ class TradingWorkerApp:
                 return [str(symbol).upper() for symbol in configured]
         return [str(symbol).upper() for symbol in self.symbols]
 
+    @staticmethod
+    def _has_grid_lineage(value: object) -> bool:
+        return any(
+            str(intent_id).upper().startswith("GRID-")
+            for intent_id in (value or [])
+        )
+
+    async def _observed_grid_depth(self, symbol: str) -> int:
+        """Read grid depth from Worker-owned ledger lineage before expansion."""
+
+        if self.execution_mode != WorkerExecutionMode.TESTNET:
+            # Paper mode has no exchange fills and must remain explicitly
+            # simulated; it cannot claim observed grid inventory.
+            return 0
+        adapter = self.execution_adapter
+        if adapter is None:
+            # No authoritative ledger means no safe assumption about depth.
+            return self.grid_engine.max_grid_levels
+        normalized_symbol = str(symbol).upper()
+        try:
+            positions = await adapter.ledger.get_positions()
+            position_qty = sum(
+                (
+                    abs(position.quantity)
+                    for position in positions
+                    if str(position.symbol).upper() == normalized_symbol
+                    and position.quantity != 0
+                ),
+                Decimal("0"),
+            )
+            all_orders = await adapter.ledger.get_all_orders()
+            grid_orders = [
+                order
+                for order in all_orders
+                if str(order.symbol).upper() == normalized_symbol
+                and self._has_grid_lineage(order.source_intent_ids)
+            ]
+            open_grid_orders = sum(
+                1
+                for order in grid_orders
+                if str(order.status).upper() in {"NEW", "PARTIALLY_FILLED"}
+            )
+            grid_order_ids = {order.client_order_id for order in grid_orders}
+            fills = await adapter.ledger.get_fills()
+            filled_grid_order_ids = {
+                str(fill.client_order_id)
+                for fill in fills
+                if str(fill.symbol).upper() == normalized_symbol
+                and (
+                    str(fill.client_order_id) in grid_order_ids
+                    or self._has_grid_lineage(fill.source_intent_ids)
+                )
+            }
+            return self.grid_engine.observed_depth(
+                position_qty=position_qty,
+                open_grid_orders=open_grid_orders,
+                filled_grid_orders=len(filled_grid_order_ids),
+            )
+        except Exception as exc:
+            logger.error(
+                "Unable to prove observed grid depth for %s; blocking grid expansion: %s",
+                normalized_symbol,
+                exc,
+            )
+            return self.grid_engine.max_grid_levels
+
     def _symbol_rules_ready(self) -> bool:
         """Require complete exchange rules for every active Testnet symbol."""
         active_symbols = self._active_instruments()
@@ -1392,7 +1458,10 @@ class TradingWorkerApp:
             
         market_state = self.market_state_engine.classify(pa_state)
         
-        grid_intent = self.grid_engine.evaluate(pa_state, market_state)
+        grid_depth = await self._observed_grid_depth(event.symbol)
+        grid_intent = self.grid_engine.evaluate(
+            pa_state, market_state, grid_depth=grid_depth
+        )
         trend_intent = self.trend_engine.evaluate(pa_state, market_state)
         shock_intent = self.shock_engine.evaluate(pa_state, market_state)
         carry_intent = self.carry_engine.evaluate(event, market_state)

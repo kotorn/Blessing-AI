@@ -319,6 +319,33 @@ def test_exposure_recovery_grid_brake():
     assert adjusted_target.desired_delta_qty <= Decimal("0.0")
 
 
+def test_exposure_recovery_blocks_new_risk_when_flat():
+    recovery = ExposureRecoveryEngine(drawdown_trigger_pct=Decimal("2.0"))
+    target = TargetExposure(
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        target_net_delta_qty=Decimal("0.5"),
+        target_gross_limit_qty=Decimal("0.5"),
+        strategy_attributions={"grid": Decimal("0.5")},
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+    toxic_risk = RiskSnapshot(
+        portfolio_equity=Decimal("100000"),
+        unrealized_pnl=Decimal("0"),
+        realized_pnl_24h=Decimal("0"),
+        margin_utilization_pct=Decimal("1"),
+        effective_leverage=Decimal("0"),
+        current_drawdown_pct=Decimal("2.1"),
+        liquidation_distance_pct=Decimal("50"),
+        risk_state=RiskState.NORMAL,
+    )
+
+    adjusted_target = recovery.process(target, toxic_risk, Decimal("0"))
+
+    assert adjusted_target.desired_delta_qty == Decimal("0")
+    assert recovery.states["BTCUSDT"].action_type.value == "HOLD"
+
+
 def _grid_price_action(*, reclaiming: bool = True) -> PriceActionState:
     return PriceActionState(
         symbol="BTCUSDT",
@@ -385,6 +412,23 @@ def test_grid_depth_is_bounded_and_decelerates_without_martingale():
     assert Decimal("0") < level_two.desired_delta_qty < level_one.desired_delta_qty
     assert Decimal("0") < level_five.desired_delta_qty < level_two.desired_delta_qty
     assert capped.desired_delta_qty == Decimal("0")
+
+
+def test_grid_runtime_depth_requires_authoritative_lineage():
+    engine = GridStrategyEngine(max_grid_levels=5)
+
+    assert engine.observed_depth(
+        position_qty=Decimal("0"), open_grid_orders=0, filled_grid_orders=4
+    ) == 0
+    assert engine.observed_depth(
+        position_qty=Decimal("0.2"), open_grid_orders=0, filled_grid_orders=0
+    ) == 5
+    assert engine.observed_depth(
+        position_qty=Decimal("0.1"), open_grid_orders=1, filled_grid_orders=1
+    ) == 2
+    assert engine.observed_depth(
+        position_qty=Decimal("0.5"), open_grid_orders=4, filled_grid_orders=4
+    ) == 5
 
 
 def test_grid_does_not_add_to_non_reclaiming_inventory():
