@@ -14,7 +14,7 @@ Testnet has been verified.
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
 | Binance CLI research cross-check boundary | `UNIT_TESTED; LOCAL_VERIFIED` | The isolated wrapper allowlists read-only USDⓈ-M checks and blocks Mainnet/mutations; no CLI binary is configured |
-| Public Testnet BTCUSDT rule spot-check | `LOCAL_VERIFIED` | Public GET-only `exchangeInfo` spot-check recorded on 2026-09-13 reports `TRADING`, `MIN_NOTIONAL=50 USDT`, `tickSize=0.10`, and `stepSize=0.0001`; this does not authenticate or authorize execution |
+| Public Testnet BTCUSDT rule spot-check | `LOCAL_VERIFIED` | Public GET-only `exchangeInfo` spot-check recorded on 2026-09-14 reports `TRADING`, `MIN_NOTIONAL=50 USDT`, `tickSize=0.10`, and `stepSize=0.0001`; this does not authenticate or authorize execution |
 | Account snapshot, liquidation math, and derived risk state | `UNIT_TESTED; LOCAL_VERIFIED` | Uses Binance account/position-risk fields; liquidation is `UNKNOWN` when unusable and unsafe account metrics set `NO_NEW_RISK` |
 | Spot/Portfolio Margin wallet observation | `CODE_PRESENT` (unverified) | Separate from USDⓈ-M Futures Testnet collateral; a Spot-to-Portfolio-Margin transfer cannot authorize the Worker or satisfy Testnet readiness |
 | Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
@@ -77,7 +77,7 @@ server time, exchangeInfo/rules, authentication, account snapshot, position
 mode, positions, open orders, private stream health/keepalive, bootstrap, and
 reconciliation. No Testnet order was submitted and no Testnet trial artifact
 exists.
-The recorded public Testnet BTCUSDT spot-check from 2026-09-13 reported a 50 USDT minimum notional,
+The recorded public Testnet BTCUSDT spot-check from 2026-09-14 reported a 50 USDT minimum notional,
 which exceeds the configured 25 USDT first-launch cap; the manual trial must
 abort until the exchange rule changes or an explicitly approved cap change is
 made. The cap was not raised automatically.
