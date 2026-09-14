@@ -494,19 +494,19 @@ def test_testnet_limits_have_bounded_defaults_and_safe_invalid_overrides(monkeyp
     limits = SafetyLimits.from_environment()
 
     assert limits.allowed_symbols == {"BTCUSDT"}
-    assert limits.max_single_order_notional == Decimal("25.0")
-    assert limits.max_total_open_notional == Decimal("50.0")
+    assert limits.max_single_order_notional == Decimal("100.0")
+    assert limits.max_total_open_notional == Decimal("100.0")
     assert limits.max_open_orders == 1
     assert limits.max_active_exposure_chains == 1
 
     monkeypatch.setenv("TESTNET_MAX_SINGLE_ORDER_NOTIONAL", "not-a-number")
-    assert SafetyLimits.from_environment().max_single_order_notional == Decimal("25.0")
+    assert SafetyLimits.from_environment().max_single_order_notional == Decimal("100.0")
 
     monkeypatch.setenv("TESTNET_MAX_SINGLE_ORDER_NOTIONAL", "1000000")
     monkeypatch.setenv("TESTNET_ALLOWED_SYMBOLS", "BTCUSDT,ETHUSDT")
     monkeypatch.delenv("TESTNET_LIMITS_OVERRIDE_APPROVED", raising=False)
     bounded = SafetyLimits.from_environment()
-    assert bounded.max_single_order_notional == Decimal("25.0")
+    assert bounded.max_single_order_notional == Decimal("100.0")
     assert bounded.allowed_symbols == {"BTCUSDT"}
 
     monkeypatch.setenv("TESTNET_LIMITS_OVERRIDE_APPROVED", "true")
@@ -950,6 +950,7 @@ async def test_market_order_uses_executable_ask_and_respects_single_order_cap():
         raise AssertionError(f"Unexpected REST call: {method} {path}")
 
     adapter = await make_adapter(rest=ScriptedRest(handler))
+    adapter.safety_limits.max_total_open_notional = Decimal("200")
     intent = OrderIntent(
         client_order_id="MARKET-ASK-CAP",
         symbol="BTCUSDT",
@@ -958,7 +959,7 @@ async def test_market_order_uses_executable_ask_and_respects_single_order_cap():
         position_side=PositionSide.BOTH,
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.GTC,
-        quantity=Decimal("0.001"),
+        quantity=Decimal("0.004"),
     )
 
     result = await adapter.order_gate.check(intent, EconomicRiskClass.NEW_RISK)
@@ -1030,7 +1031,7 @@ async def test_market_order_does_not_require_limit_percent_price_reference():
         position_side=PositionSide.BOTH,
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.GTC,
-        quantity=Decimal("0.001"),
+        quantity=Decimal("0.004"),
     )
     result = await adapter.order_gate.check(intent, EconomicRiskClass.NEW_RISK)
 
@@ -1251,8 +1252,9 @@ async def test_post_only_limit_serializes_to_binance_gtx(monkeypatch):
 @pytest.mark.asyncio
 async def test_testnet_single_order_cap_is_enforced(monkeypatch):
     adapter = await make_adapter()
+    adapter.safety_limits.max_total_open_notional = Decimal("200")
     result = await adapter.order_gate.check(
-        make_limit_intent(quantity="0.001", price="26000"),
+        make_limit_intent(quantity="0.004", price="26000"),
         EconomicRiskClass.NEW_RISK,
     )
 
@@ -1417,7 +1419,7 @@ async def test_order_amendment_that_increases_notional_is_capped():
     authority = GateAuthority()
     adapter.bind_worker_authority(authority)
     amended = await adapter.modify_order(
-        "BTCUSDT", "AMEND-1", Decimal("10000"), Decimal("0.003"), "BUY", authority=authority
+        "BTCUSDT", "AMEND-1", Decimal("10000"), Decimal("0.011"), "BUY", authority=authority
     )
 
     assert amended is None
@@ -1633,7 +1635,7 @@ async def test_total_open_notional_cap_includes_existing_position():
         ExchangePosition(
             symbol="BTCUSDT",
             position_side=PositionSide.BOTH,
-            quantity=Decimal("0.0016"),
+            quantity=Decimal("0.0041"),
             entry_price=Decimal("20000"),
             mark_price=Decimal("20000"),
         )
@@ -2066,9 +2068,10 @@ async def test_order_gate_enforces_exchange_max_notional_and_percent_price():
 
 
 @pytest.mark.asyncio
-async def test_manual_trial_does_not_raise_cap_for_exchange_minimum():
+async def test_manual_trial_honors_explicit_lower_cap_against_exchange_minimum():
     adapter = await make_adapter()
     adapter.symbol_rules["BTCUSDT"].min_notional = Decimal("50")
+    adapter.safety_limits.max_single_order_notional = Decimal("25")
 
     with pytest.raises(RuntimeError, match="25 USDT Testnet cap"):
         _passive_order(adapter, "BTCUSDT", Decimal("10000"), Decimal("10001"))

@@ -46,8 +46,8 @@ class ConnectionState(str, Enum):
 
 class TestnetSafetyLimits(BaseModel):
     allowed_symbols: Set[str] = Field(default_factory=lambda: {"BTCUSDT"})
-    max_single_order_notional: Decimal = Decimal("25.0")
-    max_total_open_notional: Decimal = Decimal("50.0")
+    max_single_order_notional: Decimal = Decimal("100.0")
+    max_total_open_notional: Decimal = Decimal("100.0")
     max_open_orders: int = 1
     max_active_exposure_chains: int = 1
 

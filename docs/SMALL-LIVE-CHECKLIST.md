@@ -18,8 +18,9 @@ operational approval before any Mainnet implementation is considered.
       read-only contract: `LOCAL_VERIFIED; CONTRACT_TESTED` (1 passed,
       2 deselected; no mutation).
 - [ ] Current-SHA controlled Testnet mutation and sanitized artifact:
-      `MANUAL_TESTNET_VERIFIED` (blocked: 50 USDT exchange minimum exceeds
-      the hard 25 USDT first-launch cap).
+      `MANUAL_TESTNET_VERIFIED` (not run: manual mutation approval and trial
+      evidence are still pending; the 50 USDT exchange minimum is within the
+      100 USDT first-launch cap).
 - [x] Deterministic strategy replay and event-time research windows:
       `UNIT_TESTED; LOCAL_VERIFIED; RESEARCH_ONLY`; this is not a live-readiness
       or positive-edge claim.
@@ -36,8 +37,8 @@ Current sprint evidence: local non-secret gates are `LOCAL_VERIFIED` and
 verified safety/research implementation checkpoint recorded in the generated
 `build-evidence.json` is `CI_VERIFIED` by the exact-SHA GitHub Actions check.
 Testnet read-only is `LOCAL_VERIFIED; CONTRACT_TESTED`;
-manual mutation is `NOT_RUN` because the 50 USDT exchange minimum exceeds the
-hard 25 USDT cap; the supervised soak runner is not approved or run; autonomous
+manual mutation is `NOT_RUN` because approval and trial evidence are pending;
+the 50 USDT exchange minimum is within the 100 USDT cap; the supervised soak runner is not approved or run; autonomous
 Testnet is locked. No Mainnet order has been created or tested.
 
 ## MVP infrastructure boundary
