@@ -12,6 +12,7 @@ Testnet has been verified.
 | Worker import smoke and non-secret Python tests | `LOCAL_VERIFIED; CI_VERIFIED` | The exact clean commit SHA is recorded in the generated `build-evidence.json`; the exact-SHA GitHub Actions check must pass Python install/tests and hygiene. |
 | Net economics and WFO/OOS research evaluator | `LOCAL_VERIFIED; RESEARCH_ONLY` | Explicit fees/funding/spread/slippage inputs, contiguous complete-horizon research candles, purged/embargoed OOS folds, regime coverage, parameter plateau, common OOS-fold coverage, and train-only selection binding; never launch evidence |
 | Deterministic strategy replay and event-time WFO windows | `UNIT_TESTED; LOCAL_VERIFIED; RESEARCH_ONLY` | Existing strategy engines run through allocator, recovery, RiskGovernor, per-order research gate, recorded bid/ask/depth fills, explicit funding settlement, event-level equity, and canonical fill lineage; train-only variant selection is replayed on untouched OOS windows; never launch evidence |
+| Causal Binance public event-dataset assembler | `UNIT_TESTED; RESEARCH_ONLY` | Requires independent 1m klines, mark-price klines, and historical bookTicker observations; rejects gaps, stale/future quotes, conflicts, mixed symbols, and missing fields; supports source-archive SHA-256 verification and deterministic JSONL hashes; no real archive has been promoted in this session |
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
 | Binance CLI research cross-check boundary | `UNIT_TESTED; LOCAL_VERIFIED` | The isolated wrapper allowlists read-only USDⓈ-M checks and blocks Mainnet/mutations; no CLI binary is configured |
@@ -97,3 +98,11 @@ walk-forward train-only selection artifacts, and statistical robustness remain
 required before any capital decision. The replay runner can produce
 train-only selection hashes and untouched OOS results, but this repository has
 not yet verified a qualifying real-data edge or approved a capital increase.
+
+The research-only event assembler joins the independent Binance Vision/public
+observations causally at closed 1-minute events. A kline close is never used as
+a substitute for a quote: missing mark-price or top-of-book data rejects the
+dataset, and an archive must be verified against its published SHA-256 before
+its digest is recorded in a research manifest. The repository contains parser
+and join tests only; it does not claim that a qualifying multi-source archive,
+positive net expectancy, or walk-forward result has been produced here.

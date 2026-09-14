@@ -121,7 +121,10 @@ class HistoricalMarketEvent(BaseModel):
     low: Decimal
     close: Decimal
     volume: Decimal
-    trade_count: int = Field(gt=0)
+    # Empty one-minute intervals are valid market observations.  They still
+    # require real quotes, depth, mark price, and provenance; rejecting them
+    # here would make a complete public archive look artificially contiguous.
+    trade_count: int = Field(ge=0)
     best_bid: Decimal
     best_ask: Decimal
     bid_qty: Decimal
@@ -619,6 +622,7 @@ class DeterministicReplay:
         self._peak_equity = self.config.initial_capital
         self._active_exposure_chains = 0
         self._last_funding_at: datetime | None = None
+        self._funding_event_seen = False
         self._grid_depth = 0
         self._trade_sequence = 0
         self._fill_sequence = 0
@@ -721,7 +725,11 @@ class DeterministicReplay:
         if event.funding_event:
             if event.funding_rate is None:
                 raise ReplayValidationError(f"funding event {event.event_id} has no rate")
-            if self.config.require_funding_events and elapsed < interval:
+            # The first settlement after entry is calendar-driven and may be
+            # less than one configured interval away when entry occurs after
+            # the previous settlement.  Once one real settlement is observed,
+            # subsequent gaps must match the configured funding cadence.
+            if self.config.require_funding_events and self._funding_event_seen and elapsed < interval:
                 raise ReplayValidationError(
                     f"funding event {event.event_id} arrived before its configured interval"
                 )
@@ -732,6 +740,7 @@ class DeterministicReplay:
             funding_pnl = -self._position.signed_qty * event.mark_price * event.funding_rate
             self._position.funding_pnl += funding_pnl
             self._last_funding_at = event.event_time
+            self._funding_event_seen = True
 
     def _strategy_intents(
         self, event: HistoricalMarketEvent, pa_state: Any, market_state: Any
@@ -938,6 +947,7 @@ class DeterministicReplay:
             )
             self._active_exposure_chains += 1
             self._last_funding_at = event.event_time
+            self._funding_event_seen = False
         elif (self._position.signed_qty > 0) == (signed_qty > 0):
             old_qty = abs(self._position.signed_qty)
             new_qty = old_qty + quantity
@@ -970,6 +980,7 @@ class DeterministicReplay:
                 self._position = None
                 self._active_exposure_chains = max(0, self._active_exposure_chains - 1)
                 self._last_funding_at = None
+                self._funding_event_seen = False
 
         fill = ExchangeFill(
             exchange_trade_id=exchange_trade_id,
