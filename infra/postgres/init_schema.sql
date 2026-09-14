@@ -219,6 +219,7 @@ CREATE TABLE IF NOT EXISTS orders (
     quantity NUMERIC(28, 10) NOT NULL,
     status VARCHAR(24) NOT NULL,             -- PENDING, SUBMITTED, PARTIALLY_FILLED, FILLED, CANCELLED, REJECTED
     time_in_force VARCHAR(8) DEFAULT 'GTC',
+    position_side VARCHAR(8) NOT NULL DEFAULT 'BOTH', -- BOTH, LONG, SHORT
     filled_quantity NUMERIC(28, 10) DEFAULT 0.0,
     avg_fill_price NUMERIC(28, 10) DEFAULT 0.0,
     cumulative_fee NUMERIC(28, 10) DEFAULT 0.0,
@@ -235,10 +236,12 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE TABLE IF NOT EXISTS fills (
     fill_id VARCHAR(64) PRIMARY KEY,
     client_order_id VARCHAR(64) REFERENCES orders(client_order_id),
+    exchange_order_id VARCHAR(64),
     exchange_trade_id VARCHAR(64) NOT NULL,
     basket_id VARCHAR(64) REFERENCES baskets(basket_id),
     symbol VARCHAR(32) REFERENCES instruments(symbol),
     side VARCHAR(8) NOT NULL,
+    position_side VARCHAR(8) NOT NULL DEFAULT 'BOTH', -- BOTH, LONG, SHORT
     price NUMERIC(28, 10) NOT NULL,
     quantity NUMERIC(28, 10) NOT NULL,
     fee NUMERIC(28, 10) NOT NULL,
@@ -255,6 +258,7 @@ CREATE TABLE IF NOT EXISTS positions (
     id SERIAL PRIMARY KEY,
     venue VARCHAR(32) NOT NULL DEFAULT 'binance_global',
     symbol VARCHAR(32) REFERENCES instruments(symbol),
+    position_side VARCHAR(8) NOT NULL DEFAULT 'BOTH', -- BOTH, LONG, SHORT
     direction VARCHAR(8) NOT NULL,           -- LONG, SHORT, FLAT
     quantity NUMERIC(28, 10) NOT NULL,
     entry_price NUMERIC(28, 10) NOT NULL,
@@ -266,7 +270,7 @@ CREATE TABLE IF NOT EXISTS positions (
     initial_margin NUMERIC(28, 10) NOT NULL,
     maintenance_margin NUMERIC(28, 10) NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
-    UNIQUE(venue, symbol)
+    UNIQUE(venue, symbol, position_side)
 );
 
 -- 16. Funding Events (USDⓈ-M Futures Funding Cashflows)
@@ -368,3 +372,26 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_events(created_at);
+
+-- 23. Transactional Persistence Outbox
+CREATE TABLE IF NOT EXISTS persistence_outbox (
+    event_id VARCHAR(128) PRIMARY KEY,
+    event_type VARCHAR(32) NOT NULL,
+    idempotency_key VARCHAR(256) NOT NULL,
+    aggregate_type VARCHAR(64) NOT NULL,
+    aggregate_id VARCHAR(256) NOT NULL,
+    payload JSONB NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+    attempt_count INT NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMPTZ,
+    last_error TEXT,
+    CONSTRAINT persistence_outbox_status_check
+        CHECK (status IN ('PENDING', 'PROCESSING', 'PROCESSED'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_persistence_outbox_idempotency
+    ON persistence_outbox(event_type, idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_persistence_outbox_pending
+    ON persistence_outbox(status, next_attempt_at, created_at);

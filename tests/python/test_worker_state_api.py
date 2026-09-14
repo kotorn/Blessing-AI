@@ -4,14 +4,17 @@ from fastapi.testclient import TestClient
 from apps.trading_worker.main import (
     app,
     set_worker_engine,
-    WORKER_ENGINE,
     WorkerExecutionMode,
     WorkerEngineState,
     WorkerRuntimeState,
-    HealthIndicators,
     TradingWorkerApp,
     get_default_state,
     _global_heartbeat_loop,
+)
+from apps.trading_worker.persistence import (
+    PersistenceConfig,
+    PersistenceManager,
+    PersistenceMode,
 )
 
 client = TestClient(app)
@@ -32,6 +35,32 @@ def test_default_worker_state_endpoint():
     assert data["kill_switch_active"] is False
     assert "health_indicators" in data
     assert data["health_indicators"]["reconciliation_status"] == "DISCONNECTED"
+
+
+@pytest.mark.asyncio
+async def test_required_persistence_blocks_paper_readiness_and_arming():
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+    worker.persistence = PersistenceManager(
+        config=PersistenceConfig(mode=PersistenceMode.REQUIRED)
+    )
+
+    preflight = worker.get_preflight("PAPER")
+    persistence_check = next(
+        check for check in preflight["checks"] if check["id"] == "CHK-PERSISTENCE"
+    )
+    assert preflight["canArm"] is False
+    assert persistence_check["required"] is True
+    assert persistence_check["status"] == "FAIL"
+
+    success, message = await worker.arm(
+        {
+            "executionMode": "PAPER",
+            "instruments": ["BTCUSDT"],
+            "strategies": {"grid": True},
+        }
+    )
+    assert success is False
+    assert "Required persistence is not ready" in message
 
 
 @pytest.mark.asyncio
@@ -183,7 +212,7 @@ async def test_worker_heartbeat_background_task():
         assert state.health_indicators.heartbeat_at == state.heartbeat_at
 
     # Graceful stop cancels heartbeat task
-    worker.stop()
+    await worker.stop()
     assert worker.is_running is False
     await asyncio.sleep(0.01)
     assert worker.heartbeat_task.done()

@@ -117,6 +117,67 @@ def test_market_event_time_is_preserved_through_state_intent_and_target():
     assert target.expires_at == later_event.event_time + timedelta(seconds=60)
 
 
+def test_production_market_event_pipeline_reaches_execution_decision():
+    event_time = datetime.now(timezone.utc)
+    event = MarketEvent(
+        event_id="E-PIPELINE-1",
+        event_time=event_time,
+        symbol="BTCUSDT",
+        venue="BINANCE_TESTNET",
+        market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("50000"),
+        best_bid=Decimal("49999.9"),
+        best_ask=Decimal("50000.1"),
+    )
+    later_event = event.model_copy(
+        update={
+            "event_id": "E-PIPELINE-2",
+            "event_time": event_time + timedelta(seconds=1),
+            "last_price": Decimal("50000"),
+        }
+    )
+
+    price_action = PriceActionEngine()
+    assert price_action.process_event(event) is None
+    pa_state = price_action.process_event(later_event)
+    assert pa_state is not None
+    market_state = MarketStateClassifier().classify(pa_state)
+    intent = GridStrategyEngine().evaluate(
+        pa_state.model_copy(update={"is_reclaiming": True}),
+        market_state,
+        grid_depth=0,
+    )
+    assert intent is not None
+
+    target = MetaAllocator().allocate([intent], later_event.symbol)
+    risk = RiskSnapshot(
+        timestamp=later_event.event_time,
+        portfolio_equity=Decimal("100000"),
+        unrealized_pnl=Decimal("0"),
+        realized_pnl_24h=Decimal("0"),
+        margin_utilization_pct=Decimal("5"),
+        effective_leverage=Decimal("0.5"),
+        current_drawdown_pct=Decimal("0"),
+        liquidation_distance_pct=Decimal("50"),
+        risk_state=RiskState.NORMAL,
+    )
+    recovered = ExposureRecoveryEngine(clock=lambda: later_event.event_time).process(
+        target,
+        risk,
+        current_position_qty=Decimal("0"),
+    )
+    decision = RiskGovernor(clock=lambda: later_event.event_time).evaluate(
+        recovered,
+        risk,
+        current_position_qty=Decimal("0"),
+    )
+
+    assert isinstance(decision, ExecutionDecision)
+    assert decision.action == "SUBMIT_ORDER"
+    assert decision.source_intent_ids == [intent.intent_id]
+    assert decision.orders[0].source_intent_ids == [intent.intent_id]
+
+
 def test_meta_allocator_rejects_mixed_symbol_intents():
     intent = StrategyIntent(
         intent_id="G1",

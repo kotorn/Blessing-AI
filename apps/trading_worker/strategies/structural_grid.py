@@ -1,3 +1,7 @@
+"""Research-only structural grid prototype; not a production execution path."""
+
+RESEARCH_ONLY = True
+
 import logging
 from decimal import Decimal
 from typing import Optional

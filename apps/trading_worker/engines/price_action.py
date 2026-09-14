@@ -2,8 +2,8 @@ import logging
 import math
 import collections
 from decimal import Decimal
-from datetime import datetime, timedelta, UTC
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, UTC
+from typing import Dict, Optional
 
 from domain.models import MarketEvent, PriceActionState
 
@@ -134,6 +134,12 @@ class PriceActionEngine:
             
         tracker = self.trackers[sym]
         state = tracker.process(event_timestamp, event.last_price)
+
+        # A single observation has no displacement or prior-tick context. It
+        # seeds the tracker, but must not enter the strategy pipeline as a
+        # tradeable market state.
+        if len(tracker.ticks) < 2:
+            return None
         
         if state:
             state = state.model_copy(update={"symbol": sym})

@@ -1,3 +1,11 @@
+"""Research-only portfolio risk prototype.
+
+The production risk authority is ``RiskGovernor``. This module is retained for
+offline comparison and must not be imported by the worker bootstrap.
+"""
+
+RESEARCH_ONLY = True
+
 import logging
 from decimal import Decimal
 from typing import Dict, Tuple

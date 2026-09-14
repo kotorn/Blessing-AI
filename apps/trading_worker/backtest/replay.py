@@ -1016,6 +1016,7 @@ class DeterministicReplay:
         if self._position is None:
             return
         side = OrderSide.SELL if self._position.signed_qty > 0 else OrderSide.BUY
+        target_exposure_id = f"REPLAY-END-CLOSE-TARGET-{event.event_id}"
         order = OrderIntent(
             client_order_id=f"REPLAY-END-CLOSE-{event.event_id}",
             symbol=event.symbol,
@@ -1040,6 +1041,8 @@ class DeterministicReplay:
             rational="Explicit end-of-sample flatten for a research replay.",
             net_exposure_delta=-self._position.signed_qty,
             timestamp=event.event_time,
+            target_exposure_id=target_exposure_id,
+            source_intent_ids=self._position.source_intent_ids,
         )
         execution_decisions.append(decision)
         normalized_order, fill_price, reason = self._order_gate(order, decision, event)
@@ -1063,6 +1066,7 @@ class DeterministicReplay:
             strategy_id=order.strategy_id,
             regime="END_OF_SAMPLE",
             decision_id=decision_id,
+            target_exposure_id=target_exposure_id,
         )
         fills.append(fill)
         if trade is not None:
@@ -1184,6 +1188,11 @@ class DeterministicReplay:
 
         self._clock_time = normalized_events[-1].event_time
         if self._position is not None and self.config.force_close_at_end:
+            # The explicit end-of-sample close is still a risk decision. Keep
+            # its contemporaneous risk snapshot in the audit stream so every
+            # execution decision has the risk context that authorized or
+            # required it.
+            risk_snapshots.append(self._risk_snapshot(normalized_events[-1]))
             self._force_close(
                 normalized_events[-1],
                 execution_decisions,
