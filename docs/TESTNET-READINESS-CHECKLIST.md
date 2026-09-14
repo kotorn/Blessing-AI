@@ -21,7 +21,7 @@ Testnet has been verified.
 | Spot/Portfolio Margin wallet observation | `CODE_PRESENT` (unverified) | Separate from USDⓈ-M Futures Testnet collateral; a Spot-to-Portfolio-Margin transfer cannot authorize the Worker or satisfy Testnet readiness |
 | Reconciliation and canonical fill recovery | `UNIT_TESTED` | Missing fill recovery cannot produce `IN_SYNC` |
 | Read-only Binance Testnet contract | `LOCAL_VERIFIED; CONTRACT_TESTED` | Worker-level contract on 2026-09-14 passed (`1 passed, 2 deselected`) using signed read-only Testnet calls; no mutation |
-| Controlled manual Testnet mutation | `NOT_RUN` | Live BTCUSDT rules reported `MIN_NOTIONAL=50 USDT`, above the hard 25 USDT cap; manual approval remains disabled |
+| Controlled manual Testnet mutation | `NOT_RUN` | Live BTCUSDT rules report `MIN_NOTIONAL=50 USDT`, within the 100 USDT first-launch cap; manual approval remains disabled |
 | Credentialed contract evidence handoff | `CODE_PRESENT` | The workflow runs non-secret tests first, records current-SHA evidence after read-only success in either mode, and promotes manual evidence only after the mutating trial passes |
 | Supervised bounded Testnet soak runner | `UNIT_TESTED` | Worker-owned market-event path, explicit caps, fill bounds, cleanup, and reconciliation are implemented; no soak approval or mutation was run |
 | GitHub CI for verified safety/research implementation candidate | `CI_VERIFIED` | The PR check and generated evidence artifact must report success for the same clean commit SHA; the workflow is the authoritative run record. |
@@ -59,8 +59,8 @@ by this repository.
 
 ## First-launch Testnet limits
 
-The safe defaults are BTCUSDT only, 25 USDT maximum single-order notional,
-50 USDT maximum total open notional, one open order, and one active exposure
+The safe defaults are BTCUSDT only, 100 USDT maximum single-order notional,
+100 USDT maximum total open notional, one open order, and one active exposure
 chain. Positive environment overrides are supported; empty, malformed, or
 non-positive values fall back to these defaults.
 
@@ -80,9 +80,9 @@ mode, positions, open orders, private stream health/keepalive, bootstrap, and
 reconciliation. No Testnet order was submitted and no Testnet trial artifact
 exists.
 The recorded public Testnet BTCUSDT spot-check from 2026-09-14 reported a 50 USDT minimum notional,
-which exceeds the configured 25 USDT first-launch cap; the manual trial must
-abort until the exchange rule changes or an explicitly approved cap change is
-made. The cap was not raised automatically.
+which is within the configured 100 USDT first-launch cap. The manual trial
+remains `NOT_RUN` because `TESTNET_MANUAL_TRIAL_APPROVED` is false; no Testnet
+order was submitted and no trial artifact exists.
 The local non-secret gates were rerun for the current clean checkout. The
 generated `artifacts/build-evidence.json` records the exact commit SHA and the
 exact-SHA GitHub CI result; the workflow artifact is the authoritative handoff

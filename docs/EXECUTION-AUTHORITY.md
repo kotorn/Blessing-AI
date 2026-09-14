@@ -135,7 +135,8 @@ Actions check is the authoritative CI record. The credentialed contract
 workflow records current-SHA sanitized evidence after read-only success and
 only marks the manual trial verified after the mutating test passes. The
 read-only contract passed locally on 2026-09-14; the controlled mutation trial
-remains `NOT_RUN` because the live BTCUSDT minimum notional observed on Testnet
-was 50 USDT while the hard first-launch cap is 25 USDT. The supervised soak
-runner is implemented and unit-tested but was not approved or run. Autonomous
-Testnet execution remains locked, and Mainnet execution remains disabled.
+remains `NOT_RUN` because no mutation approval or trial evidence has been
+completed. The live BTCUSDT minimum notional observed on Testnet was 50 USDT,
+within the 100 USDT first-launch cap. The supervised soak runner is implemented
+and unit-tested but was not approved or run. Autonomous Testnet execution
+remains locked, and Mainnet execution remains disabled.

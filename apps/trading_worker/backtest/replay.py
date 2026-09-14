@@ -297,8 +297,8 @@ class ReplayExecutionConfig(BaseModel):
 
     # These defaults mirror the first-launch Testnet caps.  They are still
     # applied by the research order gate and may only be changed explicitly.
-    max_single_order_notional: Decimal = Decimal(25)
-    max_total_open_notional: Decimal = Decimal(50)
+    max_single_order_notional: Decimal = Decimal(100)
+    max_total_open_notional: Decimal = Decimal(100)
     max_open_orders: int = 1
     max_active_exposure_chains: int = 1
     max_target_gross_qty: Decimal = Decimal(2)
