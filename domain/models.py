@@ -129,8 +129,8 @@ class StrategyIntent(BaseModel):
     market_type: MarketType
     direction: PositionSide
     desired_delta_qty: Decimal          # Signed: positive for Long, negative for Short
-    opportunity_score: Decimal = Field(ge=Decimal("0"), le=Decimal("1"))
-    confidence: Decimal = Field(ge=Decimal("0"), le=Decimal("1"))
+    opportunity_score: Decimal = Decimal("0.0")
+    confidence: Decimal = Decimal("0.0")
     expected_holding_horizon_sec: int
     invalidation_price: Optional[Decimal] = None
     evidence: Dict[str, Any] = Field(default_factory=dict)

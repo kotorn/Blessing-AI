@@ -1,84 +1,142 @@
 import logging
+import math
+import collections
 from decimal import Decimal
-from datetime import UTC
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta, UTC
+from typing import Dict, List, Optional, Tuple
+
 from domain.models import MarketEvent, PriceActionState
 
 logger = logging.getLogger("blessing.engines.price_action")
 
-class PriceActionEngine:
-    def __init__(self, atr_period: int = 14):
-        self.atr_period = atr_period
-        self.price_history: Dict[str, List[Decimal]] = {}
-        self.last_state: Dict[str, PriceActionState] = {}
+class EWMA:
+    def __init__(self, alpha: float):
+        self.alpha = alpha
+        self.value = None
+
+    def update(self, val: float) -> float:
+        if self.value is None:
+            self.value = val
+        else:
+            self.value = self.alpha * val + (1.0 - self.alpha) * self.value
+        return self.value
+
+class InstrumentTracker:
+    def __init__(self):
+        # 1-minute tracking (alpha for ~60 updates assuming 1 tick/sec)
+        self.price_ema = EWMA(2.0 / (60 + 1))
+        self.var_ema = EWMA(2.0 / (60 + 1))
+        self.vel_ema = EWMA(2.0 / (60 + 1))
+        self.accel_ema = EWMA(2.0 / (60 + 1))
         
-    def process_event(self, event: MarketEvent) -> Optional[PriceActionState]:
-        sym = event.symbol
-        if sym not in self.price_history:
-            self.price_history[sym] = []
+        # 1-hour tracking for baseline ATR/Volatility proxy (alpha for ~3600 updates)
+        self.long_var_ema = EWMA(2.0 / (3600 + 1))
+        
+        self.ticks = collections.deque(maxlen=5000)
+        
+        self.prior_24h_high = Decimal("-inf")
+        self.prior_24h_low = Decimal("inf")
+        
+        self.last_velocity = 0.0
+
+    def process(self, timestamp: datetime, price_d: Decimal) -> Optional[PriceActionState]:
+        price = float(price_d)
+        self.ticks.append((timestamp, price))
+        
+        if self.prior_24h_high == Decimal("-inf"):
+            self.prior_24h_high = price_d
+            self.prior_24h_low = price_d
             
-        self.price_history[sym].append(event.last_price)
-        # Keep rolling window bounded
-        if len(self.price_history[sym]) > 1000:
-            self.price_history[sym].pop(0)
+        # Update session highs/lows crudely for the streaming context
+        if price_d > self.prior_24h_high:
+            self.prior_24h_high = price_d
+        if price_d < self.prior_24h_low:
+            self.prior_24h_low = price_d
             
-        # We need a meaningful displacement baseline, simulated here using a simple lookback
-        history = self.price_history[sym]
+        # EWMA Updates
+        prev_ema = self.price_ema.value if self.price_ema.value is not None else price
+        curr_ema = self.price_ema.update(price)
         
-        if len(history) < 2:
-            return None
-            
-        current = history[-1]
-        previous = history[-2]
+        diff = price - curr_ema
+        self.var_ema.update(diff * diff)
+        self.long_var_ema.update(diff * diff)
         
-        # Microstructure calculations
-        displacement = current - previous
-        velocity_pct = (displacement / previous) * 100 if previous else Decimal("0")
+        # Velocity as rate of change of EMA
+        velocity = (curr_ema - prev_ema) / prev_ema if prev_ema > 0 else 0.0
+        # Normalize to % per minute roughly assuming 1 tick/sec -> * 60 * 100
+        velocity_pct_min = velocity * 6000.0 
         
-        # We define a rolling window for 24h high/low and swing structure
-        # In a real environment, we would aggregate bars. For this stream, we use local extrema.
-        window = history[-min(len(history), 60):]  # e.g., last 60 ticks/events
-        local_high = max(window)
-        local_low = min(window)
+        curr_vel = self.vel_ema.update(velocity_pct_min)
         
-        prior_24h_high = max(history)
-        prior_24h_low = min(history)
+        # Acceleration as rate of change of velocity
+        accel = curr_vel - self.last_velocity
+        self.last_velocity = curr_vel
+        curr_accel = self.accel_ema.update(accel)
         
-        # Simplistic range expansion ratio
-        range_expansion = Decimal("0")
-        if prior_24h_high > prior_24h_low:
-            range_expansion = (local_high - local_low) / (prior_24h_high - prior_24h_low)
-            
+        # Standard deviation of price proxy:
+        long_stdev = math.sqrt(self.long_var_ema.value) if self.long_var_ema.value else 0.0
+        short_stdev = math.sqrt(self.var_ema.value) if self.var_ema.value else 0.0
+        
+        # Range expansion ratio = short-term volatility / long-term volatility
+        range_expansion = (short_stdev / long_stdev) if long_stdev > 0 else 0.0
+        
+        # Local Swing High/Low over recent ticks (e.g., last 60 events)
+        recent_window = list(self.ticks)[-min(len(self.ticks), 60):]
+        local_high = Decimal(str(max(p for t, p in recent_window)))
+        local_low = Decimal(str(min(p for t, p in recent_window)))
+        
+        # Liquidity Sweep logic
         is_sweep = False
         is_reclaim = False
         
-        # Liquidity Sweep Logic: Price poked below support (prior_24h_low) but immediately closed back above
-        if current > prior_24h_low and previous <= prior_24h_low:
-            is_sweep = True
-            is_reclaim = True
+        if len(self.ticks) > 1:
+            prev_price = Decimal(str(self.ticks[-2][1]))
+            # Poked below prior low and reclaimed
+            if price_d > self.prior_24h_low and prev_price <= self.prior_24h_low:
+                is_sweep = True
+                is_reclaim = True
+            # Poked above prior high and rejected (sweep high)
+            if price_d < self.prior_24h_high and prev_price >= self.prior_24h_high:
+                is_sweep = True
+                is_reclaim = False
+
+        state = PriceActionState(
+            symbol="", # Overridden by caller
+            timestamp=timestamp,
+            swing_high=local_high,
+            swing_low=local_low,
+            prior_24h_high=self.prior_24h_high,
+            prior_24h_low=self.prior_24h_low,
+            displacement_velocity_pct=Decimal(f"{curr_vel:.4f}"),
+            displacement_acceleration=Decimal(f"{curr_accel:.4f}"),
+            range_expansion_ratio=Decimal(f"{range_expansion:.4f}"),
+            liquidity_swept=is_sweep,
+            is_reclaiming=is_reclaim
+        )
+        return state
+
+class PriceActionEngine:
+    def __init__(self, atr_period: int = 14):
+        self.atr_period = atr_period
+        self.trackers: Dict[str, InstrumentTracker] = {}
+        self.last_state: Dict[str, PriceActionState] = {}
+
+    def process_event(self, event: MarketEvent) -> Optional[PriceActionState]:
+        sym = event.symbol
+        if sym not in self.trackers:
+            self.trackers[sym] = InstrumentTracker()
             
         event_timestamp = event.event_time
         if event_timestamp.tzinfo is None:
             event_timestamp = event_timestamp.replace(tzinfo=UTC)
         else:
             event_timestamp = event_timestamp.astimezone(UTC)
-
-        state = PriceActionState(
-            symbol=sym,
-            # Historical replay and live lineage must use the exchange event
-            # time, not process wall-clock time. This keeps WFO chronology
-            # and downstream intents traceable to the observed event.
-            timestamp=event_timestamp,
-            swing_high=local_high,
-            swing_low=local_low,
-            prior_24h_high=prior_24h_high,
-            prior_24h_low=prior_24h_low,
-            displacement_velocity_pct=velocity_pct,
-            displacement_acceleration=Decimal("0.0"), # requires 2nd derivative tracking
-            range_expansion_ratio=range_expansion,
-            liquidity_swept=is_sweep,
-            is_reclaiming=is_reclaim
-        )
+            
+        tracker = self.trackers[sym]
+        state = tracker.process(event_timestamp, event.last_price)
         
-        self.last_state[sym] = state
+        if state:
+            state = state.model_copy(update={"symbol": sym})
+            self.last_state[sym] = state
+            
         return state
