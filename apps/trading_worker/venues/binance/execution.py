@@ -92,6 +92,11 @@ class BinanceExecutionAdapter:
         self.order_gate = OrderExecutionGate(self)
         self.last_market_event_at: Dict[str, datetime] = {}
         self.last_market_price: Dict[str, Decimal] = {}
+        # PERCENT_PRICE is evaluated against Binance's mark price. Keep this
+        # separate from last_market_price because book-ticker samples use a
+        # bid/ask midpoint for executable-price estimation.
+        self.last_market_reference_price: Dict[str, Decimal] = {}
+        self.last_market_reference_at: Dict[str, datetime] = {}
         self.last_market_bid: Dict[str, Decimal] = {}
         self.last_market_ask: Dict[str, Decimal] = {}
         self.last_market_bid_qty: Dict[str, Decimal] = {}
@@ -240,6 +245,7 @@ class BinanceExecutionAdapter:
         *,
         price: Decimal,
         payload: Dict[str, Any],
+        reference_price: Optional[Decimal] = None,
         bid: Optional[Decimal] = None,
         ask: Optional[Decimal] = None,
         bid_qty: Optional[Decimal] = None,
@@ -256,6 +262,13 @@ class BinanceExecutionAdapter:
         self.last_market_event_source[normalized_symbol] = "BINANCE_TESTNET_REST"
         self.last_market_event_venue[normalized_symbol] = "BINANCE_TESTNET"
         self.last_market_event_market_type[normalized_symbol] = MarketType.USDM_FUTURES.value
+        if (
+            reference_price is not None
+            and reference_price.is_finite()
+            and reference_price > 0
+        ):
+            self.last_market_reference_price[normalized_symbol] = reference_price
+            self.last_market_reference_at[normalized_symbol] = timestamp
         if bid is not None and ask is not None:
             self.last_market_bid[normalized_symbol] = bid
             self.last_market_ask[normalized_symbol] = ask
@@ -274,6 +287,26 @@ class BinanceExecutionAdapter:
             and self.last_market_event_market_type.get(normalized_symbol)
             == MarketType.USDM_FUTURES.value
         )
+
+    def get_market_reference_price(self, symbol: str) -> Optional[Decimal]:
+        """Return a fresh Binance mark price for percent-price filters."""
+
+        normalized_symbol = str(symbol).upper()
+        price = self.last_market_reference_price.get(normalized_symbol)
+        timestamp = self.last_market_reference_at.get(normalized_symbol)
+        if (
+            price is None
+            or timestamp is None
+            or not price.is_finite()
+            or price <= 0
+        ):
+            return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        age = (utc_now() - timestamp).total_seconds()
+        if age < 0 or age > self._market_data_max_age():
+            return None
+        return price
 
     def record_market_event(self, event: MarketEvent) -> bool:
         """Record a real market sample for per-symbol freshness checks."""
@@ -302,6 +335,14 @@ class BinanceExecutionAdapter:
         self.last_market_event_source[symbol] = "BINANCE_TESTNET_WS"
         self.last_market_event_venue[symbol] = "BINANCE_TESTNET"
         self.last_market_event_market_type[symbol] = MarketType.USDM_FUTURES.value
+        if event.mark_price is not None:
+            try:
+                mark_price = Decimal(str(event.mark_price))
+            except (InvalidOperation, TypeError, ValueError):
+                mark_price = None
+            if mark_price is not None and mark_price.is_finite() and mark_price > 0:
+                self.last_market_reference_price[symbol] = mark_price
+                self.last_market_reference_at[symbol] = timestamp
         try:
             bid = Decimal(str(event.best_bid))
             ask = Decimal(str(event.best_ask))
@@ -335,16 +376,26 @@ class BinanceExecutionAdapter:
         self, symbol: str, side: Optional[str] = None
     ) -> Optional[Decimal]:
         normalized_symbol = symbol.upper()
-        event_at = self.last_market_event_at.get(normalized_symbol)
         normalized_side = str(side or "").upper()
         cached = (
             self.last_market_ask.get(normalized_symbol)
             if normalized_side == OrderSide.BUY.value
             else self.last_market_bid.get(normalized_symbol)
             if normalized_side == OrderSide.SELL.value
-            else self.last_market_price.get(normalized_symbol)
+            else self.last_market_reference_price.get(normalized_symbol)
         )
-        if event_at and cached and self.has_authoritative_market_sample(normalized_symbol):
+        # Executable bid/ask samples and the mark/reference sample have
+        # independent freshness clocks. A fresh book ticker must never make
+        # an older mark price look fresh for PERCENT_PRICE validation.
+        event_at = (
+            self.last_market_event_at.get(normalized_symbol)
+            if normalized_side in {OrderSide.BUY.value, OrderSide.SELL.value}
+            else self.last_market_reference_at.get(normalized_symbol)
+        )
+        if event_at and cached and (
+            self.has_authoritative_market_sample(normalized_symbol)
+            or normalized_side not in {OrderSide.BUY.value, OrderSide.SELL.value}
+        ):
             if event_at.tzinfo is None:
                 event_at = event_at.replace(tzinfo=timezone.utc)
             age = (utc_now() - event_at).total_seconds()
@@ -366,7 +417,10 @@ class BinanceExecutionAdapter:
                 return None
             price = Decimal(str(payload.get("markPrice")))
             if not self._record_rest_market_sample(
-                normalized_symbol, price=price, payload=payload
+                normalized_symbol,
+                price=price,
+                payload=payload,
+                reference_price=price,
             ):
                 return None
             return price

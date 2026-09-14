@@ -53,6 +53,71 @@ def _is_risk_reducing(value: Any) -> bool:
     }
 
 
+_KNOWN_ALPHA_STRATEGIES = frozenset({"grid", "trend", "shock", "carry"})
+_SYSTEM_STRATEGIES = frozenset(
+    {"meta_allocator", "portfolio", "recovery", "manual_testnet_trial"}
+)
+_STRATEGY_ALIASES = {
+    "structural grid": "grid",
+    "trend / breakout": "trend",
+    "trend/breakout": "trend",
+    "shock momentum": "shock",
+    "funding carry": "carry",
+    "funding_carry": "carry",
+}
+_LINEAGE_PREFIX_TO_STRATEGY = {
+    "GRID": "grid",
+    "TREND": "trend",
+    "SHOCK": "shock",
+    "CARRY": "carry",
+}
+
+
+def _canonical_strategy_id(value: Any) -> Optional[str]:
+    normalized = str(value or "").strip().lower()
+    if normalized in _KNOWN_ALPHA_STRATEGIES:
+        return normalized
+    return _STRATEGY_ALIASES.get(normalized)
+
+
+def _disabled_strategy_reason(worker: Any, decision: ExecutionDecision) -> Optional[str]:
+    """Reject risk-increasing decisions whose alpha lineage is disabled.
+
+    The risk governor emits a system-level ``meta_allocator`` order, so the
+    source intent IDs are checked as well as the order strategy ID. Reduction
+    and emergency decisions intentionally skip this policy check so a disabled
+    alpha can still be safely unwound.
+    """
+
+    if not _is_risk_increasing(getattr(decision, "risk_class", None)):
+        return None
+    enabled_getter = getattr(worker, "_enabled_strategies", None)
+    enabled = {
+        strategy
+        for strategy in (enabled_getter() if callable(enabled_getter) else set())
+        if strategy in _KNOWN_ALPHA_STRATEGIES
+    }
+    for intent in getattr(decision, "orders", []) or []:
+        strategy_id = str(getattr(intent, "strategy_id", "")).strip().lower()
+        if strategy_id in _SYSTEM_STRATEGIES:
+            continue
+        canonical = _canonical_strategy_id(strategy_id)
+        if canonical is None:
+            return f"Unknown or unsupported strategy {strategy_id!r}"
+        if canonical not in enabled:
+            return f"Strategy {canonical} is disabled in the active configuration"
+
+    lineage_ids = list(getattr(decision, "source_intent_ids", []) or [])
+    for intent in getattr(decision, "orders", []) or []:
+        lineage_ids.extend(getattr(intent, "source_intent_ids", []) or [])
+    for lineage_id in lineage_ids:
+        prefix = str(lineage_id).strip().upper().split("-", 1)[0]
+        strategy = _LINEAGE_PREFIX_TO_STRATEGY.get(prefix)
+        if strategy is not None and strategy not in enabled:
+            return f"Strategy {strategy} is disabled in the active configuration"
+    return None
+
+
 def _liquidation_safety_is_known_and_positive(snapshot: Any) -> bool:
     if getattr(snapshot, "liquidation_safety", "UNKNOWN") != "KNOWN":
         return False
@@ -176,6 +241,10 @@ class DecisionExecutionGate:
             return GateResult(False, "Decision contains no orders")
         if str(getattr(decision, "action", "")).upper() == "NOOP":
             return GateResult(False, "NOOP decisions cannot reach execution")
+
+        disabled_strategy_reason = _disabled_strategy_reason(self.worker, decision)
+        if disabled_strategy_reason:
+            return GateResult(False, disabled_strategy_reason)
 
         if _is_risk_increasing(risk_class):
             # Treat canonical engine state as a safety input as well as the
@@ -346,6 +415,13 @@ class OrderExecutionGate:
             )
         except (TypeError, ValueError):
             return GateResult(False, "Invalid timeInForce")
+        if intent.post_only and order_type != OrderType.LIMIT.value:
+            return GateResult(False, "post_only is supported only for LIMIT orders")
+        if intent.post_only and time_in_force not in {
+            TimeInForce.GTC,
+            TimeInForce.POST_ONLY,
+        }:
+            return GateResult(False, "post_only LIMIT orders require GTC or POST_ONLY timeInForce")
 
         try:
             quantity = Decimal(str(intent.quantity))
@@ -375,8 +451,11 @@ class OrderExecutionGate:
             if intent.price is None:
                 return GateResult(False, "LIMIT order requires a price")
             try:
-                price = rules.normalize_price(Decimal(str(intent.price)))
-            except (InvalidOperation, ValueError):
+                price = rules.normalize_price(
+                    Decimal(str(intent.price)),
+                    round_up=side == OrderSide.SELL,
+                )
+            except (InvalidOperation, TypeError, ValueError):
                 return GateResult(False, "Invalid limit price")
             if not price.is_finite() or price <= 0:
                 return GateResult(False, "Limit price must be positive and finite")
@@ -396,6 +475,35 @@ class OrderExecutionGate:
             )
             if estimated_price is None:
                 return GateResult(False, f"Fresh market price unavailable for {symbol}")
+
+        if order_type == OrderType.LIMIT.value:
+            # Binance's percent-price filters apply to submitted limit prices.
+            # MARKET orders have no client-supplied price and use the fresh
+            # executable quote above for notional estimation instead.
+            reference_getter = getattr(self.adapter, "get_market_reference_price", None)
+            reference_price = (
+                reference_getter(symbol)
+                if callable(reference_getter)
+                else (
+                    None
+                    if rules.has_percent_price_filter
+                    else getattr(self.adapter, "last_market_price", {}).get(symbol)
+                )
+            )
+            if reference_price is None and rules.has_percent_price_filter:
+                # Binance evaluates PERCENT_PRICE against mark price. A recent
+                # book-ticker midpoint is not a valid substitute, so obtain a
+                # fresh mark sample before rejecting the order.
+                mark_getter = getattr(self.adapter, "get_fresh_market_price", None)
+                if callable(mark_getter):
+                    reference_price = await mark_getter(symbol)
+            percent_allowed, percent_reason = rules.validate_percent_price(
+                estimated_price,
+                getattr(side, "value", side),
+                reference_price,
+            )
+            if not percent_allowed:
+                return GateResult(False, f"Binance percent-price filter rejected order: {percent_reason}")
 
         # Check the timestamp after price discovery.  A MARKET order may have
         # had no usable cached quote and therefore refresh from the Testnet
@@ -432,8 +540,12 @@ class OrderExecutionGate:
         notional = quantity * estimated_price
         if notional.is_nan() or notional.is_infinite() or notional <= 0:
             return GateResult(False, "Order notional is invalid")
-        if rules.min_notional > 0 and notional < rules.min_notional:
-            return GateResult(False, f"Notional {notional} is below minimum {rules.min_notional}")
+        min_notional = rules.min_notional_for(order_type)
+        if min_notional > 0 and notional < min_notional:
+            return GateResult(False, f"Notional {notional} is below minimum {min_notional}")
+        max_notional = rules.max_notional_for(order_type)
+        if max_notional > 0 and notional > max_notional:
+            return GateResult(False, f"Notional {notional} exceeds maximum {max_notional}")
         if intent.reduce_only and risk in {
             EconomicRiskClass.NEW_RISK,
             EconomicRiskClass.INCREASE_RISK,

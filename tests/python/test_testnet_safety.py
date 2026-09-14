@@ -766,6 +766,56 @@ async def test_pause_and_recovery_only_use_economic_risk_class(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_decision_gate_rejects_disabled_strategy_order(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    intent = make_limit_intent().model_copy(update={"strategy_id": "trend"})
+
+    result = worker.decision_execution_gate.check(
+        make_decision(EconomicRiskClass.NEW_RISK, intent)
+    )
+
+    assert result.allowed is False
+    assert "disabled" in result.reason.lower()
+    assert "trend" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_decision_gate_rejects_disabled_strategy_lineage(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    intent = make_limit_intent().model_copy(
+        update={
+            "strategy_id": "meta_allocator",
+            "source_intent_ids": ["TREND-INTENT-BTCUSDT-1"],
+        }
+    )
+
+    result = worker.decision_execution_gate.check(
+        make_decision(EconomicRiskClass.INCREASE_RISK, intent)
+    )
+
+    assert result.allowed is False
+    assert "disabled" in result.reason.lower()
+    assert "trend" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_decision_gate_allows_reduction_from_disabled_strategy(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    intent = make_limit_intent(reduce_only=True).model_copy(
+        update={
+            "strategy_id": "trend",
+            "source_intent_ids": ["TREND-INTENT-BTCUSDT-1"],
+        }
+    )
+
+    result = worker.decision_execution_gate.check(
+        make_decision(EconomicRiskClass.CLOSE, intent)
+    )
+
+    assert result.allowed is True
+
+
+@pytest.mark.asyncio
 async def test_recovery_orders_are_reduce_only_at_the_last_gate(monkeypatch):
     worker = await make_ready_worker(monkeypatch)
     decision = make_decision(EconomicRiskClass.RECOVERY, make_limit_intent())
@@ -865,6 +915,27 @@ async def test_market_order_without_fresh_price_is_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_market_order_with_post_only_is_rejected():
+    adapter = await make_adapter()
+    intent = OrderIntent(
+        client_order_id="MARKET-POST-ONLY",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.001"),
+        post_only=True,
+    )
+
+    result = await adapter.order_gate.check(intent, EconomicRiskClass.NEW_RISK)
+
+    assert result.allowed is False
+    assert "post_only" in result.reason.lower()
+
+
+@pytest.mark.asyncio
 async def test_market_order_uses_executable_ask_and_respects_single_order_cap():
     async def handler(method, path, kwargs):
         if path == "/fapi/v1/ticker/bookTicker":
@@ -926,6 +997,58 @@ async def test_market_order_rejects_when_top_of_book_depth_is_insufficient():
 
     assert result.allowed is False
     assert "depth" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_market_order_does_not_require_limit_percent_price_reference():
+    adapter = await make_adapter()
+    rules = adapter.symbol_rules["BTCUSDT"]
+    rules.parse_exchange_info(
+        {
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "orderTypes": ["LIMIT", "MARKET"],
+            "filters": [
+                {"filterType": "PRICE_FILTER", "minPrice": "0.1", "maxPrice": "1000000", "tickSize": "0.1"},
+                {"filterType": "LOT_SIZE", "minQty": "0.001", "maxQty": "100", "stepSize": "0.001"},
+                {"filterType": "MARKET_LOT_SIZE", "minQty": "0.001", "maxQty": "100", "stepSize": "0.001"},
+                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                {"filterType": "PERCENT_PRICE", "multiplierUp": "1.05", "multiplierDown": "0.95"},
+            ],
+        }
+    )
+    adapter.last_market_bid["BTCUSDT"] = Decimal("10000")
+    adapter.last_market_ask["BTCUSDT"] = Decimal("10001")
+    adapter.last_market_bid_qty["BTCUSDT"] = Decimal("1")
+    adapter.last_market_ask_qty["BTCUSDT"] = Decimal("1")
+
+    intent = OrderIntent(
+        client_order_id="MARKET-PERCENT-FILTER",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.001"),
+    )
+    result = await adapter.order_gate.check(intent, EconomicRiskClass.NEW_RISK)
+
+    assert result.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_sell_limit_price_normalization_uses_ceiling_tick():
+    adapter = await make_adapter()
+    intent = make_limit_intent(price="10000.05").model_copy(
+        update={"side": OrderSide.SELL}
+    )
+
+    result = await adapter.order_gate.check(intent, EconomicRiskClass.NEW_RISK)
+
+    assert result.allowed is True
+    assert result.prepared is not None
+    assert result.prepared.price == Decimal("10000.1")
 
 
 @pytest.mark.asyncio
@@ -1007,6 +1130,122 @@ def test_market_event_from_non_testnet_venue_is_not_authoritative():
 
     assert adapter.record_market_event(event) is False
     assert "ETHUSDT" not in adapter.last_market_event_at
+
+
+def test_percent_price_reference_uses_mark_not_book_or_midpoint():
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET)
+    book_event = MarketEvent(
+        event_id="BOOK-1",
+        event_time=utc_now(),
+        symbol="BTCUSDT",
+        venue="BINANCE_TESTNET",
+        market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("9999"),
+        best_bid=Decimal("9999"),
+        best_ask=Decimal("10001"),
+    )
+
+    assert adapter.record_market_event(book_event) is True
+    assert adapter.get_market_reference_price("BTCUSDT") is None
+
+    mark_event = book_event.model_copy(
+        update={
+            "event_id": "MARK-1",
+            "event_time": utc_now(),
+            "last_price": Decimal("10000"),
+            "best_bid": Decimal("10000"),
+            "best_ask": Decimal("10000"),
+            "mark_price": Decimal("10000"),
+        }
+    )
+    assert adapter.record_market_event(mark_event) is True
+    assert adapter.get_market_reference_price("BTCUSDT") == Decimal("10000")
+
+    later_book_event = book_event.model_copy(
+        update={
+            "event_id": "BOOK-2",
+            "event_time": utc_now(),
+            "last_price": Decimal("9998"),
+            "best_bid": Decimal("9998"),
+            "best_ask": Decimal("10000"),
+        }
+    )
+    assert adapter.record_market_event(later_book_event) is True
+    assert adapter.get_market_reference_price("BTCUSDT") == Decimal("10000")
+
+
+@pytest.mark.asyncio
+async def test_stale_mark_is_refreshed_even_when_book_sample_is_fresh(monkeypatch):
+    async def handler(method, path, kwargs):
+        assert method == "GET"
+        assert path == "/fapi/v1/premiumIndex"
+        return {
+            "symbol": "BTCUSDT",
+            "markPrice": "10000",
+            "time": int(utc_now().timestamp() * 1000),
+        }
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    adapter.symbol_rules["BTCUSDT"].parse_exchange_info(
+        {
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "orderTypes": ["LIMIT", "MARKET"],
+            "filters": [
+                {"filterType": "PRICE_FILTER", "minPrice": "0.1", "maxPrice": "1000000", "tickSize": "0.1"},
+                {"filterType": "LOT_SIZE", "minQty": "0.001", "maxQty": "100", "stepSize": "0.001"},
+                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                {"filterType": "PERCENT_PRICE", "multiplierUp": "1.05", "multiplierDown": "0.95"},
+            ],
+        }
+    )
+    adapter.last_market_reference_price["BTCUSDT"] = Decimal("9000")
+    adapter.last_market_reference_at["BTCUSDT"] = utc_now() - timedelta(seconds=30)
+
+    result = await adapter.order_gate.check(
+        make_limit_intent(price="10000"), EconomicRiskClass.NEW_RISK
+    )
+
+    assert result.allowed is True
+    assert adapter.last_market_reference_price["BTCUSDT"] == Decimal("10000")
+
+
+@pytest.mark.asyncio
+async def test_post_only_limit_serializes_to_binance_gtx(monkeypatch):
+    submitted_params = {}
+
+    async def handler(method, path, kwargs):
+        assert method == "POST"
+        assert path == "/fapi/v1/order"
+        submitted_params.update(kwargs["params"])
+        return {
+            "orderId": 101,
+            "clientOrderId": kwargs["params"]["newClientOrderId"],
+            "status": "NEW",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "positionSide": "BOTH",
+            "origQty": "0.001",
+            "price": "10000",
+            "type": "LIMIT",
+        }
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+
+    async def verified_reconciliation(order, response):
+        return True
+
+    monkeypatch.setattr(adapter, "_post_mutation_reconcile", verified_reconciliation)
+    intent = make_limit_intent().model_copy(
+        update={"post_only": True, "time_in_force": TimeInForce.POST_ONLY}
+    )
+    executed = await execute_internal(
+        adapter, make_decision(EconomicRiskClass.NEW_RISK, intent)
+    )
+
+    assert len(executed) == 1
+    assert submitted_params["type"] == "LIMIT"
+    assert submitted_params["timeInForce"] == "GTX"
 
 
 @pytest.mark.asyncio
@@ -1451,6 +1690,59 @@ async def test_kill_switch_reconciles_even_after_partial_cancellation(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_autonomous_execution_failure_activates_local_kill_switch(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    kill_switch_calls = []
+
+    async def fake_kill_switch(active):
+        kill_switch_calls.append(active)
+        worker.kill_switch_active = True
+        return {"status": "UNKNOWN", "reason": "exchange unreachable"}
+
+    monkeypatch.setattr(worker, "set_kill_switch", fake_kill_switch)
+
+    result = await worker._fail_closed_after_autonomous_execution_error(
+        RuntimeError("ambiguous submit")
+    )
+
+    assert result["status"] == "UNKNOWN"
+    assert kill_switch_calls == [True]
+    assert worker.kill_switch_active is True
+    assert worker.pause_new_risk is True
+    assert worker.engine_state == WorkerEngineState.EMERGENCY
+    assert worker.execution_adapter.state == ConnectionState.DEGRADED
+    assert worker.execution_adapter.reconciliation.last_status == "UNKNOWN"
+    assert await worker.execution_adapter.ledger.get_account_snapshot() is None
+
+
+@pytest.mark.asyncio
+async def test_worker_wraps_adapter_degradation_in_kill_switch_workflow(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    adapter = worker.execution_adapter
+    assert adapter is not None
+
+    async def degraded_execution(decision, *, authority=None):
+        adapter.state = ConnectionState.DEGRADED
+        adapter.reconciliation.last_status = "UNKNOWN"
+        return []
+
+    async def fake_kill_switch(active):
+        worker.kill_switch_active = active
+        return {"status": "UNKNOWN"}
+
+    monkeypatch.setattr(adapter, "execute_decision", degraded_execution)
+    monkeypatch.setattr(worker, "set_kill_switch", fake_kill_switch)
+
+    await worker.execute_manual_decision(
+        make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
+    )
+
+    assert worker.kill_switch_active is True
+    assert worker.engine_state == WorkerEngineState.EMERGENCY
+    assert await adapter.ledger.get_account_snapshot() is None
+
+
+@pytest.mark.asyncio
 async def test_kill_switch_blocks_queued_mutation_after_local_activation():
     first_post_started = asyncio.Event()
     release_first_post = asyncio.Event()
@@ -1625,7 +1917,7 @@ def test_exchange_symbol_rules_require_real_filter_data_for_each_order_type():
                 {"filterType": "PRICE_FILTER", "minPrice": "0.1", "maxPrice": "1000000", "tickSize": "0.1"},
                 {"filterType": "LOT_SIZE", "minQty": "0.001", "maxQty": "100", "stepSize": "0.001"},
                 {"filterType": "MARKET_LOT_SIZE", "minQty": "0.001", "maxQty": "50", "stepSize": "0.001"},
-                {"filterType": "NOTIONAL", "minNotional": "5"},
+                {"filterType": "NOTIONAL", "minNotional": "5", "maxNotional": "20"},
             ],
         }
     )
@@ -1633,6 +1925,21 @@ def test_exchange_symbol_rules_require_real_filter_data_for_each_order_type():
     assert rules.is_ready_for("LIMIT") is True
     assert rules.is_ready_for("MARKET") is True
     assert rules.normalize_price(Decimal("10000.19")) == Decimal("10000.1")
+
+    incomplete_notional = SymbolTradingRules("BTCUSDT")
+    with pytest.raises(ValueError, match="missing maxNotional"):
+        incomplete_notional.parse_exchange_info(
+            {
+                "symbol": "BTCUSDT",
+                "status": "TRADING",
+                "orderTypes": ["LIMIT"],
+                "filters": [
+                    {"filterType": "PRICE_FILTER", "minPrice": "0.1", "maxPrice": "1000000", "tickSize": "0.1"},
+                    {"filterType": "LOT_SIZE", "minQty": "0.001", "maxQty": "100", "stepSize": "0.001"},
+                    {"filterType": "NOTIONAL", "minNotional": "5"},
+                ],
+            }
+        )
 
     missing_notional = SymbolTradingRules("BTCUSDT")
     missing_notional.parse_exchange_info(
@@ -1647,6 +1954,115 @@ def test_exchange_symbol_rules_require_real_filter_data_for_each_order_type():
         }
     )
     assert missing_notional.is_ready_for("LIMIT") is False
+
+
+def test_exchange_symbol_rules_preserve_notional_and_percent_price_filters():
+    rules = SymbolTradingRules("BTCUSDT")
+    rules.parse_exchange_info(
+        {
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "orderTypes": ["LIMIT", "MARKET"],
+            "filters": [
+                {"filterType": "PRICE_FILTER", "minPrice": "0.1", "maxPrice": "1000000", "tickSize": "0.1"},
+                {"filterType": "LOT_SIZE", "minQty": "0.001", "maxQty": "100", "stepSize": "0.001"},
+                {"filterType": "MARKET_LOT_SIZE", "minQty": "0.001", "maxQty": "50", "stepSize": "0.001"},
+                {
+                    "filterType": "NOTIONAL",
+                    "minNotional": "5",
+                    "maxNotional": "20",
+                    "applyMinToMarket": False,
+                    "applyMaxToMarket": True,
+                },
+                {
+                    "filterType": "PERCENT_PRICE",
+                    "multiplierUp": "1.05",
+                    "multiplierDown": "0.95",
+                },
+            ],
+        }
+    )
+
+    assert rules.is_ready_for("LIMIT") is True
+    assert rules.is_ready_for("MARKET") is True
+    assert rules.min_notional_for("LIMIT") == Decimal("5")
+    assert rules.min_notional_for("MARKET") == Decimal("0")
+    assert rules.max_notional_for("LIMIT") == Decimal("20")
+    assert rules.max_notional_for("MARKET") == Decimal("20")
+    assert rules.validate_percent_price(
+        Decimal("10400"), "BUY", Decimal("10000")
+    ) == (True, "")
+    allowed, reason = rules.validate_percent_price(
+        Decimal("10600"), "BUY", Decimal("10000")
+    )
+    assert allowed is False
+    assert "outside" in reason
+
+    by_side = SymbolTradingRules("BTCUSDT")
+    by_side.parse_exchange_info(
+        {
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "orderTypes": ["LIMIT"],
+            "filters": [
+                {"filterType": "PRICE_FILTER", "minPrice": "0.1", "maxPrice": "1000000", "tickSize": "0.1"},
+                {"filterType": "LOT_SIZE", "minQty": "0.001", "maxQty": "100", "stepSize": "0.001"},
+                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                {
+                    "filterType": "PERCENT_PRICE_BY_SIDE",
+                    "bidMultiplierUp": "1.02",
+                    "bidMultiplierDown": "0.98",
+                    "askMultiplierUp": "1.03",
+                    "askMultiplierDown": "0.97",
+                },
+            ],
+        }
+    )
+    assert by_side.is_ready_for("LIMIT") is True
+    assert by_side.validate_percent_price(Decimal("102"), "BUY", Decimal("100")) == (
+        True,
+        "",
+    )
+    assert by_side.validate_percent_price(Decimal("103"), "BUY", Decimal("100"))[0] is False
+    assert by_side.validate_percent_price(Decimal("97"), "SELL", Decimal("100")) == (
+        True,
+        "",
+    )
+    assert by_side.validate_percent_price(Decimal("96"), "SELL", Decimal("100"))[0] is False
+
+
+@pytest.mark.asyncio
+async def test_order_gate_enforces_exchange_max_notional_and_percent_price():
+    adapter = await make_adapter()
+    rules = adapter.symbol_rules["BTCUSDT"]
+    rules.parse_exchange_info(
+        {
+            "symbol": "BTCUSDT",
+            "status": "TRADING",
+            "orderTypes": ["LIMIT", "MARKET"],
+            "filters": [
+                {"filterType": "PRICE_FILTER", "minPrice": "0.1", "maxPrice": "1000000", "tickSize": "0.1"},
+                {"filterType": "LOT_SIZE", "minQty": "0.001", "maxQty": "100", "stepSize": "0.001"},
+                {"filterType": "MARKET_LOT_SIZE", "minQty": "0.001", "maxQty": "50", "stepSize": "0.001"},
+                {"filterType": "NOTIONAL", "minNotional": "5", "maxNotional": "20"},
+                {"filterType": "PERCENT_PRICE", "multiplierUp": "1.05", "multiplierDown": "0.95"},
+            ],
+        }
+    )
+    adapter.last_market_reference_price["BTCUSDT"] = Decimal("10000")
+    adapter.last_market_reference_at["BTCUSDT"] = utc_now()
+
+    too_large = await adapter.order_gate.check(
+        make_limit_intent(quantity="0.002", price="10500"), EconomicRiskClass.NEW_RISK
+    )
+    assert too_large.allowed is False
+    assert "maximum" in too_large.reason.lower()
+
+    outside_band = await adapter.order_gate.check(
+        make_limit_intent(price="10600"), EconomicRiskClass.NEW_RISK
+    )
+    assert outside_band.allowed is False
+    assert "percent-price" in outside_band.reason.lower()
 
 
 @pytest.mark.asyncio

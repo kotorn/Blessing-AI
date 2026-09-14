@@ -534,6 +534,27 @@ class TradingWorkerApp:
                 return [str(symbol).upper() for symbol in configured]
         return [str(symbol).upper() for symbol in self.symbols]
 
+    def _enabled_strategies(self) -> set[str]:
+        """Return only strategies explicitly enabled by the active ARM config.
+
+        Strategy engines are stateful and may emit executable intents.  A
+        disabled strategy must therefore not even be evaluated; filtering
+        after evaluation would still let it influence allocation or audit
+        output.  No active configuration means no strategy authority.
+        """
+
+        if not isinstance(self.active_configuration, dict):
+            return set()
+        configured = self.active_configuration.get("strategies")
+        if not isinstance(configured, dict):
+            return set()
+        return {
+            str(strategy).strip().lower()
+            for strategy, enabled in configured.items()
+            if enabled is True
+            and str(strategy).strip().lower() in {"grid", "trend", "shock", "carry"}
+        }
+
     @staticmethod
     def _has_grid_lineage(value: object) -> bool:
         return any(
@@ -1496,13 +1517,76 @@ class TradingWorkerApp:
         result = self.decision_execution_gate.check(decision)
         return result.allowed, result.reason
 
+    async def _fail_closed_after_autonomous_execution_error(self, error: Exception) -> dict:
+        """Stop autonomous mutation after an unexpected execution failure.
+
+        A failed await can mean either a definitive rejection or an unknown
+        exchange outcome. The worker therefore invalidates its local
+        observations, activates the local kill switch, and performs the same
+        best-effort authoritative cancellation/reconciliation workflow used by
+        the operator kill-switch endpoint. The local block remains active
+        regardless of whether the exchange can be reached.
+        """
+
+        self.pause_new_risk = True
+        self.connection_state = ConnectionState.DEGRADED.value
+        self.reconciliation_status = "UNKNOWN"
+        adapter = self.execution_adapter
+        if adapter is not None:
+            adapter.state = ConnectionState.DEGRADED
+            adapter.reconciliation.last_status = "UNKNOWN"
+            try:
+                await adapter.ledger.set_account_snapshot(None)
+            except Exception as snapshot_error:
+                logger.warning(
+                    "Unable to invalidate account snapshot after autonomous failure: %s",
+                    snapshot_error,
+                )
+
+        try:
+            result = await self.set_kill_switch(True)
+        except Exception as kill_switch_error:
+            # set_kill_switch sets the local flag before any exchange call, but
+            # preserve that invariant even if its own control path fails.
+            self.kill_switch_active = True
+            result = {
+                "status": "UNKNOWN",
+                "reason": "Autonomous execution failed and Testnet kill-switch verification is unknown.",
+            }
+            logger.error(
+                "Unable to complete autonomous-failure kill-switch workflow: %s",
+                kill_switch_error,
+            )
+
+        self.kill_switch_active = True
+        self._refresh_engine_state()
+        logger.error(
+            "Autonomous Testnet execution failed; local kill switch is ACTIVE: %s; result=%s",
+            error,
+            result,
+        )
+        return result
+
     async def execute_manual_decision(self, decision):
         """Worker-owned manual Testnet path used by the controlled trial only."""
         allowed, reason = self._evaluate_execution_gate(decision)
         if not allowed or self.execution_adapter is None:
             raise RuntimeError(f"Decision execution gate blocked manual order: {reason}")
-        self.execution_adapter.bind_worker_authority(self)
-        return await self.execution_adapter.execute_decision(decision, authority=self)
+        adapter = self.execution_adapter
+        adapter.bind_worker_authority(self)
+        executed = await adapter.execute_decision(decision, authority=self)
+        # The adapter deliberately contains most exchange errors so it can
+        # classify definitive rejections versus ambiguity. A returned list is
+        # not sufficient evidence of safety: a degraded adapter or unresolved
+        # reconciliation must still enter the worker's kill-switch workflow.
+        if (
+            adapter.connection_state != ConnectionState.READY
+            or getattr(adapter.reconciliation, "last_status", "UNKNOWN") != "IN_SYNC"
+        ):
+            await self._fail_closed_after_autonomous_execution_error(
+                RuntimeError("Testnet execution did not finish READY and IN_SYNC")
+            )
+        return executed
 
     async def amend_testnet_order(
         self,
@@ -1567,14 +1651,33 @@ class TradingWorkerApp:
             return
             
         market_state = self.market_state_engine.classify(pa_state)
-        
-        grid_depth = await self._observed_grid_depth(event.symbol)
-        grid_intent = self.grid_engine.evaluate(
-            pa_state, market_state, grid_depth=grid_depth
+
+        enabled_strategies = self._enabled_strategies()
+        grid_depth = (
+            await self._observed_grid_depth(event.symbol)
+            if "grid" in enabled_strategies
+            else 0
         )
-        trend_intent = self.trend_engine.evaluate(pa_state, market_state)
-        shock_intent = self.shock_engine.evaluate(pa_state, market_state)
-        carry_intent = self.carry_engine.evaluate(event, market_state)
+        grid_intent = (
+            self.grid_engine.evaluate(pa_state, market_state, grid_depth=grid_depth)
+            if "grid" in enabled_strategies
+            else None
+        )
+        trend_intent = (
+            self.trend_engine.evaluate(pa_state, market_state)
+            if "trend" in enabled_strategies
+            else None
+        )
+        shock_intent = (
+            self.shock_engine.evaluate(pa_state, market_state)
+            if "shock" in enabled_strategies
+            else None
+        )
+        carry_intent = (
+            self.carry_engine.evaluate(event, market_state)
+            if "carry" in enabled_strategies
+            else None
+        )
         
         intents = [i for i in [grid_intent, trend_intent, shock_intent, carry_intent] if i]
         
@@ -1718,8 +1821,8 @@ class TradingWorkerApp:
                             logger.info(f"[TESTNET][AUTONOMOUS_EXEC] Executing decision {decision.decision_id} for {decision.symbol}")
                             try:
                                 await self.execute_manual_decision(decision)
-                            except Exception as e:
-                                logger.error(f"[TESTNET][AUTONOMOUS_EXEC] Execution failed: {e}")
+                            except Exception as exc:
+                                await self._fail_closed_after_autonomous_execution_error(exc)
                         else:
                             logger.info(f"[TESTNET][EXECUTION_BLOCKED] Decision {decision.decision_id} blocked: {reason}")
                     else:

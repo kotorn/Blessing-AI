@@ -224,14 +224,18 @@ def _passive_order(adapter, symbol: str, bid: Decimal, ask: Decimal):
     if passive_price <= 0 or passive_price >= ask:
         raise RuntimeError("Unable to derive a passive Testnet bid from the live quote")
 
-    required_steps = (rules.min_notional / passive_price / rules.step_size).to_integral_value(
+    min_notional = rules.min_notional_for("LIMIT")
+    required_steps = (min_notional / passive_price / rules.step_size).to_integral_value(
         rounding=ROUND_CEILING
     )
     quantity = max(rules.min_qty, required_steps * rules.step_size)
     quantity = rules.normalize_quantity(quantity)
     notional = quantity * passive_price
-    if quantity <= 0 or notional < rules.min_notional:
+    if quantity <= 0 or notional < min_notional:
         raise RuntimeError("Exchange minimum order requirements cannot be normalized")
+    max_notional = rules.max_notional_for("LIMIT")
+    if max_notional > 0 and notional > max_notional:
+        raise RuntimeError("Exchange maximum order notional would be exceeded")
     if quantity > rules.max_qty:
         raise RuntimeError("Exchange minimum notional requires more than the symbol max quantity")
     if notional > adapter.safety_limits.max_single_order_notional:

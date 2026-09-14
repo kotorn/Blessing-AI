@@ -624,3 +624,43 @@ async def test_worker_market_event_path_has_no_regime_attribute_error():
         await worker.handle_market_event(
             _carry_event().model_copy(update={"last_price": price})
         )
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_evaluate_disabled_strategy_engines(monkeypatch):
+    from apps.trading_worker.main import TradingWorkerApp
+
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+    worker.active_configuration = {
+        "executionMode": "PAPER",
+        "instruments": ["BTCUSDT"],
+        "strategies": {
+            "grid": True,
+            "trend": False,
+            "shock": False,
+            "carry": False,
+        },
+        "riskProfile": "CONSERVATIVE",
+    }
+
+    calls: list[str] = []
+    monkeypatch.setattr(worker.pa_engine, "process_event", lambda event: object())
+    monkeypatch.setattr(
+        worker.market_state_engine, "classify", lambda price_action: object()
+    )
+
+    async def grid_depth(symbol):
+        return 0
+
+    monkeypatch.setattr(worker, "_observed_grid_depth", grid_depth)
+    for name in ("grid", "trend", "shock", "carry"):
+        engine = getattr(worker, f"{name}_engine")
+        monkeypatch.setattr(
+            engine,
+            "evaluate",
+            lambda *args, _name=name, **kwargs: calls.append(_name) or None,
+        )
+
+    await worker.handle_market_event(_carry_event())
+
+    assert calls == ["grid"]
