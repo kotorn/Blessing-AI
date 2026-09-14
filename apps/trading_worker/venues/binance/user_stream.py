@@ -1,20 +1,38 @@
 import asyncio
-import logging
 import json
+import logging
+import math
+import os
 import random
+from datetime import datetime, timezone
+
 try:
     import websockets
 except ImportError:
     websockets = None
-from .rest_client import BinanceRestClient
+
 from .config import BinanceEnvironment, get_ws_url
+from .models import BinanceAuthenticationError
+from .rest_client import BinanceRestClient
 
 logger = logging.getLogger("blessing.binance.user_stream")
 
+
 class BinanceUserStream:
     BACKOFF_STEPS = [1.0, 2.0, 4.0, 8.0, 15.0, 30.0]
+    STREAM_HEARTBEAT_INTERVAL_SEC = 15.0
+    STREAM_HEARTBEAT_TIMEOUT_SEC = 5.0
 
-    def __init__(self, rest_client: BinanceRestClient, env: BinanceEnvironment, on_disconnect=None, on_reconnected=None):
+    def __init__(
+        self,
+        rest_client: BinanceRestClient,
+        env: BinanceEnvironment,
+        on_disconnect=None,
+        on_reconnected=None,
+        on_authentication_failed=None,
+    ):
+        if env != BinanceEnvironment.TESTNET:
+            raise ValueError("Mutable user streams are restricted to Binance Testnet")
         self.rest_client = rest_client
         self.env = env
         self.base_ws_url = get_ws_url(env)
@@ -24,15 +42,46 @@ class BinanceUserStream:
         self.listen_task: asyncio.Task | None = None
         self.reconnect_task: asyncio.Task | None = None
         self.is_connected = False
+        self.connected_at: datetime | None = None
+        self.last_event_at: datetime | None = None
+        self.last_transport_heartbeat_at: datetime | None = None
+        self.last_keepalive_at: datetime | None = None
         self.on_event = None
         self.on_disconnect = on_disconnect
         self.on_reconnected = on_reconnected
+        self.on_authentication_failed = on_authentication_failed
         self.running = False
+        self.authentication_failed = False
+
+    def is_healthy(self) -> bool:
+        """Require a connected stream with a bounded transport/event heartbeat."""
+        if not self.is_connected or not self.running:
+            return False
+        # Socket establishment alone is not proof that the connection remains
+        # usable. A received private event or a successful WebSocket
+        # ping/pong is required before the execution readiness gate passes.
+        timestamp = self.last_event_at or self.last_transport_heartbeat_at
+        if timestamp is None:
+            return False
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        try:
+            max_age = float(os.getenv("PRIVATE_STREAM_MAX_AGE_SEC", "60"))
+        except (TypeError, ValueError):
+            max_age = 60.0
+        if not math.isfinite(max_age) or max_age <= 0:
+            max_age = 60.0
+        age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+        return 0 <= age <= max_age
 
     async def start(self, event_callback) -> bool:
         self.on_event = event_callback
         self.running = True
-        return await self._connect()
+        self.authentication_failed = False
+        connected = await self._connect()
+        if not connected and self.running and not self.authentication_failed:
+            self._trigger_reconnect()
+        return connected
 
     async def _connect(self) -> bool:
         await self._get_listen_key()
@@ -46,7 +95,14 @@ class BinanceUserStream:
             
         try:
             self.ws = await websockets.connect(ws_url)
+            self.last_event_at = None
+            self.last_transport_heartbeat_at = None
+            if not await self._transport_heartbeat():
+                await self.ws.close()
+                self.ws = None
+                return False
             self.is_connected = True
+            self.connected_at = datetime.now(timezone.utc)
             logger.info("User stream connected.")
             
             if self.keepalive_task and not self.keepalive_task.done():
@@ -62,34 +118,104 @@ class BinanceUserStream:
             self.is_connected = False
             return False
 
+    async def _transport_heartbeat(self) -> bool:
+        if self.ws is None:
+            return False
+        try:
+            # websockets.ping() returns an awaitable pong waiter. Await both
+            # the ping send and the actual pong; sending a ping alone is not
+            # evidence that the private stream is still usable.
+            deadline = (
+                asyncio.get_running_loop().time()
+                + self.STREAM_HEARTBEAT_TIMEOUT_SEC
+            )
+            pong_waiter = await asyncio.wait_for(
+                self.ws.ping(), timeout=self.STREAM_HEARTBEAT_TIMEOUT_SEC
+            )
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError("private stream pong deadline exceeded")
+            await asyncio.wait_for(pong_waiter, timeout=remaining)
+        except Exception as exc:
+            logger.warning("Private stream ping/pong failed: %s", exc)
+            return False
+        self.last_transport_heartbeat_at = datetime.now(timezone.utc)
+        return True
+
     async def _get_listen_key(self):
         try:
             data = await self.rest_client.request("POST", "/fapi/v1/listenKey")
+            if not isinstance(data, dict) or not data.get("listenKey"):
+                raise ValueError("Binance listenKey response is invalid")
             self.listen_key = data.get("listenKey")
             logger.info("Acquired new listenKey.")
+        except BinanceAuthenticationError as exc:
+            self.listen_key = None
+            self.authentication_failed = True
+            logger.error("Testnet authentication failed while starting user stream: %s", exc)
+            self._notify_authentication_failure()
         except Exception as e:
             logger.error("Failed to acquire listenKey: %s", e)
             self.listen_key = None
 
+    def _notify_authentication_failure(self) -> None:
+        if not self.on_authentication_failed:
+            return
+        try:
+            result = self.on_authentication_failed()
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result)
+        except Exception as exc:
+            logger.error("Error in user-stream authentication failure handler: %s", exc)
+
     async def _keepalive_loop(self):
+        keepalive_elapsed = 0.0
         while self.is_connected and self.running:
-            await asyncio.sleep(1800) # 30 mins
-            try:
-                await self.rest_client.request("PUT", "/fapi/v1/listenKey")
-                logger.info("listenKey keepalive successful.")
-            except Exception as e:
-                logger.error("listenKey keepalive failed: %s", e)
+            await asyncio.sleep(self.STREAM_HEARTBEAT_INTERVAL_SEC)
+            if not await self._transport_heartbeat():
+                logger.error("Private stream heartbeat failed.")
                 self.is_connected = False
                 if self.ws:
                     await self.ws.close()
                 self._trigger_reconnect()
                 break
 
+            keepalive_elapsed += self.STREAM_HEARTBEAT_INTERVAL_SEC
+            if keepalive_elapsed < 1800:
+                continue
+            keepalive_elapsed = 0.0
+            if await self.keepalive():
+                logger.info("listenKey keepalive successful.")
+                continue
+            logger.error("listenKey keepalive failed.")
+            self.is_connected = False
+            if self.ws:
+                await self.ws.close()
+            self._trigger_reconnect()
+            break
+
+    async def keepalive(self) -> bool:
+        """Refresh the active Testnet listen key and record the verification time."""
+        if not self.listen_key:
+            return False
+        try:
+            await self.rest_client.request(
+                "PUT", "/fapi/v1/listenKey", params={"listenKey": self.listen_key}
+            )
+            self.last_keepalive_at = datetime.now(timezone.utc)
+            return True
+        except Exception as exc:
+            if isinstance(exc, BinanceAuthenticationError):
+                self._notify_authentication_failure()
+            logger.error("listenKey keepalive failed: %s", exc)
+            return False
+
     async def _listen_loop(self):
         try:
             async for message in self.ws:
                 try:
                     event = json.loads(message)
+                    self.last_event_at = datetime.now(timezone.utc)
                     if self.on_event:
                         await self.on_event(event)
                 except Exception as parse_err:
@@ -163,6 +289,10 @@ class BinanceUserStream:
         if self.ws:
             await self.ws.close()
         try:
-            await self.rest_client.request("DELETE", "/fapi/v1/listenKey")
+            if self.listen_key:
+                await self.rest_client.request(
+                    "DELETE", "/fapi/v1/listenKey", params={"listenKey": self.listen_key}
+                )
         except Exception:
             pass
+        self.listen_key = None

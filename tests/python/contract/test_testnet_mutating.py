@@ -1,63 +1,59 @@
-import pytest
-import asyncio
+"""Explicitly approved one-order Testnet lifecycle contract test."""
+
+import json
 import os
-from decimal import Decimal
-from domain.models import ExecutionDecision, OrderIntent, OrderSide, PositionSide, MarketType
-from apps.trading_worker.venues.binance.config import BinanceEnvironment
-from apps.trading_worker.venues.binance.rest_client import BinanceRestClient
-from apps.trading_worker.venues.binance.capabilities import BinanceCapabilities
-from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
-from apps.trading_worker.venues.binance.ledger import InMemoryLedger
-from apps.trading_worker.venues.binance.models import ConnectionState
+import time
+from pathlib import Path
+
+import pytest
+
+from apps.trading_worker.venues.binance.manual_testnet import manual_testnet_workflow
+
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.contract_mutating]
 
-@pytest.fixture
-def api_credentials():
-    api_key = os.getenv("BINANCE_TESTNET_API_KEY")
-    api_secret = os.getenv("BINANCE_TESTNET_API_SECRET")
-    if not api_key or not api_secret:
-        pytest.skip("Testnet credentials not found. Skipping mutating contract test.")
-    return api_key, api_secret
 
-async def test_bounded_mutation_place_order(api_credentials):
-    api_key, api_secret = api_credentials
-    ledger = InMemoryLedger()
-    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
-    adapter.rest_client = BinanceRestClient(api_key, api_secret, BinanceEnvironment.TESTNET)
-    await adapter.rest_client.init_session()
-    
-    # Pre-flight
-    success = await adapter.arm()
-    assert success is True
-    assert adapter.state == ConnectionState.READY
-    
-    # Define bounded testing rules to fail closed.
-    allowed_symbols = ["BTCUSDT", "ETHUSDT"]
-    symbol = "BTCUSDT"
-    assert symbol in allowed_symbols
-    
-    # Place a microscopic passive order, wait 2 seconds, cancel it
-    intent = OrderIntent(
-        client_order_id="TEST_MUT_1",
-        symbol=symbol,
-        market_type=MarketType.USDM_FUTURES,
-        side=OrderSide.BUY,
-        position_side=PositionSide.LONG,
-        order_type="LIMIT",
-        time_in_force="GTC",
-        quantity=Decimal("0.001"),
-        price=Decimal("15000.0") # Deep out of the money
-    )
-    decision = ExecutionDecision(decision_id="D_TEST", symbol=symbol, action="SUBMIT", orders=[intent])
-    
-    orders = await adapter.execute_decision(decision)
-    assert len(orders) == 1
-    
-    await asyncio.sleep(2)
-    
-    # Cancel it
-    cancel_success = await adapter.cancel_order(symbol, orders[0].client_order_id)
-    assert cancel_success is True
-    
-    await adapter.close()
+@pytest.fixture
+def mutation_approval():
+    enabled = os.getenv("TESTNET_MANUAL_TRIAL_APPROVED", "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        pytest.skip("Manual Testnet mutation is not explicitly approved")
+    if os.getenv("BINANCE_TESTNET", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        pytest.skip("BINANCE_TESTNET is not explicitly enabled")
+    if not os.getenv("BINANCE_TESTNET_API_KEY", "").strip() or not os.getenv(
+        "BINANCE_TESTNET_API_SECRET", ""
+    ).strip():
+        pytest.skip("Testnet credentials not found")
+
+
+async def test_worker_owned_bounded_testnet_lifecycle(mutation_approval):
+    trial_started_ns = time.time_ns()
+    artifact = await manual_testnet_workflow()
+
+    assert artifact is not None
+    assert artifact["environment"] == "BINANCE_TESTNET"
+    assert artifact["status"] == "PASS"
+    assert artifact["reconciliation_status"] == "IN_SYNC"
+    assert artifact["diff_count"] == 0
+    assert artifact["position_after"] == []
+    assert artifact["modify_result"] == "VERIFIED"
+    assert artifact["cancel_result"] == "VERIFIED"
+
+    # A previous successful trial must not satisfy this contract.  Require the
+    # sanitized artifact written by this invocation and bind it to the same
+    # source SHA returned by the worker-owned workflow.
+    current_artifacts = [
+        path
+        for path in Path("artifacts").glob("testnet-trial-*.json")
+        if path.stat().st_mtime_ns >= trial_started_ns
+    ]
+    assert len(current_artifacts) == 1
+    written_artifact = json.loads(current_artifacts[0].read_text(encoding="utf-8"))
+    assert written_artifact["build_sha"] == artifact["build_sha"]
+    assert written_artifact["environment"] == "BINANCE_TESTNET"
+    assert written_artifact["status"] == "PASS"

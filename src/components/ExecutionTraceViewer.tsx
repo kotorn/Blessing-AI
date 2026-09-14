@@ -39,6 +39,11 @@ export const ExecutionTraceViewer: React.FC<ExecutionTraceViewerProps> = ({
   }
 
   const { trace } = order;
+  const hasVerifiedTestnetEvidence =
+    order.source === 'BINANCE_TESTNET' &&
+    trace.sourceClassification === 'EXISTING' &&
+    trace.riskGovernorCheck === 'PASS' &&
+    order.status === 'FILLED';
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-5 space-y-4 shadow-xl shadow-black/20">
@@ -112,7 +117,9 @@ export const ExecutionTraceViewer: React.FC<ExecutionTraceViewerProps> = ({
           <div className="font-bold text-indigo-300">
             {trace.opportunityScore.toFixed(1)} / 100
           </div>
-          <div className="text-[10px] text-zinc-400">Regime Fit: Verified</div>
+          <div className="text-[10px] text-zinc-400">
+            Regime Fit: {hasVerifiedTestnetEvidence ? 'Verified' : 'UNKNOWN / ILLUSTRATIVE_ONLY'}
+          </div>
         </div>
 
         {/* Stage 3: Meta Allocator */}
@@ -128,14 +135,14 @@ export const ExecutionTraceViewer: React.FC<ExecutionTraceViewerProps> = ({
         </div>
 
         {/* Stage 4: Risk Governor */}
-        <div className="p-3 bg-zinc-950/80 rounded-xl border border-emerald-900/40 space-y-1.5">
+        <div className={`p-3 bg-zinc-950/80 rounded-xl border space-y-1.5 ${hasVerifiedTestnetEvidence ? 'border-emerald-900/40' : 'border-zinc-800/80'}`}>
           <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase">
             <span>4. Governor</span>
-            <ShieldCheck className="w-3 h-3 text-emerald-400" />
+            <ShieldCheck className={`w-3 h-3 ${hasVerifiedTestnetEvidence ? 'text-emerald-400' : 'text-zinc-500'}`} />
           </div>
-          <div className="font-bold text-emerald-400 flex items-center space-x-1">
-            <CheckCircle2 className="w-3 h-3" />
-            <span>APPROVED</span>
+          <div className={`font-bold flex items-center space-x-1 ${hasVerifiedTestnetEvidence ? 'text-emerald-400' : 'text-zinc-400'}`}>
+            {hasVerifiedTestnetEvidence ? <CheckCircle2 className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
+            <span>{hasVerifiedTestnetEvidence ? 'APPROVED' : 'UNKNOWN / NOT VERIFIED'}</span>
           </div>
           <div className="text-[10px] text-zinc-400 truncate" title={trace.governorRule}>
             {trace.governorRule}
@@ -160,9 +167,11 @@ export const ExecutionTraceViewer: React.FC<ExecutionTraceViewerProps> = ({
         <div className="p-3 bg-zinc-950/80 rounded-xl border border-zinc-800/80 space-y-1.5">
           <div className="flex items-center justify-between text-[10px] text-zinc-500 uppercase">
             <span>6. Exchange</span>
-            <Check className="w-3 h-3 text-emerald-400" />
+            {hasVerifiedTestnetEvidence ? <Check className="w-3 h-3 text-emerald-400" /> : <AlertTriangle className="w-3 h-3 text-amber-400" />}
           </div>
-          <div className="font-bold text-zinc-200 truncate">{order.type}</div>
+          <div className="font-bold text-zinc-200 truncate">
+            {hasVerifiedTestnetEvidence ? order.type : `${order.type} / UNVERIFIED`}
+          </div>
           <div className="text-[10px] text-zinc-400">
             Fee: {trace.feeTier} • {trace.slippageBps} bps slip
           </div>

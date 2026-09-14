@@ -10,6 +10,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { MetaAllocationWeight } from '../types/strategy';
+import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
 
 export const MetaAllocationMatrix: React.FC<{ allocationsData?: MetaAllocationWeight[] }> = ({ allocationsData }) => {
   const allocations: MetaAllocationWeight[] = allocationsData || [
@@ -92,6 +93,8 @@ export const MetaAllocationMatrix: React.FC<{ allocationsData?: MetaAllocationWe
           </span>
         </div>
       </div>
+
+      <IllustrativeEvidenceBanner message="Expected edge, confidence, and allocation rows are illustrative; Risk Governor and Worker gates remain authoritative." />
 
       {/* Allocation Table */}
       <div className="overflow-x-auto border border-zinc-800/80 rounded-xl">

@@ -24,6 +24,7 @@ def test_default_worker_state_endpoint():
     data = response.json()
     
     assert data["execution_mode"] == "PAPER"
+    assert data["data_source"] == "SIMULATED"
     assert data["engine_state"] == "DISARMED"
     assert data["connection_state"] == "DISCONNECTED"
     assert data["market_data_healthy"] is False
@@ -45,17 +46,26 @@ async def test_worker_state_transitions_and_health():
     state = resp.json()
     assert state["engine_state"] == "DISARMED"
     assert state["execution_mode"] == "PAPER"
+    assert state["data_source"] == "SIMULATED"
     assert state["market_data_healthy"] is False
     assert state["health_indicators"]["active_symbols_count"] == 2
     
-    # Arming worker in TESTNET mode
-    arm_resp = client.post("/arm", json={"executionMode": "TESTNET"})
+    # Paper arming remains available with an explicit instrument and strategy.
+    arm_resp = client.post(
+        "/arm",
+        json={
+            "executionMode": "PAPER",
+            "instruments": ["BTCUSDT"],
+            "strategies": {"grid": True},
+        },
+    )
     assert arm_resp.status_code == 200
     
     resp = client.get("/state")
     state = resp.json()
     assert state["engine_state"] == "ARMED"
-    assert state["execution_mode"] == "TESTNET"
+    assert state["execution_mode"] == "PAPER"
+    assert state["data_source"] == "SIMULATED"
     
     # Update health indicators
     worker.market_data_healthy = True
@@ -96,14 +106,18 @@ def test_worker_runtime_state_model_contract():
     state = WorkerRuntimeState(
         execution_mode=WorkerExecutionMode.TESTNET,
         engine_state=WorkerEngineState.ARMED,
-        connection_status="READY",
+        engine_status=WorkerEngineState.DISARMED,
+        connection_state="READY",
+        connection_status="DEGRADED",
         market_data_healthy=True,
         private_stream_healthy=True,
         trading_connection_healthy=True,
         authenticated=True,
         reconciliation_status="IN_SYNC",
-        kill_switch_status=False,
-        configuration_details={"symbol": "BTCUSDT", "leverage": 5},
+        kill_switch_active=False,
+        kill_switch_status=True,
+        active_configuration={"symbol": "BTCUSDT", "leverage": 5},
+        configuration_details={"legacy": True},
     )
 
     assert state.execution_authority == "PYTHON_TRADING_WORKER"
@@ -123,13 +137,30 @@ def test_worker_runtime_state_model_contract():
     assert state.active_configuration == {"symbol": "BTCUSDT", "leverage": 5}
     assert state.heartbeat_at is not None
 
+    # Compatibility names are serialization aliases, not independently
+    # mutable runtime fields. Canonical values win if both names are supplied.
+    assert "engine_status" not in WorkerRuntimeState.model_fields
+    assert "connection_status" not in WorkerRuntimeState.model_fields
+    assert "kill_switch_status" not in WorkerRuntimeState.model_fields
+    assert "configuration_details" not in WorkerRuntimeState.model_fields
+    state.engine_state = WorkerEngineState.DEGRADED
+    state.connection_state = "DEGRADED"
+    state.kill_switch_active = True
+    state.active_configuration = {"canonical": True}
+    assert state.engine_status == WorkerEngineState.DEGRADED
+    assert state.connection_status == "DEGRADED"
+    assert state.kill_switch_status is True
+    assert state.configuration_details == {"canonical": True}
+
     dumped = state.model_dump()
     assert dumped["execution_mode"] == "TESTNET"
-    assert dumped["engine_state"] == "ARMED"
-    assert dumped["engine_status"] == "ARMED"
-    assert dumped["connection_status"] == "READY"
-    assert dumped["kill_switch_status"] == False
-    assert dumped["configuration_details"] == {"symbol": "BTCUSDT", "leverage": 5}
+    assert dumped["engine_state"] == "DEGRADED"
+    assert dumped["engine_status"] == WorkerEngineState.DEGRADED
+    assert dumped["connection_state"] == "DEGRADED"
+    assert dumped["connection_status"] == "DEGRADED"
+    assert dumped["kill_switch_active"] is True
+    assert dumped["kill_switch_status"] is True
+    assert dumped["configuration_details"] == {"canonical": True}
     assert "heartbeat_at" in dumped
 
 
@@ -281,32 +312,29 @@ def test_worker_preflight_and_live_blocking():
     assert testnet_data["canArm"] is False
 
     # 4. Strict arming in TESTNET fails if preflight fails
-    arm_testnet_strict = client.post("/arm", json={"executionMode": "TESTNET", "enforcePreflight": True})
+    arm_testnet_strict = client.post(
+        "/arm",
+        json={
+            "executionMode": "TESTNET",
+            "instruments": ["BTCUSDT"],
+            "strategies": {"grid": True},
+            "enforcePreflight": True,
+        },
+    )
     assert arm_testnet_strict.status_code == 400
-    assert "TESTNET preflight failed" in arm_testnet_strict.json()["detail"]
+    assert "Configuration Preflight Failed" in arm_testnet_strict.json()["detail"]
 
-    # 5. When prerequisites are met, preflight passes
+    # 5. Local flags and hand-written health fields cannot manufacture Testnet
+    # readiness without a real adapter, account snapshot, rules, and market data.
     worker.authenticated = True
     worker.connection_state = "READY"
     worker.reconciliation_status = "IN_SYNC"
     worker.private_stream_healthy = True
     
-    # Mock credentials in environment for the test check
-    import os
-    os.environ["BINANCE_TESTNET_API_KEY"] = "mock_key"
-    os.environ["BINANCE_TESTNET_API_SECRET"] = "mock_secret"
-    try:
-        ready_preflight = client.get("/preflight?execution_mode=TESTNET")
-        assert ready_preflight.status_code == 200
-        assert ready_preflight.json()["canArm"] is True
-
-        arm_success = client.post("/arm", json={"executionMode": "TESTNET", "enforcePreflight": True})
-        assert arm_success.status_code == 200
-        assert arm_success.json()["status"] == "ARMED"
-    finally:
-        os.environ.pop("BINANCE_TESTNET_API_KEY", None)
-        os.environ.pop("BINANCE_TESTNET_API_SECRET", None)
-        set_worker_engine(None)
+    ready_preflight = client.get("/preflight?execution_mode=TESTNET")
+    assert ready_preflight.status_code == 200
+    assert ready_preflight.json()["canArm"] is False
+    set_worker_engine(None)
 
 
 def test_reconcile_endpoint_integration():
@@ -317,12 +345,12 @@ def test_reconcile_endpoint_integration():
     worker.reconciliation_status = "UNKNOWN"
     rec_resp = client.post("/reconcile")
     assert rec_resp.status_code == 200
-    assert rec_resp.json()["status"] == "IN_SYNC"
+    assert rec_resp.json()["status"] == "SIMULATED_SYNC"
 
     state_resp = client.get("/state")
     assert state_resp.status_code == 200
-    assert state_resp.json()["reconciliation_status"] == "IN_SYNC"
-    assert state_resp.json()["account_synchronized"] is True
+    assert state_resp.json()["reconciliation_status"] == "SIMULATED_SYNC"
+    assert state_resp.json()["account_synchronized"] is False
 
     set_worker_engine(None)
 

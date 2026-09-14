@@ -6,7 +6,6 @@ import {
   Check,
   X,
   Edit3,
-  Globe,
   AlertTriangle,
   Eye,
   EyeOff,
@@ -43,7 +42,7 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
     name: '',
     apiKey: '',
     apiSecret: '',
-    isTestnet: false,
+    isTestnet: true,
   });
 
   const fetchBinanceStatus = async () => {
@@ -126,7 +125,7 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
         name: `Binance Key ${profiles.length + 1}`,
         apiKey: '',
         apiSecret: '',
-        isTestnet: false,
+        isTestnet: true,
       });
     }
     setShowSecretInput(false);
@@ -146,10 +145,9 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
       const data = await binanceApi.saveProfile({
         id: formData.id || undefined,
         name: formData.name,
-        environment: formData.isTestnet ? 'TESTNET' : 'MAINNET',
+        isTestnet: true,
         apiKey: formData.apiKey,
         apiSecret: formData.apiSecret,
-        isLiveRealMoney: !formData.isTestnet,
       });
       setBinanceStatus(data.results);
       if (onStatusChanged && data.results) {
@@ -158,7 +156,7 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
       setActiveProfileId(data.activeProfileId);
       await fetchProfiles();
       setIsEditing(false);
-      setFeedbackMsg({ type: 'success', text: 'Credentials updated and verified successfully!' });
+      setFeedbackMsg({ type: 'success', text: 'Testnet profile saved. Worker authentication and reconciliation are still required for execution readiness.' });
     } catch (err: any) {
       setFeedbackMsg({ type: 'error', text: err.message || 'Failed to save profile' });
     } finally {
@@ -238,14 +236,16 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
                   onClick={() => {
                     if (!isCurrent) handleSwitchProfile(p.id);
                   }}
-                  disabled={isSwitchingProfile}
+                  disabled={isSwitchingProfile || !isTestnet}
                   className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg border text-xs transition-all cursor-pointer ${
-                    isCurrent
-                      ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200 shadow-sm'
-                      : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
+                      isCurrent && isTestnet
+                        ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-200 shadow-sm'
+                        : !isTestnet
+                          ? 'bg-rose-950/30 border-rose-900/60 text-rose-300 cursor-not-allowed'
+                          : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
                   }`}
                 >
-                  {isCurrent ? (
+                  {isCurrent && isTestnet ? (
                     <Check className="w-3 h-3 text-emerald-400 shrink-0" />
                   ) : (
                     <Key className="w-3 h-3 text-zinc-500 shrink-0" />
@@ -254,10 +254,10 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
                   <span className="text-[10px] font-mono opacity-70">({p.maskedApiKey || 'Key'})</span>
                   <span
                     className={`text-[9px] px-1 py-0.2 rounded font-mono ${
-                      isTestnet ? 'bg-amber-950/80 text-amber-300' : 'bg-zinc-800 text-zinc-400'
+                      isTestnet ? 'bg-amber-950/80 text-amber-300' : 'bg-rose-950/80 text-rose-300'
                     }`}
                   >
-                    {isTestnet ? 'Testnet' : 'Live'}
+                    {isTestnet ? 'Testnet' : 'Mainnet Blocked'}
                   </span>
                 </button>
               );
@@ -305,7 +305,7 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
                   type="text"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  placeholder="e.g., Binance Mainnet Primary or Testnet"
+                  placeholder="e.g., Binance Testnet Primary"
                   required
                   className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500/70 text-xs"
                 />
@@ -317,15 +317,10 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => setFormData({ ...formData, isTestnet: false })}
-                    className={`py-2 px-3 rounded-lg border text-xs font-medium flex items-center justify-center space-x-1.5 cursor-pointer ${
-                      !formData.isTestnet
-                        ? 'bg-emerald-950/60 border-emerald-500/60 text-emerald-300'
-                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
-                    }`}
+                    disabled
+                    className="py-2 px-3 rounded-lg border text-xs font-medium flex items-center justify-center space-x-1.5 cursor-not-allowed bg-zinc-950 border-zinc-800 text-zinc-600"
                   >
-                    <Globe className="w-3.5 h-3.5" />
-                    <span>Binance Mainnet (Live)</span>
+                    <span>Binance Mainnet (Blocked)</span>
                   </button>
                   <button
                     type="button"
@@ -439,12 +434,12 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
                     <span className="text-zinc-400 block text-[11px]">Active API Key</span>
                     <span
                       className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
-                        binanceStatus.isTestnet
+                        binanceStatus.isTestnet === true
                           ? 'bg-amber-950 text-amber-400 border border-amber-800/50'
-                          : 'bg-emerald-950 text-emerald-400 border border-emerald-800/50'
+                          : 'bg-rose-950 text-rose-300 border border-rose-800/50'
                       }`}
                     >
-                      {binanceStatus.isTestnet ? 'Testnet Sandbox' : 'Mainnet Global'}
+                      {binanceStatus.isTestnet === true ? 'Testnet Sandbox' : 'MAINNET BLOCKED'}
                     </span>
                   </div>
                   <span className="font-mono text-zinc-200 font-medium">{binanceStatus.maskedKey || 'None'}</span>
@@ -470,7 +465,7 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
               <div className="p-3 bg-zinc-950 rounded-lg border border-zinc-800/80 space-y-1">
                 <div className="flex items-center justify-between">
                   <span className="font-semibold text-zinc-200">Binance Spot API</span>
-                  {binanceStatus.spot?.authenticated ? (
+                  {binanceStatus.isTestnet === true && binanceStatus.spot?.authenticated ? (
                     <span className="text-emerald-400 flex items-center space-x-1 font-medium">
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       <span>Authenticated (Trade: {String(binanceStatus.spot.canTrade)})</span>
@@ -489,7 +484,7 @@ export const BinanceProfileModal: React.FC<BinanceProfileModalProps> = ({
               <div className="p-3 bg-zinc-950 rounded-lg border border-zinc-800/80 space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-semibold text-zinc-200">Binance USDⓈ-M Futures API</span>
-                  {binanceStatus.futures?.authenticated ? (
+                  {binanceStatus.isTestnet === true && binanceStatus.futures?.authenticated ? (
                     <span className="text-emerald-400 flex items-center space-x-1 font-medium">
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       <span>Authenticated ({binanceStatus.futures.message})</span>

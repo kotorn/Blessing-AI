@@ -9,6 +9,7 @@ import {
   TrendingUp,
   Percent,
   Layers,
+  Info,
 } from 'lucide-react';
 import { StrategyConflictResolution } from '../types/strategy';
 
@@ -64,9 +65,9 @@ export const StrategyConflictResolver: React.FC = () => {
 
         <div className="flex items-center space-x-2 text-[10px] font-mono">
           <span className="text-zinc-500">Virtual PnL Accounting:</span>
-          <span className="px-2 py-0.5 rounded font-bold bg-emerald-950 text-emerald-300 border border-emerald-800/80 flex items-center space-x-1">
-            <CheckCircle2 className="w-3 h-3" />
-            <span>ATTRIBUTION PRESERVED</span>
+          <span className="px-2 py-0.5 rounded font-bold bg-amber-950 text-amber-300 border border-amber-800/80 flex items-center space-x-1">
+            <Info className="w-3 h-3" />
+            <span>ILLUSTRATIVE ONLY</span>
           </span>
         </div>
       </div>
@@ -118,7 +119,7 @@ export const StrategyConflictResolver: React.FC = () => {
         <div className="p-4 bg-zinc-950 rounded-xl border border-cyan-800/60 flex flex-col justify-between space-y-3">
           <div>
             <div className="text-[10px] font-mono uppercase text-cyan-400 font-bold">
-              2. Net Target Exposure (Sent to Exchange)
+              2. Net Target Exposure (Python Worker Only — Not Sent)
             </div>
             <div className="mt-3 text-center py-4 bg-zinc-900/80 rounded-lg border border-cyan-900/40 space-y-1">
               <div className="text-2xl font-mono font-bold text-emerald-400">
@@ -127,8 +128,8 @@ export const StrategyConflictResolver: React.FC = () => {
               <div className="text-xs text-zinc-300 font-sans font-medium">
                 Physical Net Exposure (Long)
               </div>
-              <div className="text-[11px] text-zinc-500 font-mono">
-                ${(resolution.netPhysicalTargetDelta * 64250).toLocaleString()} Notional
+              <div className="text-[11px] text-amber-400 font-mono">
+                UNKNOWN NOTIONAL — requires verified Testnet market price
               </div>
             </div>
           </div>
@@ -137,18 +138,18 @@ export const StrategyConflictResolver: React.FC = () => {
           <div className="space-y-2 pt-2 border-t border-zinc-800/80 text-xs font-mono">
             <div className="flex justify-between">
               <span className="text-zinc-400">Chumed Delta Avoided:</span>
-              <span className="text-zinc-200 font-bold">1.80 BTC</span>
+              <span className="text-amber-400 font-bold">ILLUSTRATIVE</span>
             </div>
             <div className="flex justify-between">
               <span className="text-zinc-400">Fee Churn Saved:</span>
               <span className="text-emerald-400 font-bold">
-                +${resolution.nettingFeeSavingsUsd.toFixed(2)}
+                UNKNOWN
               </span>
             </div>
             <div className="flex justify-between">
               <span className="text-zinc-400">Slippage Mitigation:</span>
               <span className="text-cyan-300 font-bold">
-                {resolution.slippageMitigationBps.toFixed(1)} bps
+                UNKNOWN
               </span>
             </div>
           </div>

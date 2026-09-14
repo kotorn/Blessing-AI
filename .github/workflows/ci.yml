@@ -47,7 +47,9 @@ jobs:
       
     - name: Hygiene Check
       run: |
-        if find . -name "patch_*.cjs" -o -name "patch_*.js" -o -name "patch_*.py" -o -name "fix_*.py" -o -name ".pytest_cache" | grep -q .; then
-          echo "Hygiene failure: patch scripts or cache artifacts found in source."
+        # Tests and package installs create ignored caches in the checkout.
+        # Only tracked paths are repository artifacts and should fail this gate.
+        if git ls-files | grep -E '(^|/)(patch_[^/]*\.(cjs|js|py)|fix_[^/]*\.py|__pycache__|\.pytest_cache)(/|$)|\.pyc$'; then
+          echo "Hygiene failure: tracked patch scripts or cache artifacts found in source."
           exit 1
         fi

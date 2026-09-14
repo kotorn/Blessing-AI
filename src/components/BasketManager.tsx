@@ -3,6 +3,7 @@ import { Layers, ArrowUpRight, ArrowDownRight, RefreshCw, XCircle, Shield, PlusC
 import { BasketItem, BasketState } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { ConfirmationModal } from './ConfirmationModal';
+import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
 
 interface BasketManagerProps {
   baskets: BasketItem[];
@@ -99,9 +100,14 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
         </div>
       </div>
 
+      {baskets.some((basket) => basket.verified !== true || basket.data_source !== 'BINANCE_TESTNET') && (
+        <IllustrativeEvidenceBanner message="Displayed basket rows are not verified against the Python worker ledger; mutation controls stay hidden." />
+      )}
+
       <div className="grid grid-cols-1 gap-4">
         {baskets.map((basket) => {
           const isLong = basket.direction === 'LONG';
+          const hasVerifiedData = basket.verified === true && basket.data_source === 'BINANCE_TESTNET';
           return (
             <div
               key={basket.basket_id}
@@ -127,19 +133,22 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
                       ID: {basket.basket_id} • Created: {new Date(basket.created_at).toLocaleTimeString()}
                     </div>
                   </div>
+                  {!hasVerifiedData && (
+                    <span className="text-[10px] font-mono text-amber-400">SIMULATED / UNVERIFIED</span>
+                  )}
                 </div>
 
                 {/* Net Basket PnL */}
                 <div className="text-right">
                   <div className="text-xs text-zinc-400">Net Basket PnL</div>
-                  <div className={`text-2xl font-bold font-mono ${(basket.net_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {(basket.net_pnl ?? 0) >= 0 ? '+' : ''}${(basket.net_pnl ?? 0).toFixed(2)}
+                  <div className={`text-2xl font-bold font-mono ${!hasVerifiedData ? 'text-amber-400' : (basket.net_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {hasVerifiedData ? `${(basket.net_pnl ?? 0) >= 0 ? '+' : ''}$${(basket.net_pnl ?? 0).toFixed(2)}` : 'UNKNOWN'}
                   </div>
                   <div className="text-[11px] text-zinc-400 flex items-center justify-end space-x-2 mt-0.5">
-                    <span>Unrealized: ${(basket.unrealized_pnl ?? 0).toFixed(2)}</span>
+                    <span>Unrealized: {hasVerifiedData ? `$${(basket.unrealized_pnl ?? 0).toFixed(2)}` : 'UNKNOWN'}</span>
                     <span>•</span>
                     <span className={(basket.funding_pnl ?? 0) >= 0 ? 'text-cyan-400' : 'text-amber-400'}>
-                      Funding: ${(basket.funding_pnl ?? 0).toFixed(2)}
+                      Funding: {hasVerifiedData ? `$${(basket.funding_pnl ?? 0).toFixed(2)}` : 'UNKNOWN'}
                     </span>
                   </div>
                 </div>
@@ -150,23 +159,23 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
                 <div>
                   <div className="text-zinc-400 text-[11px]">Average Entry</div>
                   <div className="text-sm font-mono font-bold text-zinc-200 mt-0.5">
-                    ${(basket.average_entry ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                    {hasVerifiedData ? `$${(basket.average_entry ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}` : 'UNKNOWN'}
                   </div>
-                  <div className="text-[10px] text-zinc-400">Mark: ${(basket.current_mark_price ?? 0).toLocaleString()}</div>
+                  <div className="text-[10px] text-zinc-400">Mark: {hasVerifiedData ? `$${(basket.current_mark_price ?? 0).toLocaleString()}` : 'UNKNOWN'}</div>
                 </div>
 
                 <div>
                   <div className="text-zinc-400 text-[11px]">Total Position Size</div>
                   <div className="text-sm font-mono font-bold text-zinc-200 mt-0.5">
-                    {(basket.total_size ?? 0).toFixed(3)} {(basket.instrument || '').replace('USDT', '')}
+                    {hasVerifiedData ? `${(basket.total_size ?? 0).toFixed(3)} ${(basket.instrument || '').replace('USDT', '')}` : 'UNKNOWN'}
                   </div>
-                  <div className="text-[10px] text-zinc-400">Notional: ~${((basket.total_size ?? 0) * (basket.current_mark_price ?? 0)).toFixed(0)}</div>
+                  <div className="text-[10px] text-zinc-400">Notional: {hasVerifiedData ? `~$${((basket.total_size ?? 0) * (basket.current_mark_price ?? 0)).toFixed(0)}` : 'UNKNOWN'}</div>
                 </div>
 
                 <div>
                   <div className="text-zinc-400 text-[11px]">Grid Depth</div>
                   <div className="text-sm font-mono font-bold text-zinc-200 mt-0.5">
-                    Level {basket.grid_depth ?? 0} of {basket.max_grid_levels ?? 5}
+                    {hasVerifiedData ? `Level ${basket.grid_depth ?? 0} of ${basket.max_grid_levels ?? 5}` : 'UNKNOWN'}
                   </div>
                   <div className="text-[10px] text-zinc-400">Progression Cap: L5</div>
                 </div>
@@ -174,9 +183,9 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
                 <div>
                   <div className="text-zinc-400 text-[11px]">Friction & Fees</div>
                   <div className="text-sm font-mono font-medium text-zinc-300 mt-0.5">
-                    -${(basket.trading_fees ?? 0).toFixed(2)}
+                    {hasVerifiedData ? `-$${(basket.trading_fees ?? 0).toFixed(2)}` : 'UNKNOWN'}
                   </div>
-                  <div className="text-[10px] text-zinc-400">Slippage: -${(basket.slippage_cost ?? 0).toFixed(2)}</div>
+                  <div className="text-[10px] text-zinc-400">Slippage: {hasVerifiedData ? `-$${(basket.slippage_cost ?? 0).toFixed(2)}` : 'UNKNOWN'}</div>
                 </div>
               </div>
 
@@ -186,7 +195,7 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
                   <span>Basket Grid Ladder (Controlled Anti-Martingale Progression)</span>
                   <span>Distances dynamically calibrated by ATR & Regime</span>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                {hasVerifiedData ? <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                   {(basket.grid_levels || []).map((lvl) => {
                     const isFilled = lvl.status === 'FILLED';
                     return (
@@ -214,11 +223,11 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
                       </div>
                     );
                   })}
-                </div>
+                </div> : <div className="text-[11px] text-amber-400">Grid ladder is unavailable until a verified Testnet basket snapshot is loaded.</div>}
               </div>
 
               {/* Basket Lifecycle Action Controls */}
-              <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-zinc-800/80">
+              {hasVerifiedData && <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-zinc-800/80">
                 {basket.state === 'ACTIVE' && basket.grid_depth < basket.max_grid_levels && (
                   <button
                     onClick={() => setPendingAction({ type: 'EXPAND', basketId: basket.basket_id, instrument: basket.instrument })}
@@ -249,7 +258,7 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
                   <XCircle className="w-3.5 h-3.5" />
                   <span>Close Basket (Market)</span>
                 </button>
-              </div>
+              </div>}
             </div>
           );
         })}

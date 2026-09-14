@@ -1,7 +1,8 @@
 import logging
 from decimal import Decimal
+from datetime import UTC
 from typing import Dict, List, Optional
-from domain.models import MarketEvent, PriceActionState, utc_now
+from domain.models import MarketEvent, PriceActionState
 
 logger = logging.getLogger("blessing.engines.price_action")
 
@@ -56,9 +57,18 @@ class PriceActionEngine:
             is_sweep = True
             is_reclaim = True
             
+        event_timestamp = event.event_time
+        if event_timestamp.tzinfo is None:
+            event_timestamp = event_timestamp.replace(tzinfo=UTC)
+        else:
+            event_timestamp = event_timestamp.astimezone(UTC)
+
         state = PriceActionState(
             symbol=sym,
-            timestamp=utc_now(),
+            # Historical replay and live lineage must use the exchange event
+            # time, not process wall-clock time. This keeps WFO chronology
+            # and downstream intents traceable to the observed event.
+            timestamp=event_timestamp,
             swing_high=local_high,
             swing_low=local_low,
             prior_24h_high=prior_24h_high,

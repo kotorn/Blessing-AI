@@ -5,8 +5,12 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { TradingSystemState, RiskConfiguration } from './src/backend/types.js';
-import { evaluatePreflight, validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES } from './src/backend/system.js';
+import { evaluatePreflight, validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES, isWorkerTradingConnectionHealthy } from './src/backend/system.js';
 import { auditRepository } from './src/backend/audit.js';
+import {
+  parsePortfolioMarginResponse,
+  unavailablePortfolioMarginObservation,
+} from './src/backend/portfolio-margin.js';
 
 
 dotenv.config();
@@ -69,7 +73,7 @@ let tradingSystemState: TradingSystemState = {
   engineState: 'DISARMED',
 
   accountSynchronized: false,
-  marketDataHealthy: true,
+  marketDataHealthy: false,
   privateStreamHealthy: false,
   tradingConnectionHealthy: false,
   reconciliationStatus: 'UNKNOWN',
@@ -77,6 +81,7 @@ let tradingSystemState: TradingSystemState = {
   killSwitchActive: false,
   pauseNewRisk: false,
   recoveryOnly: false,
+  workerResponsive: false,
 
   configVersion: 'v0.2.0-beta',
   updatedAt: new Date().toISOString()
@@ -86,18 +91,23 @@ let riskConfiguration: RiskConfiguration = RISK_PROFILES.BALANCED;
 
 let quantEngineState = {
   account: {
-    equity: 100000.0,
-    balance: 99420.5,
-    margin_utilization_pct: 16.4,
-    effective_leverage: 1.42,
-    free_margin: 83600.0,
-    used_margin: 16400.0,
-    daily_pnl: 1240.8,
-    daily_pnl_pct: 1.24,
-    portfolio_drawdown_pct: 1.85,
+    // These are deliberately neutral until a verified account snapshot is
+    // loaded. The fixture objects below remain research fixtures only.
+    equity: 0,
+    balance: 0,
+    margin_utilization_pct: 0,
+    effective_leverage: 0,
+    free_margin: 0,
+    used_margin: 0,
+    daily_pnl: 0,
+    daily_pnl_pct: 0,
+    portfolio_drawdown_pct: 0,
     kill_switch_active: false,
     realized_daily_pnl: 0,
-    risk_state: 'NORMAL' as 'NORMAL' | 'CAUTION' | 'NO_NEW_GRID' | 'RECOVERY_ONLY' | 'DELEVERAGE' | 'EMERGENCY',
+    risk_state: 'UNKNOWN' as 'NORMAL' | 'CAUTION' | 'NO_NEW_GRID' | 'RECOVERY_ONLY' | 'DELEVERAGE' | 'EMERGENCY' | 'UNKNOWN',
+    source: 'SIMULATED' as 'SIMULATED' | 'BINANCE_TESTNET' | 'BINANCE_LIVE',
+    evidence_status: 'ILLUSTRATIVE_ONLY' as 'ILLUSTRATIVE_ONLY' | 'UNVERIFIED' | 'VERIFIED',
+    verified: false,
   },
   instruments: {
     ZECUSDT: {
@@ -542,7 +552,7 @@ let quantEngineState = {
       { rule: 'Max Effective Leverage <= 2.0x', current: '1.42x', status: 'PASS' },
       { rule: 'Margin Utilization < 30% Stress Limit', current: '16.4%', status: 'PASS' },
       { rule: 'Hard Drawdown Stop < 8.0%', current: '1.85%', status: 'PASS' },
-      { rule: 'Liquidation Distance > 35%', current: '48.2%', status: 'PASS' },
+      { rule: 'Liquidation Distance > 35%', current: 'UNKNOWN', status: 'UNKNOWN' },
       { rule: 'Private WebSocket Heartbeat < 5s', current: '0.8s', status: 'PASS' },
     ],
     soft_rules: [
@@ -577,10 +587,10 @@ let activeProfileId = 'default';
 const keyProfiles: Record<string, ApiKeyProfile> = {
   default: {
     id: 'default',
-    name: 'Binance Mainnet (Primary)',
-    apiKey: process.env.BINANCE_API_KEY?.trim() || '',
-    apiSecret: process.env.BINANCE_API_SECRET?.trim() || '',
-    isTestnet: process.env.BINANCE_TESTNET === 'true' || process.env.BINANCE_TESTNET === '1',
+    name: 'Binance Testnet (Unconfigured)',
+    apiKey: process.env.BINANCE_TESTNET_API_KEY?.trim() || '',
+    apiSecret: process.env.BINANCE_TESTNET_API_SECRET?.trim() || '',
+    isTestnet: true,
     createdAt: Date.now(),
   },
 };
@@ -588,19 +598,31 @@ const keyProfiles: Record<string, ApiKeyProfile> = {
 function getActiveBinanceCredentials(): ApiKeyProfile {
   return keyProfiles[activeProfileId] || Object.values(keyProfiles)[0] || {
     id: 'default',
-    name: 'Binance Mainnet',
+    name: 'Binance Testnet (Unconfigured)',
     apiKey: '',
     apiSecret: '',
-    isTestnet: false,
+    isTestnet: true,
     createdAt: Date.now(),
   };
 }
 
 async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTestnet: boolean) {
+  if (!isTestnet) {
+    return {
+      configured: false,
+      isTestnet: false,
+      error: 'MAINNET_BLOCKED',
+      message: 'Mainnet credential verification is permanently disabled. Use Binance USDⓈ-M Testnet.',
+      spot: { authenticated: false, canTrade: false, message: 'Mainnet blocked' },
+      futures: { authenticated: false, canTrade: false, hedgeMode: false, message: 'Mainnet blocked' },
+      restrictions: {},
+    };
+  }
   if (!apiKey || !apiSecret) {
     return {
       configured: false,
-      message: 'BINANCE_API_KEY or BINANCE_API_SECRET is missing from configuration.',
+      isTestnet: true,
+      message: 'BINANCE_TESTNET_API_KEY or BINANCE_TESTNET_API_SECRET is missing from configuration.',
       spot: { authenticated: false, canTrade: false, message: 'No API credentials configured' },
       futures: { authenticated: false, canTrade: false, hedgeMode: false, message: 'No API credentials configured' },
       restrictions: {},
@@ -608,8 +630,8 @@ async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTes
   }
 
   const maskedKey = apiKey.length >= 8 ? `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}` : '***';
-  const spotBase = isTestnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
-  const futuresBase = isTestnet ? 'https://testnet.binancefuture.com' : 'https://fapi.binance.com';
+  const spotBase = 'https://testnet.binance.vision';
+  const futuresBase = 'https://testnet.binancefuture.com';
 
   const results: any = {
     configured: true,
@@ -641,20 +663,8 @@ async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTes
       results.spot.message = spotData.msg || `HTTP ${spotResp.status}`;
     }
 
-    // 2. Check API Restrictions
-    if (!isTestnet) {
-      const rTs = Date.now();
-      const rQuery = `timestamp=${rTs}`;
-      const rSig = sign(apiSecret, rQuery);
-      const rResp = await fetch(`https://api.binance.com/sapi/v1/account/apiRestrictions?${rQuery}&signature=${rSig}`, {
-        headers: { 'X-MBX-APIKEY': apiKey },
-      });
-      if (rResp.ok) {
-        results.restrictions = await rResp.json();
-      }
-    }
-
-    // 3. Check Futures Position Mode
+    // 2. Check Futures Position Mode on Testnet. This is a capability probe;
+    // the Python worker remains the sole execution/readiness authority.
     const fTs = Date.now();
     const fQuery = `timestamp=${fTs}`;
     const fSig = sign(apiSecret, fQuery);
@@ -701,7 +711,10 @@ app.get('/api/binance/profiles', (req: Request, res: Response) => {
       id: p.id,
       name: p.name,
       maskedKey: p.apiKey.length >= 8 ? `${p.apiKey.slice(0, 4)}...${p.apiKey.slice(-4)}` : (p.apiKey ? '***' : 'Unconfigured'),
+      maskedApiKey: p.apiKey.length >= 8 ? `${p.apiKey.slice(0, 4)}...${p.apiKey.slice(-4)}` : (p.apiKey ? '***' : 'Unconfigured'),
       isTestnet: p.isTestnet,
+      environment: 'TESTNET',
+      isLiveRealMoney: false,
       hasSecret: Boolean(p.apiSecret),
       isActive: p.id === activeProfileId,
     })),
@@ -713,11 +726,14 @@ app.post('/api/binance/profiles/switch', async (req: Request, res: Response) => 
   if (!profileId || !keyProfiles[profileId]) {
     return res.status(400).json({ error: 'Profile not found' });
   }
+  const active = keyProfiles[profileId];
+  if (!active.isTestnet) {
+    return res.status(400).json({ error: 'MAINNET_BLOCKED', message: 'Only Binance Testnet profiles are supported.' });
+  }
   activeProfileId = profileId;
-  const active = keyProfiles[activeProfileId];
-  process.env.BINANCE_API_KEY = active.apiKey;
-  process.env.BINANCE_API_SECRET = active.apiSecret;
-  process.env.BINANCE_TESTNET = active.isTestnet ? 'true' : 'false';
+  process.env.BINANCE_TESTNET_API_KEY = active.apiKey;
+  process.env.BINANCE_TESTNET_API_SECRET = active.apiSecret;
+  process.env.BINANCE_TESTNET = 'true';
 
   const results = await verifyBinanceCredentials(active.apiKey, active.apiSecret, active.isTestnet);
   res.json({
@@ -730,9 +746,22 @@ app.post('/api/binance/profiles/switch', async (req: Request, res: Response) => 
 
 app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
   try {
-    const { id, name, apiKey, apiSecret, isTestnet, makeActive } = req.body;
+    const { id, name, apiKey, apiSecret, isTestnet, environment, makeActive } = req.body;
     if (!name || typeof name !== 'string') {
       return res.status(400).json({ error: 'Profile name is required' });
+    }
+
+    const requestedTestnet =
+      typeof isTestnet === 'boolean'
+        ? isTestnet
+        : environment === undefined
+          ? true
+          : environment === 'TESTNET';
+    if (requestedTestnet !== true) {
+      return res.status(400).json({
+        error: 'MAINNET_BLOCKED',
+        message: 'Mainnet profiles and real-money execution are permanently disabled.',
+      });
     }
 
     const trimmedKey = (apiKey || '').trim();
@@ -744,7 +773,7 @@ app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
       existing.name = name.trim();
       if (trimmedKey) existing.apiKey = trimmedKey;
       if (trimmedSecret) existing.apiSecret = trimmedSecret;
-      if (typeof isTestnet === 'boolean') existing.isTestnet = isTestnet;
+      existing.isTestnet = true;
     } else {
       profileId = profileId || `profile_${Date.now()}`;
       keyProfiles[profileId] = {
@@ -752,7 +781,7 @@ app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
         name: name.trim(),
         apiKey: trimmedKey,
         apiSecret: trimmedSecret,
-        isTestnet: Boolean(isTestnet),
+        isTestnet: true,
         createdAt: Date.now(),
       };
     }
@@ -760,9 +789,9 @@ app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
     if (makeActive !== false) {
       activeProfileId = profileId;
       const active = keyProfiles[activeProfileId];
-      process.env.BINANCE_API_KEY = active.apiKey;
-      process.env.BINANCE_API_SECRET = active.apiSecret;
-      process.env.BINANCE_TESTNET = active.isTestnet ? 'true' : 'false';
+      process.env.BINANCE_TESTNET_API_KEY = active.apiKey;
+      process.env.BINANCE_TESTNET_API_SECRET = active.apiSecret;
+      process.env.BINANCE_TESTNET = 'true';
     }
 
     const active = keyProfiles[activeProfileId];
@@ -779,6 +808,14 @@ app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
 });
 
 async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTestnet: boolean) {
+  if (!isTestnet) {
+    return {
+      success: false,
+      configured: false,
+      error: 'MAINNET_BLOCKED',
+      message: 'Mainnet balance synchronization is permanently disabled.',
+    };
+  }
   if (!apiKey || !apiSecret) {
     return {
       success: false,
@@ -787,8 +824,8 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     };
   }
 
-  const spotBase = isTestnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
-  const futuresBase = isTestnet ? 'https://testnet.binancefuture.com' : 'https://fapi.binance.com';
+  const spotBase = 'https://testnet.binance.vision';
+  const futuresBase = 'https://testnet.binancefuture.com';
 
   const sign = (secret: string, queryStr: string) => {
     return crypto.createHmac('sha256', secret).update(queryStr).digest('hex');
@@ -841,15 +878,19 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       const tickerList = await (tickerResp as any).json();
       if (Array.isArray(tickerList)) {
         tickerList.forEach((p: any) => {
-          priceMap[p.symbol] = parseFloat(p.price || '0');
+        const price = Number(p.price);
+        if (typeof p.symbol === 'string' && Number.isFinite(price) && price > 0) {
+          priceMap[p.symbol] = price;
+        }
         });
       }
     }
-    const btcPrice = priceMap['BTCUSDT'] || 78600;
+    const btcPrice = priceMap['BTCUSDT'];
     const stableCoins = new Set(['USDT', 'USDC', 'BUSD', 'FDUSD', 'USDE', 'TUSD', 'DAI']);
 
     // Parse Spot
     const spotData = await (spotResp as any).json();
+    let valuationComplete = true;
     if ((spotResp as any).ok && Array.isArray(spotData.balances)) {
       spotSuccess = true;
       spotData.balances.forEach((b: any) => {
@@ -866,6 +907,11 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
           unitPrice = priceMap[`${cleanAsset}USDT`];
         } else if (priceMap[`${asset}USDT`]) {
           unitPrice = priceMap[`${asset}USDT`];
+        }
+
+        if (qty > 0 && (!Number.isFinite(unitPrice) || unitPrice <= 0)) {
+          valuationComplete = false;
+          return;
         }
 
         const usdVal = qty * unitPrice;
@@ -902,9 +948,12 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
 
     let totalWalletsUsd = 0;
     if (Array.isArray(walletsData)) {
+      if (walletsData.some((wallet) => Number(wallet.balance) > 0) && (!Number.isFinite(btcPrice) || btcPrice <= 0)) {
+        valuationComplete = false;
+      }
       walletsData.forEach((w: any) => {
         const btc = parseFloat(w.balance || '0');
-        const usdVal = parseFloat((btc * btcPrice).toFixed(2));
+        const usdVal = Number.isFinite(btcPrice) ? parseFloat((btc * btcPrice).toFixed(2)) : 0;
         if (usdVal > 0.001 || btc > 0) {
           let category: 'TRADING_BOT' | 'PORTFOLIO_MARGIN' | 'EARN' | 'SPOT' | 'FUNDING' = 'SPOT';
           if (w.walletName.includes('Trading Bot')) category = 'TRADING_BOT';
@@ -929,12 +978,27 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     });
     sub_wallets.sort((a, b) => b.usdVal - a.usdVal);
 
-    // Parse Portfolio Margin
-    let pmData: any[] = [];
+    // Portfolio Margin is a separate account product from the USDⓈ-M
+    // Futures Testnet worker.  Keep this as an explicitly read-only
+    // observation: it can never authorize the worker or be silently treated
+    // as Futures collateral.
+    let portfolioMarginObservation = unavailablePortfolioMarginObservation();
+
     if (pmResp && (pmResp as any).ok) {
       try {
-        pmData = await (pmResp as any).json();
-      } catch {}
+        const rawPmData = await (pmResp as any).json();
+        portfolioMarginObservation = parsePortfolioMarginResponse(rawPmData);
+      } catch (err: any) {
+        portfolioMarginObservation = {
+          ...unavailablePortfolioMarginObservation(
+            err?.message || 'Portfolio Margin response could not be read.',
+          ),
+          status: 'INVALID_RESPONSE',
+        };
+      }
+    } else if (pmResp) {
+      portfolioMarginObservation.message =
+        `Portfolio Margin read-only endpoint unavailable (HTTP ${(pmResp as any).status}).`;
     }
 
     // Parse Flexible Earn
@@ -966,17 +1030,39 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     if (fResp && (fResp as any).ok) {
       try {
         const fData = await (fResp as any).json();
-        futuresSuccess = true;
-        futuresWalletBalance = parseFloat(fData.totalWalletBalance || '0');
-        futuresMarginBalance = parseFloat(fData.totalMarginBalance || '0');
-        futuresUnrealizedPnl = parseFloat(fData.totalUnrealizedProfit || '0');
-        futuresAvailableMargin = parseFloat(fData.availableBalance || '0');
-        futuresUsedMargin = parseFloat(fData.totalPositionInitialMargin || '0');
+        const requiredAccountFields = [
+          'totalWalletBalance',
+          'totalMarginBalance',
+          'totalUnrealizedProfit',
+          'availableBalance',
+          'totalPositionInitialMargin',
+        ];
+        const missingAccountField = requiredAccountFields.find((field) => {
+          const value = Number(fData[field]);
+          return fData[field] === undefined || fData[field] === null || !Number.isFinite(value);
+        });
 
-        if (Array.isArray(fData.positions)) {
+        if (missingAccountField || !Array.isArray(fData.positions)) {
+          futuresError = `Futures account snapshot missing required field: ${missingAccountField || 'positions'}`;
+        } else {
+          futuresSuccess = true;
+          futuresWalletBalance = Number(fData.totalWalletBalance);
+          futuresMarginBalance = Number(fData.totalMarginBalance);
+          futuresUnrealizedPnl = Number(fData.totalUnrealizedProfit);
+          futuresAvailableMargin = Number(fData.availableBalance);
+          futuresUsedMargin = Number(fData.totalPositionInitialMargin);
+
           fData.positions.forEach((pos: any) => {
-            const notional = Math.abs(parseFloat(pos.notional || '0'));
-            totalPositionNotional += notional;
+            const positionAmount = Number(pos.positionAmt);
+            const notional = Number(pos.notional);
+            if (!Number.isFinite(positionAmount) || !Number.isFinite(notional)) {
+              if (Number.isFinite(positionAmount) && Math.abs(positionAmount) > 0) {
+                futuresSuccess = false;
+                futuresError = 'Futures position snapshot contains an unusable position/notional value';
+              }
+              return;
+            }
+            totalPositionNotional += Math.abs(notional);
           });
         }
       } catch (e: any) {
@@ -990,7 +1076,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     // Layer 2: Allocations (Trading Bot, Portfolio Margin, Earn, Spot)
     // ==========================================
     const botWallet = sub_wallets.find((w) => w.category === 'TRADING_BOT');
-    const botUsd = botWallet ? botWallet.usdVal : 924.0;
+    const botUsd = botWallet ? botWallet.usdVal : 0;
 
     const twoLayerMap: Record<
       string,
@@ -1014,7 +1100,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       return twoLayerMap[name];
     };
 
-    // 1. Trading Bot: User currently holds USDC base capital in Trading Bots (~924 USDC)
+    // 1. Trading Bot: include only a wallet balance returned by Binance.
     if (botUsd > 0) {
       getLayerAsset('USDC').allocations.push({
         location: 'Trading Bot',
@@ -1027,9 +1113,13 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     }
 
     // 2. Portfolio Margin (PM)
-    if (Array.isArray(pmData)) {
-      pmData.forEach((item: any) => {
-        const qty = parseFloat(item.totalWalletBalance || item.crossMarginAsset || '0');
+    if (portfolioMarginObservation.status === 'OBSERVED_READ_ONLY') {
+      portfolioMarginObservation.balances.forEach((item) => {
+        // This allocation is specifically the documented cross-margin asset
+        // balance.  Do not substitute totalWalletBalance: that field can
+        // include other Portfolio Margin components and would risk double
+        // counting against the separate Futures account below.
+        const qty = item.crossMarginAsset;
         if (qty > 0) {
           getLayerAsset(item.asset).allocations.push({
             location: 'Portfolio Margin',
@@ -1165,10 +1255,12 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     const marginUtilization = finalEquity > 0 ? (futuresUsedMargin / finalEquity) * 100 : 0;
     const effectiveLeverage = finalEquity > 0 ? totalPositionNotional / finalEquity : 0;
 
+    const snapshotValid = spotSuccess && futuresSuccess && valuationComplete;
+
     return {
-      success: true,
+      success: snapshotValid,
       configured: true,
-      spotSuccess: true,
+      spotSuccess,
       futuresSuccess,
       spot_balance: spotTotalUsd,
       futures_wallet_balance: futuresWalletBalance,
@@ -1185,8 +1277,16 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       holdings,
       two_layer_assets,
       sub_wallets,
+      portfolio_margin_observation: portfolioMarginObservation,
       source: isTestnet ? 'BINANCE_TESTNET' : 'BINANCE_LIVE',
       last_sync_time: new Date().toISOString(),
+      error: snapshotValid
+        ? undefined
+        : [
+            spotError,
+            futuresError,
+            !valuationComplete ? 'One or more non-zero assets could not be valued reliably' : '',
+          ].filter(Boolean).join('; ') || 'Account snapshot is incomplete or invalid.',
     };
   } catch (err: any) {
     return {
@@ -1211,9 +1311,12 @@ app.post('/api/binance/profiles/delete', (req: Request, res: Response) => {
   if (activeProfileId === profileId) {
     activeProfileId = Object.keys(keyProfiles)[0];
     const active = keyProfiles[activeProfileId];
-    process.env.BINANCE_API_KEY = active.apiKey;
-    process.env.BINANCE_API_SECRET = active.apiSecret;
-    process.env.BINANCE_TESTNET = active.isTestnet ? 'true' : 'false';
+    if (!active.isTestnet) {
+      return res.status(500).json({ error: 'MAINNET_BLOCKED', message: 'Stored Mainnet profile cannot be activated.' });
+    }
+    process.env.BINANCE_TESTNET_API_KEY = active.apiKey;
+    process.env.BINANCE_TESTNET_API_SECRET = active.apiSecret;
+    process.env.BINANCE_TESTNET = 'true';
   }
   res.json({ success: true, activeProfileId });
 });
@@ -1221,6 +1324,13 @@ app.post('/api/binance/profiles/delete', (req: Request, res: Response) => {
 // Sync and fetch funds directly from Binance API
 app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
   const active = getActiveBinanceCredentials();
+  if (!active.isTestnet) {
+    return res.status(400).json({
+      success: false,
+      error: 'MAINNET_BLOCKED',
+      message: 'Mainnet account synchronization is permanently disabled.',
+    });
+  }
   const liveResult = await fetchBinanceLiveBalances(active.apiKey, active.apiSecret, active.isTestnet);
 
   if (liveResult.success) {
@@ -1233,6 +1343,12 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     quantEngineState.account.daily_pnl = liveResult.daily_pnl!;
     quantEngineState.account.daily_pnl_pct = liveResult.daily_pnl_pct!;
     (quantEngineState.account as any).source = liveResult.source;
+    // This control-plane REST snapshot is not the Python worker's
+    // authenticated/private-stream/reconciled account truth.  Keep it
+    // visible as an unverified read-only observation and never promote it to
+    // execution readiness.
+    (quantEngineState.account as any).evidence_status = 'UNVERIFIED';
+    (quantEngineState.account as any).verified = false;
     (quantEngineState.account as any).spot_balance = liveResult.spot_balance;
     (quantEngineState.account as any).futures_wallet_balance = liveResult.futures_wallet_balance;
     (quantEngineState.account as any).futures_unrealized_pnl = liveResult.futures_unrealized_pnl;
@@ -1241,16 +1357,23 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     (quantEngineState.account as any).holdings = liveResult.holdings;
     (quantEngineState.account as any).two_layer_assets = liveResult.two_layer_assets;
     (quantEngineState.account as any).sub_wallets = liveResult.sub_wallets;
+    (quantEngineState.account as any).portfolio_margin_observation =
+      liveResult.portfolio_margin_observation;
 
-    // Update global trading system state to pass preflight checks
-    tradingSystemState.accountSynchronized = true;
+    // Direct REST sync cannot pass worker-owned readiness checks.
+    tradingSystemState.accountSynchronized = false;
+    tradingSystemState.privateStreamHealthy = false;
+    tradingSystemState.tradingConnectionHealthy = false;
+    tradingSystemState.reconciliationStatus = 'UNKNOWN';
     tradingSystemState.dataSource = 'BINANCE';
-    tradingSystemState.exchangeEnvironment = active.isTestnet ? 'BINANCE_TESTNET' : 'BINANCE_MAINNET';
+    tradingSystemState.exchangeEnvironment = 'BINANCE_TESTNET';
     tradingSystemState.updatedAt = new Date().toISOString();
 
     return res.json({
-      success: true,
-      message: `Successfully synchronized funds from Binance (${active.name})`,
+      success: false,
+      read_only_snapshot: true,
+      evidence_status: 'UNVERIFIED',
+      message: `Fetched a Binance Testnet read-only snapshot (${active.name}); Python worker reconciliation is still required.`,
       account: quantEngineState.account,
       liveResult,
     });
@@ -1258,6 +1381,9 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     tradingSystemState.accountSynchronized = false;
     tradingSystemState.reconciliationStatus = 'UNKNOWN';
     tradingSystemState.updatedAt = new Date().toISOString();
+    (quantEngineState.account as any).source = 'SIMULATED';
+    (quantEngineState.account as any).evidence_status = 'UNVERIFIED';
+    (quantEngineState.account as any).verified = false;
     // If not configured or API call rejected, return current state with diagnostic details
     return res.json({
       success: false,
@@ -1281,6 +1407,117 @@ app.get('/api/binance/balance', async (req: Request, res: Response) => {
 // The worker url is typically http://127.0.0.1:8080
 const WORKER_URL = 'http://127.0.0.1:8080';
 
+async function forwardWorkerRequest(
+  pathName: string,
+  init?: RequestInit,
+): Promise<{ response: globalThis.Response; data: any }> {
+  const response = await fetch(WORKER_URL + pathName, init);
+  const bodyText = await response.text();
+  let data: any = {};
+  if (bodyText) {
+    try {
+      data = JSON.parse(bodyText);
+    } catch {
+      data = { detail: bodyText };
+    }
+  }
+  return { response, data };
+}
+
+function projectWorkerState(workerState: any): void {
+  if (!workerState || typeof workerState !== 'object') return;
+  if (typeof workerState.execution_mode === 'string') {
+    tradingSystemState.executionMode = workerState.execution_mode;
+    tradingSystemState.exchangeEnvironment =
+      workerState.execution_mode === 'TESTNET' ? 'BINANCE_TESTNET' : 'NONE';
+    tradingSystemState.dataSource =
+      workerState.execution_mode === 'TESTNET' ? 'BINANCE' : 'SIMULATED';
+  }
+  if (typeof workerState.engine_state === 'string') tradingSystemState.engineState = workerState.engine_state;
+  if (typeof workerState.market_data_healthy === 'boolean') tradingSystemState.marketDataHealthy = workerState.market_data_healthy;
+  if (typeof workerState.private_stream_healthy === 'boolean') tradingSystemState.privateStreamHealthy = workerState.private_stream_healthy;
+  if (typeof workerState.trading_connection_healthy === 'boolean') tradingSystemState.tradingConnectionHealthy = workerState.trading_connection_healthy;
+  if (typeof workerState.account_synchronized === 'boolean') tradingSystemState.accountSynchronized = workerState.account_synchronized;
+  if (typeof workerState.reconciliation_status === 'string') tradingSystemState.reconciliationStatus = workerState.reconciliation_status;
+  if (typeof workerState.kill_switch_active === 'boolean') tradingSystemState.killSwitchActive = workerState.kill_switch_active;
+  if (typeof workerState.pause_new_risk === 'boolean') tradingSystemState.pauseNewRisk = workerState.pause_new_risk;
+  if (typeof workerState.recovery_only === 'boolean') tradingSystemState.recoveryOnly = workerState.recovery_only;
+  if (typeof workerState.worker_responsive === 'boolean') tradingSystemState.workerResponsive = workerState.worker_responsive;
+  if (typeof workerState.updated_at === 'string') tradingSystemState.updatedAt = workerState.updated_at;
+}
+
+function requireWorkerBoolean(data: any, field: string): boolean | null {
+  return typeof data?.[field] === 'boolean' ? data[field] : null;
+}
+
+const SIMULATED_EVIDENCE = {
+  data_source: 'SIMULATED' as const,
+  evidence_status: 'ILLUSTRATIVE_ONLY' as 'ILLUSTRATIVE_ONLY' | 'UNVERIFIED' | 'VERIFIED',
+  verified: false,
+};
+
+function quantStateForUi() {
+  const account = quantEngineState.account;
+  const accountIsVerified =
+    account.verified === true &&
+    account.source === 'BINANCE_TESTNET' &&
+    tradingSystemState.workerResponsive === true &&
+    tradingSystemState.executionMode === 'TESTNET' &&
+    tradingSystemState.accountSynchronized === true &&
+    tradingSystemState.tradingConnectionHealthy === true &&
+    tradingSystemState.privateStreamHealthy === true &&
+    tradingSystemState.reconciliationStatus === 'IN_SYNC' &&
+    tradingSystemState.killSwitchActive === false;
+
+  return {
+    ...quantEngineState,
+    account: {
+      ...account,
+      evidence_status: accountIsVerified
+        ? 'VERIFIED'
+        : account.evidence_status === 'UNVERIFIED'
+          ? 'UNVERIFIED'
+          : 'ILLUSTRATIVE_ONLY',
+      verified: accountIsVerified,
+    },
+    // The server-side fixture is never an exchange execution feed. Keep every
+    // derived object visibly simulated until the Python worker supplies it.
+    instruments: Object.fromEntries(
+      Object.entries(quantEngineState.instruments).map(([symbol, instrument]) => [
+        symbol,
+        { ...instrument, ...SIMULATED_EVIDENCE },
+      ]),
+    ),
+    baskets: quantEngineState.baskets.map((basket) => ({ ...basket, ...SIMULATED_EVIDENCE })),
+    orders: quantEngineState.orders.map((order) => ({ ...order, ...SIMULATED_EVIDENCE })),
+    alerts: quantEngineState.alerts.map((alert) => ({ ...alert, ...SIMULATED_EVIDENCE })),
+    strategy_intents: quantEngineState.strategy_intents.map((intent) => ({
+      ...intent,
+      ...SIMULATED_EVIDENCE,
+    })),
+    meta_allocations: quantEngineState.meta_allocations.map((allocation) => ({
+      ...allocation,
+      ...SIMULATED_EVIDENCE,
+    })),
+    risk_rules: [
+      ...quantEngineState.risk_rules.hard_rules,
+      ...quantEngineState.risk_rules.soft_rules,
+    ].map((rule) => ({
+      ...rule,
+      current: 'UNKNOWN',
+      status: 'UNKNOWN' as const,
+      ...SIMULATED_EVIDENCE,
+    })),
+    correlations: {
+      ...quantEngineState.correlations,
+      btc_eth_rolling_corr: null,
+      crypto_beta_exposure_pct: null,
+      common_factor_status: 'UNKNOWN',
+      ...SIMULATED_EVIDENCE,
+    },
+  };
+}
+
 app.get('/api/system/state', async (req, res) => {
   try {
     const workerStateResp = await fetch(WORKER_URL + '/state');
@@ -1297,7 +1534,10 @@ app.get('/api/system/state', async (req, res) => {
     tradingSystemState.recoveryOnly = workerState.recovery_only;
     tradingSystemState.killSwitchActive = workerState.kill_switch_active;
     tradingSystemState.updatedAt = workerState.updated_at;
-    tradingSystemState.tradingConnectionHealthy = workerState.connection_state === 'READY' || workerState.trading_connection_healthy === true;
+    // The Python worker owns the canonical health verdict. A READY transport
+    // label alone must not imply execution health while stream/auth/
+    // reconciliation checks are still false.
+    tradingSystemState.tradingConnectionHealthy = isWorkerTradingConnectionHealthy(workerState);
     if (typeof workerState.market_data_healthy === 'boolean') {
       tradingSystemState.marketDataHealthy = workerState.market_data_healthy;
     }
@@ -1306,8 +1546,6 @@ app.get('/api/system/state', async (req, res) => {
     }
     if (typeof workerState.account_synchronized === 'boolean') {
       tradingSystemState.accountSynchronized = workerState.account_synchronized;
-    } else if (typeof workerState.authenticated === 'boolean') {
-      tradingSystemState.accountSynchronized = workerState.authenticated;
     }
     if (workerState.reconciliation_status) {
       tradingSystemState.reconciliationStatus = workerState.reconciliation_status;
@@ -1317,7 +1555,7 @@ app.get('/api/system/state', async (req, res) => {
       const hbTime = new Date(workerState.heartbeat_at).getTime();
       const ageMs = Date.now() - hbTime;
       // Worker is considered responsive if heartbeat was recorded within the last 10 seconds
-      tradingSystemState.workerResponsive = !isNaN(hbTime) && ageMs < 10000;
+      tradingSystemState.workerResponsive = !isNaN(hbTime) && ageMs >= 0 && ageMs < 10000;
     } else {
       tradingSystemState.workerResponsive = false;
     }
@@ -1328,10 +1566,25 @@ app.get('/api/system/state', async (req, res) => {
       workerState, // pass raw state to frontend for debug if needed
     });
   } catch (err) {
-    tradingSystemState.workerResponsive = false;
+    // Never retain stale exchange health after the sole execution authority
+    // disappears.  The UI receives an explicit unavailable/degraded state and
+    // every exchange-dependent capability is fail-closed.
+    tradingSystemState = {
+      ...tradingSystemState,
+      dataSource: 'SIMULATED',
+      exchangeEnvironment: 'NONE',
+      executionMode: 'PAPER',
+      engineState: 'DEGRADED',
+      accountSynchronized: false,
+      marketDataHealthy: false,
+      privateStreamHealthy: false,
+      tradingConnectionHealthy: false,
+      reconciliationStatus: 'UNKNOWN',
+      workerResponsive: false,
+      updatedAt: new Date().toISOString(),
+    };
     res.json({
       ...tradingSystemState,
-      engineState: 'DEGRADED',
       capabilities: EXECUTION_CAPABILITIES,
       error: 'Worker unreachable',
       workerResponsive: false,
@@ -1369,7 +1622,7 @@ app.get('/api/system/readiness', async (req, res) => {
     res.json(data);
   } catch (err) {
     res.json({
-      PAPER_READY: true,
+      PAPER_READY: false,
       TESTNET_READ_ONLY_READY: false,
       TESTNET_MANUAL_READY: false,
       TESTNET_AUTONOMOUS_READY: false,
@@ -1392,21 +1645,22 @@ app.post('/api/system/arm', async (req, res) => {
   };
 
   try {
-    const armResp = await fetch(WORKER_URL + '/arm', {
+    const previousState = tradingSystemState.engineState;
+    const forwarded = await forwardWorkerRequest('/arm', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestedConfig)
     });
-    
-    if (!armResp.ok) {
-      const errData = await armResp.json();
-      return res.status(409).json({ error: 'WORKER_REJECTED_ARM', detail: errData });
+
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_ARM', detail: forwarded.data });
     }
-    
+
+    projectWorkerState(forwarded.data);
     // Pick risk profile
     const profileKey = requestedConfig.riskProfile as keyof typeof RISK_PROFILES;
     riskConfiguration = RISK_PROFILES[profileKey] || RISK_PROFILES.BALANCED;
-    tradingSystemState.engineState = 'ARMED';
+    tradingSystemState.engineState = forwarded.data.engine_state || 'ARMED';
     tradingSystemState.executionMode = requestedConfig.executionMode as any;
     tradingSystemState.activeConfiguration = {
       executionMode: requestedConfig.executionMode as any,
@@ -1420,14 +1674,14 @@ app.post('/api/system/arm', async (req, res) => {
     
     auditRepository.logEvent({
       eventType: 'ENGINE_ARMED',
-      previousState: tradingSystemState.engineState,
+      previousState,
       newState: 'ARMED',
       executionMode: requestedConfig.executionMode,
       reason: 'ARM requested by user and worker accepted',
       metadata: { requestedConfig }
     });
     
-    res.json({ status: 'ARMED' });
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
@@ -1435,18 +1689,22 @@ app.post('/api/system/arm', async (req, res) => {
 
 app.post('/api/system/disarm', async (req, res) => {
   try {
-    await fetch(WORKER_URL + '/disarm', { method: 'POST' });
+    const previousState = tradingSystemState.engineState;
+    const forwarded = await forwardWorkerRequest('/disarm', { method: 'POST' });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_DISARM', detail: forwarded.data });
+    }
     tradingSystemState.engineState = 'DISARMED';
     
     auditRepository.logEvent({
       eventType: 'ENGINE_DISARMED',
-      previousState: tradingSystemState.engineState,
+      previousState,
       newState: 'DISARMED',
       executionMode: tradingSystemState.executionMode,
       reason: 'Manual DISARM requested and worker accepted'
     });
     
-    res.json({ status: 'DISARMED' });
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
@@ -1454,18 +1712,19 @@ app.post('/api/system/disarm', async (req, res) => {
 
 app.post('/api/system/pause-new-risk', async (req, res) => {
   try {
-    await fetch(WORKER_URL + '/pause-new-risk', {
+    const forwarded = await forwardWorkerRequest('/pause-new-risk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
-    tradingSystemState.pauseNewRisk = !!req.body?.active;
-    if (req.body?.active) {
-      tradingSystemState.engineState = 'PAUSED_NEW_RISK';
-    } else {
-      tradingSystemState.engineState = tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED';
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_PAUSE', detail: forwarded.data });
     }
-    res.json({ status: 'ok' });
+    const active = requireWorkerBoolean(forwarded.data, 'active');
+    if (active === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    tradingSystemState.pauseNewRisk = active;
+    tradingSystemState.engineState = active ? 'PAUSED_NEW_RISK' : (tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED');
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
@@ -1473,34 +1732,43 @@ app.post('/api/system/pause-new-risk', async (req, res) => {
 
 app.post('/api/system/recovery-only', async (req, res) => {
   try {
-    await fetch(WORKER_URL + '/recovery-only', {
+    const forwarded = await forwardWorkerRequest('/recovery-only', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
-    tradingSystemState.recoveryOnly = !!req.body?.active;
-    if (req.body?.active) {
-      tradingSystemState.engineState = 'RECOVERY_ONLY';
-    } else {
-      tradingSystemState.engineState = tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED';
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_RECOVERY', detail: forwarded.data });
     }
-    res.json({ status: 'ok' });
+    const active = requireWorkerBoolean(forwarded.data, 'active');
+    if (active === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    tradingSystemState.recoveryOnly = active;
+    tradingSystemState.engineState = active ? 'RECOVERY_ONLY' : (tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED');
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
 });
 
 app.post('/api/system/kill-switch', async (req, res) => {
+  if (typeof req.body?.active !== 'boolean') {
+    return res.status(400).json({ error: 'INVALID_KILL_SWITCH_REQUEST', message: 'active must be a boolean' });
+  }
   try {
-    await fetch(WORKER_URL + '/kill-switch', {
+    const forwarded = await forwardWorkerRequest('/kill-switch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body)
     });
-    const isActive = !!req.body?.active;
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_KILL_SWITCH', detail: forwarded.data });
+    }
+    const isActive = requireWorkerBoolean(forwarded.data, 'kill_switch_active');
+    if (isActive === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
     tradingSystemState.killSwitchActive = isActive;
-    tradingSystemState.engineState = isActive ? 'EMERGENCY' : 'DISARMED';
-    res.json({ status: 'ok' });
+    if (isActive) tradingSystemState.engineState = 'EMERGENCY';
+    else if (forwarded.data.status === 'CONFIRMED') tradingSystemState.engineState = 'DISARMED';
+    res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
@@ -1508,8 +1776,11 @@ app.post('/api/system/kill-switch', async (req, res) => {
 
 app.post('/api/system/reconcile', async (req, res) => {
   try {
-    const rResp = await fetch(WORKER_URL + '/reconcile', { method: 'POST' });
-    const data = await rResp.json();
+    const forwarded = await forwardWorkerRequest('/reconcile', { method: 'POST' });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_RECONCILE', detail: forwarded.data });
+    }
+    const data = forwarded.data;
     tradingSystemState.reconciliationStatus = data.status;
     tradingSystemState.accountSynchronized = data.status === 'IN_SYNC';
     res.json(data);
@@ -1519,46 +1790,51 @@ app.post('/api/system/reconcile', async (req, res) => {
 });
 
 app.get('/api/quant/state', (req: Request, res: Response) => {
-  const allRules = [
-    ...quantEngineState.risk_rules.hard_rules,
-    ...quantEngineState.risk_rules.soft_rules,
-  ];
+  const state = quantStateForUi();
   res.json({
-    ...quantEngineState,
-    risk_rules: allRules,
-    strategy_intents: quantEngineState.strategy_intents,
-    meta_allocations: quantEngineState.meta_allocations,
+    ...state,
+    evidence_status: 'ILLUSTRATIVE_ONLY',
+    execution_authority: 'PYTHON_TRADING_WORKER',
     exposure_recovery: {
-      status: 'ACTIVE_GRID_BRAKE',
-      current_drawdown_pct: 3.12,
-      trigger_threshold_pct: 2.50,
-      toxic_inventory_symbol: 'BTCUSDT',
-      action_taken: 'Blocked +0.10 BTC Grid intent. Enforcing exposure reduction.',
-      recommended_hedge_ratio: 0.15
+      status: 'UNKNOWN',
+      data_source: 'SIMULATED',
+      evidence_status: 'ILLUSTRATIVE_ONLY',
+      verified: false,
+      assessment: null,
     },
-    correlation_btc_eth: quantEngineState.correlations.btc_eth_rolling_corr,
-    crypto_beta_exposure_pct: quantEngineState.correlations.crypto_beta_exposure_pct,
-    liquidation_distance_pct: 48.2,
+    correlation_btc_eth: null,
+    crypto_beta_exposure_pct: null,
+    liquidation_distance_pct: null,
+    liquidation_safety: 'UNKNOWN',
   });
 });
 
 app.post('/api/quant/risk/kill-switch', async (req: Request, res: Response) => {
-  const { active: ksActive } = req.body;
+  if (typeof req.body?.active !== 'boolean') {
+    return res.status(400).json({ error: 'INVALID_KILL_SWITCH_REQUEST', message: 'active must be a boolean' });
+  }
+  const ksActive = req.body.active;
   try {
-    await fetch(WORKER_URL + '/kill-switch', {
+    const forwarded = await forwardWorkerRequest('/kill-switch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ active: ksActive })
+      body: JSON.stringify({ active: ksActive }),
     });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_KILL_SWITCH', detail: forwarded.data });
+    }
+    const actualActive = requireWorkerBoolean(forwarded.data, 'kill_switch_active');
+    if (actualActive === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    tradingSystemState.killSwitchActive = actualActive;
+    if (actualActive) tradingSystemState.engineState = 'EMERGENCY';
+    else if (forwarded.data.status === 'CONFIRMED') tradingSystemState.engineState = 'DISARMED';
+    tradingSystemState.updatedAt = new Date().toISOString();
+    quantEngineState.account.kill_switch_active = actualActive;
+    quantEngineState.account.risk_state = actualActive ? 'EMERGENCY' : 'NORMAL';
+    return res.json({ ...forwarded.data, risk_state: quantEngineState.account.risk_state });
   } catch (err) {
-    console.warn('Could not forward kill switch to worker:', err);
+    return res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
-  tradingSystemState.killSwitchActive = ksActive;
-  tradingSystemState.engineState = ksActive ? 'EMERGENCY' : 'DISARMED';
-  tradingSystemState.updatedAt = new Date().toISOString();
-  quantEngineState.account.kill_switch_active = ksActive;
-  quantEngineState.account.risk_state = ksActive ? 'EMERGENCY' : 'NORMAL';
-  res.json({ kill_switch_active: ksActive, risk_state: quantEngineState.account.risk_state });
 });
 
 app.post('/api/quant/basket/expand', (req: Request, res: Response) => {
@@ -1684,38 +1960,48 @@ app.post('/api/quant/basket/action', (req: Request, res: Response) => {
 
 app.post('/api/quant/killswitch', async (req: Request, res: Response) => {
   // Alias for backward compatibility
-  const { active: ksActive } = req.body;
+  if (typeof req.body?.active !== 'boolean') {
+    return res.status(400).json({ error: 'INVALID_KILL_SWITCH_REQUEST', message: 'active must be a boolean' });
+  }
+  const ksActive = req.body.active;
   const targetState = ksActive ? 'EMERGENCY' : 'DISARMED';
   if (!validateStateTransition(tradingSystemState.engineState, targetState)) {
     return res.status(409).json({ error: 'INVALID_STATE_TRANSITION', currentState: tradingSystemState.engineState, requestedState: targetState });
   }
   try {
-    await fetch(WORKER_URL + '/kill-switch', {
+    const forwarded = await forwardWorkerRequest('/kill-switch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ active: ksActive })
+      body: JSON.stringify({ active: ksActive }),
     });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_KILL_SWITCH', detail: forwarded.data });
+    }
+    const actualActive = requireWorkerBoolean(forwarded.data, 'kill_switch_active');
+    if (actualActive === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    const prevState = tradingSystemState.engineState;
+    tradingSystemState.killSwitchActive = actualActive;
+    if (actualActive) tradingSystemState.engineState = 'EMERGENCY';
+    else if (forwarded.data.status === 'CONFIRMED') tradingSystemState.engineState = 'DISARMED';
+    auditRepository.logEvent({
+      eventType: actualActive ? 'KILL_SWITCH_ENGAGED' : 'KILL_SWITCH_RELEASED',
+      previousState: prevState,
+      newState: tradingSystemState.engineState,
+      executionMode: tradingSystemState.executionMode,
+      reason: actualActive ? 'Kill switch engaged' : 'Kill switch release verified by worker',
+    });
+    tradingSystemState.updatedAt = new Date().toISOString();
+    quantEngineState.account.kill_switch_active = actualActive;
+    quantEngineState.account.risk_state = actualActive ? 'EMERGENCY' : 'NORMAL';
+    return res.json({ ...forwarded.data, risk_state: quantEngineState.account.risk_state });
   } catch (err) {
-    console.warn('Could not forward kill switch to worker:', err);
+    return res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
-  const prevState = tradingSystemState.engineState;
-  tradingSystemState.killSwitchActive = ksActive;
-  tradingSystemState.engineState = targetState as any;
-  auditRepository.logEvent({
-    eventType: ksActive ? 'KILL_SWITCH_ENGAGED' : 'KILL_SWITCH_RELEASED',
-    previousState: prevState,
-    newState: targetState as any,
-    executionMode: tradingSystemState.executionMode,
-    reason: ksActive ? 'Kill switch engaged' : 'Kill switch released'
-  });
-  tradingSystemState.updatedAt = new Date().toISOString();
-  
-  quantEngineState.account.kill_switch_active = ksActive;
-  quantEngineState.account.risk_state = ksActive ? 'EMERGENCY' : 'NORMAL';
-  res.json({ kill_switch_active: ksActive, risk_state: quantEngineState.account.risk_state });
 });
 
-// Event-driven Historical Replay / Stress Scenario Simulation
+// Event-driven Historical Replay / Stress Scenario Simulation.  The current
+// endpoint is a deterministic UI fixture, not a data-backed backtest runner;
+// its metrics must never be treated as launch or profitability evidence.
 app.post('/api/quant/backtest/run', (req: Request, res: Response) => {
   const { scenario = 'COVID_CRASH_2020', initial_capital = 100000, max_grid_levels = 5, regime_filter = true } = req.body;
 
@@ -1827,20 +2113,39 @@ app.post('/api/quant/backtest/run', (req: Request, res: Response) => {
     (normKey.includes('BULL') ? scenarios['BULL_EXPANSION_2024'] : null) ||
     scenarios['COVID_CRASH_2020'];
 
+  const evidence = {
+    data_source: 'SIMULATED',
+    evidence_status: 'ILLUSTRATIVE_ONLY',
+    verified: false,
+    net_economic_pnl_verified: false,
+    execution_cost_model_status: 'NOT_VERIFIED',
+    launch_eligible: false,
+  };
+  const metrics = { ...resData, ...evidence };
+
   res.json({
-    ...resData,
+    ...metrics,
     scenario,
     initial_capital,
     max_grid_levels,
     regime_filter,
-    metrics: resData,
+    metrics,
   });
 });
 
 // Quant AI Assistant (Research / Analysis Only - Section 33)
 app.post('/api/quant/ai/research', async (req: Request, res: Response) => {
   const query = req.body.query || req.body.prompt;
-  const context = req.body.context;
+  const context = {
+    ...(req.body.context && typeof req.body.context === 'object' ? req.body.context : {}),
+    portfolio_equity: 'UNKNOWN',
+    risk_state: 'UNKNOWN',
+    drawdown_pct: 'UNKNOWN',
+    effective_leverage: 'UNKNOWN',
+    data_source: 'SIMULATED',
+    evidence_status: 'ILLUSTRATIVE_ONLY',
+    execution_authority: 'PYTHON_TRADING_WORKER',
+  };
   if (!query) {
     return res.status(400).json({ error: 'Query prompt is required' });
   }
@@ -1848,10 +2153,22 @@ app.post('/api/quant/ai/research', async (req: Request, res: Response) => {
   const ai = getGeminiClient();
   if (!ai) {
     return res.json({
+      analysis: `### [Blessing AI Copilot: Research-Only Diagnostic]\n\n**Evaluation Context**: Current account, market, and execution evidence is UNKNOWN. No live-state or positive-expectancy claim is made.\n\n**Query**: ${String(query)}\n\n- The Python Trading Worker is the sole execution authority.\n- This response cannot arm the worker, override Risk Governor decisions, or submit orders.\n- Load a timestamped backtest/OOS or Testnet evidence artifact before drawing performance conclusions.`,
+      model: 'deterministic_quant_engine',
+      data_source: 'SIMULATED',
+      evidence_status: 'ILLUSTRATIVE_ONLY',
+      verified: false,
+      execution_authority: 'PYTHON_TRADING_WORKER',
+      timestamp: new Date().toISOString(),
+    });
+    /* Legacy fixture response intentionally disabled. */
+    /*
+    return res.json({
       analysis: `### [Blessing AI Copilot: Quant Architecture Review]\n\n**Evaluation Context**: Live state evaluated for risk invariant compliance (Portfolio: $${Number(context?.portfolio_equity || quantEngineState.account.equity).toLocaleString()}, Risk State: ${context?.risk_state || quantEngineState.account.risk_state}).\n\n1. **Mathematical Invariant Verification**:\n   - Grid Volume Multiplier series is strictly anti-martingale ($L_1: 1.0, L_2: 1.0, L_3: 1.1, L_4: 1.2, L_5: 1.3$). Maximum grid depth is hardware-locked at $L_5$.\n   - Effective Leverage cap ($\le 2.0\\times$) is fully satisfied by the Portfolio Risk Governor.\n\n2. **Regime & Volatility Calibration**:\n   - Dynamic step distances adapt continuously via rolling 1h ATR ($\sigma_{1h}$) multiplied by regime severity factor.\n   - High Basis Z-Score ($Z > 2.5$) and extreme negative funding drag act as fail-closed execution brakes.\n\n3. **Failure Mode Mitigations**:\n   - In the event of a one-way liquidity cascade, state advances through tiered drawdown gates (Caution 2% $\\to$ No New Grid 4% $\\to$ Recovery Only 6% $\\to$ Emergency Exit 8%).\n\n*(Connect \`GEMINI_API_KEY\` in Settings > Secrets to activate real-time dynamic Gemini 3.8 Flash generative research).*`,
       model: 'deterministic_quant_engine',
       timestamp: new Date().toISOString(),
     });
+  */
   }
 
   try {
@@ -1869,6 +2186,7 @@ ${query}
 Provide a deep, rigorous, mathematically disciplined Senior Quant Engineer response in clear English and Thai terminology. Include mathematical justification, failure modes, trade-offs, and parameter boundaries where relevant.`;
 
     let textResponse = '';
+    let providerError = false;
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
@@ -1877,19 +2195,32 @@ Provide a deep, rigorous, mathematically disciplined Senior Quant Engineer respo
       textResponse = response.text || '';
     } catch (apiErr: any) {
       console.warn('Gemini 2.5 Flash temporarily unavailable, using Quant Engine fallback:', apiErr.message);
+      providerError = true;
       textResponse = `### [Blessing AI Quant Advisory — Research Diagnostic]\n\n**Evaluated Query**: ${query}\n**System State**: Risk Level: ${context?.risk_state || 'NORMAL'}, Active Drawdown: ${context?.drawdown_pct || '1.85'}%, Leverage: ${context?.effective_leverage || '1.42'}x.\n\n1. **Mathematical Validation**:\n   - Grid step scaling factor $k_{atr} = 1.25$ provides sufficient variance absorption under current regime parameters.\n   - Progression formula $S_i = S_0 \\times (1 + \\alpha)^{i-1}$ satisfies bounded adverse excursion limits.\n\n2. **Stress & Correlation Guardrails**:\n   - Cross-instrument rolling correlation is monitored against the $0.90$ threshold to mitigate synthetic unhedged directional concentration.\n   - Hard liquidation buffer maintains $>35\\%$ minimum safety margin.\n\n3. **Recommendation**:\n   - Retain anti-martingale volume cap at $L_5$.\n   - Continue monitoring Basis Z-score and 8-hour funding rates before opening secondary basket layers.`;
+    }
+
+    if (providerError) {
+      textResponse = `### [Blessing AI Copilot: Research-Only Diagnostic]\n\nThe configured research provider is unavailable. Account, market, and execution evidence remain UNKNOWN; no execution decision was made.\n\n**Query**: ${String(query)}\n\nThe Python Trading Worker remains the sole execution authority, and this analysis cannot submit, modify, or cancel an order.`;
     }
 
     res.json({
       analysis: textResponse,
       model: 'gemini-2.5-flash',
+      data_source: context.data_source,
+      evidence_status: context.evidence_status,
+      verified: false,
+      execution_authority: 'PYTHON_TRADING_WORKER',
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {
     console.error('Gemini Quant API error:', err);
     res.json({
-      analysis: 'Quant research evaluation completed with deterministic engine bounds.',
+      analysis: 'Quant research evaluation is unavailable; no execution decision was made.',
       model: 'deterministic_quant_engine',
+      data_source: 'SIMULATED',
+      evidence_status: 'ILLUSTRATIVE_ONLY',
+      verified: false,
+      execution_authority: 'PYTHON_TRADING_WORKER',
       timestamp: new Date().toISOString(),
     });
   }
@@ -2064,13 +2395,23 @@ const googleProductsState = [
   },
 ];
 
+const unverifiedGoogleProduct = (product: typeof googleProductsState[number]) => ({
+  ...product,
+  status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
+  evidence_status: 'ILLUSTRATIVE_ONLY',
+  verified: false,
+  lastVerified: null,
+});
+
 app.get('/api/google/products', (req: Request, res: Response) => {
   res.json({
     projectId: GCP_PROJECT_ID,
     region: GCP_REGION,
     userEmail: GOOGLE_USER,
-    status: 'ALL_CONFIGURED_AND_AUTO_WIRED',
-    products: googleProductsState,
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
+    evidence_status: 'ILLUSTRATIVE_ONLY',
+    verified: false,
+    products: googleProductsState.map(unverifiedGoogleProduct),
   });
 });
 
@@ -2081,32 +2422,25 @@ app.post('/api/google/test-connection', async (req: Request, res: Response) => {
     return res.status(404).json({ error: `Google product ${productId} not found` });
   }
 
-  // Simulate ultra-fast ping/discovery test
-  product.lastVerified = new Date().toISOString();
-  product.latencyMs = Math.floor(Math.random() * 30) + 12;
-
   res.json({
-    success: true,
+    success: false,
     productId: product.id,
     productName: product.name,
-    status: product.status,
-    latencyMs: product.latencyMs,
-    lastVerified: product.lastVerified,
-    message: `Connected successfully to ${product.name} (Project: ${GCP_PROJECT_ID})`,
+    status: 'UNVERIFIED',
+    evidence_status: 'ILLUSTRATIVE_ONLY',
+    verified: false,
+    message: `No live Google connector probe is configured for ${product.name}; configuration metadata only.`,
   });
 });
 
 app.post('/api/google/sync-all', (req: Request, res: Response) => {
-  const now = new Date().toISOString();
-  googleProductsState.forEach((p) => {
-    p.lastVerified = now;
-    p.latencyMs = Math.floor(Math.random() * 25) + 10;
-  });
   res.json({
-    success: true,
-    message: 'All 8 Google Cloud products verified and synchronized.',
-    syncedAt: now,
-    products: googleProductsState,
+    success: false,
+    status: 'UNVERIFIED',
+    evidence_status: 'ILLUSTRATIVE_ONLY',
+    verified: false,
+    message: 'Google product synchronization is not verified in this local runtime.',
+    products: googleProductsState.map(unverifiedGoogleProduct),
   });
 });
 
@@ -2303,6 +2637,10 @@ app.post('/api/bigquery/query', async (req: Request, res: Response) => {
     executionTimeMs,
     cacheHit: false,
     projectId: BIGQUERY_PROJECT_ID,
+    data_source: 'SIMULATED',
+    evidence_status: 'ILLUSTRATIVE_ONLY',
+    verified: false,
+    note: 'This local endpoint returns illustrative fixtures; it is not a verified BigQuery read-back.',
   });
 });
 
@@ -2365,6 +2703,11 @@ async function startServer() {
             quantEngineState.account.daily_pnl = live.daily_pnl!;
             quantEngineState.account.daily_pnl_pct = live.daily_pnl_pct!;
             (quantEngineState.account as any).source = live.source;
+            // The control-plane boot probe is a read-only observation.  It
+            // does not prove the Python worker's signed account truth,
+            // private stream health, or authoritative reconciliation.
+            (quantEngineState.account as any).evidence_status = 'UNVERIFIED';
+            (quantEngineState.account as any).verified = false;
             (quantEngineState.account as any).spot_balance = live.spot_balance;
             (quantEngineState.account as any).futures_wallet_balance = live.futures_wallet_balance;
             (quantEngineState.account as any).futures_unrealized_pnl = live.futures_unrealized_pnl;
@@ -2373,7 +2716,14 @@ async function startServer() {
             (quantEngineState.account as any).holdings = live.holdings;
             (quantEngineState.account as any).two_layer_assets = live.two_layer_assets;
             (quantEngineState.account as any).sub_wallets = live.sub_wallets;
-            console.log(`[Binance] Boot sync: Equity = $${live.equity?.toFixed(2)} (${live.two_layer_assets?.length || live.holdings?.length} assets)`);
+            tradingSystemState.accountSynchronized = false;
+            tradingSystemState.privateStreamHealthy = false;
+            tradingSystemState.tradingConnectionHealthy = false;
+            tradingSystemState.reconciliationStatus = 'UNKNOWN';
+            tradingSystemState.dataSource = 'BINANCE';
+            tradingSystemState.exchangeEnvironment = 'BINANCE_TESTNET';
+            tradingSystemState.updatedAt = new Date().toISOString();
+            console.log(`[Binance] Boot sync: read-only Testnet snapshot observed; worker reconciliation is still required (equity = $${live.equity?.toFixed(2)})`);
           }
         })
         .catch((e) => console.warn('[Binance] Initial balance sync failed:', e.message));

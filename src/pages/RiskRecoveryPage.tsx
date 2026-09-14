@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { RiskRuleItem, RiskState, BasketItem } from '../types';
+import { AccountData, RiskRuleItem, RiskState, BasketItem } from '../types';
 import { ShieldCheck, Lock, LifeBuoy, ShieldAlert, Info, AlertTriangle, Power } from 'lucide-react';
 import { HardRiskBoundsCard } from '../components/HardRiskBoundsCard';
 import { ExposureRecoveryEngineCard } from '../components/ExposureRecoveryEngineCard';
@@ -7,11 +7,12 @@ import { FailClosedSafeguardsCard } from '../components/FailClosedSafeguardsCard
 import { RiskGovernorMonitor } from '../components/RiskGovernorMonitor';
 
 interface RiskRecoveryPageProps {
+  account: AccountData;
   riskState: RiskState;
   rules: RiskRuleItem[];
-  correlationBtcEth: number;
-  cryptoBetaExposurePct: number;
-  liquidationDistancePct: number;
+  correlationBtcEth: number | null;
+  cryptoBetaExposurePct: number | null;
+  liquidationDistancePct: number | null;
   baskets?: BasketItem[];
   recoveryData?: any;
   killSwitchActive: boolean;
@@ -19,6 +20,7 @@ interface RiskRecoveryPageProps {
 }
 
 export const RiskRecoveryPage: React.FC<RiskRecoveryPageProps> = ({
+  account,
   riskState,
   rules,
   correlationBtcEth,
@@ -74,13 +76,18 @@ export const RiskRecoveryPage: React.FC<RiskRecoveryPageProps> = ({
 
       {/* 1. Deterministic Hard Risk Bounds */}
       <HardRiskBoundsCard
+        account={account}
         riskState={riskState}
         rules={rules}
         liquidationDistancePct={liquidationDistancePct}
       />
 
       {/* 2. Dynamic Exposure Recovery Decision Engine */}
-      <ExposureRecoveryEngineCard baskets={baskets} recoveryData={recoveryData || ((window as any).quantState as any)?.exposure_recovery} />
+      <ExposureRecoveryEngineCard
+        account={account}
+        baskets={baskets}
+        recoveryData={recoveryData || ((window as any).quantState as any)?.exposure_recovery}
+      />
 
       {/* 3. Cross-Instrument Correlation & Beta Exposure Monitor */}
       <RiskGovernorMonitor

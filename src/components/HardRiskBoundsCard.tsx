@@ -10,19 +10,36 @@ import {
   Activity,
   Layers,
 } from 'lucide-react';
-import { RiskState, RiskRuleItem } from '../types';
+import { AccountData, RiskState, RiskRuleItem } from '../types';
 
 interface HardRiskBoundsCardProps {
+  account: AccountData;
   riskState: RiskState;
   rules: RiskRuleItem[];
-  liquidationDistancePct: number;
+  liquidationDistancePct: number | null;
 }
 
 export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
+  account,
   riskState,
   rules,
   liquidationDistancePct,
 }) => {
+  const hasVerifiedAccount =
+    account.verified === true && account.source === 'BINANCE_TESTNET';
+  const marginUtilization = hasVerifiedAccount ? account.margin_utilization_pct : null;
+  const effectiveLeverage = hasVerifiedAccount ? account.effective_leverage : null;
+  const drawdown = hasVerifiedAccount ? account.portfolio_drawdown_pct : null;
+  const verifiedLiquidationDistance = hasVerifiedAccount ? liquidationDistancePct : null;
+
+  const boundStatus = (value: number | null, limit: number, lowerIsSafer = true) => {
+    if (value == null) return 'UNKNOWN';
+    return lowerIsSafer ? (value <= limit ? 'PASS' : 'FAIL') : (value >= limit ? 'PASS' : 'FAIL');
+  };
+
+  const statusIcon = (status: string) => status === 'PASS'
+    ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+    : <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />;
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">
       {/* Header */}
@@ -55,11 +72,11 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
         <div className="p-3.5 bg-zinc-950/80 border border-zinc-800/80 rounded-xl space-y-1.5">
           <div className="flex items-center justify-between text-[10px] text-zinc-400 uppercase">
             <span>Margin Utilization</span>
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            {statusIcon(boundStatus(marginUtilization, 25))}
           </div>
-          <div className="text-lg font-bold text-emerald-400">22.8%</div>
+          <div className="text-lg font-bold text-emerald-400">{marginUtilization == null ? 'UNKNOWN' : `${marginUtilization.toFixed(1)}%`}</div>
           <div className="w-full bg-zinc-800 rounded-full h-1.5">
-            <div className="bg-emerald-500 h-1.5 rounded-full" style={{ width: '22.8%' }} />
+            <div className="bg-emerald-500 h-1.5 rounded-full" style={{ width: `${marginUtilization == null ? 0 : Math.min(marginUtilization, 100)}%` }} />
           </div>
           <div className="flex justify-between text-[10px] text-zinc-500 pt-0.5">
             <span>Current</span>
@@ -71,11 +88,11 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
         <div className="p-3.5 bg-zinc-950/80 border border-zinc-800/80 rounded-xl space-y-1.5">
           <div className="flex items-center justify-between text-[10px] text-zinc-400 uppercase">
             <span>Effective Leverage</span>
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            {statusIcon(boundStatus(effectiveLeverage, 2))}
           </div>
-          <div className="text-lg font-bold text-zinc-100">1.20x</div>
+          <div className="text-lg font-bold text-zinc-100">{effectiveLeverage == null ? 'UNKNOWN' : `${effectiveLeverage.toFixed(2)}x`}</div>
           <div className="w-full bg-zinc-800 rounded-full h-1.5">
-            <div className="bg-cyan-500 h-1.5 rounded-full" style={{ width: '60%' }} />
+            <div className="bg-cyan-500 h-1.5 rounded-full" style={{ width: `${effectiveLeverage == null ? 0 : Math.min((effectiveLeverage / 2) * 100, 100)}%` }} />
           </div>
           <div className="flex justify-between text-[10px] text-zinc-500 pt-0.5">
             <span>Current</span>
@@ -87,11 +104,11 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
         <div className="p-3.5 bg-zinc-950/80 border border-zinc-800/80 rounded-xl space-y-1.5">
           <div className="flex items-center justify-between text-[10px] text-zinc-400 uppercase">
             <span>Portfolio Drawdown</span>
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            {statusIcon(boundStatus(drawdown, 8))}
           </div>
-          <div className="text-lg font-bold text-emerald-400">-1.82%</div>
+          <div className="text-lg font-bold text-emerald-400">{drawdown == null ? 'UNKNOWN' : `${drawdown.toFixed(2)}%`}</div>
           <div className="w-full bg-zinc-800 rounded-full h-1.5">
-            <div className="bg-emerald-500 h-1.5 rounded-full" style={{ width: '18.2%' }} />
+            <div className="bg-emerald-500 h-1.5 rounded-full" style={{ width: `${drawdown == null ? 0 : Math.min((drawdown / 8) * 100, 100)}%` }} />
           </div>
           <div className="flex justify-between text-[10px] text-zinc-500 pt-0.5">
             <span>Current</span>
@@ -103,16 +120,23 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
         <div className="p-3.5 bg-zinc-950/80 border border-zinc-800/80 rounded-xl space-y-1.5">
           <div className="flex items-center justify-between text-[10px] text-zinc-400 uppercase">
             <span>Liquidation Buffer</span>
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            {verifiedLiquidationDistance == null ? (
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+            ) : (
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            )}
           </div>
-          <div className="text-lg font-bold text-emerald-400">
-            +{liquidationDistancePct.toFixed(1)}%
+          <div className={`text-lg font-bold ${verifiedLiquidationDistance == null ? 'text-amber-400' : 'text-emerald-400'}`}>
+            {verifiedLiquidationDistance == null ? 'UNKNOWN' : `+${verifiedLiquidationDistance.toFixed(1)}%`}
           </div>
           <div className="w-full bg-zinc-800 rounded-full h-1.5">
-            <div className="bg-emerald-500 h-1.5 rounded-full" style={{ width: '100%' }} />
+            <div
+              className={`${verifiedLiquidationDistance == null ? 'bg-amber-500/50' : 'bg-emerald-500'} h-1.5 rounded-full`}
+              style={{ width: verifiedLiquidationDistance == null ? '0%' : `${Math.min(verifiedLiquidationDistance, 100)}%` }}
+            />
           </div>
           <div className="flex justify-between text-[10px] text-zinc-500 pt-0.5">
-            <span>Current Distance</span>
+            <span>{verifiedLiquidationDistance == null ? 'No verified distance' : 'Current Distance'}</span>
             <span>Hard Floor: +25.0%</span>
           </div>
         </div>
@@ -127,6 +151,7 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
           {rules.map((rule, idx) => {
             const isPass = rule.status === 'PASS';
             const isWarn = rule.status === 'WARN';
+            const isUnknown = rule.status === 'UNKNOWN';
             return (
               <div
                 key={idx}
@@ -135,7 +160,7 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
                 <div className="flex items-center space-x-2">
                   {isPass ? (
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  ) : isWarn ? (
+                  ) : isWarn || isUnknown ? (
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                   ) : (
                     <XCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
@@ -148,8 +173,8 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
                     className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
                       isPass
                         ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
-                        : isWarn
-                        ? 'bg-amber-950 text-amber-300 border-amber-800'
+                        : isWarn || isUnknown
+                          ? 'bg-amber-950 text-amber-300 border-amber-800'
                         : 'bg-rose-950 text-rose-300 border-rose-800'
                     }`}
                   >

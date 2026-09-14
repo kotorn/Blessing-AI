@@ -43,8 +43,9 @@ export const ReplayPage: React.FC = () => {
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-2 font-mono text-[11px]">
           <div className="p-2 bg-zinc-950 rounded border border-zinc-800">
-            <span className="text-emerald-400 font-bold block">EXISTING (/api/quant/backtest/run):</span>
-            Historical stress scenarios (COVID, Luna, FTX, Bull), ulcer index, balance/equity divergence.
+            <span className="text-amber-400 font-bold block">RESEARCH_ONLY (/api/quant/backtest/run):</span>
+            Deterministic illustrative scenarios (COVID, Luna, FTX, Bull); not verified
+            backtest, net-PnL, Testnet, or capital-allocation evidence.
           </div>
           <div className="p-2 bg-zinc-950 rounded border border-zinc-800">
             <span className="text-cyan-400 font-bold block">DERIVED_FRONTEND:</span>

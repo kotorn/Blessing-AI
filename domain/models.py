@@ -6,6 +6,7 @@ Strict financial models using Python Decimal arithmetic and UTC datetime fields.
 from decimal import Decimal
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
+from uuid import uuid4
 
 try:
     from pydantic import BaseModel, Field, ConfigDict
@@ -44,6 +45,7 @@ from domain.enums import (
     RiskState,
     BasketState,
     RecoveryActionType,
+    EconomicRiskClass,
 )
 
 
@@ -65,7 +67,10 @@ class Instrument(BaseModel):
     price_precision: int
     quantity_precision: int
     is_trading_enabled: bool = True
-    max_leverage: int = 20
+    # A leverage limit is venue/account specific and is not present in every
+    # public exchange-info response.  Unknown must remain distinguishable from
+    # a guessed default so a caller cannot overstate available risk capacity.
+    max_leverage: Optional[int] = None
 
 
 class MarketEvent(BaseModel):
@@ -124,8 +129,8 @@ class StrategyIntent(BaseModel):
     market_type: MarketType
     direction: PositionSide
     desired_delta_qty: Decimal          # Signed: positive for Long, negative for Short
-    opportunity_score: Decimal          # Bounded [0.00, 1.00]
-    confidence: Decimal                 # Bounded [0.00, 1.00]
+    opportunity_score: Decimal = Field(ge=Decimal("0"), le=Decimal("1"))
+    confidence: Decimal = Field(ge=Decimal("0"), le=Decimal("1"))
     expected_holding_horizon_sec: int
     invalidation_price: Optional[Decimal] = None
     evidence: Dict[str, Any] = Field(default_factory=dict)
@@ -167,6 +172,8 @@ class TargetExposure(BaseModel):
     strategy_attributions: Dict[str, Decimal]  # Virtual strategy allocations
     created_at: datetime = Field(default_factory=utc_now)
     expires_at: datetime
+    exposure_id: str = Field(default_factory=lambda: f"EXP-{uuid4().hex}")
+    source_intent_ids: List[str] = Field(default_factory=list)
 
     @property
     def desired_delta_qty(self) -> Decimal:
@@ -230,7 +237,7 @@ class RiskSnapshot(BaseModel):
     margin_utilization_pct: Decimal
     effective_leverage: Decimal
     current_drawdown_pct: Decimal
-    liquidation_distance_pct: Decimal
+    liquidation_distance_pct: Optional[Decimal]
     risk_state: RiskState
     hard_violations: List[str] = Field(default_factory=list)
     soft_violations: List[str] = Field(default_factory=list)
@@ -262,6 +269,7 @@ class OrderIntent(BaseModel):
     reduce_only: bool = False
     post_only: bool = False
     strategy_id: str = "portfolio"
+    source_intent_ids: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
 
     @property
@@ -290,10 +298,15 @@ class ExecutionDecision(BaseModel):
     decision_id: str
     symbol: str
     action: str                         # "SUBMIT_ORDER" | "REDUCE_POSITION" | "NOOP"
+    # An omitted economic classification is non-executable.  Callers that
+    # intend to mutate exposure must state the policy explicitly.
+    risk_class: EconomicRiskClass = EconomicRiskClass.NOOP
     orders: List[OrderIntent] = Field(default_factory=list)
     rational: str = ""
     net_exposure_delta: Decimal = Decimal("0.0")
     timestamp: datetime = Field(default_factory=utc_now)
+    target_exposure_id: Optional[str] = None
+    source_intent_ids: List[str] = Field(default_factory=list)
 
 class ExecutionOrder(BaseModel):
     if PYDANTIC_AVAILABLE:
@@ -307,6 +320,15 @@ class ExecutionOrder(BaseModel):
     status: str
     exchange_order_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=utc_now)
+    market_type: MarketType = MarketType.USDM_FUTURES
+    position_side: PositionSide = PositionSide.BOTH
+    reduce_only: bool = False
+    time_in_force: TimeInForce = TimeInForce.GTC
+    strategy_id: str = "portfolio"
+    decision_id: Optional[str] = None
+    target_exposure_id: Optional[str] = None
+    source_intent_ids: List[str] = Field(default_factory=list)
+    risk_class: EconomicRiskClass = EconomicRiskClass.NOOP
 
 class ExchangeFill(BaseModel):
     if PYDANTIC_AVAILABLE:
@@ -326,6 +348,10 @@ class ExchangeFill(BaseModel):
     event_time: Any
     transaction_time: Any
     source: str
+    strategy_id: str = "portfolio"
+    decision_id: Optional[str] = None
+    target_exposure_id: Optional[str] = None
+    source_intent_ids: List[str] = Field(default_factory=list)
 
 
 class ExchangePosition(BaseModel):
@@ -341,6 +367,8 @@ class ExchangePosition(BaseModel):
     entry_price: Decimal = Decimal("0.0")
     mark_price: Optional[Decimal] = None
     unrealized_pnl: Decimal = Decimal("0.0")
+    liquidation_price: Optional[Decimal] = None
+    leverage: Decimal = Decimal("0.0")
     margin_type: str = "cross"
     event_time: Optional[Any] = None
     source: str = "BINANCE_TESTNET"
@@ -352,6 +380,10 @@ class ExchangePosition(BaseModel):
             "entryPrice": str(self.entry_price),
             "unRealizedProfit": str(self.unrealized_pnl),
             "marginType": self.margin_type,
+            "liquidationPrice": (
+                str(self.liquidation_price) if self.liquidation_price is not None else None
+            ),
+            "leverage": str(self.leverage),
         }
         if item in mapping:
             return mapping[item]

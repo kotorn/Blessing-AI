@@ -12,46 +12,50 @@ import {
   Scissors,
 } from 'lucide-react';
 import { ExposureRecoveryAssessment } from '../types/risk';
-import { BasketItem } from '../types';
+import { AccountData, BasketItem } from '../types';
 
 interface ExposureRecoveryEngineCardProps {
+  account: AccountData;
   recoveryData?: any;
   baskets: BasketItem[];
 }
 
 export const ExposureRecoveryEngineCard: React.FC<ExposureRecoveryEngineCardProps> = ({
+  account,
   baskets,
   recoveryData,
 }) => {
-  // Find basket with highest drawdown or recovery active
-  const candidateBasket = baskets.find((b) => b.recovery_hedge) || baskets[0];
+  const hasVerifiedAccount = account.verified === true && account.source === 'BINANCE_TESTNET';
+  const hasVerifiedAssessment =
+    hasVerifiedAccount &&
+    recoveryData?.verified === true &&
+    recoveryData?.assessment &&
+    recoveryData.status !== 'UNKNOWN';
 
-  const assessment: ExposureRecoveryAssessment = {
-    basketId: candidateBasket?.basket_id || 'BSK-BTC-001',
-    symbol: candidateBasket?.instrument || 'BTCUSDT',
-    direction: candidateBasket?.direction || 'LONG',
-    gridDepth: candidateBasket?.grid_levels?.length || 5,
-    netExposureUsd: (candidateBasket?.current_size || 0.15) * 64250,
-    grossExposureUsd: (candidateBasket?.current_size || 0.15) * 64250 * 1.3,
-    currentDrawdownPct: Math.abs(candidateBasket?.unrealized_pnl_pct || -1.45),
-    volatilityRegime: 'R1 (Equilibrium Compression)',
-    trendContinuationProb: 0.38,
-    recommendedAction: 'REDUCE_INVENTORY',
-    actionComparison: {
-      reduceExposureScore: 88,
-      reduceExposureGrossImpact: 'Reduces gross exposure by -35% without adding counterparty margin risk',
-      openHedgeScore: 62,
-      openHedgeGrossImpact: 'Expands gross margin by +50% and doubles fee drag; only justified in explosive breakout',
-      decisionRationale: 'Trend continuation probability is low (38%). Mathematical priority favors de-risking toxic upper tranches over increasing gross position multiple.',
-    },
-    toxicLevelsToHarvest: [4, 5],
-  };
-
-  if (recoveryData?.status === 'ACTIVE_GRID_BRAKE') {
-    assessment.currentDrawdownPct = recoveryData.current_drawdown_pct;
-    assessment.recommendedAction = 'BLOCK_GRID_EXPANSION';
-    assessment.actionComparison.decisionRationale = recoveryData.action_taken;
+  if (!hasVerifiedAssessment) {
+    return (
+      <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">
+        <div className="flex items-center space-x-2 border-b border-zinc-800/80 pb-3">
+          <div className="p-1.5 rounded-lg bg-cyan-950/80 border border-cyan-800/60 text-cyan-400">
+            <LifeBuoy className="w-4 h-4" />
+          </div>
+          <div>
+            <h3 className="text-xs font-bold text-zinc-100 uppercase tracking-wider">
+              Dynamic Exposure Recovery Decision Engine
+            </h3>
+            <p className="text-[11px] text-zinc-400">
+              Recovery decisions are available only from the verified Python worker account and position state.
+            </p>
+          </div>
+        </div>
+        <div className="p-4 rounded-xl border border-amber-900/60 bg-amber-950/20 text-xs text-amber-300">
+          UNKNOWN — no verified recovery assessment is available. This panel will not recommend a hedge or exposure increase.
+        </div>
+      </div>
+    );
   }
+
+  const assessment: ExposureRecoveryAssessment = recoveryData.assessment;
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">

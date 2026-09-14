@@ -1,406 +1,1826 @@
-import logging
-import hashlib
-from decimal import Decimal
-from typing import List, Optional, Any
+"""Native, Testnet-only Binance USDⓈ-M execution adapter."""
 
-from domain.models import ExecutionDecision, ExecutionOrder, OrderSide, PositionSide, ExchangeFill, utc_now
-from .config import BinanceEnvironment
-from .rest_client import BinanceRestClient, BinanceAPIError
+import asyncio
+import hashlib
+import logging
+import math
+import os
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any, Dict, List, Optional, Tuple
+
+from domain.enums import (
+    EconomicRiskClass,
+    MarketType,
+    OrderSide,
+    OrderType,
+    PositionSide,
+    TimeInForce,
+)
+from domain.models import (
+    ExchangeFill,
+    ExecutionDecision,
+    ExecutionOrder,
+    MarketEvent,
+    OrderIntent,
+    utc_now,
+)
+
 from .capabilities import BinanceCapabilities
-from .user_stream import BinanceUserStream
-from .reconciliation import BinanceReconciliation
+from .config import BinanceEnvironment
+from .gates import OrderExecutionGate
 from .ledger import ExecutionLedger, InMemoryLedger
 from .models import (
-    ConnectionState,
-    TestnetSafetyLimits,
-    BinanceDefinitiveRejection,
-    BinanceTransportAmbiguity,
     BinanceAuthenticationError,
+    BinanceDefinitiveRejection,
     BinanceRateLimitError,
     BinanceTimestampError,
+    BinanceTransportAmbiguity,
+    ConnectionState,
+    TestnetSafetyLimits,
 )
+from .reconciliation import BinanceReconciliation, ReconciliationDiff
+from .rest_client import BinanceAPIError, BinanceRestClient
+from .symbol_rules import SymbolTradingRules
+from .user_stream import BinanceUserStream
 
 logger = logging.getLogger("blessing.venues.binance.execution")
 
+
+def _exchange_bool(value: object) -> bool:
+    """Parse exchange booleans without treating a false string as truthy."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 class BinanceExecutionAdapter:
-    """
-    Blessing AI Execution Adapter (USDⓈ-M Futures) Native implementation.
-    """
-    def __init__(self, api_key: str = "", api_secret: str = "", env: BinanceEnvironment = BinanceEnvironment.TESTNET, ledger: Optional[ExecutionLedger] = None):
-        if env == BinanceEnvironment.MAINNET:
-            raise ValueError("LIVE execution mode is permanently blocked in this sprint.")
-            
+    """Blessing AI's sole mutable exchange adapter, restricted to Testnet."""
+
+    testnet_environment = BinanceEnvironment.TESTNET
+
+    def __init__(
+        self,
+        api_key: str = "",
+        api_secret: str = "",
+        env: BinanceEnvironment = BinanceEnvironment.TESTNET,
+        ledger: Optional[ExecutionLedger] = None,
+    ):
+        if env != BinanceEnvironment.TESTNET:
+            raise ValueError("LIVE/Mainnet mutable execution is permanently blocked.")
+
         self.env = env
         self.api_key = api_key
         self.api_secret = api_secret
         self.ledger = ledger or InMemoryLedger()
-        self.safety_limits = TestnetSafetyLimits()
-        
+        self.safety_limits = TestnetSafetyLimits.from_environment()
         self.rest_client = BinanceRestClient(api_key, api_secret, env)
         self.capabilities = BinanceCapabilities()
         self.user_stream = BinanceUserStream(
             self.rest_client,
             env,
             on_disconnect=self._on_user_stream_disconnect,
-            on_reconnected=self._on_user_stream_reconnected
+            on_reconnected=self._on_user_stream_reconnected,
+            on_authentication_failed=self.invalidate_authentication,
         )
         self.reconciliation = BinanceReconciliation(self.rest_client, self.ledger)
-        
         self.state = ConnectionState.DISCONNECTED
+        self.order_gate = OrderExecutionGate(self)
+        self.last_market_event_at: Dict[str, datetime] = {}
+        self.last_market_price: Dict[str, Decimal] = {}
+        # PERCENT_PRICE is evaluated against Binance's mark price. Keep this
+        # separate from last_market_price because book-ticker samples use a
+        # bid/ask midpoint for executable-price estimation.
+        self.last_market_reference_price: Dict[str, Decimal] = {}
+        self.last_market_reference_at: Dict[str, datetime] = {}
+        self.last_market_bid: Dict[str, Decimal] = {}
+        self.last_market_ask: Dict[str, Decimal] = {}
+        self.last_market_bid_qty: Dict[str, Decimal] = {}
+        self.last_market_ask_qty: Dict[str, Decimal] = {}
+        self.last_market_event_source: Dict[str, str] = {}
+        self.last_market_event_venue: Dict[str, str] = {}
+        self.last_market_event_market_type: Dict[str, str] = {}
+        self.last_order_event_at: Dict[str, datetime] = {}
+        self.last_emergency_result: Dict[str, Any] = {"status": "UNKNOWN"}
+        # The adapter is intentionally not an independent execution authority.
+        # A Worker instance binds itself immediately before using the internal
+        # submit path; direct adapter calls remain blocked.
+        self._worker_authority: Optional[object] = None
+        self._mutation_lock = asyncio.Lock()
+
+    @property
+    def connection_state(self) -> ConnectionState:
+        """Canonical adapter connection state consumed by the worker."""
+        return self.state
+
+    @property
+    def mutation_lock(self) -> asyncio.Lock:
+        """Serialize all mutable Testnet REST operations with kill switch."""
+        return self._mutation_lock
+
+    @property
+    def authenticated(self) -> bool:
+        """Authentication is true only after signed account capability discovery."""
+        return bool(
+            self.env == BinanceEnvironment.TESTNET
+            and getattr(self.capabilities, "account_request_succeeded", False)
+            and getattr(self.capabilities, "authenticated", False)
+            and not getattr(self.reconciliation, "authentication_failed", False)
+        )
+
+    @property
+    def symbol_rules(self) -> Dict[str, SymbolTradingRules]:
+        """Canonical symbol-rule API for worker readiness and order validation."""
+        return self.capabilities.symbol_rules
+
+    @property
+    def account_snapshot(self):
+        return getattr(self.ledger, "account_snapshot", None)
+
+    @property
+    def private_stream_healthy(self) -> bool:
+        """Return stream connectivity plus the stream's own freshness verdict."""
+        stream = self.user_stream
+        health_checker = getattr(stream, "is_healthy", None)
+        if callable(health_checker):
+            return bool(health_checker())
+        return bool(stream and getattr(stream, "is_connected", False))
+
+    def is_account_snapshot_fresh(self) -> bool:
+        snapshot = self.account_snapshot
+        if snapshot is None or not getattr(snapshot, "valid", False):
+            return False
+        if getattr(snapshot, "exchange_environment", None) != "BINANCE_TESTNET":
+            return False
+        timestamp = getattr(snapshot, "timestamp", None)
+        if not isinstance(timestamp, datetime):
+            return False
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        age = (utc_now() - timestamp).total_seconds()
+        try:
+            max_age = float(os.getenv("ACCOUNT_SNAPSHOT_MAX_AGE_SEC", "30"))
+        except ValueError:
+            max_age = 30.0
+        if not math.isfinite(max_age) or max_age <= 0 or age < 0 or age > max_age:
+            return False
+        required = (
+            "wallet_balance",
+            "margin_balance",
+            "available_balance",
+            "unrealized_pnl",
+            "total_initial_margin",
+            "total_maint_margin",
+            "position_initial_margin",
+            "total_position_notional",
+            "effective_leverage",
+            "margin_utilization_pct",
+        )
+        try:
+            finite = all(
+                getattr(snapshot, field, None) is not None
+                and Decimal(str(getattr(snapshot, field))).is_finite()
+                for field in required
+            )
+            nonnegative = all(
+                Decimal(str(getattr(snapshot, field))) >= 0
+                for field in (
+                    "wallet_balance",
+                    "margin_balance",
+                    "available_balance",
+                    "total_initial_margin",
+                    "total_maint_margin",
+                    "position_initial_margin",
+                    "total_position_notional",
+                    "effective_leverage",
+                    "margin_utilization_pct",
+                )
+            )
+            return finite and nonnegative
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+
+    def invalidate_authentication(self) -> None:
+        """Drop authentication immediately after any signed-request auth failure."""
+        self.capabilities.authenticated = False
+        self.capabilities.account_request_succeeded = False
+        self.capabilities.trade_authorized = False
+        self.state = ConnectionState.DEGRADED
+
+    def bind_worker_authority(self, worker: object) -> None:
+        """Bind the owning Worker object for the sole mutable execution path."""
+        if self._worker_authority is not None and self._worker_authority is not worker:
+            raise RuntimeError("Worker authority cannot be rebound")
+        self._worker_authority = worker
+
+    def _worker_authorized(self, authority: object) -> bool:
+        return self._worker_authority is not None and authority is self._worker_authority
+
+    @staticmethod
+    def _exchange_event_time(payload: Dict[str, Any]) -> Optional[datetime]:
+        raw_timestamp = payload.get("E")
+        if raw_timestamp in (None, ""):
+            raw_timestamp = payload.get("time")
+        if raw_timestamp in (None, ""):
+            return None
+        try:
+            parsed = float(raw_timestamp)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed) or parsed <= 0:
+            return None
+        # Binance REST/WS timestamps are milliseconds since Unix epoch.
+        try:
+            return datetime.fromtimestamp(parsed / 1000.0, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    def _record_rest_market_sample(
+        self,
+        symbol: str,
+        *,
+        price: Decimal,
+        payload: Dict[str, Any],
+        reference_price: Optional[Decimal] = None,
+        bid: Optional[Decimal] = None,
+        ask: Optional[Decimal] = None,
+        bid_qty: Optional[Decimal] = None,
+        ask_qty: Optional[Decimal] = None,
+    ) -> bool:
+        if not price.is_finite() or price <= 0:
+            return False
+        normalized_symbol = symbol.upper()
+        timestamp = self._exchange_event_time(payload)
+        if timestamp is None:
+            return False
+        self.last_market_event_at[normalized_symbol] = timestamp
+        self.last_market_price[normalized_symbol] = price
+        self.last_market_event_source[normalized_symbol] = "BINANCE_TESTNET_REST"
+        self.last_market_event_venue[normalized_symbol] = "BINANCE_TESTNET"
+        self.last_market_event_market_type[normalized_symbol] = MarketType.USDM_FUTURES.value
+        if (
+            reference_price is not None
+            and reference_price.is_finite()
+            and reference_price > 0
+        ):
+            self.last_market_reference_price[normalized_symbol] = reference_price
+            self.last_market_reference_at[normalized_symbol] = timestamp
+        if bid is not None and ask is not None:
+            self.last_market_bid[normalized_symbol] = bid
+            self.last_market_ask[normalized_symbol] = ask
+            if bid_qty is not None and bid_qty.is_finite() and bid_qty > 0:
+                self.last_market_bid_qty[normalized_symbol] = bid_qty
+            if ask_qty is not None and ask_qty.is_finite() and ask_qty > 0:
+                self.last_market_ask_qty[normalized_symbol] = ask_qty
+        return True
+
+    def has_authoritative_market_sample(self, symbol: str) -> bool:
+        normalized_symbol = str(symbol).upper()
+        return (
+            self.last_market_event_source.get(normalized_symbol)
+            in {"BINANCE_TESTNET_WS", "BINANCE_TESTNET_REST"}
+            and self.last_market_event_venue.get(normalized_symbol) == "BINANCE_TESTNET"
+            and self.last_market_event_market_type.get(normalized_symbol)
+            == MarketType.USDM_FUTURES.value
+        )
+
+    def get_market_reference_price(self, symbol: str) -> Optional[Decimal]:
+        """Return a fresh Binance mark price for percent-price filters."""
+
+        normalized_symbol = str(symbol).upper()
+        price = self.last_market_reference_price.get(normalized_symbol)
+        timestamp = self.last_market_reference_at.get(normalized_symbol)
+        if (
+            price is None
+            or timestamp is None
+            or not price.is_finite()
+            or price <= 0
+        ):
+            return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        age = (utc_now() - timestamp).total_seconds()
+        if age < 0 or age > self._market_data_max_age():
+            return None
+        return price
+
+    def record_market_event(self, event: MarketEvent) -> bool:
+        """Record a real market sample for per-symbol freshness checks."""
+        market_type = getattr(event.market_type, "value", event.market_type)
+        venue = str(event.venue).upper()
+        if market_type != MarketType.USDM_FUTURES.value or venue != "BINANCE_TESTNET":
+            logger.warning(
+                "Ignoring market event outside Binance Testnet USDⓈ-M: venue=%s market_type=%s",
+                event.venue,
+                market_type,
+            )
+            return False
+        raw_price = event.mark_price or event.last_price
+        try:
+            price = Decimal(str(raw_price))
+        except (InvalidOperation, ValueError):
+            return False
+        if not price.is_finite() or price <= 0:
+            return False
+        timestamp = event.event_time
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        symbol = str(event.symbol).upper()
+        self.last_market_event_at[symbol] = timestamp
+        self.last_market_price[symbol] = price
+        self.last_market_event_source[symbol] = "BINANCE_TESTNET_WS"
+        self.last_market_event_venue[symbol] = "BINANCE_TESTNET"
+        self.last_market_event_market_type[symbol] = MarketType.USDM_FUTURES.value
+        if event.mark_price is not None:
+            try:
+                mark_price = Decimal(str(event.mark_price))
+            except (InvalidOperation, TypeError, ValueError):
+                mark_price = None
+            if mark_price is not None and mark_price.is_finite() and mark_price > 0:
+                self.last_market_reference_price[symbol] = mark_price
+                self.last_market_reference_at[symbol] = timestamp
+        try:
+            bid = Decimal(str(event.best_bid))
+            ask = Decimal(str(event.best_ask))
+            if bid.is_finite() and ask.is_finite() and bid > 0 and ask >= bid:
+                self.last_market_bid[symbol] = bid
+                self.last_market_ask[symbol] = ask
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+        return True
+
+    def _market_data_max_age(self) -> float:
+        raw = os.getenv("MAX_MARKET_DATA_AGE_SEC", "3.0")
+        try:
+            value = float(raw)
+        except ValueError:
+            return 3.0
+        return value if value > 0 and value != float("inf") and value != float("-inf") else 3.0
+
+    async def get_fresh_market_price(
+        self, symbol: str, side: Optional[str] = None
+    ) -> Optional[Decimal]:
+        """Return a fresh executable Testnet price; never synthesize one.
+
+        ``side`` is optional for compatibility with mark-price consumers.  A
+        MARKET order passes BUY/SELL and therefore uses the executable ask/bid
+        rather than a mid/mark estimate.
+        """
+        return await self._get_fresh_market_price(symbol, side)
+
+    async def _get_fresh_market_price(
+        self, symbol: str, side: Optional[str] = None
+    ) -> Optional[Decimal]:
+        normalized_symbol = symbol.upper()
+        normalized_side = str(side or "").upper()
+        cached = (
+            self.last_market_ask.get(normalized_symbol)
+            if normalized_side == OrderSide.BUY.value
+            else self.last_market_bid.get(normalized_symbol)
+            if normalized_side == OrderSide.SELL.value
+            else self.last_market_reference_price.get(normalized_symbol)
+        )
+        # Executable bid/ask samples and the mark/reference sample have
+        # independent freshness clocks. A fresh book ticker must never make
+        # an older mark price look fresh for PERCENT_PRICE validation.
+        event_at = (
+            self.last_market_event_at.get(normalized_symbol)
+            if normalized_side in {OrderSide.BUY.value, OrderSide.SELL.value}
+            else self.last_market_reference_at.get(normalized_symbol)
+        )
+        if event_at and cached and (
+            self.has_authoritative_market_sample(normalized_symbol)
+            or normalized_side not in {OrderSide.BUY.value, OrderSide.SELL.value}
+        ):
+            if event_at.tzinfo is None:
+                event_at = event_at.replace(tzinfo=timezone.utc)
+            age = (utc_now() - event_at).total_seconds()
+            if 0 <= age <= self._market_data_max_age():
+                return cached
+
+        try:
+            if normalized_side in {OrderSide.BUY.value, OrderSide.SELL.value}:
+                quote = await self.get_best_bid_ask(normalized_symbol)
+                if quote is None:
+                    return None
+                return quote[1] if normalized_side == OrderSide.BUY.value else quote[0]
+            payload = await self.rest_client.request(
+                "GET", "/fapi/v1/premiumIndex", params={"symbol": normalized_symbol}
+            )
+            if not isinstance(payload, dict):
+                return None
+            if str(payload.get("symbol", "")).upper() != normalized_symbol:
+                return None
+            price = Decimal(str(payload.get("markPrice")))
+            if not self._record_rest_market_sample(
+                normalized_symbol,
+                price=price,
+                payload=payload,
+                reference_price=price,
+            ):
+                return None
+            return price
+        except BinanceAuthenticationError:
+            self.invalidate_authentication()
+            self.reconciliation.last_status = "UNKNOWN"
+            return None
+        except BinanceRateLimitError:
+            self.state = ConnectionState.DEGRADED
+            self.reconciliation.last_status = "UNKNOWN"
+            return None
+        except (BinanceTransportAmbiguity, BinanceTimestampError):
+            self.state = ConnectionState.DEGRADED
+            self.reconciliation.last_status = "UNKNOWN"
+            return None
+        except Exception as exc:
+            self.state = ConnectionState.DEGRADED
+            self.reconciliation.last_status = "UNKNOWN"
+            logger.warning("Fresh market price unavailable for %s: %s", normalized_symbol, exc)
+            return None
+
+    async def get_best_bid_ask(self, symbol: str) -> Optional[Tuple[Decimal, Decimal]]:
+        """Fetch a current Testnet book quote for passive manual validation."""
+        normalized_symbol = symbol.upper()
+        try:
+            payload = await self.rest_client.request(
+                "GET", "/fapi/v1/ticker/bookTicker", params={"symbol": normalized_symbol}
+            )
+            if not isinstance(payload, dict):
+                return None
+            if str(payload.get("symbol", "")).upper() != normalized_symbol:
+                return None
+            bid = Decimal(str(payload.get("bidPrice")))
+            ask = Decimal(str(payload.get("askPrice")))
+            if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask < bid:
+                return None
+            try:
+                bid_qty = Decimal(str(payload.get("bidQty")))
+                ask_qty = Decimal(str(payload.get("askQty")))
+            except (InvalidOperation, TypeError, ValueError):
+                return None
+            if (
+                not bid_qty.is_finite()
+                or not ask_qty.is_finite()
+                or bid_qty <= 0
+                or ask_qty <= 0
+            ):
+                return None
+            if not self._record_rest_market_sample(
+                normalized_symbol,
+                price=(bid + ask) / Decimal("2"),
+                payload=payload,
+                bid=bid,
+                ask=ask,
+                bid_qty=bid_qty,
+                ask_qty=ask_qty,
+            ):
+                return None
+            return bid, ask
+        except BinanceAuthenticationError:
+            self.invalidate_authentication()
+            self.reconciliation.last_status = "UNKNOWN"
+            return None
+        except BinanceRateLimitError:
+            self.state = ConnectionState.DEGRADED
+            self.reconciliation.last_status = "UNKNOWN"
+            return None
+        except (BinanceTransportAmbiguity, BinanceTimestampError):
+            self.state = ConnectionState.DEGRADED
+            self.reconciliation.last_status = "UNKNOWN"
+            return None
+        except Exception as exc:
+            self.state = ConnectionState.DEGRADED
+            self.reconciliation.last_status = "UNKNOWN"
+            logger.warning("Book quote unavailable for %s: %s", normalized_symbol, exc)
+            return None
+
+    async def refresh_market_data(self, symbols: List[str]) -> bool:
+        results = [await self.get_best_bid_ask(symbol) for symbol in symbols]
+        return bool(results) and all(result is not None for result in results)
 
     async def _on_user_stream_disconnect(self):
         logger.warning("[%s] User stream disconnected. Adapter transitioning to DEGRADED.", self.env)
         self.state = ConnectionState.DEGRADED
-        # Reconcile for diagnostics, but do not become READY while disconnected
-        await self.reconciliation.reconcile()
+        try:
+            await self.reconciliation.reconcile()
+            if getattr(self.reconciliation, "authentication_failed", False):
+                self.invalidate_authentication()
+        except Exception as exc:
+            logger.error("Reconciliation after user-stream disconnect failed: %s", exc)
 
     async def _on_user_stream_reconnected(self):
         logger.info("[%s] User stream reconnected. Initiating reconciliation.", self.env)
         self.state = ConnectionState.SYNCING
         sync_result = await self.reconciliation.reconcile()
-        if sync_result == "IN_SYNC" and self.user_stream.is_connected:
+        if getattr(self.reconciliation, "authentication_failed", False):
+            self.invalidate_authentication()
+        if sync_result == "IN_SYNC" and self.private_stream_healthy and self.authenticated:
             self.state = ConnectionState.READY
             logger.info("[%s] Reconnected and IN_SYNC. State transitioned to READY.", self.env)
         else:
             self.state = ConnectionState.DEGRADED
-            logger.warning("[%s] Reconnection complete but sync_result=%s, ws_connected=%s. State remains DEGRADED.",
-                           self.env, sync_result, self.user_stream.is_connected)
+            logger.warning(
+                "[%s] Reconnection verification failed: sync=%s ws=%s auth=%s",
+                self.env,
+                sync_result,
+                self.private_stream_healthy,
+                self.authenticated,
+            )
 
-    async def connect(self):
+    async def connect(self) -> bool:
+        if self.env != BinanceEnvironment.TESTNET:
+            raise ValueError("Mutable Binance connection is restricted to Testnet")
         self.state = ConnectionState.CONNECTING
-        await self.rest_client.init_session()
-        
-        self.state = ConnectionState.AUTHENTICATING
-        success = await self.capabilities.discover(self.rest_client)
-        if not success:
+        try:
+            await self.rest_client.init_session()
+            self.state = ConnectionState.AUTHENTICATING
+            if not await self.capabilities.discover(self.rest_client):
+                self.state = ConnectionState.DEGRADED
+                return False
+
+            self.state = ConnectionState.STREAM_STARTING
+            if not await self.user_stream.start(self._on_ws_event):
+                self.state = ConnectionState.DEGRADED
+                return False
+
+            self.state = ConnectionState.SYNCING
+            sync_result = await self.reconciliation.reconcile()
+            if getattr(self.reconciliation, "authentication_failed", False):
+                self.invalidate_authentication()
+            if sync_result == "IN_SYNC" and self.private_stream_healthy and self.authenticated:
+                self.state = ConnectionState.READY
+                return True
             self.state = ConnectionState.DEGRADED
             return False
-            
-        self.state = ConnectionState.STREAM_STARTING
-        ws_ok = await self.user_stream.start(self._on_ws_event)
-        if not ws_ok:
-            self.state = ConnectionState.DEGRADED
-            return False
-        
-        self.state = ConnectionState.SYNCING
-        sync_result = await self.reconciliation.reconcile()
-        if sync_result == "IN_SYNC" and self.user_stream.is_connected:
-            self.state = ConnectionState.READY
-            return True
-        else:
-            self.state = ConnectionState.DEGRADED
+        except Exception as exc:
+            self.invalidate_authentication()
+            logger.error("Binance Testnet adapter connection failed: %s", exc)
             return False
 
     async def arm(self) -> bool:
-        """Alias for connect() to establish session, discover capabilities, start stream, and reconcile."""
         return await self.connect()
 
     async def _on_ws_event(self, event: Any):
-        event_type = event.get("e")
+        event_type = event.get("e") if isinstance(event, dict) else None
         if event_type == "ORDER_TRADE_UPDATE":
-            logger.info("WS Order Update: %s", event)
             order_info = event.get("o", {})
-            symbol = order_info.get("s")
-            client_order_id = order_info.get("c")
-            status = order_info.get("X")
-            
+            symbol = str(order_info.get("s", "")).upper()
+            client_order_id = str(order_info.get("c", ""))
+            if not symbol or not client_order_id:
+                return
+            self.last_order_event_at[client_order_id] = utc_now()
+            status = str(order_info.get("X", "UNKNOWN"))
             existing_order = await self.ledger.get_order_by_client_id(client_order_id)
+            if existing_order is None:
+                # A private event without a local intent/decision lineage may
+                # be a manual order or a different worker instance. Never
+                # adopt it as if this worker authorized it; reconciliation
+                # must remain non-IN_SYNC until the operator resolves it.
+                logger.error(
+                    "Quarantining unowned Testnet order event %s for %s",
+                    client_order_id,
+                    symbol,
+                )
+                await self.ledger.set_account_snapshot(None)
+                self.reconciliation.last_diffs = [
+                    ReconciliationDiff(
+                        code="EXCHANGE_ORDER_EVENT_UNKNOWN_LOCALLY",
+                        symbol=symbol,
+                        local_value=client_order_id,
+                        exchange_value=str(order_info.get("i") or "UNKNOWN"),
+                    )
+                ]
+                self.reconciliation.last_status = "UNKNOWN"
+                return
+
             if existing_order:
                 existing_order.status = status
+                if order_info.get("i") is not None:
+                    existing_order.exchange_order_id = str(order_info["i"])
                 await self.ledger.upsert_order(existing_order)
-            else:
-                # Create a minimal tracking representation if absent locally
-                new_order = ExecutionOrder(
-                    symbol=symbol,
-                    side=OrderSide(order_info.get("S")),
-                    quantity=Decimal(str(order_info.get("q", "0"))),
-                    price=Decimal(str(order_info.get("p", "0"))),
-                    order_type=str(order_info.get("ot") or order_info.get("o") or "LIMIT"),
-                    client_order_id=client_order_id,
-                    status=status,
-                    timestamp=utc_now()
-                )
-                new_order.exchange_order_id = str(order_info.get("i"))
-                await self.ledger.upsert_order(new_order)
-                
-            exec_type = order_info.get("x")
-            if exec_type == "TRADE":
+
+            # Every order lifecycle update can change open-order count,
+            # exposure, balances, or fills.  Invalidate all prior readiness
+            # evidence before the next risk-increasing decision.
+            await self.ledger.set_account_snapshot(None)
+            self.reconciliation.last_status = "UNKNOWN"
+
+            if order_info.get("x") != "TRADE":
+                return
+            try:
+                required_fill_fields = ("t", "i", "l", "L", "n", "N", "rp", "m", "T")
+                missing_fill_fields = [
+                    field
+                    for field in required_fill_fields
+                    if order_info.get(field) in (None, "")
+                ]
+                if missing_fill_fields:
+                    raise ValueError(
+                        "Trade update is missing required fields: "
+                        + ", ".join(missing_fill_fields)
+                    )
+                side = OrderSide(str(order_info.get("S")))
+                position_side = PositionSide(str(order_info.get("ps", "BOTH")))
+                quantity = Decimal(str(order_info["l"]))
+                price = Decimal(str(order_info["L"]))
+                commission = Decimal(str(order_info["n"]))
+                realized_pnl = Decimal(str(order_info["rp"]))
+                if any(
+                    not value.is_finite()
+                    for value in (quantity, price, commission, realized_pnl)
+                ):
+                    raise ValueError("Trade update contains non-finite economics")
+                if quantity <= 0 or price <= 0 or commission < 0:
+                    raise ValueError("Trade update contains unusable economics")
+                event_time = event.get("E") or order_info.get("T")
+                if event_time in (None, ""):
+                    raise ValueError("Trade update has no event or transaction timestamp")
                 fill = ExchangeFill(
-                    exchange_trade_id=str(order_info.get("t")),
-                    exchange_order_id=str(order_info.get("i")),
+                    exchange_trade_id=str(order_info["t"]),
+                    exchange_order_id=str(order_info["i"]),
                     client_order_id=client_order_id,
                     symbol=symbol,
-                    side=OrderSide(order_info.get("S")),
-                    position_side=PositionSide(order_info.get("ps")),
-                    quantity=Decimal(str(order_info.get("l"))),
-                    price=Decimal(str(order_info.get("L"))),
-                    commission=Decimal(str(order_info.get("n", "0"))),
-                    commission_asset=order_info.get("N"),
-                    realized_pnl=Decimal(str(order_info.get("rp", "0"))),
-                    maker=order_info.get("m", False),
-                    event_time=event.get("E", 0),
-                    transaction_time=order_info.get("T", 0),
-                    source="BINANCE_TESTNET" if self.env == BinanceEnvironment.TESTNET else "BINANCE_MAINNET"
+                    side=side,
+                    position_side=position_side,
+                    quantity=quantity,
+                    price=price,
+                    commission=commission,
+                    commission_asset=str(order_info["N"]),
+                    realized_pnl=realized_pnl,
+                    maker=_exchange_bool(order_info.get("m", False)),
+                    event_time=event_time,
+                    transaction_time=order_info["T"],
+                    source="BINANCE_TESTNET",
+                    strategy_id=(existing_order.strategy_id if existing_order else "portfolio"),
+                    decision_id=(existing_order.decision_id if existing_order else None),
+                    target_exposure_id=(
+                        existing_order.target_exposure_id if existing_order else None
+                    ),
+                    source_intent_ids=(
+                        list(existing_order.source_intent_ids) if existing_order else []
+                    ),
                 )
                 await self.ledger.append_fill(fill)
+            except (InvalidOperation, KeyError, ValueError, TypeError) as exc:
+                logger.error("Invalid Testnet fill event ignored: %s", exc)
         elif event_type == "ACCOUNT_UPDATE":
-            logger.info("WS Account Update: %s", event)
             update_data = event.get("a", {})
-            positions = update_data.get("P", [])
-            for p in positions:
-                await self.ledger.upsert_position({
-                    "symbol": p.get("s"),
-                    "positionSide": p.get("ps"),
-                    "positionAmt": p.get("pa"),
-                    "entryPrice": p.get("ep"),
-                    "unRealizedProfit": p.get("up"),
-                    "marginType": p.get("mt", "cross")
-                })
-            balances = update_data.get("B", [])
-            for b in balances:
-                if b.get("a") == "USDT":
-                    wb = Decimal(str(b.get("wb", "0")))
-                    cw = Decimal(str(b.get("cw", "0")))
-                    # Approx margin balance can be cw or we just store wb
-                    await self.ledger.update_balances(wb, cw)
+            if not isinstance(update_data, dict):
+                await self.ledger.set_account_snapshot(None)
+                self.reconciliation.last_diffs = [
+                    ReconciliationDiff(
+                        code="ACCOUNT_UPDATE_INVALID",
+                        exchange_value="account_update_data_not_object",
+                    )
+                ]
+                self.reconciliation.last_status = "UNKNOWN"
+                return
 
-    def _generate_client_order_id(self, context_id: str, symbol: str, order_index: int = 0, attempt: int = 1) -> str:
-        """
-        Deterministic Client Order ID.
-        Format: BAI-<context_hash>-<order_index>-<attempt>
-        """
+            account_update_diffs: List[ReconciliationDiff] = []
+
+            def mark_account_update_unknown(diff: ReconciliationDiff) -> None:
+                account_update_diffs.append(diff)
+                self.reconciliation.last_diffs = account_update_diffs
+                self.reconciliation.last_status = "UNKNOWN"
+
+            raw_positions = update_data.get("P", [])
+            if not isinstance(raw_positions, list):
+                raw_positions = []
+                mark_account_update_unknown(
+                    ReconciliationDiff(
+                        code="ACCOUNT_POSITION_UPDATE_INVALID",
+                        exchange_value="positions_not_list",
+                    )
+                )
+
+            for position in raw_positions:
+                if not isinstance(position, dict):
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_POSITION_UPDATE_INVALID",
+                            exchange_value="position_not_object",
+                        )
+                    )
+                    continue
+                symbol = str(position.get("s", "")).upper()
+                raw_position_side = position.get("ps")
+                position_side = str(raw_position_side or "").upper()
+                if not symbol or not position_side or position.get("pa") in (None, ""):
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_POSITION_UPDATE_INCOMPLETE",
+                            symbol=symbol or None,
+                            exchange_value="symbol_positionSide_positionAmt_required",
+                        )
+                    )
+                    continue
+                # ACCOUNT_UPDATE is a delta.  Binance does not include every
+                # position-risk field (notably mark/liquidation price and
+                # leverage) in every event.  Preserve the last authoritative
+                # value instead of replacing it with a fabricated zero/None.
+                existing_position = next(
+                    (
+                        item
+                        for item in await self.ledger.get_positions()
+                        if str(item.symbol).upper() == symbol
+                        and item.position_side.value == position_side
+                    ),
+                    None,
+                )
+                merged_position = {
+                    "symbol": symbol,
+                    "positionSide": position_side,
+                    "positionAmt": position.get("pa"),
+                    "entryPrice": position.get("ep"),
+                    "unRealizedProfit": position.get("up"),
+                    "marginType": position.get("mt"),
+                    "eventTime": event.get("E"),
+                    "source": "BINANCE_TESTNET",
+                }
+                if existing_position is not None:
+                    for raw_name, attribute in (
+                        ("entryPrice", "entry_price"),
+                        ("unRealizedProfit", "unrealized_pnl"),
+                        ("marginType", "margin_type"),
+                        ("markPrice", "mark_price"),
+                        ("liquidationPrice", "liquidation_price"),
+                        ("leverage", "leverage"),
+                    ):
+                        if merged_position.get(raw_name) in (None, ""):
+                            previous_value = getattr(existing_position, attribute, None)
+                            if previous_value is not None:
+                                merged_position[raw_name] = str(previous_value)
+                try:
+                    await self.ledger.upsert_position(merged_position)
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    # A new active delta without a complete authoritative
+                    # position-risk record is not an exposure of zero and is
+                    # not safe to promote into the ledger. REST reconciliation
+                    # must obtain the complete positionRisk row first.
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_POSITION_UPDATE_INCOMPLETE",
+                            symbol=symbol,
+                            exchange_value=str(exc),
+                        )
+                    )
+            raw_balances = update_data.get("B", [])
+            if not isinstance(raw_balances, list):
+                raw_balances = []
+                mark_account_update_unknown(
+                    ReconciliationDiff(
+                        code="ACCOUNT_BALANCE_UPDATE_INVALID",
+                        exchange_value="balances_not_list",
+                    )
+                )
+
+            for balance in raw_balances:
+                if not isinstance(balance, dict):
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_BALANCE_UPDATE_INVALID",
+                            exchange_value="balance_not_object",
+                        )
+                    )
+                    continue
+                missing_balance_fields = [
+                    field
+                    for field in ("a", "wb", "cw")
+                    if balance.get(field) in (None, "")
+                ]
+                if missing_balance_fields:
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_BALANCE_UPDATE_INCOMPLETE",
+                            exchange_value="missing=" + ",".join(missing_balance_fields),
+                        )
+                    )
+                    continue
+                try:
+                    wallet_balance = Decimal(str(balance["wb"]))
+                    cross_wallet_balance = Decimal(str(balance["cw"]))
+                except (InvalidOperation, TypeError, ValueError):
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_BALANCE_UPDATE_INVALID",
+                            symbol=str(balance.get("a") or "").upper() or None,
+                            exchange_value="wallet_or_cross_wallet_not_decimal",
+                        )
+                    )
+                    continue
+                if not wallet_balance.is_finite() or not cross_wallet_balance.is_finite():
+                    mark_account_update_unknown(
+                        ReconciliationDiff(
+                            code="ACCOUNT_BALANCE_UPDATE_INVALID",
+                            symbol=str(balance.get("a") or "").upper() or None,
+                            exchange_value="wallet_or_cross_wallet_not_finite",
+                        )
+                    )
+            # B contains per-asset deltas, not the USDⓈ-M aggregate totals used
+            # by ExchangeAccountSnapshot. Do not project one asset (for example
+            # USDT) into wallet/margin totals. The next signed REST reconcile
+            # must provide the authoritative aggregate account snapshot.
+            # A delta event is not a complete account snapshot and cannot
+            # prove reconciliation.  Force the next authoritative REST
+            # snapshot/reconcile before any risk-increasing order.
+            await self.ledger.set_account_snapshot(None)
+            self.reconciliation.last_diffs = account_update_diffs
+            self.reconciliation.last_status = "UNKNOWN"
+
+    def _generate_client_order_id(
+        self, context_id: str, symbol: str, order_index: int = 0, attempt: int = 1
+    ) -> str:
         raw_str = f"{context_id}-{symbol}"
         hash_str = hashlib.md5(raw_str.encode()).hexdigest()[:8]
         return f"BAI-{hash_str}-{order_index}-{attempt}"
 
-    async def execute_decision(self, decision: ExecutionDecision) -> List[ExecutionOrder]:
-        if self.state != ConnectionState.READY:
-            logger.warning("Cannot execute decision. State is %s", self.state)
-            return []
+    @staticmethod
+    def _order_from_response(
+        intent: OrderIntent,
+        response: Dict[str, Any],
+        prepared,
+        client_order_id: str,
+        decision: Optional[ExecutionDecision] = None,
+        allow_terminal_status: bool = False,
+    ) -> ExecutionOrder:
+        if not isinstance(response, dict):
+            raise BinanceTransportAmbiguity("Binance order response is not an object")
+        order_id = response.get("orderId")
+        status = response.get("status")
+        if order_id in (None, "") or status in (None, ""):
+            raise BinanceTransportAmbiguity("Binance order response did not contain orderId/status")
+        expected_symbol = str(prepared.symbol).upper()
+        response_symbol = response.get("symbol")
+        if response_symbol in (None, "") or str(response_symbol).upper() != expected_symbol:
+            raise BinanceTransportAmbiguity(
+                "Binance order response symbol does not match the submitted intent"
+            )
 
+        response_client_id = response.get("clientOrderId")
+        if response_client_id not in (None, "") and str(response_client_id) != client_order_id:
+            raise BinanceTransportAmbiguity(
+                "Binance order response clientOrderId does not match the submitted intent"
+            )
+
+        response_side = response.get("side")
+        expected_side = getattr(intent.side, "value", intent.side)
+        if response_side not in (None, "") and str(response_side).upper() != str(expected_side).upper():
+            raise BinanceTransportAmbiguity(
+                "Binance order response side does not match the submitted intent"
+            )
+        response_position_side = response.get("positionSide")
+        expected_position_side = getattr(intent.position_side, "value", intent.position_side)
+        if (
+            response_position_side not in (None, "")
+            and str(response_position_side).upper() != str(expected_position_side).upper()
+        ):
+            raise BinanceTransportAmbiguity(
+                "Binance order response positionSide does not match the submitted intent"
+            )
+
+        raw_quantity = response.get("origQty")
+        if raw_quantity in (None, ""):
+            raise BinanceTransportAmbiguity("Binance order response did not contain origQty")
+        try:
+            response_quantity = Decimal(str(raw_quantity))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise BinanceTransportAmbiguity("Binance order response origQty is invalid") from exc
+        if (
+            not response_quantity.is_finite()
+            or response_quantity <= 0
+            or response_quantity != prepared.quantity
+        ):
+            raise BinanceTransportAmbiguity(
+                "Binance order response quantity does not match the normalized intent"
+            )
+
+        normalized_status = str(status).upper()
+        if normalized_status not in {
+            "NEW",
+            "PARTIALLY_FILLED",
+            "FILLED",
+            "CANCELED",
+            "CANCELLED",
+            "EXPIRED",
+            "REJECTED",
+        }:
+            raise BinanceTransportAmbiguity(
+                f"Binance order response contains an unknown status: {status}"
+            )
+        if not allow_terminal_status and normalized_status in {
+            "CANCELED",
+            "CANCELLED",
+            "EXPIRED",
+            "REJECTED",
+        }:
+            raise BinanceDefinitiveRejection(
+                -2010,
+                f"Binance returned terminal order status {normalized_status}",
+            )
+
+        response_price = response.get("price")
+        if response_price in (None, "", "0", 0):
+            response_price = response.get("avgPrice")
+        if response_price not in (None, "", "0", 0):
+            try:
+                price = Decimal(str(response_price))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise BinanceTransportAmbiguity("Binance order response price is invalid") from exc
+            if not price.is_finite() or price <= 0:
+                raise BinanceTransportAmbiguity("Binance order response price is unusable")
+            if prepared.price is not None and price != prepared.price:
+                raise BinanceTransportAmbiguity(
+                    "Binance order response price does not match the normalized intent"
+                )
+        else:
+            price = prepared.estimated_price
+        if not price.is_finite() or price <= 0:
+            raise BinanceTransportAmbiguity("Binance order response has no usable execution price")
+
+        if "reduceOnly" in response and _exchange_bool(response.get("reduceOnly")) != bool(intent.reduce_only):
+            raise BinanceTransportAmbiguity(
+                "Binance order response reduceOnly does not match the submitted intent"
+            )
+        return ExecutionOrder(
+            symbol=prepared.symbol,
+            side=intent.side,
+            quantity=prepared.quantity,
+            price=price,
+            order_type=prepared.order_type,
+            client_order_id=str(response.get("clientOrderId") or client_order_id),
+            status=normalized_status,
+            exchange_order_id=str(order_id),
+            timestamp=utc_now(),
+            market_type=intent.market_type,
+            position_side=intent.position_side,
+            reduce_only=intent.reduce_only,
+            time_in_force=intent.time_in_force,
+            strategy_id=intent.strategy_id,
+            decision_id=decision.decision_id if decision else None,
+            target_exposure_id=decision.target_exposure_id if decision else None,
+            source_intent_ids=list(
+                decision.source_intent_ids if decision else intent.source_intent_ids
+            ),
+            risk_class=(decision.risk_class if decision else EconomicRiskClass.NOOP),
+        )
+
+    async def _resolve_ambiguous_order(
+        self,
+        intent: OrderIntent,
+        prepared,
+        client_order_id: str,
+        decision: Optional[ExecutionDecision] = None,
+    ) -> Optional[ExecutionOrder]:
+        self.state = ConnectionState.RECONCILING
+        recovered_order: Optional[ExecutionOrder] = None
+        order_status_known = False
+        fill_recovery_verified = True
+        for attempt, delay in enumerate((0.0, 0.1, 0.25)):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                status_response = await self.rest_client.request(
+                    "GET",
+                    "/fapi/v1/order",
+                    signed=True,
+                    params={"symbol": prepared.symbol, "origClientOrderId": client_order_id},
+                )
+                recovered_order = self._order_from_response(
+                    intent,
+                    status_response,
+                    prepared,
+                    client_order_id,
+                    decision,
+                    allow_terminal_status=True,
+                )
+                await self.ledger.upsert_order(recovered_order)
+                order_status_known = True
+                if str(recovered_order.status).upper() in {"FILLED", "PARTIALLY_FILLED"}:
+                    try:
+                        await self.reconciliation._recover_order_fills(
+                            recovered_order, status_response
+                        )
+                    except BinanceAuthenticationError:
+                        self.invalidate_authentication()
+                        return None
+                    except Exception as exc:
+                        # A filled exchange order without canonical userTrades
+                        # is not an execution success. Keep the adapter
+                        # degraded even if a later position snapshot is flat.
+                        fill_recovery_verified = False
+                        self.reconciliation.last_status = "UNKNOWN"
+                        logger.error(
+                            "Ambiguous filled order %s has unverified fills: %s",
+                            client_order_id,
+                            exc,
+                        )
+                break
+            except BinanceAuthenticationError:
+                self.invalidate_authentication()
+                return None
+            except BinanceDefinitiveRejection as exc:
+                if exc.code == -2013 and attempt < 2:
+                    # A just-accepted order may not be visible to the query
+                    # endpoint immediately.  Keep it quarantined and poll.
+                    continue
+                if exc.code == -2013:
+                    logger.info("Ambiguous order %s confirmed absent on exchange", client_order_id)
+                    order_status_known = True
+                else:
+                    logger.error("Ambiguous order status was rejected unexpectedly: %s", exc)
+                break
+            except Exception as exc:
+                # Do not infer absence from a transport exception whose text
+                # happens to contain "does not exist".
+                logger.error("Ambiguous order status remains unknown: %s", exc)
+                break
+
+        try:
+            sync_result = await self.reconciliation.reconcile()
+        except Exception as exc:
+            logger.error("Authoritative reconciliation after ambiguity failed: %s", exc)
+            sync_result = "UNKNOWN"
+        if (
+            sync_result == "IN_SYNC"
+            and self.private_stream_healthy
+            and self.authenticated
+            and order_status_known
+            and fill_recovery_verified
+        ):
+            self.state = ConnectionState.READY
+        else:
+            self.state = ConnectionState.DEGRADED
+        # The recovered record remains in the ledger for reconciliation, but
+        # it is not reported as an executable success while the authoritative
+        # post-mutation checks are degraded.
+        return recovered_order if self.state == ConnectionState.READY else None
+
+    async def _post_mutation_reconcile(
+        self, order: ExecutionOrder, response: Dict[str, Any]
+    ) -> bool:
+        """Verify REST acknowledgement before exposing it as execution success."""
+        self.reconciliation.last_status = "UNKNOWN"
+        try:
+            if str(order.status).upper() in {"FILLED", "PARTIALLY_FILLED"}:
+                await self.reconciliation._recover_order_fills(order, response)
+            sync_result = await self.reconciliation.reconcile()
+        except BinanceAuthenticationError:
+            self.invalidate_authentication()
+            return False
+        except Exception as exc:
+            logger.error(
+                "Post-mutation Testnet reconciliation failed for %s: %s",
+                order.client_order_id,
+                exc,
+            )
+            self.reconciliation.last_status = "UNKNOWN"
+            self.state = ConnectionState.DEGRADED
+            return False
+
+        verified = bool(
+            sync_result == "IN_SYNC"
+            and self.private_stream_healthy
+            and self.authenticated
+        )
+        self.state = ConnectionState.READY if verified else ConnectionState.DEGRADED
+        return verified
+
+    async def execute_decision(
+        self,
+        decision: ExecutionDecision,
+        *,
+        authority: Optional[object] = None,
+    ) -> List[ExecutionOrder]:
+        """Reject direct adapter mutation; only the bound Worker may submit."""
+        if not self._worker_authorized(authority):
+            logger.error(
+                "Blocked direct Binance adapter mutation for decision %s; use TradingWorkerApp",
+                getattr(decision, "decision_id", "UNKNOWN"),
+            )
+            return []
+        gate = getattr(authority, "_evaluate_execution_gate", None)
+        if not callable(gate):
+            logger.error("Blocked Binance mutation because Worker gate is unavailable")
+            return []
+        allowed, reason = gate(decision)
+        if not allowed:
+            logger.warning("Worker decision gate blocked adapter mutation: %s", reason)
+            return []
+        async with self._mutation_lock:
+            # The first gate check may have happened while another mutation was
+            # in flight. Re-evaluate after acquiring the single-flight lock so
+            # a kill switch or degraded state cannot release a queued order.
+            allowed, reason = gate(decision)
+            if not allowed:
+                logger.warning(
+                    "Worker decision gate blocked queued adapter mutation: %s", reason
+                )
+                return []
+            return await self._execute_decision(decision, authority=authority)
+
+    async def _execute_decision(
+        self,
+        decision: ExecutionDecision,
+        *,
+        allow_emergency_fallback: bool = False,
+        authority: Optional[object] = None,
+    ) -> List[ExecutionOrder]:
+        if not self._worker_authorized(authority):
+            logger.error(
+                "Blocked internal Binance mutation outside the bound Trading Worker"
+            )
+            return []
+        if (
+            not allow_emergency_fallback
+            and (self.state != ConnectionState.READY or decision.action == "NOOP")
+        ):
+            return []
         if decision.action == "NOOP":
             return []
 
-        executed_orders = []
-        for i, order_intent in enumerate(decision.orders):
-            symbol = decision.symbol
-            if symbol not in self.safety_limits.allowed_symbols:
-                logger.error("Symbol %s not in allowed Testnet symbols %s. Skipping.", symbol, self.safety_limits.allowed_symbols)
+        executed_orders: List[ExecutionOrder] = []
+        reserved_open_orders = 0
+        reserved_notional = Decimal("0")
+        for index, intent in enumerate(decision.orders):
+            if not allow_emergency_fallback and getattr(
+                authority, "kill_switch_active", False
+            ):
+                self.state = ConnectionState.DEGRADED
+                logger.warning("Kill switch blocked remaining Testnet order mutations")
+                return executed_orders
+            gate_result = await self.order_gate.check(
+                intent,
+                decision.risk_class,
+                reserved_open_orders=reserved_open_orders,
+                reserved_notional=reserved_notional,
+                allow_emergency_fallback=allow_emergency_fallback,
+            )
+            if not gate_result.allowed or gate_result.prepared is None:
+                logger.warning("Order blocked by final gate: %s", gate_result.reason)
                 continue
-
-            rules = self.capabilities.symbol_rules.get(symbol)
-            if not rules:
-                logger.error("No rules for %s. Skipping.", symbol)
-                continue
-                
-            rounded_qty = rules.normalize_quantity(order_intent.quantity)
-            if rounded_qty <= 0:
-                continue
-                
-            price_str = None
-            rounded_price = Decimal("0")
-            if order_intent.limit_price:
-                rounded_price = rules.normalize_price(order_intent.limit_price)
-                price_str = str(rounded_price)
-
-            est_price = rounded_price
-            if not price_str:
-                # Fallback to mark price from ledger for market order notional check
-                positions = await self.ledger.get_positions()
-                sym_pos = next((p for p in positions if p.symbol == symbol), None)
-                if sym_pos and (sym_pos.mark_price or sym_pos.entry_price):
-                    est_price = sym_pos.mark_price or sym_pos.entry_price or Decimal("1")
-                else:
-                    est_price = Decimal("100000") # Prevents min_notional failure, exchange will validate real notional
-                    
-            order_notional = rounded_qty * est_price
-
-            # Check min notional rule only if we have a real est_price, or for limit orders
-            if rules.min_notional and order_notional < rules.min_notional and price_str:
-                logger.error(
-                    "Order notional %s below min_notional %s for %s. Skipping.",
-                    order_notional, rules.min_notional, symbol
-                )
-                continue
-
-            # Gate G2: Testnet Safety Limits
-            if order_notional > self.safety_limits.max_single_order_notional:
-                logger.error(
-                    "Order notional %s exceeds safety limit %s for %s. Skipping.",
-                    order_notional, self.safety_limits.max_single_order_notional, symbol
-                )
-                continue
-
-            open_orders = await self.ledger.get_open_orders()
-            if len(open_orders) >= self.safety_limits.max_open_orders:
-                logger.error("Max open orders limit reached (%d >= %d). Skipping.", len(open_orders), self.safety_limits.max_open_orders)
-                continue
-
-            current_open_notional = sum(o.quantity * o.price for o in open_orders)
-            if current_open_notional + order_notional > self.safety_limits.max_total_open_notional:
-                logger.error(
-                    "Total open notional %s exceeds safety cap %s. Skipping.",
-                    current_open_notional + order_notional, self.safety_limits.max_total_open_notional
-                )
-                continue
-                
-            client_oid = self._generate_client_order_id(str(decision.decision_id), symbol, order_index=i, attempt=1)
-            
-            params = {
-                "symbol": symbol,
-                "side": order_intent.side.name,
-                "type": "LIMIT" if price_str else "MARKET",
-                "quantity": str(rounded_qty),
-                "newClientOrderId": client_oid,
+            prepared = gate_result.prepared
+            client_order_id = intent.client_order_id or self._generate_client_order_id(
+                str(decision.decision_id), prepared.symbol, order_index=index
+            )
+            params: Dict[str, Any] = {
+                "symbol": prepared.symbol,
+                "side": intent.side.value,
+                "type": prepared.order_type,
+                "quantity": str(prepared.quantity),
+                "newClientOrderId": client_order_id,
             }
-            if price_str:
-                params["price"] = price_str
-                params["timeInForce"] = "GTC"
-                
+            if prepared.price is not None:
+                params["price"] = str(prepared.price)
+                time_in_force = getattr(intent.time_in_force, "value", intent.time_in_force)
+                params["timeInForce"] = (
+                    "GTX"
+                    if intent.post_only or str(time_in_force).upper() == TimeInForce.POST_ONLY.value
+                    else str(time_in_force).upper()
+                )
             if self.capabilities.hedge_mode:
-                params["positionSide"] = order_intent.position_side.name
-                if order_intent.reduce_only:
-                    # In hedge mode, reduceOnly cannot be sent per Binance futures documentation
-                    pass 
-            else:
-                if order_intent.reduce_only:
-                    params["reduceOnly"] = "true"
-            
-            logger.info("[%s] Submitting order: %s", self.env, params)
+                params["positionSide"] = intent.position_side.value
+            if intent.reduce_only and not self.capabilities.hedge_mode:
+                params["reduceOnly"] = "true"
+
             try:
-                resp = await self.rest_client.request("POST", "/fapi/v1/order", signed=True, params=params)
-                logger.info("Order success: %s", resp)
-                
-                # Update ledger
-                executed_order = ExecutionOrder(
-                    symbol=symbol,
-                    side=order_intent.side,
-                    quantity=rounded_qty,
-                    price=Decimal(str(resp.get("price", "0"))),
-                    order_type=params["type"],
-                    client_order_id=client_oid,
-                    status=resp.get("status", "NEW"),
-                    exchange_order_id=str(resp.get("orderId", "")),
-                    timestamp=utc_now()
+                response = await self.rest_client.request(
+                    "POST", "/fapi/v1/order", signed=True, params=params
                 )
-                await self.ledger.upsert_order(executed_order)
-                executed_orders.append(executed_order)
-            except BinanceAPIError as api_err:
-                code = api_err.code or 0
-                if code in (-2014, -2015):
-                    classified_err = BinanceAuthenticationError(code, str(api_err))
-                elif code in (-1003, -1015) or api_err.status == 429:
-                    classified_err = BinanceRateLimitError(code, str(api_err))
-                elif code == -1021:
-                    classified_err = BinanceTimestampError(code, str(api_err))
-                else:
-                    classified_err = BinanceDefinitiveRejection(code, str(api_err))
-                
-                logger.error("Order %s rejected (%s): %s", client_oid, type(classified_err).__name__, classified_err)
-                executed_order = ExecutionOrder(
-                    symbol=symbol,
-                    side=order_intent.side,
-                    quantity=rounded_qty,
-                    price=Decimal(price_str or "0"),
-                    order_type=params["type"],
-                    client_order_id=client_oid,
-                    status="REJECTED",
-                    timestamp=utc_now()
+                if not isinstance(response, dict):
+                    raise BinanceTransportAmbiguity("Binance order response is invalid")
+                order = self._order_from_response(
+                    intent, response, prepared, client_order_id, decision
                 )
-                await self.ledger.upsert_order(executed_order)
-                executed_orders.append(executed_order)
-            except Exception as e:
-                logger.error("Order execution failed, ambiguity triggered: %s", e)
-                # Gate I1: Ambiguous order state machine - query order status before declaring failure
-                self.state = ConnectionState.RECONCILING
-                try:
-                    logger.info("Querying ambiguous order by client ID: %s", client_oid)
-                    query_params = {"symbol": symbol, "origClientOrderId": client_oid}
-                    status_resp = await self.rest_client.request("GET", "/fapi/v1/order", signed=True, params=query_params)
-                    logger.info("Ambiguous order found on exchange: %s", status_resp)
-                    executed_order = ExecutionOrder(
-                        symbol=symbol,
-                        side=order_intent.side,
-                        quantity=rounded_qty,
-                        price=Decimal(str(status_resp.get("price", "0"))),
-                        order_type=params["type"],
-                        client_order_id=client_oid,
-                        status=status_resp.get("status", "NEW"),
-                        exchange_order_id=str(status_resp.get("orderId", "")),
-                        timestamp=utc_now()
+                await self.ledger.upsert_order(order)
+                if not await self._post_mutation_reconcile(order, response):
+                    logger.error(
+                        "Testnet order %s acknowledged but not fully verified; keeping execution degraded",
+                        client_order_id,
                     )
-                    await self.ledger.upsert_order(executed_order)
-                    executed_orders.append(executed_order)
-                    self.state = ConnectionState.READY # Recovered
-                except Exception as query_err:
-                    err_msg = str(query_err)
-                    if "Order does not exist" in err_msg or "-2013" in err_msg:
-                        logger.warning("Order %s confirmed absent. It was not placed.", client_oid)
-                        self.state = ConnectionState.READY # Safe to resume
-                    else:
-                        logger.error("Order %s status STILL UNKNOWN. Blocking new risk. Error: %s", client_oid, query_err)
-                        self.state = ConnectionState.DEGRADED
-                
+                    continue
+                executed_orders.append(order)
+                if order.status in ("NEW", "PARTIALLY_FILLED"):
+                    reserved_open_orders += 1
+                    reserved_notional += prepared.notional
+            except BinanceAuthenticationError as exc:
+                self.invalidate_authentication()
+                logger.error("Testnet authentication failed while submitting %s: %s", client_order_id, exc)
+            except (BinanceRateLimitError, BinanceTimestampError) as exc:
+                logger.error("Testnet mutable request was not submitted: %s", exc)
+                self.state = ConnectionState.DEGRADED
+            except BinanceDefinitiveRejection as exc:
+                logger.warning("Testnet order rejected definitively: %s", exc)
+                await self.ledger.upsert_order(
+                    ExecutionOrder(
+                        symbol=prepared.symbol,
+                        side=intent.side,
+                        quantity=prepared.quantity,
+                        price=prepared.price or prepared.estimated_price,
+                        order_type=prepared.order_type,
+                        client_order_id=client_order_id,
+                        status="REJECTED",
+                        timestamp=utc_now(),
+                        strategy_id=intent.strategy_id,
+                        decision_id=decision.decision_id,
+                        target_exposure_id=decision.target_exposure_id,
+                        source_intent_ids=list(
+                            decision.source_intent_ids or intent.source_intent_ids
+                        ),
+                        risk_class=decision.risk_class,
+                    )
+                )
+            except (BinanceTransportAmbiguity, BinanceAPIError) as exc:
+                logger.error("Testnet order response is ambiguous: %s", exc)
+                recovered = await self._resolve_ambiguous_order(
+                    intent, prepared, client_order_id, decision
+                )
+                if recovered is not None:
+                    executed_orders.append(recovered)
+            except Exception as exc:
+                logger.error("Unexpected Testnet order execution failure: %s", exc)
+                self.state = ConnectionState.DEGRADED
+
         return executed_orders
 
-
-    async def cancel_order(self, symbol: str, orig_client_order_id: str) -> bool:
-        if self.state != ConnectionState.READY:
-            return False
+    async def query_order(self, symbol: str, client_order_id: str) -> Optional[Dict[str, Any]]:
         try:
-            params = {
-                "symbol": symbol,
-                "origClientOrderId": orig_client_order_id
-            }
-            logger.info("[%s] Canceling order: %s", self.env, params)
-            resp = await self.rest_client.request("DELETE", "/fapi/v1/order", signed=True, params=params)
-            logger.info("Cancel success: %s", resp)
-            return True
-        except Exception as e:
-            logger.error("Failed to cancel order: %s", e)
-            return False
-
-    async def modify_order(self, symbol: str, orig_client_order_id: str, new_price: Decimal, new_qty: Decimal, side: str) -> Optional[ExecutionOrder]:
-        if self.state != ConnectionState.READY:
-            return None
-        rules = self.capabilities.symbol_rules.get(symbol)
-        if not rules:
-            return None
-            
-        rounded_qty = rules.normalize_quantity(new_qty)
-        rounded_price = rules.normalize_price(new_price)
-        
-        try:
-            params = {
-                "symbol": symbol,
-                "origClientOrderId": orig_client_order_id,
-                "side": side,
-                "quantity": str(rounded_qty),
-                "price": str(rounded_price)
-            }
-            logger.info("[%s] Modifying order (PUT): %s", self.env, params)
-            resp = await self.rest_client.request("PUT", "/fapi/v1/order", signed=True, params=params)
-            logger.info("Modify success: %s", resp)
-            
-            new_order = ExecutionOrder(
-                symbol=symbol,
-                side=OrderSide(side) if isinstance(side, str) else side,
-                quantity=rounded_qty,
-                price=rounded_price,
-                order_type="LIMIT",
-                client_order_id=resp.get("clientOrderId", orig_client_order_id),
-                status=resp.get("status", "NEW"),
-                exchange_order_id=str(resp.get("orderId", "")),
-                timestamp=utc_now()
+            return await self.rest_client.request(
+                "GET",
+                "/fapi/v1/order",
+                signed=True,
+                params={"symbol": symbol.upper(), "origClientOrderId": client_order_id},
             )
-            await self.ledger.upsert_order(new_order)
-            return new_order
+        except BinanceDefinitiveRejection as exc:
+            if exc.code == -2013:
+                return None
+            raise
 
-        except Exception as e:
-            logger.error("Failed to modify order: %s", e)
+    async def cancel_all_open_orders(
+        self,
+        *,
+        authority: Optional[object] = None,
+    ) -> Dict[str, Any]:
+        """Cancel and verify all authoritative Testnet open orders.
+
+        This is the kill-switch mutation path. It shares the adapter's
+        single-flight lock with submit, cancel, amend, and emergency flatten so
+        a queued normal mutation cannot overtake local kill-switch activation.
+        """
+
+        if not self._worker_authorized(authority):
+            return {
+                "status": "UNKNOWN",
+                "reason": "Worker authority is required for Testnet cancellation",
+            }
+        async with self._mutation_lock:
+            try:
+                open_orders = await self.rest_client.request(
+                    "GET", "/fapi/v1/openOrders", signed=True
+                )
+                if not isinstance(open_orders, list):
+                    return {
+                        "status": "UNKNOWN",
+                        "reason": "Authoritative openOrders response is invalid",
+                    }
+
+                cancel_failures = 0
+                for order in open_orders:
+                    symbol = str(order.get("symbol", "")).upper()
+                    order_id = order.get("orderId")
+                    if not symbol or order_id in (None, ""):
+                        cancel_failures += 1
+                        continue
+                    try:
+                        response = await self.rest_client.request(
+                            "DELETE",
+                            "/fapi/v1/order",
+                            signed=True,
+                            params={"symbol": symbol, "orderId": order_id},
+                        )
+                        if not isinstance(response, dict) or str(
+                            response.get("status", "")
+                        ).upper() not in {"CANCELED", "CANCELLED"}:
+                            cancel_failures += 1
+                    except BinanceAuthenticationError:
+                        self.invalidate_authentication()
+                        return {
+                            "status": "UNKNOWN",
+                            "reason": "Testnet authentication failed; exchange cancellation is unknown",
+                        }
+                    except Exception as exc:
+                        logger.error("Testnet kill-switch cancellation failed: %s", exc)
+                        cancel_failures += 1
+
+                remaining = await self.rest_client.request(
+                    "GET", "/fapi/v1/openOrders", signed=True
+                )
+                if not isinstance(remaining, list):
+                    return {
+                        "status": "UNKNOWN",
+                        "reason": "Open-order verification response is invalid",
+                    }
+                if remaining or cancel_failures:
+                    return {
+                        "status": "PARTIAL",
+                        "remaining_orders": len(remaining),
+                        "cancel_failures": cancel_failures,
+                    }
+                return {"status": "CONFIRMED", "remaining_orders": 0}
+            except BinanceAuthenticationError:
+                self.invalidate_authentication()
+                return {
+                    "status": "UNKNOWN",
+                    "reason": "Testnet authentication failed; exchange cancellation is unknown",
+                }
+            except Exception as exc:
+                logger.error("Testnet kill-switch exchange cancellation is unknown: %s", exc)
+                return {
+                    "status": "UNKNOWN",
+                    "reason": "Exchange cancellation could not be verified",
+                }
+
+    async def cancel_order(
+        self,
+        symbol: str,
+        orig_client_order_id: str,
+        *,
+        authority: Optional[object] = None,
+    ) -> bool:
+        if not self._worker_authorized(authority):
+            logger.error("Blocked direct Testnet cancel outside the Trading Worker")
+            return False
+        async with self._mutation_lock:
+            if getattr(authority, "kill_switch_active", False):
+                logger.warning("Kill switch blocked Testnet cancel mutation")
+                return False
+            return await self._cancel_order(
+                symbol, orig_client_order_id, authority=authority
+            )
+
+    async def _cancel_order(
+        self,
+        symbol: str,
+        orig_client_order_id: str,
+        *,
+        authority: Optional[object] = None,
+    ) -> bool:
+        if not self._worker_authorized(authority):
+            logger.error("Blocked direct Testnet cancel outside the Trading Worker")
+            return False
+        if self.state != ConnectionState.READY:
+            return False
+        try:
+            response = await self.rest_client.request(
+                "DELETE",
+                "/fapi/v1/order",
+                signed=True,
+                params={"symbol": symbol.upper(), "origClientOrderId": orig_client_order_id},
+            )
+            if not isinstance(response, dict) or response.get("status") != "CANCELED":
+                resolved = await self._resolve_ambiguous_cancel(symbol, orig_client_order_id)
+                return bool(
+                    self.state == ConnectionState.READY
+                    and resolved is not None
+                    and resolved.get("status") in {"CANCELED", "CANCELLED"}
+                )
+            response_client_id = response.get("clientOrderId")
+            response_order_id = response.get("orderId")
+            if response_client_id not in (None, "", orig_client_order_id):
+                resolved = await self._resolve_ambiguous_cancel(symbol, orig_client_order_id)
+                return bool(
+                    self.state == ConnectionState.READY
+                    and resolved is not None
+                    and resolved.get("status") in {"CANCELED", "CANCELLED"}
+                )
+            if response_client_id in (None, "") and response_order_id in (None, ""):
+                resolved = await self._resolve_ambiguous_cancel(symbol, orig_client_order_id)
+                return bool(
+                    self.state == ConnectionState.READY
+                    and resolved is not None
+                    and resolved.get("status") in {"CANCELED", "CANCELLED"}
+                )
+            order = await self.ledger.get_order_by_client_id(orig_client_order_id)
+            if order:
+                order.status = "CANCELED"
+                await self.ledger.upsert_order(order)
+            self.reconciliation.last_status = "UNKNOWN"
+            try:
+                sync_result = await self.reconciliation.reconcile()
+            except Exception as exc:
+                logger.error("Post-cancel Testnet reconciliation failed: %s", exc)
+                sync_result = "UNKNOWN"
+            verified = bool(
+                sync_result == "IN_SYNC"
+                and self.private_stream_healthy
+                and self.authenticated
+            )
+            self.state = ConnectionState.READY if verified else ConnectionState.DEGRADED
+            return verified
+        except BinanceAuthenticationError:
+            self.invalidate_authentication()
+            return False
+        except BinanceDefinitiveRejection as exc:
+            logger.warning("Cancel was rejected; resolving authoritative order status: %s", exc)
+            resolved = await self._resolve_ambiguous_cancel(symbol, orig_client_order_id)
+            return bool(
+                self.state == ConnectionState.READY
+                and resolved is not None
+                and resolved.get("status") in {"CANCELED", "CANCELLED"}
+            )
+        except (BinanceRateLimitError, BinanceTimestampError) as exc:
+            logger.error("Testnet cancel was not submitted: %s", exc)
+            self.state = ConnectionState.DEGRADED
+            return False
+        except BinanceTransportAmbiguity as exc:
+            logger.error("Cancel request is not verified: %s", exc)
+            resolved = await self._resolve_ambiguous_cancel(symbol, orig_client_order_id)
+            return bool(
+                self.state == ConnectionState.READY
+                and resolved is not None
+                and resolved.get("status") in {"CANCELED", "CANCELLED"}
+            )
+        except Exception as exc:
+            logger.error("Unexpected cancel failure: %s", exc)
+            self.state = ConnectionState.DEGRADED
+            return False
+
+    async def modify_order(
+        self,
+        symbol: str,
+        orig_client_order_id: str,
+        new_price: Decimal,
+        new_qty: Decimal,
+        side: str,
+        *,
+        authority: Optional[object] = None,
+    ) -> Optional[ExecutionOrder]:
+        if not self._worker_authorized(authority):
+            logger.error("Blocked direct Testnet amendment outside the Trading Worker")
             return None
+        async with self._mutation_lock:
+            if getattr(authority, "kill_switch_active", False):
+                logger.warning("Kill switch blocked Testnet amendment mutation")
+                return None
+            return await self._modify_order(
+                symbol,
+                orig_client_order_id,
+                new_price,
+                new_qty,
+                side,
+                authority=authority,
+            )
+
+    async def _modify_order(
+        self,
+        symbol: str,
+        orig_client_order_id: str,
+        new_price: Decimal,
+        new_qty: Decimal,
+        side: str,
+        *,
+        authority: Optional[object] = None,
+    ) -> Optional[ExecutionOrder]:
+        if not self._worker_authorized(authority):
+            logger.error("Blocked direct Testnet amendment outside the Trading Worker")
+            return None
+        if self.state != ConnectionState.READY:
+            return None
+        existing = await self.ledger.get_order_by_client_id(orig_client_order_id)
+        if existing is None or str(existing.status).upper() not in {"NEW", "PARTIALLY_FILLED"}:
+            return None
+        try:
+            amendment_side = OrderSide(side)
+        except (TypeError, ValueError):
+            logger.warning("Order amendment has an invalid side: %s", side)
+            return None
+        if amendment_side != existing.side:
+            logger.warning(
+                "Order amendment cannot change side for %s: %s -> %s",
+                orig_client_order_id,
+                existing.side,
+                amendment_side,
+            )
+            return None
+        try:
+            requested_qty = Decimal(str(new_qty))
+            requested_price = Decimal(str(new_price))
+            existing_qty = Decimal(str(existing.quantity))
+            existing_price = Decimal(str(existing.price))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if (
+            not requested_qty.is_finite()
+            or not requested_price.is_finite()
+            or requested_qty <= 0
+            or requested_price <= 0
+            or not existing_qty.is_finite()
+            or not existing_price.is_finite()
+            or existing_qty <= 0
+            or existing_price <= 0
+        ):
+            return None
+
+        # An amendment can increase economic exposure even though it is not a
+        # new client order.  Classify the delta from the current exchange
+        # working order so the same account/liquidation/cap gates apply.
+        existing_notional = existing_qty * existing_price
+        requested_notional = requested_qty * requested_price
+        amendment_risk = (
+            EconomicRiskClass.INCREASE_RISK
+            if requested_notional > existing_notional
+            else EconomicRiskClass.RECOVERY
+        )
+        intent = OrderIntent(
+            client_order_id=orig_client_order_id,
+            symbol=symbol.upper(),
+            market_type=existing.market_type,
+            side=amendment_side,
+            position_side=existing.position_side,
+            order_type=OrderType.LIMIT,
+            time_in_force=existing.time_in_force,
+            quantity=new_qty,
+            price=new_price,
+            reduce_only=existing.reduce_only,
+            strategy_id=existing.strategy_id,
+            source_intent_ids=list(existing.source_intent_ids),
+        )
+        gate_result = await self.order_gate.check(
+            intent,
+            amendment_risk,
+            exclude_client_order_id=orig_client_order_id,
+            # A lower-notional amendment reduces resting order risk but is not
+            # a position-closing order. Preserve reduceOnly for genuine
+            # position reductions while retaining entry-order semantics here.
+            require_reduce_only_for_risk_reduction=existing.reduce_only,
+        )
+        if not gate_result.allowed or gate_result.prepared is None:
+            logger.warning("Order amendment blocked: %s", gate_result.reason)
+            return None
+        prepared = gate_result.prepared
+        amendment_decision = ExecutionDecision(
+            decision_id=existing.decision_id or f"AMEND-{orig_client_order_id}",
+            symbol=prepared.symbol,
+            action="AMEND_ORDER",
+            risk_class=amendment_risk,
+            orders=[intent],
+            target_exposure_id=existing.target_exposure_id,
+            source_intent_ids=list(existing.source_intent_ids),
+        )
+        worker_gate = getattr(self._worker_authority, "_evaluate_execution_gate", None)
+        if not callable(worker_gate):
+            logger.error("Blocked amendment because the Worker decision gate is unavailable")
+            return None
+        decision_allowed, decision_reason = worker_gate(amendment_decision)
+        if not decision_allowed:
+            logger.warning("Worker decision gate blocked amendment: %s", decision_reason)
+            return None
+        try:
+            params: Dict[str, Any] = {
+                "symbol": prepared.symbol,
+                "origClientOrderId": orig_client_order_id,
+                "side": amendment_side.value,
+                "quantity": str(prepared.quantity),
+                "price": str(prepared.price),
+                "timeInForce": (
+                    "GTX"
+                    if intent.time_in_force == TimeInForce.POST_ONLY
+                    else intent.time_in_force.value
+                ),
+            }
+            if self.capabilities.hedge_mode:
+                params["positionSide"] = intent.position_side.value
+            if intent.reduce_only and not self.capabilities.hedge_mode:
+                params["reduceOnly"] = "true"
+            response = await self.rest_client.request(
+                "PUT",
+                "/fapi/v1/order",
+                signed=True,
+                params=params,
+            )
+            if not isinstance(response, dict):
+                raise BinanceTransportAmbiguity("Binance amendment response is invalid")
+            amended = self._order_from_response(
+                intent, response, prepared, orig_client_order_id, amendment_decision
+            )
+            await self.ledger.upsert_order(amended)
+            return amended if await self._post_mutation_reconcile(amended, response) else None
+        except BinanceAuthenticationError:
+            self.invalidate_authentication()
+            return None
+        except BinanceDefinitiveRejection as exc:
+            logger.warning("Order amendment was rejected definitively: %s", exc)
+            return None
+        except (BinanceRateLimitError, BinanceTimestampError) as exc:
+            logger.error("Testnet amendment was not submitted: %s", exc)
+            return None
+        except BinanceTransportAmbiguity as exc:
+            logger.error("Testnet amendment response is ambiguous: %s", exc)
+            return await self._resolve_ambiguous_order(
+                intent, prepared, orig_client_order_id, amendment_decision
+            )
+        except Exception as exc:
+            logger.error("Order amendment is not verified: %s", exc)
+            self.state = ConnectionState.DEGRADED
+            return None
+
+    async def _resolve_ambiguous_cancel(
+        self, symbol: str, client_order_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve cancel status by client ID, then require authoritative reconciliation."""
+        self.state = ConnectionState.RECONCILING
+        order_status: Optional[Dict[str, Any]] = None
+        status_known = False
+        try:
+            order_status = await self.query_order(symbol, client_order_id)
+            status_known = True  # None is a definitive absent-order result.
+            if order_status is not None:
+                order = await self.ledger.get_order_by_client_id(client_order_id)
+                if order is not None and order_status.get("status"):
+                    order.status = str(order_status["status"])
+                    if order_status.get("orderId") is not None:
+                        order.exchange_order_id = str(order_status["orderId"])
+                    await self.ledger.upsert_order(order)
+        except BinanceAuthenticationError:
+            self.invalidate_authentication()
+            return None
+        except Exception as exc:
+            logger.error("Cancel status remains unknown after ambiguity: %s", exc)
+
+        try:
+            sync_result = await self.reconciliation.reconcile()
+        except Exception as exc:
+            logger.error("Authoritative reconciliation after cancel ambiguity failed: %s", exc)
+            sync_result = "UNKNOWN"
+        if (
+            status_known
+            and sync_result == "IN_SYNC"
+            and self.private_stream_healthy
+            and self.authenticated
+        ):
+            self.state = ConnectionState.READY
+        else:
+            self.state = ConnectionState.DEGRADED
+        return order_status
+
+    async def emergency_flatten(
+        self,
+        symbol: Optional[str] = None,
+        *,
+        authority: Optional[object] = None,
+    ) -> List[ExecutionOrder]:
+        if not self._worker_authorized(authority):
+            logger.error("Blocked direct emergency flatten outside the Trading Worker")
+            self.last_emergency_result = {
+                "status": "UNKNOWN",
+                "reason": "Worker authority is required for emergency execution",
+            }
+            return []
+        async with self._mutation_lock:
+            return await self._emergency_flatten(symbol, authority=authority)
+
+    async def _emergency_flatten(
+        self,
+        symbol: Optional[str] = None,
+        *,
+        authority: Optional[object] = None,
+    ) -> List[ExecutionOrder]:
+        """Reduce only Testnet positions through the Worker-owned emergency path."""
+        if not self._worker_authorized(authority):
+            logger.error("Blocked direct emergency flatten outside the Trading Worker")
+            self.last_emergency_result = {
+                "status": "UNKNOWN",
+                "reason": "Worker authority is required for emergency execution",
+            }
+            return []
+
+        self.last_emergency_result = {"status": "UNKNOWN", "submitted_orders": 0}
+        try:
+            positions = await self.rest_client.request(
+                "GET", "/fapi/v2/positionRisk", signed=True
+            )
+        except BinanceAuthenticationError:
+            self.invalidate_authentication()
+            self.last_emergency_result = {
+                "status": "UNKNOWN",
+                "reason": "Testnet authentication failed while reading positions",
+            }
+            return []
+        except Exception as exc:
+            self.last_emergency_result = {
+                "status": "UNKNOWN",
+                "reason": f"Authoritative Testnet position state is unknown: {exc}",
+            }
+            return []
+        if not isinstance(positions, list):
+            self.last_emergency_result = {
+                "status": "UNKNOWN",
+                "reason": "Authoritative Testnet positionRisk response is invalid",
+            }
+            return []
+
+        # The emergency source is authoritative. Refresh the ledger before
+        # each generated reduce-only intent so the emergency order gate can
+        # prove that its side and quantity reduce a real signed position even
+        # when a private ACCOUNT_UPDATE event is delayed.
+        try:
+            await self.ledger.replace_positions(positions, mark_initialized=False)
+        except Exception as exc:
+            self.reconciliation.last_status = "UNKNOWN"
+            self.state = ConnectionState.DEGRADED
+            self.last_emergency_result = {
+                "status": "UNKNOWN",
+                "reason": f"Authoritative Testnet position state is invalid: {exc}",
+            }
+            return []
+        flattened: List[ExecutionOrder] = []
+        attempted = 0
+        for position in positions:
+            current_symbol = str(position.get("symbol", "")).upper()
+            try:
+                amount = Decimal(str(position.get("positionAmt", "0")))
+                position_side = PositionSide(str(position.get("positionSide", "BOTH")).upper())
+            except (InvalidOperation, TypeError, ValueError):
+                self.last_emergency_result = {
+                    "status": "UNKNOWN",
+                    "reason": "Active Testnet position contained invalid emergency fields",
+                }
+                return flattened
+            if not current_symbol or amount == 0 or (symbol and current_symbol != symbol.upper()):
+                continue
+            attempted += 1
+            side = OrderSide.SELL if amount > 0 else OrderSide.BUY
+            intent = OrderIntent(
+                client_order_id=self._generate_client_order_id(
+                    "EMERGENCY", current_symbol, attempted
+                ),
+                symbol=current_symbol,
+                market_type=MarketType.USDM_FUTURES,
+                side=side,
+                position_side=position_side,
+                order_type=OrderType.MARKET,
+                time_in_force=TimeInForce.GTC,
+                quantity=abs(amount),
+                reduce_only=True,
+            )
+            decision = ExecutionDecision(
+                decision_id=f"EMERGENCY-{current_symbol}",
+                symbol=current_symbol,
+                action="CLOSE_POSITION",
+                risk_class=EconomicRiskClass.EMERGENCY,
+                orders=[intent],
+            )
+            flattened.extend(
+                await self._execute_decision(
+                    decision,
+                    allow_emergency_fallback=True,
+                    authority=authority,
+                )
+            )
+
+        sync_result = self.reconciliation.last_status
+        try:
+            sync_result = await self.reconciliation.reconcile()
+        except Exception as exc:
+            logger.error("Emergency post-action reconciliation failed: %s", exc)
+            sync_result = "UNKNOWN"
+        stream_healthy = self.private_stream_healthy
+        if (
+            sync_result == "IN_SYNC"
+            and stream_healthy
+            and self.authenticated
+            and len(flattened) >= attempted
+        ):
+            self.state = ConnectionState.READY
+            self.last_emergency_result = {
+                "status": "CONFIRMED",
+                "submitted_orders": len(flattened),
+                "reconciliation": sync_result,
+            }
+        elif flattened or attempted:
+            self.state = ConnectionState.DEGRADED
+            self.last_emergency_result = {
+                "status": "PARTIAL",
+                "submitted_orders": len(flattened),
+                "attempted_orders": attempted,
+                "reconciliation": sync_result,
+                "reason": "Emergency reduction was not fully verified",
+            }
+        else:
+            self.last_emergency_result = {
+                "status": "CONFIRMED" if sync_result == "IN_SYNC" and self.authenticated else "UNKNOWN",
+                "submitted_orders": 0,
+                "reconciliation": sync_result,
+            }
+        return flattened
 
     async def close(self):
         await self.user_stream.close()
         await self.rest_client.close()
+        self.capabilities.authenticated = False
+        self.capabilities.account_request_succeeded = False
+        self.capabilities.trade_authorized = False
         self.state = ConnectionState.DISCONNECTED

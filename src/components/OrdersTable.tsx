@@ -130,14 +130,13 @@ export const OrdersTable: React.FC<OrdersTableProps> = ({
               <th className="py-2.5 px-3 text-right">Notional ($)</th>
               <th className="py-2.5 px-3 text-center">Lifecycle Status</th>
               <th className="py-2.5 px-3 text-center">Source</th>
-              <th className="py-2.5 px-3 text-center">Source</th>
               <th className="py-2.5 px-3 text-center">Action</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-800/60 font-mono">
             {filteredOrders.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-8 text-center text-zinc-500 font-sans">
+                <td colSpan={10} className="py-8 text-center text-zinc-500 font-sans">
                   No orders match current filter criteria.
                 </td>
               </tr>
@@ -234,6 +233,17 @@ export const OrdersTable: React.FC<OrdersTableProps> = ({
                           <Clock className="w-3 h-3" />
                         )}
                         <span>{isFilled ? 'FILLED' : 'RESTING'}</span>
+                      </span>
+                    </td>
+
+                    {/* Provenance */}
+                    <td className="py-3 px-3 text-center">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                        ord.source === 'BINANCE_TESTNET'
+                          ? 'bg-amber-950 text-amber-300 border-amber-800/80'
+                          : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                      }`}>
+                        {ord.source === 'BINANCE_TESTNET' ? 'BINANCE_TESTNET' : `${ord.source} / UNVERIFIED`}
                       </span>
                     </td>
 

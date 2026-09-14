@@ -1,4 +1,5 @@
 node_modules/
+.npm-cache*/
 build/
 dist/
 coverage/
@@ -11,8 +12,14 @@ patch_*.cjs
 patch_*.js
 patch_*.py
 fix_*.cjs
+fix_*.js
 fix_*.py
 update_*.cjs
+*.tmp
+*.bak
+*.orig
+artifacts/
+.research-cache/
 
 # Python
 __pycache__/
@@ -21,6 +28,9 @@ __pycache__/
 *.pyd
 .Python
 .pytest_cache/
+.pytest-tmp*/
+.ruff_cache/
+.mypy_cache/
 env/
 venv/
 .venv/

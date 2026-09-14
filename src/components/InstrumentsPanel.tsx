@@ -44,7 +44,12 @@ export const InstrumentsPanel: React.FC<InstrumentsPanelProps> = ({ instruments 
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {(Object.values(instruments) as InstrumentData[]).map((inst) => {
-          const safety = getSafetyBadge(inst.grid_safety_score);
+          const hasVerifiedData =
+            inst.verified === true &&
+            inst.data_source === 'BINANCE_TESTNET';
+          const safety = hasVerifiedData
+            ? getSafetyBadge(inst.grid_safety_score)
+            : { label: 'UNKNOWN', color: 'text-amber-400 bg-amber-500/10 border-amber-500/30' };
           return (
             <div key={inst.symbol} className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-4 space-y-4">
               {/* Instrument Header */}
@@ -56,23 +61,23 @@ export const InstrumentsPanel: React.FC<InstrumentsPanelProps> = ({ instruments 
                   <div>
                     <div className="flex items-center space-x-2">
                       <span className="font-bold text-zinc-100 text-base">{inst.symbol}</span>
-                      <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${getRegimeColor(inst.regime)}`}>
-                        {inst.regime.replace('_', ' ')}
+                      <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${hasVerifiedData ? getRegimeColor(inst.regime) : 'text-amber-400 bg-amber-500/10 border-amber-500/20'}`}>
+                        {hasVerifiedData ? inst.regime.replace('_', ' ') : 'UNKNOWN'}
                       </span>
                     </div>
                     <div className="text-xs text-zinc-400 flex items-center space-x-2 mt-0.5">
-                      <span>Perp: ${inst.perp_price.toLocaleString()}</span>
+                      <span>Perp: {hasVerifiedData ? `$${inst.perp_price.toLocaleString()}` : 'UNKNOWN'}</span>
                       <span>•</span>
-                      <span>Spot: ${inst.spot_price.toLocaleString()}</span>
+                      <span>Spot: {hasVerifiedData ? `$${inst.spot_price.toLocaleString()}` : 'UNKNOWN'}</span>
                     </div>
                   </div>
                 </div>
 
                 <div className="text-right">
-                  <div className="text-xs text-zinc-400">Grid Safety AI</div>
+                  <div className="text-xs text-zinc-400">Grid Safety {hasVerifiedData ? 'Worker Data' : 'Unverified'}</div>
                   <div className="flex items-center justify-end space-x-1.5 mt-0.5">
-                    <span className="text-lg font-bold font-mono text-zinc-100">{inst.grid_safety_score}</span>
-                    <span className="text-xs text-zinc-400">/100</span>
+                    <span className="text-lg font-bold font-mono text-zinc-100">{hasVerifiedData ? inst.grid_safety_score : 'UNKNOWN'}</span>
+                    {hasVerifiedData && <span className="text-xs text-zinc-400">/100</span>}
                   </div>
                 </div>
               </div>
@@ -87,11 +92,11 @@ export const InstrumentsPanel: React.FC<InstrumentsPanelProps> = ({ instruments 
                 </div>
                 <div>
                   <div className="text-zinc-400 text-[11px]">Exp. MAE</div>
-                  <div className="mt-1 font-mono text-zinc-200 font-medium">{(inst.expected_mae_pct ?? 0).toFixed(2)}%</div>
+                  <div className="mt-1 font-mono text-zinc-200 font-medium">{hasVerifiedData ? `${inst.expected_mae_pct.toFixed(2)}%` : 'UNKNOWN'}</div>
                 </div>
                 <div>
                   <div className="text-zinc-400 text-[11px]">Est. Recovery</div>
-                  <div className="mt-1 font-mono text-zinc-200 font-medium">{(inst.expected_recovery_time_hrs ?? 0).toFixed(1)} hrs</div>
+                  <div className="mt-1 font-mono text-zinc-200 font-medium">{hasVerifiedData ? `${inst.expected_recovery_time_hrs.toFixed(1)} hrs` : 'UNKNOWN'}</div>
                 </div>
               </div>
 
@@ -99,34 +104,34 @@ export const InstrumentsPanel: React.FC<InstrumentsPanelProps> = ({ instruments 
               <div className="grid grid-cols-4 gap-2 text-xs">
                 <div className="bg-zinc-800/40 p-2 rounded border border-zinc-800">
                   <div className="text-zinc-400 text-[10px]">Funding Rate (8h)</div>
-                  <div className={`font-mono font-medium mt-0.5 ${(inst.funding_rate ?? 0) >= 0 ? 'text-amber-400' : 'text-cyan-400'}`}>
-                    {((inst.funding_rate ?? 0) * 100).toFixed(4)}%
+                  <div className={`font-mono font-medium mt-0.5 ${!hasVerifiedData ? 'text-amber-400' : inst.funding_rate >= 0 ? 'text-amber-400' : 'text-cyan-400'}`}>
+                    {hasVerifiedData ? `${(inst.funding_rate * 100).toFixed(4)}%` : 'UNKNOWN'}
                   </div>
-                  <div className="text-[10px] text-zinc-400">~{(inst.funding_annualized_pct ?? 0).toFixed(1)}% APR</div>
+                  <div className="text-[10px] text-zinc-400">{hasVerifiedData ? `~${inst.funding_annualized_pct.toFixed(1)}% APR` : 'Unverified'}</div>
                 </div>
 
                 <div className="bg-zinc-800/40 p-2 rounded border border-zinc-800">
                   <div className="text-zinc-400 text-[10px]">Basis (Spot vs Perp)</div>
                   <div className="font-mono font-medium mt-0.5 text-zinc-200">
-                    +${(inst.basis ?? 0).toFixed(1)}
+                    {hasVerifiedData ? `${inst.basis >= 0 ? '+' : ''}$${inst.basis.toFixed(1)}` : 'UNKNOWN'}
                   </div>
-                  <div className="text-[10px] text-zinc-400">Z: {(inst.basis_zscore ?? 0).toFixed(2)}</div>
+                  <div className="text-[10px] text-zinc-400">Z: {hasVerifiedData ? inst.basis_zscore.toFixed(2) : 'UNKNOWN'}</div>
                 </div>
 
                 <div className="bg-zinc-800/40 p-2 rounded border border-zinc-800">
                   <div className="text-zinc-400 text-[10px]">Open Interest</div>
                   <div className="font-mono font-medium mt-0.5 text-zinc-200">
-                    ${((inst.open_interest_usd ?? 0) / 1e9).toFixed(2)}B
+                    {hasVerifiedData ? `$${(inst.open_interest_usd / 1e9).toFixed(2)}B` : 'UNKNOWN'}
                   </div>
-                  <div className="text-[10px] text-emerald-400 font-mono">+{(inst.open_interest_delta_24h_pct ?? 0)}% 24h</div>
+                  <div className="text-[10px] text-emerald-400 font-mono">{hasVerifiedData ? `${inst.open_interest_delta_24h_pct >= 0 ? '+' : ''}${inst.open_interest_delta_24h_pct}% 24h` : 'Unverified'}</div>
                 </div>
 
                 <div className="bg-zinc-800/40 p-2 rounded border border-zinc-800">
                   <div className="text-zinc-400 text-[10px]">ATR (1h) / Vol</div>
                   <div className="font-mono font-medium mt-0.5 text-zinc-200">
-                    ${(inst.atr_1h ?? 0).toFixed(1)}
+                    {hasVerifiedData ? `$${inst.atr_1h.toFixed(1)}` : 'UNKNOWN'}
                   </div>
-                  <div className="text-[10px] text-zinc-400">{(inst.realized_vol_24h_pct ?? 0)}% Ann.</div>
+                  <div className="text-[10px] text-zinc-400">{hasVerifiedData ? `${inst.realized_vol_24h_pct}% Ann.` : 'Unverified'}</div>
                 </div>
               </div>
 
@@ -134,15 +139,15 @@ export const InstrumentsPanel: React.FC<InstrumentsPanelProps> = ({ instruments 
               <div className="space-y-1.5 pt-1">
                 <div className="flex items-center justify-between text-[11px] text-zinc-400">
                   <span>Regime Distribution</span>
-                  <span>P(Range/MeanRev): {(((inst.regime_probabilities?.R0_STRONG_MEAN_REVERSION ?? 0) + (inst.regime_probabilities?.R1_RANGE ?? 0)) * 100).toFixed(0)}%</span>
+                  <span>P(Range/MeanRev): {hasVerifiedData ? `${((inst.regime_probabilities.R0_STRONG_MEAN_REVERSION + inst.regime_probabilities.R1_RANGE) * 100).toFixed(0)}%` : 'UNKNOWN'}</span>
                 </div>
                 <div className="w-full h-2 rounded-full bg-zinc-800 flex overflow-hidden">
-                  <div style={{ width: `${(inst.regime_probabilities?.R0_STRONG_MEAN_REVERSION ?? 0) * 100}%` }} className="bg-cyan-500" title="R0 Mean Reversion" />
-                  <div style={{ width: `${(inst.regime_probabilities?.R1_RANGE ?? 0) * 100}%` }} className="bg-emerald-500" title="R1 Range" />
-                  <div style={{ width: `${(inst.regime_probabilities?.R2_WEAK_TREND ?? 0) * 100}%` }} className="bg-amber-500" title="R2 Weak Trend" />
-                  <div style={{ width: `${(inst.regime_probabilities?.R3_STRONG_TREND ?? 0) * 100}%` }} className="bg-orange-500" title="R3 Strong Trend" />
-                  <div style={{ width: `${(inst.regime_probabilities?.R4_BREAKOUT ?? 0) * 100}%` }} className="bg-purple-500" title="R4 Breakout" />
-                  <div style={{ width: `${((inst.regime_probabilities?.R5_VOLATILITY_SHOCK ?? 0) + (inst.regime_probabilities?.R6_CRISIS ?? 0)) * 100}%` }} className="bg-rose-500" title="Shock/Crisis" />
+                <div style={{ width: hasVerifiedData ? `${inst.regime_probabilities.R0_STRONG_MEAN_REVERSION * 100}%` : '0%' }} className="bg-cyan-500" title="R0 Mean Reversion" />
+                  <div style={{ width: hasVerifiedData ? `${inst.regime_probabilities.R1_RANGE * 100}%` : '0%' }} className="bg-emerald-500" title="R1 Range" />
+                  <div style={{ width: hasVerifiedData ? `${inst.regime_probabilities.R2_WEAK_TREND * 100}%` : '0%' }} className="bg-amber-500" title="R2 Weak Trend" />
+                  <div style={{ width: hasVerifiedData ? `${inst.regime_probabilities.R3_STRONG_TREND * 100}%` : '0%' }} className="bg-orange-500" title="R3 Strong Trend" />
+                  <div style={{ width: hasVerifiedData ? `${inst.regime_probabilities.R4_BREAKOUT * 100}%` : '0%' }} className="bg-purple-500" title="R4 Breakout" />
+                  <div style={{ width: hasVerifiedData ? `${(inst.regime_probabilities.R5_VOLATILITY_SHOCK + inst.regime_probabilities.R6_CRISIS) * 100}%` : '0%' }} className="bg-rose-500" title="Shock/Crisis" />
                 </div>
               </div>
             </div>

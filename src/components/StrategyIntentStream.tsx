@@ -26,72 +26,9 @@ export const StrategyIntentStream: React.FC<StrategyIntentStreamProps> = ({
   instruments,
   intentsData,
 }) => {
-  const btcPerp = instruments['BTCUSDT']?.perp_price || 64250;
-  const ethPerp = instruments['ETHUSDT']?.perp_price || 3480;
-
-  // Authoritative Strategy Intents emitted by independent alpha engines
-  const intents: StrategyIntentItem[] = intentsData || [
-    {
-      id: 'INT-GRID-BTC-01',
-      engineId: 'structural_grid',
-      strategyName: 'Structural Mean-Reversion Grid',
-      symbol: 'BTCUSDT',
-      direction: 'LONG',
-      rawTargetDelta: 0.15,
-      opportunityScore: instruments['BTCUSDT']?.grid_safety_score || 78.5,
-      confidence: 0.84,
-      urgency: 'LOW',
-      timeHorizon: '12h - 48h',
-      hypothesis: 'Price oscillating inside 24h equilibrium; accumulate passive tranches at swing base.',
-      regimeFit: 'R0/R1 (Range & Mean Reversion)',
-      proposedMaxNotionalUsd: 15000,
-    },
-    {
-      id: 'INT-TREND-BTC-01',
-      engineId: 'trend_breakout',
-      strategyName: 'Trend / Breakout Following',
-      symbol: 'BTCUSDT',
-      direction: 'SHORT',
-      rawTargetDelta: -0.08,
-      opportunityScore: 62.0,
-      confidence: 0.65,
-      urgency: 'MEDIUM',
-      timeHorizon: '4h - 12h',
-      hypothesis: 'Rejection at 24h swing high; probing structural breakdown under key pivot.',
-      regimeFit: 'R2 (Weak Trend Transition)',
-      proposedMaxNotionalUsd: 8000,
-    },
-    {
-      id: 'INT-SHOCK-ETH-01',
-      engineId: 'shock_momentum',
-      strategyName: 'Shock Momentum',
-      symbol: 'ETHUSDT',
-      direction: 'LONG',
-      rawTargetDelta: 1.2,
-      opportunityScore: 71.4,
-      confidence: 0.76,
-      urgency: 'HIGH',
-      timeHorizon: '5m - 30m',
-      hypothesis: 'Fast 15s liquidity sweep reclaimed; targeting mean reversion to 1m VWAP.',
-      regimeFit: 'R5 (Micro Liquidity Sweep)',
-      proposedMaxNotionalUsd: 6500,
-    },
-    {
-      id: 'INT-CARRY-BTC-01',
-      engineId: 'funding_carry',
-      strategyName: 'Funding / Basis Carry',
-      symbol: 'BTCUSDT',
-      direction: 'SHORT',
-      rawTargetDelta: -0.05,
-      opportunityScore: 82.0,
-      confidence: 0.91,
-      urgency: 'LOW',
-      timeHorizon: '24h - 7d',
-      hypothesis: 'Annualized funding APR > 10.5% with positive spot-perp basis. Harvest delta-neutral yield.',
-      regimeFit: 'Positive Basis Spectrum',
-      proposedMaxNotionalUsd: 10000,
-    },
-  ];
+  // Strategy intents are authoritative only when supplied by the Python
+  // worker. A missing feed is an empty/unknown state, never a UI fixture.
+  const intents: StrategyIntentItem[] = Array.isArray(intentsData) ? intentsData : [];
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">
@@ -121,6 +58,11 @@ export const StrategyIntentStream: React.FC<StrategyIntentStreamProps> = ({
 
       {/* Intents Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 text-xs">
+        {intents.length === 0 && (
+          <div className="md:col-span-2 p-5 rounded-xl border border-amber-900/60 bg-amber-950/20 text-center text-amber-300">
+            No verified strategy-intent stream is available. Intents are informational and cannot authorize orders.
+          </div>
+        )}
         {intents.map((intent) => {
           const isLong = intent.direction === 'LONG';
           return (

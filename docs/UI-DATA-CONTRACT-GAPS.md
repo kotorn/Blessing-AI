@@ -81,7 +81,7 @@
 
 | Field / Model | Status | Current Source / Notes | Temporary UI Behavior |
 |---|---|---|---|
-| `BacktestMetrics` (ROI, Ulcer Index, Drawdowns, Divergence) | `EXISTING` | Authoritative in `/api/quant/backtest/run` for historical crisis scenarios | Rendered in `BacktestReplayStudio` |
+| `BacktestMetrics` (ROI, Ulcer Index, Drawdowns, Divergence) | `RESEARCH_ONLY` | `/api/quant/backtest/run` currently returns explicitly labeled illustrative fixtures; no verified net-economic PnL evidence | Rendered with an evidence warning; cannot unlock execution |
 | `ExecutionFrictionAnalysis` (Naive vs realistic tick replay) | `DERIVED_FRONTEND` | Quantifies spread, fee, funding, latency, and partial fill slippage gap | Rendered in `ExecutionSensitivityCard` |
 | `OverfittingMetrics` (DSR, PBO, Plateau stability, Complexity Budget) | `DERIVED_FRONTEND` | Strictly tracks 5 states, 4 engines, 5 grid levels, features <= 15 | Rendered in `OverfittingControlCard` |
 | `PurgedCVFold[]` (Train / Purge / Test / Embargo) | `DERIVED_FRONTEND` | Models purged cross-validation to prevent serial correlation leakage | Rendered in `OverfittingControlCard` fold table |

@@ -29,7 +29,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
 
   // Form State
   const [executionMode, setExecutionMode] = useState<'PAPER' | 'TESTNET' | 'LIVE'>('PAPER');
-  const [instruments, setInstruments] = useState({ BTCUSDT: true, ETHUSDT: true });
+  const [instruments, setInstruments] = useState({ BTCUSDT: true });
   const [strategies, setStrategies] = useState({
     grid: true,
     trend: true,
@@ -37,7 +37,6 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
     carry: false,
   });
   const [riskProfile, setRiskProfile] = useState<'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE'>('BALANCED');
-  const [riskAcknowledged, setRiskAcknowledged] = useState(false);
 
   // Preflight State
   const [preflightResult, setPreflightResult] = useState<PreflightResult | null>(null);
@@ -62,7 +61,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
   };
 
   const handleArm = async () => {
-    if (!preflightResult?.canArm) return;
+    if (!preflightResult?.canArm || executionMode === 'LIVE') return;
     setLoading(true);
     try {
       await onComplete({
@@ -92,13 +91,18 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
             <button
               key={mode}
               type="button"
-              onClick={() => setExecutionMode(mode)}
+              onClick={() => {
+                if (mode !== 'LIVE') setExecutionMode(mode);
+              }}
+              disabled={mode === 'LIVE'}
               className={`p-3 border rounded-xl text-left transition-all relative ${
                 executionMode === mode
                   ? mode === 'LIVE'
                     ? 'bg-rose-950/40 border-rose-600 text-rose-300'
                     : 'bg-indigo-900/30 border-indigo-500 text-indigo-300'
-                  : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:border-zinc-700'
+                  : mode === 'LIVE'
+                    ? 'bg-zinc-950 border-zinc-800 text-zinc-700 cursor-not-allowed'
+                    : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:border-zinc-700'
               }`}
             >
               <div className="flex items-center justify-between">
@@ -230,7 +234,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
               ) : check.status === 'WARN' ? (
                 <AlertTriangle className="w-4 h-4 text-amber-400" />
               ) : check.status === 'UNKNOWN' ? (
-                <CheckCircle2 className="w-4 h-4 text-zinc-600" />
+                <AlertTriangle className="w-4 h-4 text-zinc-600" />
               ) : (
                 <XCircle className="w-4 h-4 text-rose-400" />
               )}
@@ -258,21 +262,6 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
         </div>
       )}
 
-      {preflightResult?.canArm && executionMode === 'LIVE' && (
-        <label className="flex items-start space-x-3 p-3 bg-rose-950/20 border border-rose-900/50 rounded-xl cursor-pointer">
-          <input
-            type="checkbox"
-            checked={riskAcknowledged}
-            onChange={(e) => setRiskAcknowledged(e.target.checked)}
-            className="mt-1 bg-zinc-900 border-zinc-700 rounded text-rose-600 focus:ring-rose-500"
-          />
-          <div className="text-xs text-zinc-300">
-            <span className="font-bold text-rose-400 block mb-0.5">I acknowledge the risk of LIVE execution.</span>
-            This will authorize the engine to place real orders with real capital. I accept full responsibility for any financial losses.
-          </div>
-        </label>
-      )}
-
       <div className="flex justify-between pt-4">
         <button
           onClick={() => setStep(2)}
@@ -282,7 +271,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
         </button>
         <button
           onClick={handleArm}
-          disabled={loading || !preflightResult?.canArm || (executionMode === 'LIVE' && !riskAcknowledged)}
+          disabled={loading || !preflightResult?.canArm || executionMode === 'LIVE'}
           className="flex items-center space-x-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors"
         >
           <Play className="w-4 h-4" />

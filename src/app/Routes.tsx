@@ -12,7 +12,7 @@ import { AnalyticsPage } from '../pages/AnalyticsPage';
 import { ConnectionsPage } from '../pages/ConnectionsPage';
 import { AuditLogPage } from '../pages/AuditLogPage';
 import { SettingsPage } from '../pages/SettingsPage';
-import { AccountData, BasketItem, InstrumentData, RiskRuleItem } from '../types';
+import { AccountData, BasketItem, InstrumentData, RiskRuleItem, TradingSystemState } from '../types';
 import { BinanceKeyStatus } from '../api/binance';
 
 import { ExecutionOrder } from '../types/orders';
@@ -20,6 +20,7 @@ import { ExecutionOrder } from '../types/orders';
 interface AppRoutesProps {
   currentRoute: AppRoute;
   onNavigate: (route: AppRoute) => void;
+  systemState: TradingSystemState | null;
   account: AccountData;
   onAccountUpdated: (account: AccountData) => void;
   instruments: Record<string, InstrumentData>;
@@ -29,11 +30,11 @@ interface AppRoutesProps {
   strategyIntents?: any[];
   metaAllocations?: Record<string, any> | null;
   exposureRecovery?: any | null;
-  correlationBtcEth: number;
-  cryptoBetaExposurePct: number;
+  correlationBtcEth: number | null;
+  cryptoBetaExposurePct: number | null;
   killSwitchActive?: boolean;
   onToggleKillSwitch: () => void;
-  liquidationDistancePct: number;
+  liquidationDistancePct: number | null;
   isActionLoading: boolean;
   onExpandGrid: (basketId: string) => Promise<void>;
   onEnterRecovery: (basketId: string) => Promise<void>;
@@ -48,6 +49,7 @@ interface AppRoutesProps {
 export const AppRoutes: React.FC<AppRoutesProps> = ({
   currentRoute,
   onNavigate,
+  systemState,
   account,
   onAccountUpdated,
   instruments,
@@ -77,6 +79,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
       return (
         <CommandCenterPage
           account={account}
+          systemState={systemState}
           onAccountUpdated={onAccountUpdated}
           instruments={instruments}
           baskets={baskets}
@@ -112,6 +115,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
         <OrdersExecutionPage
           account={account}
           orders={orders}
+          systemState={systemState}
         />
       );
 
@@ -129,6 +133,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
     case '/risk':
       return (
         <RiskRecoveryPage
+          account={account}
           riskState={account.risk_state}
           rules={riskRules}
           correlationBtcEth={correlationBtcEth}
@@ -177,6 +182,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
       return (
         <CommandCenterPage
           account={account}
+          systemState={systemState}
           onAccountUpdated={onAccountUpdated}
           instruments={instruments}
           baskets={baskets}

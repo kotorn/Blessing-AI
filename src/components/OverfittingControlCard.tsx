@@ -11,6 +11,7 @@ import {
   Calendar,
 } from 'lucide-react';
 import { OverfittingMetrics, PurgedCVFold } from '../types/research';
+import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
 
 export const OverfittingControlCard: React.FC = () => {
   const metrics: OverfittingMetrics = {
@@ -100,10 +101,12 @@ export const OverfittingControlCard: React.FC = () => {
         <div className="flex items-center space-x-2 font-mono text-[10px]">
           <span className="text-zinc-500">Complexity Budget:</span>
           <span className="px-2 py-0.5 rounded font-bold bg-emerald-950 text-emerald-300 border border-emerald-800/80">
-            COMPLIANT (ALL BOUNDS RESPECTED)
+            ILLUSTRATIVE ONLY
           </span>
         </div>
       </div>
+
+      <IllustrativeEvidenceBanner message="No timestamped, current-build backtest artifact is loaded in this UI session." />
 
       {/* 4 Core Overfitting Metrics */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs font-mono">

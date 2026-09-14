@@ -3,7 +3,7 @@ import { RiskState, RiskRuleItem } from '../types';
 export interface FailClosedSafeguard {
   id: string;
   name: string;
-  status: 'HEALTHY' | 'WARNING' | 'BREACHED';
+  status: 'HEALTHY' | 'WARNING' | 'BREACHED' | 'UNKNOWN';
   latencyOrLag: string;
   failClosedAction: string;
   lastChecked: string;

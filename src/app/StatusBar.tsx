@@ -117,32 +117,23 @@ export const StatusBar: React.FC<StatusBarProps> = ({
               {engineState}
             </div>
           )}
-          {engineState && (
-            <div className={`px-2 py-0.5 rounded text-[10px] tracking-wider font-bold uppercase border ${engineState === "ARMED" ? "bg-emerald-950 text-emerald-400 border-emerald-800" : engineState === "DISARMED" ? "bg-zinc-800 text-zinc-400 border-zinc-700" : engineState === "PAUSED_NEW_RISK" ? "bg-amber-950 text-amber-400 border-amber-800" : "bg-rose-950 text-rose-400 border-rose-800"}`}>
-              {engineState}
-            </div>
-          )}
-
-
           {/* Binance Status Badge */}
           <button
             type="button"
             onClick={onOpenBinanceModal}
             className={`flex items-center space-x-1.5 px-2.5 py-1 rounded text-xs border transition-colors cursor-pointer ${
               binanceStatus?.spot?.authenticated
-                ? binanceStatus.futures?.authenticated
-                  ? 'bg-emerald-950/40 text-emerald-400 border-emerald-800/50 hover:bg-emerald-900/30'
-                  : 'bg-amber-950/40 text-amber-400 border-amber-800/50 hover:bg-amber-900/30'
+                ? 'bg-amber-950/40 text-amber-300 border-amber-800/50 hover:bg-amber-900/30'
                 : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:bg-zinc-800'
             }`}
             title="Binance Global API Key Diagnostics & Profiles"
           >
             <Key className="w-3.5 h-3.5" />
             <span className="hidden sm:inline font-mono font-medium text-[11px]">
-              {binanceStatus?.spot?.authenticated ? 'Binance Connected' : 'Binance Setup'}
+              {binanceStatus?.spot?.authenticated ? 'Binance Probe Only' : 'Binance Setup'}
             </span>
             {binanceStatus?.spot?.authenticated && (
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
             )}
           </button>
 

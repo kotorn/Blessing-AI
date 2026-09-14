@@ -2,7 +2,7 @@
 export type DataSource = 'SIMULATED' | 'BINANCE';
 export type ExchangeEnvironment = 'NONE' | 'BINANCE_TESTNET' | 'BINANCE_MAINNET';
 export type ExecutionMode = 'PAPER' | 'TESTNET' | 'LIVE';
-export type EngineState = 'DISARMED' | 'ARMING' | 'ARMED' | 'PAUSED_NEW_RISK' | 'RECOVERY_ONLY' | 'EMERGENCY';
+export type EngineState = 'DISARMED' | 'ARMING' | 'ARMED' | 'PAUSED_NEW_RISK' | 'RECOVERY_ONLY' | 'DEGRADED' | 'EMERGENCY';
 
 export interface ExecutionCapabilities {
   paper: boolean;
@@ -32,6 +32,7 @@ export interface TradingSystemState {
 
   configVersion: string;
   updatedAt: string;
+  workerResponsive?: boolean;
 }
 
 export interface PreflightCheck {
@@ -73,7 +74,8 @@ export type RiskState =
   | 'NO_NEW_GRID'
   | 'RECOVERY_ONLY'
   | 'DELEVERAGE'
-  | 'EMERGENCY';
+  | 'EMERGENCY'
+  | 'UNKNOWN';
 
 export type MarketRegimeType =
   | 'R0_STRONG_MEAN_REVERSION'
@@ -111,6 +113,8 @@ export interface BasketItem {
   created_at: string;
   last_updated: string;
   grid_levels: GridLevelItem[];
+  data_source?: 'BINANCE_TESTNET' | 'SIMULATED';
+  verified?: boolean;
 }
 
 export interface InstrumentData {
@@ -133,6 +137,8 @@ export interface InstrumentData {
   expected_recovery_time_hrs: number;
   expected_mae_pct: number;
   prob_basket_profit: number;
+  data_source?: 'BINANCE_TESTNET' | 'BINANCE_PUBLIC_MAINNET' | 'SIMULATED';
+  verified?: boolean;
 }
 
 export interface AccountHolding {
@@ -182,6 +188,8 @@ export interface AccountData {
   risk_state: RiskState;
   realized_daily_pnl?: number;
   source?: 'BINANCE_LIVE' | 'BINANCE_TESTNET' | 'SIMULATED';
+  evidence_status?: 'ILLUSTRATIVE_ONLY' | 'UNVERIFIED' | 'VERIFIED';
+  verified?: boolean;
   spot_balance?: number;
   futures_wallet_balance?: number;
   futures_unrealized_pnl?: number;
@@ -195,7 +203,7 @@ export interface AccountData {
 export interface RiskRuleItem {
   rule: string;
   current: string;
-  status: 'PASS' | 'WARN' | 'FAIL';
+  status: 'PASS' | 'WARN' | 'FAIL' | 'UNKNOWN';
 }
 
 export interface BacktestMetrics {
@@ -221,6 +229,12 @@ export interface BacktestMetrics {
   total_trading_fees: number;
   slippage_cost: number;
   profit_to_floating_dd_ratio: number;
+  data_source?: 'SIMULATED' | 'HISTORICAL_DATASET';
+  evidence_status?: 'ILLUSTRATIVE_ONLY' | 'UNVERIFIED' | 'VERIFIED';
+  verified?: boolean;
+  net_economic_pnl_verified?: boolean;
+  execution_cost_model_status?: 'NOT_VERIFIED' | 'MODELED' | 'VERIFIED';
+  launch_eligible?: boolean;
 }
 
 export interface SystemAlert {

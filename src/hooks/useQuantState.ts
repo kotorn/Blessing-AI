@@ -14,9 +14,9 @@ export interface UseQuantStateReturn {
   strategyIntents: any[];
   metaAllocations: Record<string, any> | null;
   exposureRecovery: any | null;
-  correlationBtcEth: number;
-  cryptoBetaExposurePct: number;
-  liquidationDistancePct: number;
+  correlationBtcEth: number | null;
+  cryptoBetaExposurePct: number | null;
+  liquidationDistancePct: number | null;
   isLoading: boolean;
   isActionLoading: boolean;
   lastUpdated: Date | null;
@@ -34,17 +34,17 @@ export interface UseQuantStateReturn {
 }
 
 const DEFAULT_ACCOUNT: AccountData = {
-  equity: 50720.5,
-  balance: 50000.0,
-  margin_utilization_pct: 14.2,
-  effective_leverage: 0.85,
-  free_margin: 43518.19,
-  used_margin: 7202.31,
-  daily_pnl: 720.5,
-  daily_pnl_pct: 1.44,
-  portfolio_drawdown_pct: 1.15,
+  equity: 0,
+  balance: 0,
+  margin_utilization_pct: 0,
+  effective_leverage: 0,
+  free_margin: 0,
+  used_margin: 0,
+  daily_pnl: 0,
+  daily_pnl_pct: 0,
+  portfolio_drawdown_pct: 0,
   kill_switch_active: false,
-  risk_state: 'NORMAL',
+  risk_state: 'UNKNOWN',
   source: 'SIMULATED',
 };
 
@@ -59,9 +59,9 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
   const [strategyIntents, setStrategyIntents] = useState<any[]>([]);
   const [metaAllocations, setMetaAllocations] = useState<Record<string, any> | null>(null);
   const [exposureRecovery, setExposureRecovery] = useState<any | null>(null);
-  const [correlationBtcEth, setCorrelationBtcEth] = useState<number>(0.74);
-  const [cryptoBetaExposurePct, setCryptoBetaExposurePct] = useState<number>(42.8);
-  const [liquidationDistancePct, setLiquidationDistancePct] = useState<number>(38.5);
+  const [correlationBtcEth, setCorrelationBtcEth] = useState<number | null>(null);
+  const [cryptoBetaExposurePct, setCryptoBetaExposurePct] = useState<number | null>(null);
+  const [liquidationDistancePct, setLiquidationDistancePct] = useState<number | null>(null);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isActionLoading, setIsActionLoading] = useState<boolean>(false);
@@ -79,43 +79,26 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
         quantApi.getSystemState()
       ]);
       setSystemState(sysState);
-      if (data?.account) {
-        setAccount((prev) => ({
-          ...prev,
-          ...data.account,
-        }));
-      }
-      if (Array.isArray(data?.baskets)) {
-        setBaskets(data.baskets);
-      }
-      if (data?.instruments) {
-        setInstruments(data.instruments);
-      }
-      if (Array.isArray(data?.orders)) {
-        setOrders(data.orders);
-      }
-      if (Array.isArray(data?.alerts)) {
-        setAlerts(data.alerts);
-      }
-      if (Array.isArray(data?.risk_rules)) {
-        setRiskRules(data.risk_rules);
-      }
-      if (Array.isArray(data?.strategy_intents)) {
-        setStrategyIntents(data.strategy_intents);
-      }
-      if (data?.meta_allocations) {
-        setMetaAllocations(data.meta_allocations);
-      }
-      if (data?.exposure_recovery) {
-        setExposureRecovery(data.exposure_recovery);
-      }
-      if (typeof data?.correlation_btc_eth === 'number') {
-        setCorrelationBtcEth(data.correlation_btc_eth);
-      }
-      if (typeof data?.crypto_beta_exposure_pct === 'number') {
-        setCryptoBetaExposurePct(data.crypto_beta_exposure_pct);
-      }
-      if (typeof data?.liquidation_distance_pct === 'number') {
+      setAccount(data?.account || DEFAULT_ACCOUNT);
+      setBaskets(Array.isArray(data?.baskets) ? data.baskets : []);
+      setInstruments(data?.instruments || {});
+      setOrders(Array.isArray(data?.orders) ? data.orders : []);
+      setAlerts(Array.isArray(data?.alerts) ? data.alerts : []);
+      setRiskRules(Array.isArray(data?.risk_rules) ? data.risk_rules : []);
+      setStrategyIntents(Array.isArray(data?.strategy_intents) ? data.strategy_intents : []);
+      setMetaAllocations(data?.meta_allocations || null);
+      setExposureRecovery(data?.exposure_recovery || null);
+      setCorrelationBtcEth(
+        typeof data?.correlation_btc_eth === 'number' ? data.correlation_btc_eth : null,
+      );
+      setCryptoBetaExposurePct(
+        typeof data?.crypto_beta_exposure_pct === 'number'
+          ? data.crypto_beta_exposure_pct
+          : null,
+      );
+      if (data?.liquidation_distance_pct === null) {
+        setLiquidationDistancePct(null);
+      } else if (typeof data?.liquidation_distance_pct === 'number') {
         setLiquidationDistancePct(data.liquidation_distance_pct);
       }
 
@@ -123,7 +106,22 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
       setError(null);
     } catch (err: any) {
       if (!isMountedRef.current) return;
-      // Stale or initializing backend is expected occasionally during dev reload
+      // Never retain an old exchange snapshot or healthy execution state when
+      // either the UI gateway or the Python worker is unavailable.
+      setSystemState(null);
+      setAccount({ ...DEFAULT_ACCOUNT, kill_switch_active: true });
+      setBaskets([]);
+      setInstruments({});
+      setOrders([]);
+      setAlerts([]);
+      setRiskRules([]);
+      setStrategyIntents([]);
+      setMetaAllocations(null);
+      setExposureRecovery(null);
+      setCorrelationBtcEth(null);
+      setCryptoBetaExposurePct(null);
+      setLiquidationDistancePct(null);
+      setLastUpdated(null);
       setError(err?.message || 'Failed to fetch quant state');
     } finally {
       if (isMountedRef.current) {
@@ -154,11 +152,11 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
 
   const armEngine = useCallback(async (params: any) => {
     setIsActionLoading(true);
-    if (auditLogger) {
-      auditLogger('ENGINE_ARMED', 'SYSTEM', 'Armed in ' + params.executionMode + ' mode');
-    }
     try {
       await quantApi.arm(params);
+      if (auditLogger) {
+        auditLogger('ENGINE_ARMED', 'SYSTEM', 'Armed in ' + params.executionMode + ' mode');
+      }
       await fetchState();
     } finally {
       setIsActionLoading(false);
@@ -216,11 +214,11 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
     }
     try {
       const resp = await quantApi.toggleKillSwitch(nextState);
-      if (resp?.success) {
+      if (typeof resp?.kill_switch_active === 'boolean') {
         setAccount((prev) => ({
           ...prev,
           kill_switch_active: resp.kill_switch_active,
-          risk_state: resp.kill_switch_active ? 'EMERGENCY' : 'NORMAL',
+          risk_state: resp.kill_switch_active ? 'EMERGENCY' : 'UNKNOWN',
         }));
       }
       await fetchState();

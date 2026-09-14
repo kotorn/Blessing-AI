@@ -7,7 +7,7 @@ The repository recently migrated core strategy/risk components from older archit
 | `core/basket/models.py` | `domain/models.py` | Yes (Decimal precision maintained) | No |
 | `core/basket/state_machine.py` | Python worker loop / `meta_allocator.py` | Partial (Implicitly handled, explicit state enforcements need unit tests) | Yes (State enforcements) |
 | `core/events/schema.py` | `domain/models.py` | Yes | No |
-| `core/grid/adaptive_grid.py` | `grid_strategy.py` | Yes (Integrated with ML Scorer) | Yes (Grid max depth, NO aggressive Martingale) |
+| `core/grid/adaptive_grid.py` | `grid_strategy.py` | Partial (deterministic guardrails preserved; research scorer isolated) | Yes (Grid max depth, trend/shock brake, no aggressive Martingale) |
 | `core/risk/governor.py` | `risk_governor.py` | Yes (Hard limits enforced before execution) | Yes (Risk Governor veto tests) |
 
 ## Audit Action Items

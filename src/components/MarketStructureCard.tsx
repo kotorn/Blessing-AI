@@ -22,48 +22,13 @@ export const MarketStructureCard: React.FC<MarketStructureCardProps> = ({
   instrument,
   symbol,
 }) => {
-  const currentPerp = instrument?.perp_price || 64250;
-  const currentSpot = instrument?.spot_price || 64235;
-
-  // Measurable structural calculations (24h swing levels)
-  const swingHigh24h = currentPerp * 1.024;
-  const swingLow24h = currentPerp * 0.978;
-  const pivotPoint = (swingHigh24h + swingLow24h + currentPerp) / 3;
-
-  const structuralLevels: StructuralLevel[] = [
-    {
-      label: '24h Swing High (Resistance)',
-      price: swingHigh24h,
-      type: 'SWING_HIGH',
-      distancePct: ((swingHigh24h - currentPerp) / currentPerp) * 100,
-      reclaimStatus: 'REJECTED',
-      touchCount: 3,
-    },
-    {
-      label: 'Key Daily Pivot (Equilibrium)',
-      price: pivotPoint,
-      type: 'PIVOT',
-      distancePct: ((pivotPoint - currentPerp) / currentPerp) * 100,
-      reclaimStatus: 'ACCEPTED',
-      touchCount: 5,
-    },
-    {
-      label: '24h Swing Low (Structural Base)',
-      price: swingLow24h,
-      type: 'SWING_LOW',
-      distancePct: ((currentPerp - swingLow24h) / currentPerp) * 100,
-      reclaimStatus: 'ACCEPTED',
-      touchCount: 2,
-    },
-    {
-      label: 'Liquidity Sweep Cluster',
-      price: swingLow24h * 0.995,
-      type: 'LIQUIDITY_SWEEP',
-      distancePct: ((currentPerp - swingLow24h * 0.995) / currentPerp) * 100,
-      reclaimStatus: 'SWEPT',
-      touchCount: 1,
-    },
-  ];
+  const hasVerifiedData =
+    instrument?.verified === true &&
+    instrument.data_source === 'BINANCE_TESTNET';
+  // A current mark alone is not enough to invent swing levels, pivots, or
+  // liquidity-touch counts. Those values must come from a verified OHLCV/
+  // market-structure service.
+  const structuralLevels: StructuralLevel[] = [];
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl shadow-black/20">
@@ -86,7 +51,7 @@ export const MarketStructureCard: React.FC<MarketStructureCardProps> = ({
         <div className="flex items-center space-x-2 text-[10px] font-mono">
           <span className="text-zinc-500">Structural Bias:</span>
           <span className="px-2 py-0.5 rounded font-bold bg-cyan-950 text-cyan-300 border border-cyan-800/80">
-            RANGE BOUND (EQUILIBRIUM)
+            {hasVerifiedData ? 'AWAITING STRUCTURE SNAPSHOT' : 'UNKNOWN (NO VERIFIED DATA)'}
           </span>
         </div>
       </div>
@@ -100,10 +65,10 @@ export const MarketStructureCard: React.FC<MarketStructureCardProps> = ({
             <Activity className="w-3.5 h-3.5 text-cyan-400" />
           </div>
           <div className="text-sm font-mono font-bold text-emerald-400">
-            +142.5 bps (+1.42%)
+            UNKNOWN
           </div>
           <div className="text-[10px] text-zinc-400">
-            Velocity: Normalizing • Direction: Neutral
+            Awaiting verified OHLCV structure data
           </div>
         </div>
 
@@ -114,10 +79,10 @@ export const MarketStructureCard: React.FC<MarketStructureCardProps> = ({
             <Layers className="w-3.5 h-3.5 text-indigo-400" />
           </div>
           <div className="text-sm font-mono font-bold text-zinc-200">
-            0.88x (Mean Reverting)
+            UNKNOWN
           </div>
           <div className="text-[10px] text-zinc-400">
-            Compressing inside prior day value area
+            Awaiting verified range and ATR window
           </div>
         </div>
 
@@ -128,11 +93,11 @@ export const MarketStructureCard: React.FC<MarketStructureCardProps> = ({
             <Shield className="w-3.5 h-3.5 text-emerald-400" />
           </div>
           <div className="text-sm font-mono font-bold text-emerald-400 flex items-center space-x-1">
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>Support Absorption</span>
+            <AlertTriangle className="w-3.5 h-3.5" />
+            <span>UNKNOWN</span>
           </div>
           <div className="text-[10px] text-zinc-400">
-            Bids holding structural swing low
+            Awaiting verified order-flow and structure data
           </div>
         </div>
       </div>
@@ -150,6 +115,13 @@ export const MarketStructureCard: React.FC<MarketStructureCardProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-zinc-800/60">
+            {structuralLevels.length === 0 && (
+              <tr>
+                <td colSpan={5} className="py-6 px-3 text-center text-amber-400">
+                  No verified structural snapshot is available for {symbol}.
+                </td>
+              </tr>
+            )}
             {structuralLevels.map((lvl) => (
               <tr key={lvl.label} className="hover:bg-zinc-800/30">
                 <td className="py-2.5 px-3 font-sans font-medium text-zinc-200">

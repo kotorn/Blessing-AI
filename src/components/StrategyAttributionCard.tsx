@@ -14,6 +14,7 @@ import {
   Calendar,
 } from 'lucide-react';
 import { StrategyAttribution } from '../types/analytics';
+import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
 
 export const StrategyAttributionCard: React.FC = () => {
   const [selectedHorizon, setSelectedHorizon] = useState<'30D' | '90D' | 'ALL'>('30D');
@@ -134,6 +135,8 @@ export const StrategyAttributionCard: React.FC = () => {
           ))}
         </div>
       </div>
+
+      <IllustrativeEvidenceBanner message="The PnL attribution rows are static research fixtures until a verified ledger artifact is loaded." />
 
       {/* Aggregate Return & Friction Attribution Summary */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs font-mono">

@@ -25,34 +25,34 @@ export const FailClosedSafeguardsCard: React.FC<FailClosedSafeguardsCardProps> =
     {
       id: 'market_data_freshness',
       name: 'Market Data Feed Latency',
-      status: 'HEALTHY',
-      latencyOrLag: '240 ms',
+      status: 'UNKNOWN',
+      latencyOrLag: 'UNKNOWN',
       failClosedAction: 'Halts all new exposure when feed lag > 3,000 ms',
-      lastChecked: 'Just now',
+      lastChecked: 'Not verified',
     },
     {
       id: 'private_account_stream',
       name: 'Private Account Stream (WS)',
-      status: 'HEALTHY',
-      latencyOrLag: '0.8s Heartbeat',
+      status: 'UNKNOWN',
+      latencyOrLag: 'UNKNOWN',
       failClosedAction: 'Halts new orders until balance/position reconciled',
-      lastChecked: '1s ago',
+      lastChecked: 'Not verified',
     },
     {
       id: 'risk_service_invariants',
       name: 'Risk Governor Service Loop',
-      status: 'HEALTHY',
-      latencyOrLag: '< 1 ms',
+      status: 'UNKNOWN',
+      latencyOrLag: 'UNKNOWN',
       failClosedAction: 'Hard fail-closed if governor check times out',
-      lastChecked: 'Synchronous',
+      lastChecked: 'Not verified',
     },
     {
       id: 'order_reconciliation',
       name: 'Order State Reconciliation',
-      status: 'HEALTHY',
-      latencyOrLag: '0 Orphan Orders',
+      status: 'UNKNOWN',
+      latencyOrLag: 'UNKNOWN',
       failClosedAction: 'Blocks new submissions until unknown order resolved',
-      lastChecked: 'Idempotent',
+      lastChecked: 'Not verified',
     },
   ];
 
@@ -80,10 +80,10 @@ export const FailClosedSafeguardsCard: React.FC<FailClosedSafeguardsCardProps> =
             className={`px-2 py-0.5 rounded font-bold border ${
               killSwitchActive
                 ? 'bg-rose-950 text-rose-300 border-rose-800'
-                : 'bg-emerald-950 text-emerald-300 border-emerald-800/80'
+              : 'bg-amber-950 text-amber-300 border-amber-800/80'
             }`}
           >
-            {killSwitchActive ? 'HALTED (MANUAL KILL SWITCH)' : 'PERMITTED (ALL GATES HEALTHY)'}
+            {killSwitchActive ? 'HALTED (MANUAL KILL SWITCH)' : 'UNKNOWN / FAIL-CLOSED'}
           </span>
         </div>
       </div>
@@ -99,10 +99,16 @@ export const FailClosedSafeguardsCard: React.FC<FailClosedSafeguardsCardProps> =
               <span className="font-sans font-bold text-zinc-200 truncate">
                 {item.name}
               </span>
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              {item.status === 'HEALTHY' ? (
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              ) : item.status === 'BREACHED' ? (
+                <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              )}
             </div>
 
-            <div className="text-sm font-bold text-emerald-400">
+            <div className={`text-sm font-bold ${item.status === 'HEALTHY' ? 'text-emerald-400' : item.status === 'BREACHED' ? 'text-rose-400' : 'text-amber-400'}`}>
               {item.latencyOrLag}
             </div>
 
