@@ -5,7 +5,7 @@ description = "Adaptive Basket Grid Trading System, Market Regime Engine, AI Gri
 authors = [
     { name = "Principal Quant Engineer", email = "quant@blessing-ai.internal" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 readme = "README.md"
 dependencies = [
     # MVP Runtime & Testnet Native Execution

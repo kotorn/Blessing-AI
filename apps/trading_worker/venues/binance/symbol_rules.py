@@ -3,11 +3,18 @@ from decimal import Decimal
 from decimal import InvalidOperation
 from typing import Any, Dict, Optional
 
+from domain.enums import MarketType
+from domain.models import Instrument
+
 logger = logging.getLogger("blessing.binance.symbol_rules")
 
 class SymbolTradingRules:
     def __init__(self, symbol: str):
         self.symbol = symbol
+        self.base_asset = ""
+        self.quote_asset = ""
+        self.price_precision: Optional[int] = None
+        self.quantity_precision: Optional[int] = None
         self.status = "UNKNOWN"
         self.tick_size = Decimal("0.0")
         self.min_price = Decimal("0.0")
@@ -48,9 +55,17 @@ class SymbolTradingRules:
         if not isinstance(symbol_data, dict):
             raise ValueError("Exchange symbol information must be an object")
         self.status = str(symbol_data.get("status", "UNKNOWN")).upper()
+        self.base_asset = str(symbol_data.get("baseAsset", "")).upper()
+        self.quote_asset = str(symbol_data.get("quoteAsset", "")).upper()
         self.supported_order_types = [
             str(order_type).upper() for order_type in symbol_data.get("orderTypes", [])
         ]
+        self.price_precision = self._parse_precision(
+            symbol_data.get("pricePrecision"), "pricePrecision"
+        )
+        self.quantity_precision = self._parse_precision(
+            symbol_data.get("quantityPrecision"), "quantityPrecision"
+        )
         self._parsed_from_exchange_info = True
         self._seen_filter_types = set()
         self.tick_size = Decimal("0.0")
@@ -203,6 +218,59 @@ class SymbolTradingRules:
                 self.percent_price_ask_multiplier_down = decimal_filter_value(
                     f, "askMultiplierDown"
                 )
+
+        # Some historical fixtures omit precision fields. Deriving precision
+        # from the exchange tick/step values avoids inventing venue defaults.
+        if self.price_precision is None:
+            self.price_precision = self._decimal_places(self.tick_size)
+        if self.quantity_precision is None:
+            self.quantity_precision = self._decimal_places(self.step_size)
+
+    @staticmethod
+    def _parse_precision(value: Any, field: str) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Exchange symbol has invalid {field}") from exc
+        if parsed < 0:
+            raise ValueError(f"Exchange symbol has invalid {field}")
+        return parsed
+
+    @staticmethod
+    def _decimal_places(value: Decimal) -> int:
+        if not value.is_finite() or value <= 0:
+            return 0
+        return max(0, -value.as_tuple().exponent)
+
+    def to_instrument(
+        self,
+        *,
+        venue: str = "binance_global",
+        market_type: MarketType = MarketType.USDM_FUTURES,
+    ) -> Instrument:
+        """Convert complete exchange-discovered rules into a domain model."""
+
+        if not self.base_asset or not self.quote_asset:
+            raise ValueError(f"Exchange asset metadata is missing for {self.symbol}")
+        if not self.is_ready_for("LIMIT"):
+            raise ValueError(f"Exchange trading rules are incomplete for {self.symbol}")
+        if self.price_precision is None or self.quantity_precision is None:
+            raise ValueError(f"Exchange precision metadata is missing for {self.symbol}")
+        return Instrument(
+            symbol=self.symbol.upper(),
+            venue=venue,
+            market_type=market_type,
+            base_asset=self.base_asset,
+            quote_asset=self.quote_asset,
+            tick_size=self.tick_size,
+            step_size=self.step_size,
+            min_notional=self.min_notional,
+            price_precision=self.price_precision,
+            quantity_precision=self.quantity_precision,
+            is_trading_enabled=self.status == "TRADING",
+        )
 
     @staticmethod
     def _valid_multiplier(value: Optional[Decimal]) -> bool:

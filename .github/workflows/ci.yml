@@ -43,7 +43,7 @@ jobs:
     - name: Python Unit Tests
       env:
         PYTHONPATH: .
-      run: pytest tests/python/ -m "not contract_readonly and not contract_mutating"
+      run: pytest tests/python/ -m "not contract_readonly and not contract_mutating and not contract_soak"
       
     - name: Hygiene Check
       run: |

@@ -1,3 +1,10 @@
+"""Experimental strategy stack retained for research only.
+
+Production execution uses the engines under ``apps.trading_worker.engines``.
+"""
+
+RESEARCH_ONLY = True
+
 import abc
 import logging
 from decimal import Decimal

@@ -60,8 +60,16 @@ and `futures-usds symbol-order-book-ticker`.
 
 ## Local use
 
-The binary is optional. If it is not installed, the wrapper returns
-`NOT_RUN`; it does not install software or invent contract evidence.
+The binary is optional and is never committed to this repository. On Linux,
+the pinned installer can place it in an external directory:
+
+```sh
+./binance-cli-installer.sh --install-dir "$HOME/.local/bin"
+```
+
+The installer verifies the pinned archive checksum and installs outside the
+checkout. If the binary is not installed, the wrapper returns `NOT_RUN`; it
+does not install software or invent contract evidence.
 
 PowerShell example for a public research cross-check:
 

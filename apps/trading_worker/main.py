@@ -23,7 +23,7 @@ from pydantic import (
 )
 
 from domain.enums import RiskState
-from domain.models import MarketEvent, RiskSnapshot, utc_now
+from domain.models import Instrument, MarketEvent, MarketType, RiskSnapshot, utc_now
 
 from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
 from apps.trading_worker.engines.funding_carry import (
@@ -143,6 +143,7 @@ class LaunchReadiness(BaseModel):
     testnet_autonomous_soak_ready: bool = False
     testnet_autonomous_ready: bool
     small_live_ready: bool = False
+    persistence: Dict[str, Any] = Field(default_factory=dict)
 
 class WorkerRuntimeState(BaseModel):
     """Authoritative execution state model for the Python Trading Worker.
@@ -494,7 +495,31 @@ class TradingWorkerApp:
         self.updated_at = utc_now()
         self.last_market_event_at: Dict[str, datetime] = {}
         self.decision_execution_gate = DecisionExecutionGate(self)
-        self.persistence = PersistenceManager()
+        self.persistence = PersistenceManager(
+            instrument_rules_provider=self._persistence_instrument_rules
+        )
+
+    def _persistence_instrument_rules(self, symbol: str) -> Optional[Instrument]:
+        """Expose only exchange-discovered Binance rules to persistence."""
+
+        adapter = self.execution_adapter
+        if adapter is None:
+            return None
+        rules = getattr(adapter, "symbol_rules", {}).get(str(symbol).upper())
+        if rules is None:
+            return None
+        try:
+            return rules.to_instrument(
+                venue="binance_global",
+                market_type=MarketType.USDM_FUTURES,
+            )
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.error(
+                "Exchange-derived persistence rules unavailable for %s: %s",
+                symbol,
+                type(exc).__name__,
+            )
+            return None
 
     def record_heartbeat(self) -> datetime:
         """Update and return the current heartbeat timestamp."""
@@ -961,7 +986,8 @@ class TradingWorkerApp:
             "usdmFuturesSupported": True,
             "hedgeModeSupported": bool(
                 self.execution_adapter and self.execution_adapter.capabilities.hedge_mode
-            )
+            ),
+            "persistence": self.persistence.readiness(),
         }
 
     def get_launch_readiness(self) -> dict:
@@ -1040,9 +1066,13 @@ class TradingWorkerApp:
         rules_ready = self._symbol_rules_ready()
         account_ready = self.is_account_snapshot_ready()
         market_data_fresh = self.is_market_data_fresh()
+        persistence = self.persistence.readiness()
+        persistence_required_ready = (
+            self.persistence.mode.value != "REQUIRED" or persistence["durable"]
+        )
 
         readiness = LaunchReadiness(
-            paper_ready=not self.kill_switch_active,
+            paper_ready=not self.kill_switch_active and persistence_required_ready,
             local_non_secret_tests_verified=local_non_secret_tests_verified,
             ci_verified=ci_verified,
             testnet_credentials_verified=testnet_configured and self.authenticated,
@@ -1061,7 +1091,8 @@ class TradingWorkerApp:
             launch_approved=self._env_flag("TESTNET_LAUNCH_APPROVED", False),
             testnet_autonomous_soak_ready=False,
             testnet_autonomous_ready=False,
-            small_live_ready=False
+            small_live_ready=False,
+            persistence=persistence,
         )
         
         readiness.testnet_autonomous_soak_ready = (
@@ -1079,6 +1110,7 @@ class TradingWorkerApp:
             readiness.private_stream_healthy and
             readiness.reconciliation_in_sync and
             readiness.market_data_fresh and
+            persistence_required_ready and
             readiness.autonomous_soak_flag_enabled and
             readiness.autonomous_flag_enabled and
             readiness.launch_approved and
@@ -1122,6 +1154,8 @@ class TradingWorkerApp:
             rules_ready = self._symbol_rules_ready()
             account_ready = self.is_account_snapshot_ready()
             market_data_fresh = self.is_market_data_fresh()
+            persistence = self.persistence.readiness()
+            persistence_required = self.persistence.mode.value == "REQUIRED"
             checks = [
                 {
                     "id": "CHK-CREDS",
@@ -1198,6 +1232,25 @@ class TradingWorkerApp:
                     "required": True,
                     "status": "FAIL" if self.kill_switch_active else "PASS",
                     "message": "Kill switch is active" if self.kill_switch_active else "Kill switch inactive"
+                },
+                {
+                    "id": "CHK-PERSISTENCE",
+                    "name": "Persistence Outbox",
+                    "required": persistence_required,
+                    "status": (
+                        "PASS"
+                        if persistence["durable"]
+                        else "FAIL"
+                        if persistence_required
+                        else "DEGRADED"
+                    ),
+                    "message": (
+                        "Transactional outbox is connected and durable"
+                        if persistence["durable"]
+                        else "REQUIRED persistence is unavailable; execution is blocked"
+                        if persistence_required
+                        else "OPTIONAL persistence is degraded; events are not durable"
+                    ),
                 }
             ]
             can_arm = all(c["status"] == "PASS" for c in checks if c["required"])
@@ -1208,9 +1261,14 @@ class TradingWorkerApp:
             }
 
         # Default PAPER mode
+        persistence = self.persistence.readiness()
+        persistence_required = self.persistence.mode.value == "REQUIRED"
         return {
             "executionMode": "PAPER",
-            "canArm": not self.kill_switch_active,
+            "canArm": (
+                not self.kill_switch_active
+                and (not persistence_required or persistence["durable"])
+            ),
             "checks": [
                 {
                     "id": "CHK-SIMULATION",
@@ -1225,6 +1283,25 @@ class TradingWorkerApp:
                     "required": True,
                     "status": "FAIL" if self.kill_switch_active else "PASS",
                     "message": "Kill switch is active" if self.kill_switch_active else "Kill switch inactive"
+                },
+                {
+                    "id": "CHK-PERSISTENCE",
+                    "name": "Persistence Outbox",
+                    "required": persistence_required,
+                    "status": (
+                        "PASS"
+                        if persistence["durable"]
+                        else "FAIL"
+                        if persistence_required
+                        else "DEGRADED"
+                    ),
+                    "message": (
+                        "Transactional outbox is connected and durable"
+                        if persistence["durable"]
+                        else "REQUIRED persistence is unavailable; Paper arming is blocked"
+                        if persistence_required
+                        else "OPTIONAL persistence is unavailable; Paper remains explicitly non-durable"
+                    ),
                 }
             ]
         }
@@ -1417,6 +1494,20 @@ class TradingWorkerApp:
         # ever turn a LIVE request into a partially accepted state.
         if req.executionMode == "LIVE":
             return False, "LIVE execution mode is permanently blocked in this sprint."
+
+        try:
+            self.persistence.validate_execution_mode(req.executionMode)
+        except RuntimeError as exc:
+            return False, str(exc)
+
+        if (
+            self.persistence.mode.value == "REQUIRED"
+            and not self.persistence.readiness()["durable"]
+        ):
+            return False, (
+                "Required persistence is not ready; execution is blocked "
+                "until the transactional outbox is durable."
+            )
 
         validation_error = self._validate_arm_request(req)
         if validation_error:
@@ -1854,7 +1945,11 @@ class TradingWorkerApp:
     async def start(self):
         logger.info("Initializing Blessing AI Trading Worker v0.2...")
         
-        await self.persistence.start()
+        persistence_started = await self.persistence.start()
+        if not persistence_started:
+            logger.warning(
+                "Persistence is not available; worker continues in explicitly degraded OPTIONAL mode."
+            )
         
         self.symbols = await self.scanner.scan_active_symbols()
         
