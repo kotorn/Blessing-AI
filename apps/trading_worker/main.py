@@ -1287,24 +1287,34 @@ class TradingWorkerApp:
             return {"status": "UNKNOWN", "reason": "Testnet exchange adapter is unavailable."}
         adapter.bind_worker_authority(self)
 
+        # A kill-switch transition invalidates every prior account/order
+        # observation immediately.  Keep the local switch active even if the
+        # exchange is unreachable; the subsequent read-only reconciliation is
+        # best effort and can never clear the switch by itself.
+        adapter.reconciliation.last_status = "UNKNOWN"
+        await adapter.ledger.set_account_snapshot(None)
+
         cancellation = await adapter.cancel_all_open_orders(authority=self)
-        if cancellation.get("status") != "CONFIRMED":
-            return cancellation
+        cancellation_status = str(cancellation.get("status", "UNKNOWN")).upper()
+
+        # Always attempt authoritative reconciliation after the cancellation
+        # workflow, including PARTIAL/UNKNOWN outcomes.  This gives operators
+        # the strongest available post-switch state without ever converting an
+        # unverified cancellation into CONFIRMED.
         try:
             reconciliation = await self.trigger_reconciliation()
         except BinanceAuthenticationError as exc:
             adapter.invalidate_authentication()
             logger.error("Kill switch reconciliation authentication failed: %s", exc)
-            return {
-                "status": "UNKNOWN",
-                "reason": "Testnet authentication failed; exchange cancellation is unknown.",
-            }
+            reconciliation = "UNKNOWN"
         except Exception as exc:
             logger.error("Kill switch reconciliation is unknown: %s", exc)
-            return {
-                "status": "UNKNOWN",
-                "reason": "Exchange cancellation was verified but reconciliation is unknown.",
-            }
+            reconciliation = "UNKNOWN"
+
+        if cancellation_status != "CONFIRMED":
+            result = dict(cancellation)
+            result["reconciliation"] = reconciliation
+            return result
         if (
             reconciliation != "IN_SYNC"
             or not adapter.private_stream_healthy

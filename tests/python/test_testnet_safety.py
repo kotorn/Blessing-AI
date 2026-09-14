@@ -1424,6 +1424,33 @@ async def test_kill_switch_stays_active_when_exchange_is_unreachable(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_kill_switch_reconciles_even_after_partial_cancellation(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    adapter = worker.execution_adapter
+    assert adapter is not None
+    adapter.reconciliation.next_status = "MISMATCH"
+
+    async def partial_cancel(*, authority=None):
+        assert authority is worker
+        return {
+            "status": "PARTIAL",
+            "remaining_orders": 1,
+            "cancel_failures": 1,
+        }
+
+    adapter.cancel_all_open_orders = partial_cancel
+
+    result = await worker.set_kill_switch(True)
+
+    assert result["status"] == "PARTIAL"
+    assert result["reconciliation"] == "MISMATCH"
+    assert adapter.reconciliation.calls == 1
+    assert worker.kill_switch_active is True
+    assert worker.engine_state == WorkerEngineState.EMERGENCY
+    assert await adapter.ledger.get_account_snapshot() is None
+
+
+@pytest.mark.asyncio
 async def test_kill_switch_blocks_queued_mutation_after_local_activation():
     first_post_started = asyncio.Event()
     release_first_post = asyncio.Event()
