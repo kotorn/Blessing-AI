@@ -240,6 +240,15 @@ def _parsed_rows(rows: Sequence[Sequence[Any]], parser: Any) -> list[Any]:
     return parsed
 
 
+def _parsed_row_pairs(rows: Sequence[Sequence[Any]], parser: Any) -> list[tuple[list[Any], Any]]:
+    parsed: list[tuple[list[Any], Any]] = []
+    for row in rows:
+        observation = parser(row)
+        if observation is not None:
+            parsed.append((list(row), observation))
+    return parsed
+
+
 def _exchange_decimal(
     filter_data: Mapping[str, Any], names: Sequence[str], label: str
 ) -> Decimal:
@@ -522,6 +531,8 @@ def load_vision_replay_inputs(
     book_ticker_checksum: str | Path,
     max_book_age_sec: float = 60.0,
     funding_tolerance_sec: float = 60.0,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
 ) -> tuple[tuple[HistoricalMarketEvent, ...], tuple[ResearchSourceRecord, ...]]:
     """Load checked local Vision archives and assemble causal replay events.
 
@@ -535,22 +546,55 @@ def load_vision_replay_inputs(
     verify_vision_archive_checksum(book_ticker_archive, book_ticker_checksum)
     kline_rows = list(iter_vision_csv_archive(kline_archive))
     mark_rows = list(iter_vision_csv_archive(mark_price_archive))
-    kline_observations = _parsed_rows(kline_rows, parse_vision_kline_row)
-    mark_observations = _parsed_rows(mark_rows, parse_vision_mark_price_row)
+    kline_pairs = _parsed_row_pairs(kline_rows, parse_vision_kline_row)
+    mark_pairs = _parsed_row_pairs(mark_rows, parse_vision_mark_price_row)
+    kline_source_observations = [observation for _, observation in kline_pairs]
+    mark_source_observations = [observation for _, observation in mark_pairs]
+    requested_start = (
+        _utc_datetime(start_time, "start_time") if start_time is not None else None
+    )
+    requested_end = (
+        _utc_datetime(end_time, "end_time") if end_time is not None else None
+    )
+    if requested_start is not None and requested_end is not None and requested_end <= requested_start:
+        raise ValueError("end_time must be after start_time")
+    selected_kline_pairs = [
+        (row, observation)
+        for row, observation in kline_pairs
+        if (requested_start is None or observation.event_time >= requested_start)
+        and (requested_end is None or observation.event_time < requested_end)
+    ]
+    if not selected_kline_pairs:
+        raise ValueError("requested replay window contains no kline observations")
+    selected_open_times = {
+        observation.open_time_ms for _, observation in selected_kline_pairs
+    }
+    selected_mark_pairs = [
+        (row, observation)
+        for row, observation in mark_pairs
+        if observation.open_time_ms in selected_open_times
+    ]
+    selected_kline_rows = [row for row, _ in selected_kline_pairs]
+    selected_mark_rows = [row for row, _ in selected_mark_pairs]
+    selected_kline_observations = [observation for _, observation in selected_kline_pairs]
     try:
         book_age_sec = float(max_book_age_sec)
     except (TypeError, ValueError) as exc:
         raise ValueError("max_book_age_sec must be finite and positive") from exc
     if not math.isfinite(book_age_sec) or not book_age_sec > 0:
         raise ValueError("max_book_age_sec must be finite and positive")
-    if not kline_observations:
-        raise ValueError("kline source contains no data rows")
+    try:
+        funding_tolerance = float(funding_tolerance_sec)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("funding_tolerance_sec must be finite and positive") from exc
+    if not math.isfinite(funding_tolerance) or not funding_tolerance > 0:
+        raise ValueError("funding_tolerance_sec must be finite and positive")
     # The daily bookTicker archive can be multi-gigabyte and is not
     # guaranteed to be ordered.  Stream it once and retain only observations
     # that can causally serve this kline window.  Sorting remains delegated to
     # build_historical_events after this bounded filter.
-    book_start = kline_observations[0].event_time - timedelta(seconds=book_age_sec)
-    book_end = kline_observations[-1].event_time
+    book_start = selected_kline_observations[0].event_time - timedelta(seconds=book_age_sec)
+    book_end = selected_kline_observations[-1].event_time
     book_rows: list[list[str]] = []
     book_observations: list[Any] = []
     book_row_count = 0
@@ -576,16 +620,23 @@ def load_vision_replay_inputs(
     ]
     if len(funding_observations) != len(records):
         raise ValueError("funding response contains a non-object record")
+    funding_for_replay = [
+        funding
+        for funding in funding_observations
+        if selected_kline_observations[0].event_time - timedelta(seconds=funding_tolerance)
+        <= funding.funding_time
+        <= selected_kline_observations[-1].event_time
+    ]
     data_source = (
         "BINANCE_PUBLIC_TESTNET_READ_ONLY"
         if venue == "BINANCE_TESTNET"
         else "BINANCE_PUBLIC_MAINNET_READ_ONLY"
     )
     events = build_historical_events(
-        kline_rows,
-        mark_rows,
+        selected_kline_rows,
+        selected_mark_rows,
         book_rows,
-        funding_observations,
+        funding_for_replay,
         symbol=symbol,
         venue=venue,
         data_source=data_source,
@@ -597,15 +648,15 @@ def load_vision_replay_inputs(
             "KLINES_1M",
             url=kline_url,
             path=kline_archive,
-            row_count=len(kline_observations),
-            observations=kline_observations,
+            row_count=len(kline_source_observations),
+            observations=kline_source_observations,
         ),
         _source_record(
             "MARK_PRICE_KLINES_1M",
             url=mark_price_url,
             path=mark_price_archive,
-            row_count=len(mark_observations),
-            observations=mark_observations,
+            row_count=len(mark_source_observations),
+            observations=mark_source_observations,
         ),
         _source_record(
             "BOOK_TICKER",

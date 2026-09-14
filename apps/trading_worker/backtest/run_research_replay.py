@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .evidence_artifact import (
@@ -20,6 +21,16 @@ from .evidence_artifact import (
     write_replay_evidence_artifact,
 )
 from .replay import ReplayExecutionConfig
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timestamp must be ISO-8601") from exc
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError("timestamp must include a timezone")
+    return parsed.astimezone(UTC)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,6 +46,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-json", type=Path, required=True)
     parser.add_argument("--exchange-info-json", type=Path, required=True)
     parser.add_argument("--exchange-info-url", required=True)
+    parser.add_argument("--start-time", type=_parse_utc_datetime, required=True)
+    parser.add_argument("--end-time", type=_parse_utc_datetime, required=True)
     parser.add_argument("--kline-archive", type=Path, required=True)
     parser.add_argument("--kline-checksum", type=Path, required=True)
     parser.add_argument("--kline-url", required=True)
@@ -80,6 +93,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         book_ticker_checksum=args.book_ticker_checksum,
         max_book_age_sec=args.max_book_age_sec,
         funding_tolerance_sec=args.funding_tolerance_sec,
+        start_time=args.start_time,
+        end_time=args.end_time,
     )
     exchange_info_source = build_exchange_info_source(
         args.exchange_info_json,
