@@ -47,6 +47,7 @@ from apps.trading_worker.venues.binance.models import (
     ConnectionState,
     TestnetSafetyLimits,
 )
+from apps.trading_worker.persistence.manager import PersistenceManager
 from venues.binance.public_ws import BinancePublicWebSocket
 
 class StrategyEnablement(BaseModel):
@@ -493,6 +494,7 @@ class TradingWorkerApp:
         self.updated_at = utc_now()
         self.last_market_event_at: Dict[str, datetime] = {}
         self.decision_execution_gate = DecisionExecutionGate(self)
+        self.persistence = PersistenceManager()
 
     def record_heartbeat(self) -> datetime:
         """Update and return the current heartbeat timestamp."""
@@ -1439,6 +1441,12 @@ class TradingWorkerApp:
                         api_secret=api_secret,
                         env=BinanceEnvironment.TESTNET,
                     )
+                    # Register persistence callbacks
+                    if self.execution_adapter.ledger:
+                        self.execution_adapter.ledger.on_order_update = self.persistence.enqueue_order
+                        self.execution_adapter.ledger.on_fill_update = self.persistence.enqueue_fill
+                        self.execution_adapter.ledger.on_position_update = self.persistence.enqueue_position
+                
                 self.execution_adapter.bind_worker_authority(self)
                 connected = await self.execution_adapter.connect()
                 self._sync_adapter_state()
@@ -1735,6 +1743,7 @@ class TradingWorkerApp:
                         max(Decimal("0.0"), drawdown_pct),
                     ),
                 )
+                self.persistence.enqueue_risk_snapshot(risk_snapshot)
                 
                 positions = await self.execution_adapter.ledger.get_positions()
                 normalized_event_symbol = str(event.symbol).upper()
@@ -1844,6 +1853,9 @@ class TradingWorkerApp:
 
     async def start(self):
         logger.info("Initializing Blessing AI Trading Worker v0.2...")
+        
+        await self.persistence.start()
+        
         self.symbols = await self.scanner.scan_active_symbols()
         
         logger.info("Connecting to Binance WS for: %s", self.symbols)
@@ -1884,7 +1896,7 @@ class TradingWorkerApp:
             except Exception as e:
                 logger.error("Periodic scanner failed: %s", e)
 
-    def stop(self):
+    async def stop(self):
         logger.info("Gracefully stopping Trading Worker...")
         self.is_running = False
         self.stop_heartbeat()
@@ -1892,10 +1904,10 @@ class TradingWorkerApp:
             self.scan_task.cancel()
         if self.ws_client:
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self.ws_client.stop())
+                await self.ws_client.stop()
             except RuntimeError:
                 pass
+        await self.persistence.stop()
 
 def serve_api(app_instance):
     set_worker_engine(app_instance)

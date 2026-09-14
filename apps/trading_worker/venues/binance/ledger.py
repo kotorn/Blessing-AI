@@ -67,6 +67,9 @@ class InMemoryLedger:
         self.wallet_balance: Decimal = Decimal("0")
         self.margin_balance: Decimal = Decimal("0")
         self.account_snapshot: Optional[ExchangeAccountSnapshot] = None
+        self.on_order_update = None
+        self.on_fill_update = None
+        self.on_position_update = None
 
     async def set_account_snapshot(self, snapshot: Optional[ExchangeAccountSnapshot]) -> None:
         self.account_snapshot = snapshot
@@ -138,6 +141,8 @@ class InMemoryLedger:
             ),
         )
         self.orders[client_oid] = order
+        if self.on_order_update:
+            self.on_order_update(order)
 
     def _get_fill_key(self, fill: ExchangeFill) -> str:
         return f"{str(fill.symbol).upper()}:{fill.exchange_trade_id}"
@@ -149,6 +154,8 @@ class InMemoryLedger:
             return
         self._fill_keys.add(key)
         self.fills.append(fill)
+        if self.on_fill_update:
+            self.on_fill_update(fill)
         
     async def has_fill(self, deduplication_key: str) -> bool:
         if ":" in deduplication_key:
@@ -287,6 +294,9 @@ class InMemoryLedger:
         mark_initialized: bool = True,
     ) -> None:
         self.positions = [self._to_exchange_position(p) for p in raw_positions]
+        if self.on_position_update:
+            for p in self.positions:
+                self.on_position_update(p)
         if mark_initialized:
             self._initialized = True
 
@@ -298,8 +308,12 @@ class InMemoryLedger:
         for i, p in enumerate(self.positions):
             if p.symbol == norm_pos.symbol and p.position_side == norm_pos.position_side:
                 self.positions[i] = norm_pos
+                if self.on_position_update:
+                    self.on_position_update(norm_pos)
                 return
         self.positions.append(norm_pos)
+        if self.on_position_update:
+            self.on_position_update(norm_pos)
         
     async def get_open_orders(self) -> List[ExecutionOrder]:
         return [o for o in self.orders.values() if o.status in ("NEW", "PARTIALLY_FILLED")]
