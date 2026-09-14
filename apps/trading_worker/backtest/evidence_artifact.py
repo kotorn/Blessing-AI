@@ -595,14 +595,29 @@ def load_vision_replay_inputs(
     # build_historical_events after this bounded filter.
     book_start = selected_kline_observations[0].event_time - timedelta(seconds=book_age_sec)
     book_end = selected_kline_observations[-1].event_time
+    book_start_ms = int(book_start.timestamp() * 1000)
+    book_end_ms = int(book_end.timestamp() * 1000)
     book_rows: list[list[str]] = []
     book_observations: list[Any] = []
     book_row_count = 0
     for row in iter_vision_csv_archive(book_ticker_archive):
+        if not isinstance(row, (list, tuple)) or not row:
+            raise ValueError("Binance Vision bookTicker row is malformed")
+        first_cell = str(row[0]).strip().lower().replace(" ", "_")
+        if first_cell == "update_id":
+            continue
+        book_row_count += 1
+        if len(row) < 7:
+            raise ValueError("Binance Vision bookTicker row is malformed")
+        try:
+            event_time_ms = int(row[6])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Binance Vision bookTicker event time is invalid") from exc
+        if not book_start_ms <= event_time_ms <= book_end_ms:
+            continue
         observation = parse_vision_book_ticker_row(row)
         if observation is None:
             continue
-        book_row_count += 1
         if book_start <= observation.event_time <= book_end:
             book_rows.append(row)
             book_observations.append(observation)
