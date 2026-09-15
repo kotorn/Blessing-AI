@@ -23,6 +23,7 @@ class BinanceCapabilities:
         self.authenticated = False
         self.account_request_succeeded = False
         self.trade_authorized = False
+        self.position_mode_known = False
         self.environment = BinanceEnvironment.TESTNET
         self.usdm_futures = True
         self.hedge_mode = False
@@ -32,6 +33,7 @@ class BinanceCapabilities:
         self.authenticated = False
         self.account_request_succeeded = False
         self.trade_authorized = False
+        self.position_mode_known = False
         self.hedge_mode = False
         self.symbol_rules.clear()
         self.environment = rest_client.env
@@ -56,6 +58,7 @@ class BinanceCapabilities:
             if not isinstance(pos_mode, dict) or "dualSidePosition" not in pos_mode:
                 raise ValueError("Position mode response is invalid")
             self.hedge_mode = _exchange_bool(pos_mode["dualSidePosition"])
+            self.position_mode_known = True
             
             # Fetch Exchange Info
             exchange_info = await rest_client.request("GET", "/fapi/v1/exchangeInfo")
@@ -82,5 +85,6 @@ class BinanceCapabilities:
             self.authenticated = False
             self.account_request_succeeded = False
             self.trade_authorized = False
+            self.position_mode_known = False
             self.symbol_rules.clear()
             return False

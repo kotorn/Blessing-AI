@@ -5,6 +5,7 @@ import { PRESET_BIGQUERY_QUERIES } from '../src/lib/bigquery';
 
 const backend = readFileSync(resolve(process.cwd(), 'src/backend/bigquery.ts'), 'utf8');
 const client = readFileSync(resolve(process.cwd(), 'src/lib/bigquery.ts'), 'utf8');
+const accessVerification = readFileSync(resolve(process.cwd(), 'infra/bigquery/verify-runtime-access.ps1'), 'utf8');
 
 describe('BigQuery evidence and cost boundary', () => {
   it('accepts symbolic direct timestamp partition filters', () => {
@@ -40,5 +41,14 @@ describe('BigQuery evidence and cost boundary', () => {
 
   it('represents an unavailable browser buffer as an explicit safe no-op', () => {
     expect(client).toContain('body: JSON.stringify({ rows: [] })');
+  });
+
+  it('keeps runtime BigQuery writes dataset-scoped', () => {
+    expect(accessVerification).toContain('roles/bigquery.dataEditor');
+    expect(accessVerification).toContain('project-wide');
+    expect(accessVerification).toContain('WRITER');
+    for (const dataset of ['market_data', 'signals', 'risk', 'backtests']) {
+      expect(accessVerification).toContain(dataset);
+    }
   });
 });

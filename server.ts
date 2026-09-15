@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import { GoogleAuth } from 'google-auth-library';
 import { TradingSystemState, RiskConfiguration } from './src/backend/types.js';
 import { evaluatePreflight, validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES, isWorkerTradingConnectionHealthy } from './src/backend/system.js';
 import { auditRepository } from './src/backend/audit.js';
@@ -23,6 +24,10 @@ import {
   BIGQUERY_PROJECT_ID,
   MAX_SCAN_BYTES,
 } from './src/backend/bigquery.js';
+import {
+  requiredControlPlaneRole,
+  type ControlPlaneRole,
+} from './src/backend/control-plane-auth.js';
 
 
 dotenv.config();
@@ -31,6 +36,23 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
 app.use(express.json());
+
+// The control-plane middleware is registered before any API route so the
+// Binance profile/balance endpoints cannot bypass server-side Firebase RBAC.
+// The implementation is declared below as a function declaration and is
+// therefore available when Express starts handling requests.
+app.use(['/api/system', '/api/quant', '/api/binance'], (req, res, next) => {
+  void enforceOperatorAccess(req, res, next).catch(() => {
+    if (res.headersSent) return;
+    res.status(503).json({
+      error: 'CONTROL_PLANE_AUTH_UNAVAILABLE',
+      message: 'Control-plane authorization service is unavailable',
+      status: 'DEGRADED',
+      verified: false,
+      evidence_status: 'UNVERIFIED',
+    });
+  });
+});
 
 // Lazy-initialized Gemini client for Quant Research Assistant
 let geminiClient: GoogleGenAI | null = null;
@@ -1419,7 +1441,30 @@ app.get('/api/binance/balance', async (req: Request, res: Response) => {
 // production control plane must never silently fall back to localhost or an
 // unauthenticated worker.
 const WORKER_URL = (process.env.WORKER_URL?.trim() || (process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8080')).replace(/\/+$/, '');
-const WORKER_IDENTITY_TOKEN = process.env.WORKER_IDENTITY_TOKEN?.trim() || '';
+// A static token is accepted only as a local test override. Production always
+// mints a Google-signed OIDC token through ADC with the Worker URL as its
+// audience; Firebase user tokens never cross this service boundary.
+const LOCAL_WORKER_IDENTITY_TOKEN = process.env.WORKER_IDENTITY_TOKEN?.trim() || '';
+const workerGoogleAuth = new GoogleAuth();
+let workerIdentityClient: Awaited<ReturnType<GoogleAuth['getIdTokenClient']>> | null = null;
+
+async function workerAuthorizationHeader(): Promise<string | null> {
+  const localBypass = process.env.NODE_ENV !== 'production'
+    && ['1', 'true', 'yes', 'on'].includes((process.env.CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL || '').trim().toLowerCase());
+  if (localBypass) return null;
+  if (!WORKER_URL) throw new Error('WORKER_URL is not configured');
+  if (process.env.NODE_ENV !== 'production' && LOCAL_WORKER_IDENTITY_TOKEN) {
+    return `Bearer ${LOCAL_WORKER_IDENTITY_TOKEN}`;
+  }
+  if (!workerIdentityClient) {
+    // getIdTokenClient binds the exact Worker URL into the OIDC audience.
+    workerIdentityClient = await workerGoogleAuth.getIdTokenClient(WORKER_URL);
+  }
+  const headers = await workerIdentityClient.getRequestHeaders();
+  const authorization = headers.get('authorization');
+  if (!authorization) throw new Error('Google Worker identity token could not be minted');
+  return authorization;
+}
 
 async function forwardWorkerRequest(
   pathName: string,
@@ -1427,11 +1472,8 @@ async function forwardWorkerRequest(
 ): Promise<{ response: globalThis.Response; data: any }> {
   if (!WORKER_URL) throw new Error('WORKER_URL is not configured');
   const headers = new Headers(init?.headers);
-  if (WORKER_IDENTITY_TOKEN) {
-    headers.set('Authorization', `Bearer ${WORKER_IDENTITY_TOKEN}`);
-  } else if (!(process.env.NODE_ENV !== 'production' && ['1', 'true', 'yes', 'on'].includes((process.env.CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL || '').trim().toLowerCase()))) {
-    throw new Error('WORKER_IDENTITY_TOKEN is not configured');
-  }
+  const workerAuthorization = await workerAuthorizationHeader();
+  if (workerAuthorization) headers.set('Authorization', workerAuthorization);
   headers.set('X-Worker-Caller', 'blessing-control-plane');
   const response = await fetch(WORKER_URL + pathName, { ...init, headers });
   const bodyText = await response.text();
@@ -1478,26 +1520,21 @@ function projectWorkerState(workerState: any): void {
 }
 
 async function enforceOperatorAccess(req: Request, res: Response, next: () => void): Promise<void> {
-  const authorization = await authorizeOperatorRequest(req);
+  const requiredRole: ControlPlaneRole = requiredControlPlaneRole(req);
+  const authorization = await authorizeOperatorRequest(req, { requiredRole });
   if (authorization.ok) {
     next();
     return;
   }
   res.status(authorization.forbidden ? 403 : 401).json({
-    error: authorization.forbidden ? 'OPERATOR_AUTH_FORBIDDEN' : 'OPERATOR_AUTH_REQUIRED',
-    message: authorization.error || 'Authenticated operator access is required',
+    error: authorization.forbidden ? 'CONTROL_PLANE_AUTH_FORBIDDEN' : 'CONTROL_PLANE_AUTH_REQUIRED',
+    message: authorization.error || `Authenticated ${requiredRole} access is required`,
+    requiredRole,
     status: 'DEGRADED',
     verified: false,
     evidence_status: 'UNVERIFIED',
   });
 }
-
-// All control-plane reads and mutations use the same authenticated operator
-// boundary. The explicit local bypass is disabled by default and cannot be
-// enabled by a browser request.
-app.use(['/api/system', '/api/quant'], (req, res, next) => {
-  void enforceOperatorAccess(req, res, next);
-});
 
 function requireWorkerBoolean(data: any, field: string): boolean | null {
   return typeof data?.[field] === 'boolean' ? data[field] : null;
@@ -1682,6 +1719,25 @@ app.get('/api/system/preflight', async (req, res) => {
       checks: [{ id: 'CHK-WORKER', name: 'Worker Connectivity', required: true, status: 'FAIL', message: 'Unreachable' }],
       capabilities: EXECUTION_CAPABILITIES
     });
+  }
+});
+
+// This is an operator-only, non-arming Mainnet observation. It uses the
+// Worker's Google-authenticated service boundary and never forwards a browser
+// Firebase token to Cloud Run. The Worker must leave its engine state and
+// active configuration unchanged and must report zero order submissions.
+app.post('/api/system/preflight/read-only', async (req, res) => {
+  try {
+    const forwarded = await forwardWorkerRequest('/preflight/read-only', { method: 'POST' });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json({
+        error: 'WORKER_REJECTED_READ_ONLY_PREFLIGHT',
+        detail: forwarded.data,
+      });
+    }
+    return res.json(forwarded.data);
+  } catch (err) {
+    return res.status(503).json({ error: 'WORKER_UNREACHABLE' });
   }
 });
 

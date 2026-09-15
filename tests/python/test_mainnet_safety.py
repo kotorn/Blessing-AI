@@ -49,6 +49,8 @@ from apps.trading_worker.venues.binance.gates import (
     OrderExecutionGate,
     GateResult,
 )
+from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
+from apps.trading_worker.venues.binance.ledger import InMemoryLedger
 from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
 from apps.trading_worker.research.binance_cli import (
     BinanceCliPolicyError,
@@ -106,6 +108,59 @@ def test_leverage_exceeding_10x_rejected():
     """Verify that leverage >10x is rejected on Mainnet."""
     mainnet_limits = SafetyLimits.from_environment(BinanceEnvironment.MAINNET)
     assert mainnet_limits.max_leverage <= Decimal("10.0")
+
+
+@pytest.mark.asyncio
+async def test_read_only_mainnet_adapter_bypasses_approval_but_blocks_mutations(monkeypatch):
+    """Preflight may observe an unapproved account but can never submit orders."""
+
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "false")
+    adapter = BinanceExecutionAdapter(
+        api_key="preflight-key",
+        api_secret="preflight-secret",
+        env=BinanceEnvironment.MAINNET,
+        ledger=InMemoryLedger(),
+        preflight_only=True,
+    )
+    authority = object()
+    adapter.bind_worker_authority(authority)
+
+    decision = ExecutionDecision(
+        symbol="ETHUSDC",
+        decision_id="preflight-no-order",
+        action="EXECUTE",
+        risk_class=EconomicRiskClass.NEW_RISK,
+        orders=[],
+    )
+
+    assert await adapter.execute_decision(decision, authority=authority) == []
+    assert await adapter.cancel_all_open_orders(authority=authority) == {
+        "status": "BLOCKED",
+        "reason": "Read-only preflight adapter cannot cancel orders",
+    }
+    assert await adapter.cancel_order("ETHUSDC", "client-id", authority=authority) is False
+    assert (
+        await adapter.modify_order(
+            "ETHUSDC",
+            "client-id",
+            Decimal("100"),
+            Decimal("0.001"),
+            "BUY",
+            authority=authority,
+        )
+        is None
+    )
+    assert await adapter.emergency_flatten(authority=authority) == []
+    assert adapter.last_emergency_result["status"] == "BLOCKED"
+    with pytest.raises(PermissionError, match="cannot call the order endpoint"):
+        await adapter.rest_client.request(
+            "POST",
+            "/fapi/v1/order",
+            signed=True,
+            params={"symbol": "ETHUSDC"},
+        )
+    assert adapter.rest_client.order_endpoint_attempts == 1
+    await adapter.close()
 
 
 @pytest.mark.asyncio

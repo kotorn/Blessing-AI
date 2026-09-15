@@ -2,6 +2,12 @@ import { BigQuery } from '@google-cloud/bigquery';
 import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import type { Request } from 'express';
+import {
+  controlPlaneRoles,
+  hasControlPlaneRole,
+  highestControlPlaneRole,
+  type ControlPlaneRole,
+} from './control-plane-auth.js';
 
 export const BIGQUERY_PROJECT_ID = process.env.BIGQUERY_PROJECT_ID?.trim() || 'gen-lang-client-0730128480';
 export const BIGQUERY_LOCATION = process.env.BIGQUERY_LOCATION?.trim() || 'US';
@@ -100,6 +106,8 @@ export interface BigQueryAuthResult {
   mode: 'FIREBASE_ID_TOKEN' | 'LOCAL_DEV_ONLY';
   uid?: string;
   claims?: Record<string, unknown>;
+  roles?: ControlPlaneRole[];
+  role?: ControlPlaneRole;
   forbidden?: boolean;
   error?: string;
 }
@@ -114,6 +122,7 @@ export async function authorizeFirebaseRequest(
   options: {
     localBypassEnv?: string;
     requireOperator?: boolean;
+    requiredRole?: ControlPlaneRole;
     requireTelemetryProducer?: boolean;
   } = {},
 ): Promise<BigQueryAuthResult> {
@@ -136,17 +145,19 @@ export async function authorizeFirebaseRequest(
     });
     const decoded = await getAuth(app).verifyIdToken(match[1]);
     const claims: Record<string, unknown> = { ...decoded };
-    if (options.requireOperator) {
-      const role = String(claims.role || '').trim().toUpperCase();
-      const isOperator = claims.operator === true || claims.admin === true || ['OPERATOR', 'ADMIN', 'TRADER'].includes(role);
-      if (!isOperator) {
+    const roles = controlPlaneRoles(claims);
+    const requiredRole = options.requiredRole || (options.requireOperator ? 'operator' : 'viewer');
+    if (!hasControlPlaneRole(roles, requiredRole)) {
+      if (requiredRole) {
         return {
           ok: false,
           mode: 'FIREBASE_ID_TOKEN',
           uid: decoded.uid,
           claims,
+          roles,
+          role: highestControlPlaneRole(roles),
           forbidden: true,
-          error: 'Operator authorization is required',
+          error: `${requiredRole} authorization is required`,
         };
       }
     }
@@ -158,12 +169,21 @@ export async function authorizeFirebaseRequest(
           mode: 'FIREBASE_ID_TOKEN',
           uid: decoded.uid,
           claims,
+          roles,
+          role: highestControlPlaneRole(roles),
           forbidden: true,
           error: 'Telemetry producer authorization is required',
         };
       }
     }
-    return { ok: true, mode: 'FIREBASE_ID_TOKEN', uid: decoded.uid, claims };
+    return {
+      ok: true,
+      mode: 'FIREBASE_ID_TOKEN',
+      uid: decoded.uid,
+      claims,
+      roles,
+      role: highestControlPlaneRole(roles),
+    };
   } catch {
     // Never echo token or provider internals into an HTTP response.
     return { ok: false, mode: 'FIREBASE_ID_TOKEN', error: 'Firebase ID token could not be verified' };
@@ -176,14 +196,18 @@ export async function authorizeBigQueryRequest(
 ): Promise<BigQueryAuthResult> {
   return authorizeFirebaseRequest(req, {
     localBypassEnv: 'BIGQUERY_ALLOW_LOCAL_UNAUTHENTICATED',
+    requiredRole: 'viewer',
     requireTelemetryProducer: options.requireTelemetryProducer,
   });
 }
 
-export async function authorizeOperatorRequest(req: Request): Promise<BigQueryAuthResult> {
+export async function authorizeOperatorRequest(
+  req: Request,
+  options: { requiredRole?: ControlPlaneRole } = {},
+): Promise<BigQueryAuthResult> {
   return authorizeFirebaseRequest(req, {
     localBypassEnv: 'CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL',
-    requireOperator: true,
+    requiredRole: options.requiredRole || 'operator',
   });
 }
 

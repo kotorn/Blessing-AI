@@ -105,12 +105,24 @@ class BinanceAPIError(Exception):
         self.headers = headers or {}
 
 class BinanceRestClient:
-    def __init__(self, api_key: str, api_secret: str, env: BinanceEnvironment):
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        env: BinanceEnvironment,
+        *,
+        read_only: bool = False,
+    ):
         if not isinstance(env, BinanceEnvironment):
             raise ValueError("Binance REST execution client requires TESTNET or MAINNET")
         self.api_key = api_key
         self.api_secret = api_secret
         self.env = env
+        # A preflight adapter gets a transport-level read-only boundary in
+        # addition to the adapter method guards.  This prevents a future
+        # preflight code path from reaching the order endpoint accidentally.
+        self.read_only = bool(read_only)
+        self.order_endpoint_attempts = 0
         self.base_url = get_rest_url(env)
         self.clock = BinanceClock(self.base_url)
         self.session: Optional[aiohttp.ClientSession] = None
@@ -185,6 +197,12 @@ class BinanceRestClient:
                 "Binance request is outside the fixed USDⓈ-M endpoint allowlist: "
                 f"{method_upper} {path}"
             )
+        if path == "/fapi/v1/order":
+            self.order_endpoint_attempts += 1
+            if self.read_only:
+                raise PermissionError(
+                    "Read-only Binance client cannot call the order endpoint"
+                )
         if not self.session:
             await self.init_session()
 

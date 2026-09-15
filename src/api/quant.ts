@@ -17,6 +17,26 @@ export interface QuantStateResponse {
   liquidation_distance_pct?: number | null;
 }
 
+export interface ReadOnlyMainnetPreflightResponse {
+  executionMode: 'LIVE';
+  preflightOnly: true;
+  preflightPassed: boolean;
+  canArm: false;
+  mainnetLiveApproved: boolean;
+  engineState: string;
+  orderSubmissionAttempts: number;
+  order_submission_attempts?: number;
+  orderEndpointAttempts?: number;
+  checks: Array<{
+    id: string;
+    name: string;
+    required: boolean;
+    status: 'PASS' | 'FAIL';
+    message: string;
+  }>;
+  observedAt: string;
+}
+
 export const quantApi = {
 
   getSystemState: async (): Promise<TradingSystemState> => {
@@ -24,6 +44,9 @@ export const quantApi = {
   },
   preflight: async (executionMode: string): Promise<PreflightResult> => {
     return apiClient.get<PreflightResult>('/api/system/preflight?executionMode=' + executionMode);
+  },
+  readOnlyMainnetPreflight: async (): Promise<ReadOnlyMainnetPreflightResponse> => {
+    return apiClient.post<ReadOnlyMainnetPreflightResponse>('/api/system/preflight/read-only', {});
   },
   arm: async (params: any): Promise<TradingSystemState> => {
     return apiClient.post<TradingSystemState>('/api/system/arm', params);

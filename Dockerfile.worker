@@ -1,7 +1,19 @@
 # Builder stage for official Binance CLI
 FROM debian:bookworm-slim AS cli-builder
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates xz-utils && rm -rf /var/lib/apt/lists/*
-RUN curl -L https://github.com/binance/binance-cli/releases/download/v2.1.1/binance-cli-x86_64-unknown-linux-gnu.tar.xz | tar -xJ -C /usr/local/bin --strip-components=1 binance-cli-x86_64-unknown-linux-gnu/binance-cli && chmod +x /usr/local/bin/binance-cli
+ARG BINANCE_CLI_VERSION=2.1.1
+ARG BINANCE_CLI_ARCHIVE=binance-cli-x86_64-unknown-linux-gnu.tar.xz
+ARG BINANCE_CLI_SHA256=6b836a24f281abf590988207b0d19d4933971ca66dcf45a9e255cdc237c4deee
+RUN set -eux; \
+    archive_path="/tmp/${BINANCE_CLI_ARCHIVE}"; \
+    curl --fail --silent --show-error --location \
+      --output "${archive_path}" \
+      "https://github.com/binance/binance-cli/releases/download/v${BINANCE_CLI_VERSION}/${BINANCE_CLI_ARCHIVE}"; \
+    printf '%s  %s\n' "${BINANCE_CLI_SHA256}" "${archive_path}" | sha256sum --check --strict -; \
+    tar -xJf "${archive_path}" -C /tmp; \
+    test -x "/tmp/binance-cli-x86_64-unknown-linux-gnu/binance-cli"; \
+    install -m 0755 "/tmp/binance-cli-x86_64-unknown-linux-gnu/binance-cli" /usr/local/bin/binance-cli; \
+    rm -rf "${archive_path}" /tmp/binance-cli-x86_64-unknown-linux-gnu
 
 # Phase 5: Cloud Run Deployment for Blessing AI Trading Worker
 FROM python:3.13-slim

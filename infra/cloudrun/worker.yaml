@@ -16,7 +16,9 @@ spec:
       containerConcurrency: 1
       serviceAccountName: blessing-runtime@gen-lang-client-0730128480.iam.gserviceaccount.com
       containers:
-        - image: REPLACE_WITH_IMMUTABLE_IMAGE_URI
+        # Replace with the full Artifact Registry image digest, never a tag:
+        # asia-southeast1-docker.pkg.dev/.../trading-worker@sha256:<64 hex>
+        - image: REPLACE_WITH_IMMUTABLE_IMAGE_DIGEST
           ports:
             - name: http1
               containerPort: 8080
@@ -45,17 +47,17 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: blessing-binance-mainnet-api-key
-                  key: latest
+                  key: "1"
             - name: BINANCE_MAINNET_API_SECRET
               valueFrom:
                 secretKeyRef:
                   name: blessing-binance-mainnet-api-secret
-                  key: latest
+                  key: "1"
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: blessing-cloud-sql-password
-                  key: latest
+                  key: "1"
           startupProbe:
             httpGet:
               path: /health

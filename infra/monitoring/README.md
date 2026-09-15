@@ -40,6 +40,11 @@ The deployment owner must confirm the alert notification channel, metric
 names, retention, and a test notification during the Cloud Run acceptance
 runbook. An alert is not a spending cap and cannot authorize Mainnet.
 
+The declarative budget in `budget.json` is a monthly alert amount in the
+billing account's currency (the current target account reports THB). It is
+scoped to the Blessing project by `apply.ps1` and is an alert only; Google
+Cloud Billing Budgets does not stop spend or change trading authorization.
+
 ## Read-back acceptance
 
 Acceptance requires a live read-back of the Cloud Run revision, readiness

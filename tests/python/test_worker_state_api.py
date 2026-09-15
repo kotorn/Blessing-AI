@@ -1,4 +1,7 @@
 import asyncio
+from datetime import datetime, timezone, timedelta
+from decimal import Decimal
+from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from apps.trading_worker.main import (
@@ -11,6 +14,8 @@ from apps.trading_worker.main import (
     get_default_state,
     _global_heartbeat_loop,
 )
+from apps.trading_worker.venues.binance.config import BinanceEnvironment, environment_label
+from apps.trading_worker.venues.binance.models import ConnectionState
 from apps.trading_worker.persistence import (
     PersistenceConfig,
     PersistenceManager,
@@ -61,6 +66,143 @@ async def test_required_persistence_blocks_paper_readiness_and_arming():
     )
     assert success is False
     assert "Required persistence is not ready" in message
+
+
+@pytest.mark.asyncio
+async def test_mainnet_read_only_preflight_never_arms_worker_or_submits_orders(monkeypatch):
+    """Signed observation evidence must not mutate the Worker lifecycle."""
+
+    monkeypatch.setenv("BINANCE_MAINNET_API_KEY", "preflight-key")
+    monkeypatch.setenv("BINANCE_MAINNET_API_SECRET", "preflight-secret")
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "false")
+
+    worker = TradingWorkerApp(symbols=["BTCUSDT"])
+    worker.persistence = SimpleNamespace(
+        readiness=lambda: {"mode": "REQUIRED", "durable": True},
+    )
+    original_signature = (
+        worker.execution_mode,
+        worker.engine_state,
+        worker.connection_state,
+        worker.market_data_healthy,
+        worker.private_stream_healthy,
+        worker.authenticated,
+        worker.reconciliation_status,
+        worker.kill_switch_active,
+        worker.pause_new_risk,
+        worker.recovery_only,
+        tuple(worker.symbols),
+        worker.execution_adapter,
+        worker.active_configuration,
+    )
+
+    now = datetime.now(timezone.utc)
+    window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    snapshot = SimpleNamespace(
+        valid=True,
+        timestamp=now,
+        exchange_environment=environment_label(BinanceEnvironment.MAINNET),
+        wallet_balance=Decimal("100"),
+        margin_balance=Decimal("100"),
+        available_balance=Decimal("100"),
+        unrealized_pnl=Decimal("0"),
+        total_initial_margin=Decimal("0"),
+        total_maint_margin=Decimal("0"),
+        position_initial_margin=Decimal("0"),
+        total_position_notional=Decimal("0"),
+        effective_leverage=Decimal("0"),
+        margin_utilization_pct=Decimal("0"),
+        liquidation_safety="KNOWN",
+        min_liquidation_distance_pct=None,
+        collateral_asset="USDC",
+        risk_currency="USDC",
+        daily_loss_asset="USDC",
+        daily_pnl_includes_fees=True,
+        daily_pnl_includes_funding=True,
+        daily_loss_known=True,
+        daily_realized_pnl=Decimal("0"),
+        daily_loss_window_start=window_start,
+        daily_loss_window_end=window_start + timedelta(days=1),
+        configured_leverage=Decimal("5"),
+        configured_leverage_known=True,
+        margin_mode="SINGLE_ASSET_CROSS",
+        margin_mode_known=True,
+    )
+
+    class FakeAdapter:
+        instances = []
+
+        def __init__(self, **kwargs):
+            assert kwargs["env"] is BinanceEnvironment.MAINNET
+            assert kwargs["preflight_only"] is True
+            self.env = kwargs["env"]
+            self.preflight_only = kwargs["preflight_only"]
+            self.connection_state = ConnectionState.READY
+            self.authenticated = True
+            self.private_stream_healthy = True
+            self.account_snapshot = snapshot
+            self.last_market_event_at = {"ETHUSDC": now}
+            self.capabilities = SimpleNamespace(
+                account_request_succeeded=True,
+                authenticated=True,
+                trade_authorized=True,
+                position_mode_known=True,
+            )
+            self.reconciliation = SimpleNamespace(last_status="IN_SYNC")
+            self.closed = False
+            self.order_submission_attempts = 0
+            self.__class__.instances.append(self)
+
+        async def connect(self):
+            return True
+
+        async def refresh_market_data(self, symbols):
+            assert symbols == ["ETHUSDC"]
+            return True
+
+        def is_symbol_ready_for_execution(self, symbol):
+            return symbol == "ETHUSDC"
+
+        def is_account_snapshot_fresh(self):
+            return True
+
+        def has_authoritative_market_sample(self, symbol):
+            return symbol == "ETHUSDC"
+
+        def _market_data_max_age(self):
+            return 30.0
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("apps.trading_worker.main.BinanceExecutionAdapter", FakeAdapter)
+
+    result = await worker.run_mainnet_read_only_preflight()
+
+    assert result["preflightOnly"] is True
+    assert result["preflightPassed"] is True
+    assert result["canArm"] is False
+    assert result["mainnetLiveApproved"] is False
+    assert result["orderSubmissionAttempts"] == 0
+    assert result["order_submission_attempts"] == 0
+    assert result["orderEndpointAttempts"] == 0
+    assert FakeAdapter.instances[-1].closed is True
+    assert FakeAdapter.instances[-1].order_submission_attempts == 0
+    assert (
+        worker.execution_mode,
+        worker.engine_state,
+        worker.connection_state,
+        worker.market_data_healthy,
+        worker.private_stream_healthy,
+        worker.authenticated,
+        worker.reconciliation_status,
+        worker.kill_switch_active,
+        worker.pause_new_risk,
+        worker.recovery_only,
+        tuple(worker.symbols),
+        worker.execution_adapter,
+        worker.active_configuration,
+    ) == original_signature
 
 
 @pytest.mark.asyncio

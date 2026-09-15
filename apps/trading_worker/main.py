@@ -450,6 +450,16 @@ def get_preflight_endpoint(execution_mode: str = "PAPER"):
         raise HTTPException(status_code=503, detail="Worker not initialized")
     return WORKER_ENGINE.get_preflight(execution_mode)
 
+@app.post("/preflight/read-only")
+async def read_only_preflight_endpoint():
+    """Run a signed Mainnet observation without arming or submitting orders."""
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    runner = getattr(WORKER_ENGINE, "run_mainnet_read_only_preflight", None)
+    if not callable(runner):
+        raise HTTPException(status_code=503, detail="Read-only preflight is unavailable")
+    return await runner()
+
 @app.post("/pause-new-risk")
 async def pause_new_risk_endpoint(req: ToggleRequest):
     if not WORKER_ENGINE:
@@ -540,6 +550,7 @@ class TradingWorkerApp:
         self.persistence = PersistenceManager(
             instrument_rules_provider=self._persistence_instrument_rules
         )
+        self._mainnet_preflight_lock = asyncio.Lock()
         self._execution_lease_owner_id = uuid.uuid4().hex
         self._execution_lease_ttl_seconds = 10.0
         self._execution_lease_last_renewed_at = 0.0
@@ -858,19 +869,34 @@ class TradingWorkerApp:
         except (InvalidOperation, TypeError, ValueError):
             return False
 
-    def is_mainnet_account_risk_ready(self) -> bool:
-        """Require independently observed Mainnet collateral, mode, leverage, and PnL."""
+    def _is_mainnet_snapshot_risk_ready(
+        self,
+        snapshot: Any,
+        adapter: Any,
+        *,
+        freshness_verified: Optional[bool] = None,
+        require_execution_lease: bool = True,
+    ) -> bool:
+        """Apply the immutable Mainnet account/risk limits to one snapshot.
 
-        if self.execution_mode != WorkerExecutionMode.LIVE:
+        ``run_mainnet_read_only_preflight`` uses this same validator with the
+        temporary observation adapter and without an execution lease.  That
+        keeps preflight useful while ensuring it can never satisfy the
+        autonomous execution lease gate.
+        """
+
+        if snapshot is None or not getattr(snapshot, "valid", False):
             return False
-        adapter = self.execution_adapter
-        snapshot = getattr(adapter, "account_snapshot", None) if adapter else None
-        if snapshot is None:
-            snapshot = getattr(getattr(adapter, "ledger", None), "account_snapshot", None) if adapter else None
-        if snapshot is None or not self.is_account_snapshot_ready():
+        if getattr(adapter, "env", None) != BinanceEnvironment.MAINNET:
             return False
+        if freshness_verified is None:
+            freshness_check = getattr(adapter, "is_account_snapshot_fresh", None)
+            freshness_verified = bool(callable(freshness_check) and freshness_check())
+        if not freshness_verified:
+            return False
+
         lease = getattr(adapter, "execution_lease", None)
-        if bool(getattr(adapter, "execution_lease_required", True)) and (
+        if require_execution_lease and bool(getattr(adapter, "execution_lease_required", True)) and (
             lease is None or getattr(lease, "fencing_token", None) is None
         ):
             return False
@@ -896,6 +922,9 @@ class TradingWorkerApp:
             "SINGLE_ASSET_CROSS",
         }:
             return False
+        if str(getattr(snapshot, "liquidation_safety", "")).upper() != "KNOWN":
+            return False
+
         try:
             limits = TestnetSafetyLimits.from_environment(BinanceEnvironment.MAINNET)
             collateral = Decimal(str(getattr(snapshot, "margin_balance", None)))
@@ -908,9 +937,9 @@ class TradingWorkerApp:
             total_position_notional = Decimal(
                 str(getattr(snapshot, "total_position_notional", None))
             )
-            max_loss = limits.max_daily_loss
         except (InvalidOperation, TypeError, ValueError):
             return False
+
         if (
             not collateral.is_finite()
             or collateral <= 0
@@ -934,14 +963,20 @@ class TradingWorkerApp:
             or configured_leverage > limits.max_leverage
         ):
             return False
-        if (
-            not daily_pnl.is_finite()
-            or not unrealized_pnl.is_finite()
-        ):
+        if not daily_pnl.is_finite() or not unrealized_pnl.is_finite():
             return False
         daily_loss = max(Decimal("0"), -(daily_pnl + unrealized_pnl))
-        if not daily_loss.is_finite() or daily_loss >= max_loss:
+        if not daily_loss.is_finite() or daily_loss >= limits.max_daily_loss:
             return False
+
+        liquidation_distance = getattr(snapshot, "min_liquidation_distance_pct", None)
+        if total_position_notional != 0:
+            try:
+                if liquidation_distance is None or not Decimal(str(liquidation_distance)).is_finite() or Decimal(str(liquidation_distance)) <= 0:
+                    return False
+            except (InvalidOperation, TypeError, ValueError):
+                return False
+
         window_start = getattr(snapshot, "daily_loss_window_start", None)
         window_end = getattr(snapshot, "daily_loss_window_end", None)
         if not isinstance(window_start, datetime) or not isinstance(window_end, datetime):
@@ -959,6 +994,24 @@ class TradingWorkerApp:
             and end_utc >= start_utc
             and end_utc <= start_utc + timedelta(days=1)
             and start_utc <= now_utc < end_utc
+        )
+
+    def is_mainnet_account_risk_ready(self) -> bool:
+        """Require independently observed Mainnet collateral, mode, leverage, and PnL."""
+
+        if self.execution_mode != WorkerExecutionMode.LIVE:
+            return False
+        adapter = self.execution_adapter
+        snapshot = getattr(adapter, "account_snapshot", None) if adapter else None
+        if snapshot is None:
+            snapshot = getattr(getattr(adapter, "ledger", None), "account_snapshot", None) if adapter else None
+        if snapshot is None or not self.is_account_snapshot_ready():
+            return False
+        return self._is_mainnet_snapshot_risk_ready(
+            snapshot,
+            adapter,
+            freshness_verified=True,
+            require_execution_lease=True,
         )
 
     def _derive_testnet_risk_state(
@@ -1707,6 +1760,357 @@ class TradingWorkerApp:
                 }
             ]
         }
+
+    async def run_mainnet_read_only_preflight(self) -> dict:
+        """Collect signed Mainnet evidence without changing worker lifecycle.
+
+        This path deliberately creates a disposable adapter that is allowed to
+        perform only the read/stream/reconciliation lifecycle.  It never binds
+        the adapter to this worker, never acquires an execution lease, never
+        calls an order endpoint, and always closes the private stream before
+        returning.  A successful observation is evidence for a later release
+        gate; it is not an ARM operation.
+        """
+
+        async with self._mainnet_preflight_lock:
+            observed_at = utc_now()
+            checks: List[dict[str, Any]] = []
+
+            def add_check(
+                check_id: str,
+                name: str,
+                passed: bool,
+                message: str,
+                *,
+                required: bool = True,
+            ) -> None:
+                checks.append(
+                    {
+                        "id": check_id,
+                        "name": name,
+                        "required": required,
+                        "status": "PASS" if passed else "FAIL",
+                        "message": message,
+                    }
+                )
+
+            before_signature = (
+                self.execution_mode,
+                self.engine_state,
+                self.connection_state,
+                self.market_data_healthy,
+                self.private_stream_healthy,
+                self.authenticated,
+                self.reconciliation_status,
+                self.kill_switch_active,
+                self.pause_new_risk,
+                self.recovery_only,
+                tuple(self.symbols),
+                id(self.execution_adapter),
+                repr(self.active_configuration),
+            )
+            adapter: Optional[BinanceExecutionAdapter] = None
+            order_submission_attempts = 0
+            order_endpoint_attempts = 0
+            credentials_configured = self._mainnet_configured()
+            add_check(
+                "CHK-PREFLIGHT-CREDENTIALS",
+                "Mainnet Credentials",
+                credentials_configured,
+                "Secret-injected Mainnet credential pair is present"
+                if credentials_configured
+                else "Mainnet credentials are not injected into this revision",
+            )
+
+            connected = False
+            market_fresh = False
+            persistence_ready = False
+            persistence_error = False
+            try:
+                try:
+                    persistence = self.persistence.readiness()
+                    persistence_ready = bool(
+                        persistence.get("mode") == "REQUIRED"
+                        and persistence.get("durable") is True
+                    )
+                except Exception:
+                    persistence_error = True
+                add_check(
+                    "CHK-PREFLIGHT-PERSISTENCE",
+                    "Required SQL Persistence",
+                    persistence_ready and not persistence_error,
+                    "Required transactional outbox is durable"
+                    if persistence_ready and not persistence_error
+                    else "Required persistence is unavailable; preflight evidence is not durable",
+                )
+                add_check(
+                    "CHK-PREFLIGHT-KILL-SWITCH",
+                    "Kill Switch",
+                    not self.kill_switch_active,
+                    "Kill switch is inactive"
+                    if not self.kill_switch_active
+                    else "Kill switch is active",
+                )
+
+                if credentials_configured:
+                    adapter = BinanceExecutionAdapter(
+                        api_key=os.getenv("BINANCE_MAINNET_API_KEY", ""),
+                        api_secret=os.getenv("BINANCE_MAINNET_API_SECRET", ""),
+                        env=BinanceEnvironment.MAINNET,
+                        preflight_only=True,
+                    )
+                    connected = await adapter.connect()
+                    try:
+                        market_fresh = await adapter.refresh_market_data(["ETHUSDC"])
+                    except Exception:
+                        market_fresh = False
+
+                    capabilities = adapter.capabilities
+                    add_check(
+                        "CHK-PREFLIGHT-CONNECTION",
+                        "Mainnet Read-only Connection",
+                        connected and adapter.connection_state == ConnectionState.READY,
+                        "Fixed Mainnet adapter reached READY for observation"
+                        if connected and adapter.connection_state == ConnectionState.READY
+                        else "Mainnet read-only connection did not reach READY",
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-AUTH",
+                        "Signed Account Authentication",
+                        bool(
+                            capabilities.account_request_succeeded
+                            and adapter.authenticated
+                        ),
+                        "Signed Mainnet account request succeeded"
+                        if capabilities.account_request_succeeded and adapter.authenticated
+                        else "Signed Mainnet account authentication is unverified",
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-CAN-TRADE",
+                        "Account Trade Permission",
+                        bool(capabilities.trade_authorized),
+                        "Binance account canTrade is true"
+                        if capabilities.trade_authorized
+                        else "Binance account canTrade is false or unverified",
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-POSITION-MODE",
+                        "Position Mode",
+                        bool(capabilities.position_mode_known),
+                        "Binance position mode was read successfully"
+                        if capabilities.position_mode_known
+                        else "Binance position mode is unknown",
+                    )
+                    rules_ready = adapter.is_symbol_ready_for_execution("ETHUSDC")
+                    add_check(
+                        "CHK-PREFLIGHT-RULES",
+                        "ETHUSDC Exchange Rules",
+                        rules_ready,
+                        "Runtime exchangeInfo proves a TRADING USDC perpetual with complete filters"
+                        if rules_ready
+                        else "ETHUSDC exchange-derived contract or filters are incomplete",
+                    )
+                    reconciliation_ready = (
+                        adapter.reconciliation.last_status == "IN_SYNC"
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-RECONCILIATION",
+                        "Account Reconciliation",
+                        reconciliation_ready,
+                        "Mainnet positions, open orders, fills, and account snapshot are in sync"
+                        if reconciliation_ready
+                        else "Mainnet exchange state is not reconciled with the disposable preflight ledger",
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-PRIVATE-STREAM",
+                        "Private Stream",
+                        bool(adapter.private_stream_healthy),
+                        "Private stream transport heartbeat was verified"
+                        if adapter.private_stream_healthy
+                        else "Private stream is unavailable or stale",
+                    )
+                    snapshot = adapter.account_snapshot
+                    account_ready = self._is_mainnet_snapshot_risk_ready(
+                        snapshot,
+                        adapter,
+                        require_execution_lease=False,
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-ACCOUNT-RISK",
+                        "USDC Account Risk Snapshot",
+                        account_ready,
+                        "USDC collateral, balance, leverage, exposure, liquidation, and fee/funding-inclusive daily PnL are within locked limits"
+                        if account_ready
+                        else "USDC collateral, mode, leverage, exposure, liquidation, or complete daily PnL evidence is unsafe or unavailable",
+                    )
+                    market_timestamp = adapter.last_market_event_at.get("ETHUSDC")
+                    if market_timestamp is not None and market_timestamp.tzinfo is not None:
+                        market_age = (utc_now() - market_timestamp).total_seconds()
+                        market_fresh = bool(
+                            market_fresh
+                            and adapter.has_authoritative_market_sample("ETHUSDC")
+                            and 0 <= market_age <= adapter._market_data_max_age()
+                        )
+                    else:
+                        market_fresh = False
+                    add_check(
+                        "CHK-PREFLIGHT-MARKET",
+                        "ETHUSDC Market Freshness",
+                        market_fresh,
+                        "Fresh Mainnet ETHUSDC book data was observed"
+                        if market_fresh
+                        else "Fresh Mainnet ETHUSDC market data is unavailable",
+                    )
+                else:
+                    for check_id, name, message in (
+                        (
+                            "CHK-PREFLIGHT-CONNECTION",
+                            "Mainnet Read-only Connection",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-AUTH",
+                            "Signed Account Authentication",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-CAN-TRADE",
+                            "Account Trade Permission",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-POSITION-MODE",
+                            "Position Mode",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-RULES",
+                            "ETHUSDC Exchange Rules",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-RECONCILIATION",
+                            "Account Reconciliation",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-PRIVATE-STREAM",
+                            "Private Stream",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-ACCOUNT-RISK",
+                            "USDC Account Risk Snapshot",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-MARKET",
+                            "ETHUSDC Market Freshness",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                    ):
+                        add_check(check_id, name, False, message)
+            except Exception as exc:
+                logger.error(
+                    "Mainnet read-only preflight failed: %s",
+                    type(exc).__name__,
+                )
+                add_check(
+                    "CHK-PREFLIGHT-ERROR",
+                    "Preflight Lifecycle",
+                    False,
+                    "Read-only preflight could not complete; see sanitized server logs",
+                )
+            finally:
+                if adapter is not None:
+                    order_submission_attempts = int(
+                        getattr(adapter, "order_submission_attempts", 0) or 0
+                    )
+                    order_endpoint_attempts = int(
+                        getattr(
+                            getattr(adapter, "rest_client", None),
+                            "order_endpoint_attempts",
+                            0,
+                        )
+                        or 0
+                    )
+                    try:
+                        await adapter.close()
+                    except Exception as exc:
+                        logger.error(
+                            "Mainnet read-only preflight cleanup failed: %s",
+                            type(exc).__name__,
+                        )
+
+            after_signature = (
+                self.execution_mode,
+                self.engine_state,
+                self.connection_state,
+                self.market_data_healthy,
+                self.private_stream_healthy,
+                self.authenticated,
+                self.reconciliation_status,
+                self.kill_switch_active,
+                self.pause_new_risk,
+                self.recovery_only,
+                tuple(self.symbols),
+                id(self.execution_adapter),
+                repr(self.active_configuration),
+            )
+            state_unchanged = before_signature == after_signature
+            add_check(
+                "CHK-PREFLIGHT-WORKER-STATE",
+                "Worker Lifecycle Unchanged",
+                state_unchanged,
+                "Worker remained in its prior lifecycle state"
+                if state_unchanged
+                else "Worker lifecycle changed during read-only preflight",
+            )
+            add_check(
+                "CHK-PREFLIGHT-NO-ORDER-ENDPOINT",
+                "No Order Endpoint",
+                order_endpoint_attempts == 0,
+                "No Binance order endpoint was called"
+                if order_endpoint_attempts == 0
+                else "A Binance order endpoint was called during read-only preflight",
+            )
+            add_check(
+                "CHK-PREFLIGHT-NO-ORDER-SUBMISSION",
+                "No Order Submission",
+                order_submission_attempts == 0,
+                "No order submission was attempted"
+                if order_submission_attempts == 0
+                else "An order submission was attempted during read-only preflight",
+            )
+            operational_checks = [
+                check for check in checks if check["required"]
+            ]
+            preflight_passed = bool(
+                operational_checks
+                and all(check["status"] == "PASS" for check in operational_checks)
+            )
+            approval = self._env_flag("MAINNET_LIVE_APPROVED", False)
+            logger.info(
+                "monitor_event=mainnet_read_only_preflight preflight_passed=%s order_submission_attempts=%d order_endpoint_attempts=%d",
+                preflight_passed,
+                order_submission_attempts,
+                order_endpoint_attempts,
+            )
+            return {
+                "executionMode": "LIVE",
+                "preflightOnly": True,
+                "preflightPassed": preflight_passed,
+                # A read-only observation can never arm this Worker, even if a
+                # deployment happens to carry a stale approval flag.
+                "canArm": False,
+                "mainnetLiveApproved": approval,
+                "engineState": self.engine_state.value,
+                "orderSubmissionAttempts": order_submission_attempts,
+                "order_submission_attempts": order_submission_attempts,
+                "orderEndpointAttempts": order_endpoint_attempts,
+                "checks": checks,
+                "observedAt": observed_at.isoformat(),
+            }
 
     async def set_pause_new_risk(self, active: bool):
         self.pause_new_risk = bool(active)

@@ -78,20 +78,27 @@ class BinanceExecutionAdapter:
         api_secret: str = "",
         env: BinanceEnvironment = BinanceEnvironment.TESTNET,
         ledger: Optional[ExecutionLedger] = None,
+        preflight_only: bool = False,
     ):
         if not isinstance(env, BinanceEnvironment):
             raise ValueError("Binance execution requires TESTNET or MAINNET")
         if env == BinanceEnvironment.MAINNET and os.getenv(
             "MAINNET_LIVE_APPROVED", ""
-        ).strip().lower() not in {"1", "true", "yes", "on"}:
+        ).strip().lower() not in {"1", "true", "yes", "on"} and not preflight_only:
             raise ValueError("Mainnet adapter construction requires MAINNET_LIVE_APPROVED=true")
 
         self.env = env
+        self.preflight_only = bool(preflight_only)
         self.api_key = api_key
         self.api_secret = api_secret
         self.ledger = ledger or InMemoryLedger()
         self.safety_limits = TestnetSafetyLimits.from_environment(env)
-        self.rest_client = BinanceRestClient(api_key, api_secret, env)
+        self.rest_client = BinanceRestClient(
+            api_key,
+            api_secret,
+            env,
+            read_only=self.preflight_only,
+        )
         self.capabilities = BinanceCapabilities()
         self.user_stream = BinanceUserStream(
             self.rest_client,
@@ -119,6 +126,7 @@ class BinanceExecutionAdapter:
         self.last_market_event_market_type: Dict[str, str] = {}
         self.last_order_event_at: Dict[str, datetime] = {}
         self.last_emergency_result: Dict[str, Any] = {"status": "UNKNOWN"}
+        self.order_submission_attempts = 0
         # The adapter is intentionally not an independent execution authority.
         # A Worker instance binds itself immediately before using the internal
         # submit path; direct adapter calls remain blocked.
@@ -643,6 +651,9 @@ class BinanceExecutionAdapter:
             return False
 
     async def arm(self) -> bool:
+        if self.preflight_only:
+            logger.warning("Read-only preflight adapter cannot transition to ARMED")
+            return False
         return await self.connect()
 
     async def _on_ws_event(self, event: Any):
@@ -1179,6 +1190,9 @@ class BinanceExecutionAdapter:
         authority: Optional[object] = None,
     ) -> List[ExecutionOrder]:
         """Reject direct adapter mutation; only the bound Worker may submit."""
+        if self.preflight_only:
+            logger.error("Blocked order submission from a read-only preflight adapter")
+            return []
         if not self._worker_authorized(authority):
             logger.error(
                 "Blocked direct Binance adapter mutation for decision %s; use TradingWorkerApp",
@@ -1212,6 +1226,9 @@ class BinanceExecutionAdapter:
         allow_emergency_fallback: bool = False,
         authority: Optional[object] = None,
     ) -> List[ExecutionOrder]:
+        if self.preflight_only:
+            logger.error("Blocked internal order submission from a read-only preflight adapter")
+            return []
         if not self._worker_authorized(authority):
             logger.error(
                 "Blocked internal Binance mutation outside the bound Trading Worker"
@@ -1337,6 +1354,7 @@ class BinanceExecutionAdapter:
                 # lease checked at arm time or at the first decision gate may
                 # have been fenced while this order was being prepared.
                 await self._assert_execution_lease(decision.risk_class)
+                self.order_submission_attempts += 1
                 response = await self.rest_client.request(
                     "POST", "/fapi/v1/order", signed=True, params=params
                 )
@@ -1425,6 +1443,12 @@ class BinanceExecutionAdapter:
         a queued normal mutation cannot overtake local kill-switch activation.
         """
 
+        if self.preflight_only:
+            return {
+                "status": "BLOCKED",
+                "reason": "Read-only preflight adapter cannot cancel orders",
+            }
+
         if not self._worker_authorized(authority):
             return {
                 "status": "UNKNOWN",
@@ -1504,6 +1528,9 @@ class BinanceExecutionAdapter:
         *,
         authority: Optional[object] = None,
     ) -> bool:
+        if self.preflight_only:
+            logger.error("Blocked %s cancellation from a read-only preflight adapter", self.environment_label)
+            return False
         if not self._worker_authorized(authority):
             logger.error("Blocked direct %s cancel outside the Trading Worker", self.environment_label)
             return False
@@ -1522,6 +1549,9 @@ class BinanceExecutionAdapter:
         *,
         authority: Optional[object] = None,
     ) -> bool:
+        if self.preflight_only:
+            logger.error("Blocked %s internal cancellation from a read-only preflight adapter", self.environment_label)
+            return False
         if not self._worker_authorized(authority):
             logger.error("Blocked direct %s cancel outside the Trading Worker", self.environment_label)
             return False
@@ -1612,6 +1642,9 @@ class BinanceExecutionAdapter:
         *,
         authority: Optional[object] = None,
     ) -> Optional[ExecutionOrder]:
+        if self.preflight_only:
+            logger.error("Blocked %s amendment from a read-only preflight adapter", self.environment_label)
+            return None
         if not self._worker_authorized(authority):
             logger.error("Blocked direct %s amendment outside the Trading Worker", self.environment_label)
             return None
@@ -1638,6 +1671,9 @@ class BinanceExecutionAdapter:
         *,
         authority: Optional[object] = None,
     ) -> Optional[ExecutionOrder]:
+        if self.preflight_only:
+            logger.error("Blocked %s internal amendment from a read-only preflight adapter", self.environment_label)
+            return None
         if not self._worker_authorized(authority):
             logger.error(
                 "Blocked direct %s amendment outside the Trading Worker",
@@ -1834,6 +1870,13 @@ class BinanceExecutionAdapter:
         *,
         authority: Optional[object] = None,
     ) -> List[ExecutionOrder]:
+        if self.preflight_only:
+            logger.error("Blocked emergency flatten from a read-only preflight adapter")
+            self.last_emergency_result = {
+                "status": "BLOCKED",
+                "reason": "Read-only preflight adapter cannot mutate exchange state",
+            }
+            return []
         if not self._worker_authorized(authority):
             logger.error("Blocked direct emergency flatten outside the Trading Worker")
             self.last_emergency_result = {
@@ -1851,6 +1894,13 @@ class BinanceExecutionAdapter:
         authority: Optional[object] = None,
     ) -> List[ExecutionOrder]:
         """Reduce only Binance positions through the Worker-owned emergency path."""
+        if self.preflight_only:
+            logger.error("Blocked internal emergency flatten from a read-only preflight adapter")
+            self.last_emergency_result = {
+                "status": "BLOCKED",
+                "reason": "Read-only preflight adapter cannot mutate exchange state",
+            }
+            return []
         if not self._worker_authorized(authority):
             logger.error("Blocked direct emergency flatten outside the Trading Worker")
             self.last_emergency_result = {

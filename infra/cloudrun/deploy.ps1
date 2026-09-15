@@ -2,6 +2,12 @@ param(
   [string]$ProjectId = "gen-lang-client-0730128480",
   [string]$Region = "asia-southeast1",
   [string]$ImageUri = "",
+  [ValidatePattern('^[1-9][0-9]*$')]
+  [string]$CloudSqlPasswordVersion = "1",
+  [ValidatePattern('^[1-9][0-9]*$')]
+  [string]$BinanceMainnetApiKeyVersion = "1",
+  [ValidatePattern('^[1-9][0-9]*$')]
+  [string]$BinanceMainnetApiSecretVersion = "1",
   [switch]$LiveRelease
 )
 
@@ -9,6 +15,10 @@ $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($ImageUri)) {
   throw "Pass an immutable ImageUri. This script never builds or selects a live image implicitly."
+}
+
+if ($ImageUri -notmatch '@sha256:[0-9a-fA-F]{64}$') {
+  throw "ImageUri must use an immutable registry digest (…@sha256:<64 hex characters>), not a tag."
 }
 
 if ($LiveRelease) {
@@ -39,7 +49,7 @@ Invoke-GCloud @(
   "--no-cpu-throttling",
   "--add-cloudsql-instances", "${ProjectId}:${Region}:blessing-sql-primary",
   "--set-env-vars", "EXECUTION_MODE=PAPER,PERSISTENCE_MODE=REQUIRED,EXECUTION_LEASE_REQUIRED=true,MAINNET_LIVE_APPROVED=false,POSTGRES_HOST=/cloudsql/${ProjectId}:${Region}:blessing-sql-primary,POSTGRES_PORT=5432,POSTGRES_DB=blessing_trading,POSTGRES_USER=blessing_worker",
-  "--set-secrets", "POSTGRES_PASSWORD=blessing-cloud-sql-password:latest,BINANCE_MAINNET_API_KEY=blessing-binance-mainnet-api-key:latest,BINANCE_MAINNET_API_SECRET=blessing-binance-mainnet-api-secret:latest",
+  "--set-secrets", "POSTGRES_PASSWORD=blessing-cloud-sql-password:${CloudSqlPasswordVersion},BINANCE_MAINNET_API_KEY=blessing-binance-mainnet-api-key:${BinanceMainnetApiKeyVersion},BINANCE_MAINNET_API_SECRET=blessing-binance-mainnet-api-secret:${BinanceMainnetApiSecretVersion}",
   "--no-allow-unauthenticated"
 )
 
