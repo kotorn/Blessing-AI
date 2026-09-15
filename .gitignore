@@ -29,8 +29,12 @@ __pycache__/
 .Python
 .pytest_cache/
 .pytest-tmp*/
+.pytest_temp/
 .ruff_cache/
 .mypy_cache/
+src/dataconnect-generated/.guides/
+src/dataconnect-generated/README.md
+src/dataconnect-generated/react/README.md
 env/
 venv/
 .venv/

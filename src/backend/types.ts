@@ -60,6 +60,9 @@ export interface TradingSystemState {
   updatedAt: string;
   heartbeatAt?: string;
   workerResponsive?: boolean;
+  mainnetCredentialsVerified?: boolean;
+  mainnetLiveApproved?: boolean;
+  mainnetPreflightReady?: boolean;
   activeConfiguration?: ActiveTradingConfiguration;
 }
 

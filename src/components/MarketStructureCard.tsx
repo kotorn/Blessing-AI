@@ -24,7 +24,7 @@ export const MarketStructureCard: React.FC<MarketStructureCardProps> = ({
 }) => {
   const hasVerifiedData =
     instrument?.verified === true &&
-    instrument.data_source === 'BINANCE_TESTNET';
+    (instrument.data_source === 'BINANCE_TESTNET' || instrument.data_source === 'BINANCE_MAINNET');
   // A current mark alone is not enough to invent swing levels, pivots, or
   // liquidity-touch counts. Those values must come from a verified OHLCV/
   // market-structure service.

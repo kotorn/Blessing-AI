@@ -1,8 +1,9 @@
 """Fail-closed execution gates shared by the worker and Binance adapter."""
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import logging
 import math
 import os
 from typing import Any, Optional
@@ -10,7 +11,10 @@ from typing import Any, Optional
 from domain.enums import EconomicRiskClass, MarketType, OrderSide, OrderType, PositionSide, TimeInForce
 from domain.models import ExecutionDecision, OrderIntent
 
+from .config import BinanceEnvironment, environment_label
 from .models import ConnectionState
+
+logger = logging.getLogger("blessing.binance.gates")
 
 
 @dataclass(frozen=True)
@@ -185,8 +189,22 @@ def _age_seconds(timestamp: Any) -> Optional[float]:
     if not isinstance(timestamp, datetime):
         return None
     if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=timezone.utc)
+        # A naive timestamp has no defensible exchange-time meaning. Treat it
+        # as unknown so the stale-data gate fails closed.
+        return None
     return (datetime.now(timezone.utc) - timestamp).total_seconds()
+
+
+def _venue_label(adapter: Any) -> str:
+    env = getattr(adapter, "env", BinanceEnvironment.TESTNET)
+    return environment_label(env) if isinstance(env, BinanceEnvironment) else str(env)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class DecisionExecutionGate:
@@ -197,8 +215,10 @@ class DecisionExecutionGate:
 
     def check(self, decision: ExecutionDecision) -> GateResult:
         mode = getattr(self.worker.execution_mode, "value", self.worker.execution_mode)
-        if mode != "TESTNET":
-            return GateResult(False, "Execution mode is not TESTNET")
+        if mode not in {"TESTNET", "LIVE"}:
+            return GateResult(False, "Execution mode is not an exchange execution mode")
+        if mode == "LIVE" and not _env_flag("MAINNET_LIVE_APPROVED", False):
+            return GateResult(False, "MAINNET_LIVE_APPROVED is not enabled")
         engine_state = getattr(self.worker, "engine_state", None)
         engine_state = getattr(engine_state, "value", engine_state)
         if engine_state not in {"ARMED", "PAUSED_NEW_RISK", "RECOVERY_ONLY"}:
@@ -206,9 +226,21 @@ class DecisionExecutionGate:
         if getattr(self.worker, "kill_switch_active", False):
             return GateResult(False, "Kill switch is active")
 
-        testnet_configured = getattr(self.worker, "_testnet_configured", None)
-        if callable(testnet_configured) and not testnet_configured():
-            return GateResult(False, "Binance Testnet configuration is not verified")
+        configured_getter = getattr(
+            self.worker,
+            "_mainnet_configured" if mode == "LIVE" else "_testnet_configured",
+            None,
+        )
+        if callable(configured_getter) and not configured_getter():
+            expected_environment = (
+                BinanceEnvironment.MAINNET
+                if mode == "LIVE"
+                else BinanceEnvironment.TESTNET
+            )
+            return GateResult(
+                False,
+                f"{environment_label(expected_environment)} configuration is not verified",
+            )
 
         adapter = getattr(self.worker, "execution_adapter", None)
         if adapter is None:
@@ -222,7 +254,7 @@ class DecisionExecutionGate:
         if not bool(
             getattr(getattr(adapter, "capabilities", None), "trade_authorized", False)
         ):
-            return GateResult(False, "Testnet trade permission is not verified")
+            return GateResult(False, f"{_venue_label(adapter)} trade permission is not verified")
         stream_health = getattr(adapter, "private_stream_healthy", None)
         if stream_health is None:
             stream_health = bool(
@@ -263,15 +295,18 @@ class DecisionExecutionGate:
 
         account_snapshot_ready = self.worker.is_account_snapshot_ready()
         if _is_risk_increasing(risk_class) and not account_snapshot_ready:
-            return GateResult(False, "Account snapshot is missing, stale, invalid, or not Testnet")
+            return GateResult(
+                False,
+                f"Account snapshot is missing, stale, invalid, or not {_venue_label(adapter)}",
+            )
 
         snapshot = getattr(adapter, "account_snapshot", None)
         if snapshot is None:
             snapshot = getattr(getattr(adapter, "ledger", None), "account_snapshot", None)
         if _is_risk_increasing(risk_class) and not _available_balance_is_positive(snapshot):
-            return GateResult(False, "Available Testnet balance is not positive")
+            return GateResult(False, f"Available {_venue_label(adapter)} balance is not positive")
         if _is_risk_increasing(risk_class) and not _margin_utilization_is_safe(snapshot):
-            return GateResult(False, "Margin utilization is at or above the Testnet safety limit")
+            return GateResult(False, f"Margin utilization is at or above the {_venue_label(adapter)} safety limit")
         if _is_risk_increasing(risk_class) and not _liquidation_safety_is_known_and_positive(snapshot):
             return GateResult(False, "Liquidation safety is UNKNOWN")
 
@@ -293,7 +328,7 @@ class DecisionExecutionGate:
                 if callable(has_market_sample) and not has_market_sample(symbol):
                     return GateResult(
                         False,
-                        f"Authoritative Testnet market sample unavailable for {symbol}",
+                        f"Authoritative {_venue_label(adapter)} market sample unavailable for {symbol}",
                     )
                 last_event = timestamps.get(symbol) or adapter_timestamps.get(symbol)
                 age = _age_seconds(last_event)
@@ -320,8 +355,11 @@ class OrderExecutionGate:
         require_reduce_only_for_risk_reduction: bool = True,
         allow_emergency_fallback: bool = False,
     ) -> GateResult:
-        if self.adapter.env != self.adapter.testnet_environment:
-            return GateResult(False, "Mutable execution is restricted to Binance Testnet")
+        if self.adapter.env not in {
+            BinanceEnvironment.TESTNET,
+            BinanceEnvironment.MAINNET,
+        }:
+            return GateResult(False, "Mutable execution requires a fixed Binance environment")
         risk = _risk_class(risk_class)
         if risk is None or risk == EconomicRiskClass.NOOP:
             return GateResult(False, "Invalid economic risk class")
@@ -336,7 +374,13 @@ class OrderExecutionGate:
         if not bool(
             getattr(getattr(self.adapter, "capabilities", None), "trade_authorized", False)
         ):
-            return GateResult(False, "Testnet trade permission is not verified")
+            return GateResult(False, f"{_venue_label(self.adapter)} trade permission is not verified")
+        if (
+            self.adapter.env == BinanceEnvironment.MAINNET
+            and not emergency_fallback
+            and not _env_flag("MAINNET_LIVE_APPROVED", False)
+        ):
+            return GateResult(False, "MAINNET_LIVE_APPROVED is not enabled")
         stream_health = getattr(self.adapter, "private_stream_healthy", None)
         if stream_health is None:
             stream_health = bool(
@@ -358,22 +402,102 @@ class OrderExecutionGate:
             and not emergency_fallback
             and (not callable(snapshot_checker) or not snapshot_checker())
         ):
-            return GateResult(False, "Account snapshot is missing, stale, invalid, or not Testnet")
+            return GateResult(
+                False,
+                f"Account snapshot is missing, stale, invalid, or not {_venue_label(self.adapter)}",
+            )
         if risk_increasing and not emergency_fallback:
             snapshot = getattr(self.adapter, "account_snapshot", None)
             if snapshot is None:
                 snapshot = getattr(getattr(self.adapter, "ledger", None), "account_snapshot", None)
             if not _available_balance_is_positive(snapshot):
-                return GateResult(False, "Available Testnet balance is not positive")
+                return GateResult(False, f"Available {_venue_label(self.adapter)} balance is not positive")
             if not _margin_utilization_is_safe(snapshot):
-                return GateResult(False, "Margin utilization is at or above the Testnet safety limit")
+                return GateResult(False, f"Margin utilization is at or above the {_venue_label(self.adapter)} safety limit")
             if not _liquidation_safety_is_known_and_positive(snapshot):
                 return GateResult(False, "Liquidation safety is UNKNOWN")
+            if self.adapter.env == BinanceEnvironment.MAINNET:
+                limits = self.adapter.safety_limits
+                try:
+                    collateral = Decimal(str(getattr(snapshot, "margin_balance", None)))
+                    wallet_balance = Decimal(str(getattr(snapshot, "wallet_balance", None)))
+                    effective_leverage = Decimal(str(getattr(snapshot, "effective_leverage", None)))
+                    configured_leverage = Decimal(str(getattr(snapshot, "configured_leverage", None)))
+                except (InvalidOperation, TypeError, ValueError):
+                    return GateResult(False, "Mainnet collateral or leverage is unknown")
+                if (
+                    str(getattr(snapshot, "collateral_asset", "")).upper() != "USDC"
+                    or str(getattr(snapshot, "risk_currency", "")).upper() != "USDC"
+                ):
+                    return GateResult(False, "Mainnet USDC collateral is not verified")
+                if not bool(getattr(snapshot, "margin_mode_known", False)) or str(
+                    getattr(snapshot, "margin_mode", "UNKNOWN")
+                ).upper() not in {"CROSS", "ISOLATED", "SINGLE_ASSET_CROSS"}:
+                    return GateResult(False, "Mainnet margin mode is unknown or unsupported")
+                if not collateral.is_finite() or collateral <= 0:
+                    return GateResult(False, "Mainnet collateral is invalid")
+                if (
+                    not wallet_balance.is_finite()
+                    or wallet_balance <= 0
+                    or wallet_balance > limits.max_collateral
+                    or collateral > limits.max_collateral
+                ):
+                    return GateResult(False, "Mainnet collateral cap exceeded")
+                if (
+                    not effective_leverage.is_finite()
+                    or effective_leverage < 0
+                    or effective_leverage > limits.max_leverage
+                ):
+                    return GateResult(False, "Mainnet effective leverage cap exceeded")
+                if (
+                    not bool(getattr(snapshot, "configured_leverage_known", False))
+                    or not configured_leverage.is_finite()
+                    or configured_leverage <= 0
+                    or configured_leverage > Decimal("10")
+                    or configured_leverage > limits.max_leverage
+                ):
+                    return GateResult(False, "Mainnet configured ETHUSDC leverage cap exceeded or unknown")
+                if (
+                    not bool(getattr(snapshot, "daily_loss_known", False))
+                    or str(getattr(snapshot, "daily_loss_asset", "")).upper() != "USDC"
+                    or not bool(getattr(snapshot, "daily_pnl_includes_fees", False))
+                    or not bool(getattr(snapshot, "daily_pnl_includes_funding", False))
+                ):
+                    return GateResult(False, "Mainnet daily loss observation is unknown")
+                window_start = getattr(snapshot, "daily_loss_window_start", None)
+                window_end = getattr(snapshot, "daily_loss_window_end", None)
+                if not isinstance(window_start, datetime) or not isinstance(window_end, datetime):
+                    return GateResult(False, "Mainnet daily loss UTC window is unknown")
+                if window_start.tzinfo is None or window_end.tzinfo is None:
+                    return GateResult(False, "Mainnet daily loss UTC window is not timezone-aware")
+                window_start = window_start.astimezone(timezone.utc)
+                window_end = window_end.astimezone(timezone.utc)
+                if (
+                    window_start != window_start.replace(hour=0, minute=0, second=0, microsecond=0)
+                    or window_end < window_start
+                    or window_end > window_start + timedelta(days=1)
+                ):
+                    return GateResult(False, "Mainnet daily loss UTC window is invalid")
+                try:
+                    realized = Decimal(str(getattr(snapshot, "daily_realized_pnl", None)))
+                    unrealized = Decimal(str(getattr(snapshot, "unrealized_pnl", None)))
+                except (InvalidOperation, TypeError, ValueError):
+                    return GateResult(False, "Mainnet daily loss observation is invalid")
+                if not realized.is_finite() or not unrealized.is_finite():
+                    return GateResult(False, "Mainnet daily loss observation is invalid")
+                daily_loss = max(Decimal("0"), -(realized + unrealized))
+                if not daily_loss.is_finite() or daily_loss >= limits.max_daily_loss:
+                    logger.error(
+                        "monitor_event=daily_loss_cap_breached environment=%s symbol=%s",
+                        _venue_label(self.adapter),
+                        str(getattr(intent, "symbol", "UNKNOWN")).upper(),
+                    )
+                    return GateResult(False, "Mainnet daily loss cap exceeded")
 
         symbol = str(intent.symbol).upper()
         limits = self.adapter.safety_limits
         if symbol not in limits.allowed_symbols:
-            return GateResult(False, f"Symbol {symbol} is not allowed by Testnet limits")
+            return GateResult(False, f"Symbol {symbol} is not allowed by {_venue_label(self.adapter)} limits")
         if intent.market_type != MarketType.USDM_FUTURES:
             return GateResult(False, "Only USDⓈ-M Futures intents are supported")
         order_type = getattr(intent.order_type, "value", intent.order_type)
@@ -506,7 +630,7 @@ class OrderExecutionGate:
                 return GateResult(False, f"Binance percent-price filter rejected order: {percent_reason}")
 
         # Check the timestamp after price discovery.  A MARKET order may have
-        # had no usable cached quote and therefore refresh from the Testnet
+        # had no usable cached quote and therefore refresh from the fixed
         # book; that fresh REST sample must be accepted only if its own event
         # or receipt timestamp is within the same per-symbol bound.
         if risk_increasing and not emergency_fallback:
@@ -516,7 +640,7 @@ class OrderExecutionGate:
             if callable(has_market_sample) and not has_market_sample(symbol):
                 return GateResult(
                     False,
-                    f"Authoritative Testnet market sample unavailable for {symbol}",
+                    f"Authoritative {_venue_label(self.adapter)} market sample unavailable for {symbol}",
                 )
             last_event = getattr(self.adapter, "last_market_event_at", {}).get(symbol)
             age = _age_seconds(last_event)
@@ -584,7 +708,7 @@ class OrderExecutionGate:
             if reducible_exposure < quantity:
                 return GateResult(
                     False,
-                    "reduceOnly side or quantity exceeds known Testnet exposure",
+                    f"reduceOnly side or quantity exceeds known {_venue_label(self.adapter)} exposure",
                 )
 
         if risk_increasing:
@@ -595,7 +719,7 @@ class OrderExecutionGate:
                 if order.client_order_id != exclude_client_order_id
             ]
             if len(current_open_orders) + reserved_open_orders >= limits.max_open_orders:
-                return GateResult(False, "Maximum Testnet open-order count reached")
+                return GateResult(False, f"Maximum {_venue_label(self.adapter)} open-order count reached")
 
             existing_notional = Decimal("0")
             for order in current_open_orders:
@@ -610,9 +734,9 @@ class OrderExecutionGate:
                     return GateResult(False, "Existing position notional is unknown")
                 existing_notional += abs(position.quantity * mark_price)
             if existing_notional + reserved_notional + notional > limits.max_total_open_notional:
-                return GateResult(False, "Maximum Testnet total open notional exceeded")
+                return GateResult(False, f"Maximum {_venue_label(self.adapter)} total open notional exceeded")
             if notional > limits.max_single_order_notional:
-                return GateResult(False, "Maximum Testnet single-order notional exceeded")
+                return GateResult(False, f"Maximum {_venue_label(self.adapter)} single-order notional exceeded")
 
             active_symbols = {
                 order.symbol for order in current_open_orders
@@ -621,7 +745,7 @@ class OrderExecutionGate:
                 if position.quantity != 0:
                     active_symbols.add(position.symbol)
             if symbol not in active_symbols and len(active_symbols) >= limits.max_active_exposure_chains:
-                return GateResult(False, "Maximum Testnet active exposure chains exceeded")
+                return GateResult(False, f"Maximum {_venue_label(self.adapter)} active exposure chains exceeded")
 
         return GateResult(
             True,

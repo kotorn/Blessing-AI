@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -29,8 +29,9 @@ from apps.trading_worker.main import (
     WorkerEngineState,
     WorkerExecutionMode,
 )
-from apps.trading_worker.venues.binance.config import BinanceEnvironment
+from apps.trading_worker.venues.binance.config import BinanceEnvironment, environment_label
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
+from apps.trading_worker.venues.binance.gates import OrderExecutionGate
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
 from apps.trading_worker.venues.binance.manual_testnet import (
     _cleanup_trial_open_orders,
@@ -60,6 +61,14 @@ class FakeStream:
 
     async def close(self):
         self.is_connected = False
+
+
+class FakePublicStream:
+    def __init__(self):
+        self.stopped = False
+
+    async def stop(self):
+        self.stopped = True
 
 
 class GateAuthority:
@@ -229,6 +238,7 @@ def make_decision(risk_class, *intents):
 
 def account_payload():
     return {
+        "multiAssetsMargin": False,
         "totalWalletBalance": "100",
         "totalMarginBalance": "100",
         "availableBalance": "90",
@@ -236,7 +246,193 @@ def account_payload():
         "totalInitialMargin": "10",
         "totalMaintMargin": "5",
         "totalPositionInitialMargin": "10",
+        "assets": [
+            {
+                "asset": "USDT",
+                "walletBalance": "100",
+                "marginBalance": "100",
+                "availableBalance": "90",
+                "unrealizedProfit": "0",
+                "initialMargin": "10",
+                "maintMargin": "5",
+                "positionInitialMargin": "10",
+            }
+        ],
     }
+
+
+def mainnet_account_payload():
+    payload = account_payload()
+    payload["assets"][0]["asset"] = "USDC"
+    return payload
+
+
+def test_mainnet_snapshot_uses_explicit_usdc_and_separate_leverage_observation():
+    window_start = utc_now().astimezone(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    window_end = utc_now().astimezone(timezone.utc)
+    snapshot = build_account_snapshot(
+        mainnet_account_payload(),
+        [{"symbol": "ETHUSDC", "positionAmt": "0", "leverage": "10"}],
+        environment=environment_label(BinanceEnvironment.MAINNET),
+        daily_realized_pnl=Decimal("-4"),
+        daily_loss_known=True,
+        daily_loss_asset="USDC",
+        daily_pnl_includes_fees=True,
+        daily_pnl_includes_funding=True,
+        daily_loss_window_start=window_start,
+        daily_loss_window_end=window_end,
+    )
+
+    assert snapshot.collateral_asset == "USDC"
+    assert snapshot.risk_currency == "USDC"
+    assert snapshot.configured_leverage == Decimal("10")
+    assert snapshot.configured_leverage_known is True
+    assert snapshot.margin_mode == "SINGLE_ASSET_CROSS"
+    assert snapshot.margin_mode_known is True
+
+
+def test_mainnet_multi_asset_mode_is_not_accepted_as_single_asset_cross():
+    payload = mainnet_account_payload()
+    payload["multiAssetsMargin"] = True
+    snapshot = build_account_snapshot(
+        payload,
+        [{"symbol": "ETHUSDC", "positionAmt": "0", "leverage": "10", "marginType": "cross"}],
+        environment=environment_label(BinanceEnvironment.MAINNET),
+        daily_realized_pnl=Decimal("0"),
+        daily_loss_known=True,
+        daily_loss_asset="USDC",
+        daily_pnl_includes_fees=True,
+        daily_pnl_includes_funding=True,
+    )
+
+    assert snapshot.margin_mode == "MULTI_ASSET_CROSS"
+    assert snapshot.margin_mode_known is True
+
+
+def test_mainnet_snapshot_fails_closed_without_usdc_asset():
+    with pytest.raises(ValueError, match="USDC"):
+        build_account_snapshot(
+            account_payload(),
+            [{"symbol": "ETHUSDC", "positionAmt": "0", "leverage": "10"}],
+            environment=environment_label(BinanceEnvironment.MAINNET),
+        )
+
+
+@pytest.mark.asyncio
+async def test_mainnet_daily_pnl_is_paginated_filtered_and_fee_funding_inclusive():
+    class MainnetIncomeRest(ScriptedRest):
+        env = BinanceEnvironment.MAINNET
+
+    page_one = [
+        {"asset": "USDC", "symbol": "ETHUSDC", "incomeType": "REALIZED_PNL", "income": "-2"}
+    ] + [
+        {"asset": "USDT", "symbol": "BTCUSDT", "incomeType": "REALIZED_PNL", "income": "-999"}
+    ] * 999
+    page_two = [
+        {"asset": "USDC", "symbol": "ETHUSDC", "incomeType": "COMMISSION", "income": "-1"},
+        {"asset": "USDC", "symbol": "ETHUSDC", "incomeType": "FUNDING_FEE", "income": "-0.5"},
+        {"asset": "USDC", "symbol": "BTCUSDC", "incomeType": "REALIZED_PNL", "income": "-999"},
+    ]
+
+    async def handler(method, path, kwargs):
+        assert method == "GET"
+        assert path == "/fapi/v1/income"
+        params = kwargs["params"]
+        assert params["symbol"] == "ETHUSDC"
+        assert params["limit"] == 1000
+        assert "incomeType" not in params
+        return page_one if params["page"] == 1 else page_two
+
+    rest = MainnetIncomeRest(handler)
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+
+    total, known = await reconciliation._daily_realized_pnl()
+
+    assert total == Decimal("-3.5")
+    assert known is True
+    assert [call[2]["params"]["page"] for call in rest.calls] == [1, 2]
+    assert reconciliation.daily_loss_window_start is not None
+    assert reconciliation.daily_loss_window_start.hour == 0
+    assert reconciliation.daily_loss_window_end == reconciliation.daily_loss_window_start + timedelta(days=1)
+
+
+@pytest.mark.asyncio
+async def test_mainnet_order_gate_blocks_daily_loss_at_five_usdc(monkeypatch):
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")
+    adapter = BinanceExecutionAdapter(
+        api_key="unit-test-mainnet-key",
+        api_secret="unit-test-mainnet-secret",
+        env=BinanceEnvironment.MAINNET,
+        ledger=InMemoryLedger(),
+    )
+    adapter.state = ConnectionState.READY
+    adapter.capabilities.account_request_succeeded = True
+    adapter.capabilities.authenticated = True
+    adapter.capabilities.trade_authorized = True
+    adapter.user_stream = FakeStream()
+    adapter.reconciliation.last_status = "IN_SYNC"
+    adapter.capabilities.symbol_rules["ETHUSDC"] = make_rules("ETHUSDC")
+    adapter.last_market_event_at["ETHUSDC"] = utc_now()
+    adapter.last_market_event_source["ETHUSDC"] = "BINANCE_MAINNET_WS"
+    adapter.last_market_event_venue["ETHUSDC"] = "BINANCE_MAINNET"
+    adapter.last_market_event_market_type["ETHUSDC"] = MarketType.USDM_FUTURES.value
+    now = utc_now()
+    window_start = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    adapter.ledger.account_snapshot = ExchangeAccountSnapshot(
+        wallet_balance=Decimal("100"),
+        margin_balance=Decimal("100"),
+        available_balance=Decimal("90"),
+        unrealized_pnl=Decimal("0"),
+        total_initial_margin=Decimal("10"),
+        total_maint_margin=Decimal("5"),
+        position_initial_margin=Decimal("10"),
+        total_position_notional=Decimal("0"),
+        effective_leverage=Decimal("0"),
+        margin_utilization_pct=Decimal("10"),
+        liquidation_safety="KNOWN",
+        exchange_environment=environment_label(BinanceEnvironment.MAINNET),
+        daily_realized_pnl=Decimal("-5"),
+        daily_loss_known=True,
+        collateral_asset="USDC",
+        risk_currency="USDC",
+        daily_loss_asset="USDC",
+        daily_pnl_includes_fees=True,
+        daily_pnl_includes_funding=True,
+        daily_loss_window_start=window_start,
+        daily_loss_window_end=window_start + timedelta(days=1),
+        configured_leverage=Decimal("10"),
+        configured_leverage_known=True,
+        margin_mode="SINGLE_ASSET_CROSS",
+        margin_mode_known=True,
+        valid=True,
+        timestamp=now,
+    )
+
+    result = await OrderExecutionGate(adapter).check(
+        make_limit_intent(symbol="ETHUSDC", quantity="0.05", price="100"),
+        EconomicRiskClass.NEW_RISK,
+    )
+
+    assert result.allowed is False
+    assert "daily loss" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_exchange_modes_preserve_configured_symbols_without_scanner_replacement():
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+
+    async def scanner_must_not_run():
+        raise AssertionError("research scanner must not rewrite exchange symbols")
+
+    worker.scanner.scan_active_symbols = scanner_must_not_run
+    assert await worker._resolve_startup_symbols("LIVE") == ["ETHUSDC"]
+    assert await worker._resolve_startup_symbols("TESTNET") == ["ETHUSDC"]
+
+    wrong = TradingWorkerApp(symbols=["BTCUSDT"])
+    wrong.scanner.scan_active_symbols = scanner_must_not_run
+    assert await wrong._resolve_startup_symbols("LIVE") == []
 
 
 def trade_payload():
@@ -684,6 +880,44 @@ async def test_failed_testnet_arm_does_not_mutate_existing_paper_runtime(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_failed_exchange_arm_detaches_partially_started_public_stream():
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    stream = FakePublicStream()
+    worker.ws_client = stream
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    worker.engine_state = WorkerEngineState.ARMING
+
+    await worker._reset_after_failed_exchange_arm()
+
+    assert stream.stopped is True
+    assert worker.ws_client is None
+    assert worker.execution_mode == WorkerExecutionMode.PAPER
+    assert worker.engine_state == WorkerEngineState.DISARMED
+
+
+@pytest.mark.asyncio
+async def test_paper_arm_detaches_exchange_stream_without_restarting_testnet():
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    stream = FakePublicStream()
+    worker.ws_client = stream
+    worker.execution_mode = WorkerExecutionMode.TESTNET
+    worker.engine_state = WorkerEngineState.ARMED
+
+    armed, reason = await worker.arm(
+        ArmRequest(
+            executionMode="PAPER",
+            instruments=["ETHUSDC"],
+            strategies={"grid": True},
+        )
+    )
+
+    assert armed is True, reason
+    assert stream.stopped is True
+    assert worker.ws_client is None
+    assert worker.execution_mode == WorkerExecutionMode.PAPER
+
+
+@pytest.mark.asyncio
 async def test_stale_account_snapshot_does_not_prevent_reduction_fallback(monkeypatch):
     worker = await make_ready_worker(monkeypatch, snapshot=make_snapshot(age_seconds=60))
     decision = make_decision(
@@ -1122,7 +1356,7 @@ def test_market_event_from_non_testnet_venue_is_not_authoritative():
         event_id="MAINNET-EVENT",
         event_time=utc_now(),
         symbol="ETHUSDT",
-        venue="BINANCE_LIVE",
+        venue="BINANCE_MAINNET",
         market_type=MarketType.USDM_FUTURES,
         last_price=Decimal("100"),
         best_bid=Decimal("99.9"),
@@ -1830,7 +2064,7 @@ async def test_emergency_flatten_reports_partial_when_private_stream_is_down():
     assert adapter.state == ConnectionState.DEGRADED
 
 
-def test_mainnet_mutable_adapters_are_rejected():
+def test_mainnet_mutable_adapters_require_explicit_approval():
     with pytest.raises(ValueError):
         BinanceExecutionAdapter(env=BinanceEnvironment.MAINNET)
     with pytest.raises(ValueError):
@@ -1869,7 +2103,7 @@ def test_account_snapshot_uses_position_risk_and_real_liquidation_distance():
 
 def test_negative_account_margin_is_rejected():
     payload = account_payload()
-    payload["totalMarginBalance"] = "-1"
+    payload["assets"][0]["marginBalance"] = "-1"
 
     with pytest.raises(ValueError, match="cannot be negative"):
         build_account_snapshot(payload, [])
@@ -2399,10 +2633,10 @@ async def test_bootstrap_marks_ledger_initialized_only_after_verification():
             ]
         if path == "/fapi/v1/openOrders":
             return []
-        if path == "/fapi/v2/account":
-            payload = account_payload()
-            payload.pop("totalMaintMargin")
-            return payload
+            if path == "/fapi/v2/account":
+                payload = account_payload()
+                payload["assets"][0].pop("maintMargin")
+                return payload
         raise AssertionError(f"Unexpected REST call: {method} {path}")
 
     ledger = InMemoryLedger()

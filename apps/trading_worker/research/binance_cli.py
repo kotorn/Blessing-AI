@@ -3,12 +3,13 @@
 The Python Trading Worker remains the only execution authority.  This module
 exists for research and contract cross-checks, so it deliberately exposes a
 small allowlist of USDⓈ-M read operations and has no generic subprocess or
-custom-request escape hatch.  It also refuses to run unless the CLI is pinned
-to Binance USDⓈ-M Testnet.
+custom-request escape hatch.  Mainnet is supported only for the fixed
+production host and remains read-only.
 
 The official CLI is an independently installed Rust binary.  It is therefore
 not a Python or npm runtime dependency and is never imported by the worker's
-execution path.
+execution path. The wrapper supports the documented ``testnet`` and ``prod``
+routes, but keeps both routes fixed and read-only.
 """
 
 from __future__ import annotations
@@ -28,11 +29,34 @@ from urllib.parse import urlparse
 
 TESTNET_FUTURES_BASE_URL = "https://testnet.binancefuture.com"
 TESTNET_FUTURES_HOST = "testnet.binancefuture.com"
+MAINNET_FUTURES_BASE_URL = "https://fapi.binance.com"
+MAINNET_FUTURES_HOST = "fapi.binance.com"
 DEFAULT_TIMEOUT_SEC = 15.0
 DEFAULT_SYMBOL = "BTCUSDT"
+MAINNET_SYMBOL = "ETHUSDC"
 DEFAULT_RECV_WINDOW = "5000"
 DEFAULT_BINARY = "binance-cli"
 ALLOWED_BINARY_NAMES = frozenset({"binance-cli", "binance-cli.exe"})
+
+
+class BinanceCliEnvironment(StrEnum):
+    TESTNET = "TESTNET"
+    MAINNET = "MAINNET"
+
+
+def _parse_environment(value: str | BinanceCliEnvironment) -> BinanceCliEnvironment:
+    try:
+        return value if isinstance(value, BinanceCliEnvironment) else BinanceCliEnvironment(value.strip().upper())
+    except (AttributeError, ValueError) as exc:
+        raise BinanceCliPolicyError("CLI environment must be testnet or mainnet") from exc
+
+
+def _route_for_environment(environment: BinanceCliEnvironment) -> tuple[str, str, str]:
+    if environment is BinanceCliEnvironment.TESTNET:
+        return "testnet", TESTNET_FUTURES_BASE_URL, TESTNET_FUTURES_HOST
+    # Binance CLI calls its production environment `prod`; no arbitrary URL is
+    # accepted by this research wrapper.
+    return "prod", MAINNET_FUTURES_BASE_URL, MAINNET_FUTURES_HOST
 
 
 class BinanceCliResearchError(RuntimeError):
@@ -40,7 +64,7 @@ class BinanceCliResearchError(RuntimeError):
 
 
 class BinanceCliPolicyError(BinanceCliResearchError):
-    """Raised when a requested operation violates the read-only Testnet policy."""
+    """Raised when a requested operation violates the read-only CLI policy."""
 
 
 class ReadOnlyCheck(StrEnum):
@@ -159,6 +183,8 @@ _SENSITIVE_ENV_KEYS = frozenset(
         "BINANCE_SECRET_KEY",
         "BINANCE_TESTNET_API_KEY",
         "BINANCE_TESTNET_API_SECRET",
+        "BINANCE_MAINNET_API_KEY",
+        "BINANCE_MAINNET_API_SECRET",
     }
 )
 
@@ -217,7 +243,8 @@ def build_read_only_command(
     return tuple(command)
 
 
-def _validate_testnet_base_url(value: str) -> str:
+def _validate_base_url(value: str, environment: BinanceCliEnvironment) -> str:
+    _, expected_url, expected_host = _route_for_environment(environment)
     parsed = urlparse(value)
     try:
         valid_port = parsed.port in (None, 443)
@@ -225,23 +252,26 @@ def _validate_testnet_base_url(value: str) -> str:
         valid_port = False
     if not (
         parsed.scheme == "https"
-        and parsed.hostname == TESTNET_FUTURES_HOST
+        and parsed.hostname == expected_host
         and valid_port
         and parsed.path in ("", "/")
         and not parsed.query
         and not parsed.fragment
     ):
         raise BinanceCliPolicyError(
-            "BINANCE_FUTURES_USDS_BASE_PATH must be exactly the Binance USDⓈ-M Testnet host"
+            f"BINANCE_FUTURES_USDS_BASE_PATH must be exactly the Binance USDⓈ-M {environment.value} host"
         )
-    return TESTNET_FUTURES_BASE_URL
+    return expected_url
 
 
-def _credential_pair(environ: Mapping[str, str]) -> tuple[str, str, str] | None:
+def _credential_pair(
+    environ: Mapping[str, str], environment: BinanceCliEnvironment
+) -> tuple[str, str, str] | None:
     official_key = environ.get("BINANCE_API_KEY", "")
     official_secret = environ.get("BINANCE_SECRET_KEY", "")
-    worker_key = environ.get("BINANCE_TESTNET_API_KEY", "")
-    worker_secret = environ.get("BINANCE_TESTNET_API_SECRET", "")
+    suffix = "TESTNET" if environment is BinanceCliEnvironment.TESTNET else "MAINNET"
+    worker_key = environ.get(f"BINANCE_{suffix}_API_KEY", "")
+    worker_secret = environ.get(f"BINANCE_{suffix}_API_SECRET", "")
 
     if bool(official_key) != bool(official_secret):
         raise BinanceCliPolicyError(
@@ -249,7 +279,7 @@ def _credential_pair(environ: Mapping[str, str]) -> tuple[str, str, str] | None:
         )
     if bool(worker_key) != bool(worker_secret):
         raise BinanceCliPolicyError(
-            "BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET must be provided together"
+            f"BINANCE_{suffix}_API_KEY and BINANCE_{suffix}_API_SECRET must be provided together"
         )
     if official_key and worker_key:
         raise BinanceCliPolicyError(
@@ -258,31 +288,36 @@ def _credential_pair(environ: Mapping[str, str]) -> tuple[str, str, str] | None:
     if official_key:
         return official_key, official_secret, "BINANCE_CLI_ENV"
     if worker_key:
-        return worker_key, worker_secret, "WORKER_TESTNET_ENV"
+        return worker_key, worker_secret, f"WORKER_{suffix}_ENV"
     return None
 
 
 def _prepare_environment(
-    environ: Mapping[str, str], *, include_credentials: bool
+    environ: Mapping[str, str],
+    *,
+    environment: BinanceCliEnvironment,
+    include_credentials: bool,
 ) -> tuple[dict[str, str], str]:
-    """Return a child environment with only the explicit Testnet route/keys."""
+    """Return a child environment with one explicit fixed route and keys."""
 
-    if environ.get("BINANCE_API_ENV") != "testnet":
+    api_env, default_base_url, _ = _route_for_environment(environment)
+    configured_api_env = environ.get("BINANCE_API_ENV")
+    if configured_api_env not in (None, api_env):
         raise BinanceCliPolicyError(
-            "BINANCE_API_ENV must be exactly 'testnet'; prod/demo and an unset value are blocked"
+            f"BINANCE_API_ENV must be exactly '{api_env}'; other environments are blocked"
         )
 
-    base_url = _validate_testnet_base_url(
-        environ.get("BINANCE_FUTURES_USDS_BASE_PATH", TESTNET_FUTURES_BASE_URL)
+    base_url = _validate_base_url(
+        environ.get("BINANCE_FUTURES_USDS_BASE_PATH", default_base_url), environment
     )
-    credentials = _credential_pair(environ)
+    credentials = _credential_pair(environ, environment)
 
     # Keep PATH/HOME/TMP and other process basics, but strip every Binance
     # variable first so a profile or another product cannot override the route.
     child_env = {
         key: value for key, value in environ.items() if not key.startswith("BINANCE_")
     }
-    child_env["BINANCE_API_ENV"] = "testnet"
+    child_env["BINANCE_API_ENV"] = api_env
     child_env["BINANCE_FUTURES_USDS_BASE_PATH"] = base_url
     credential_source = "NONE"
     if include_credentials and credentials is not None:
@@ -351,11 +386,17 @@ class BinanceCliResearchRunner:
         binary: str | None = None,
         timeout_sec: float = DEFAULT_TIMEOUT_SEC,
         environ: Mapping[str, str] | None = None,
+        environment: BinanceCliEnvironment | str | None = None,
     ) -> None:
         if timeout_sec <= 0 or timeout_sec > 120:
             raise ValueError("timeout_sec must be between 0 and 120 seconds")
         self.timeout_sec = timeout_sec
         self.environ = dict(os.environ if environ is None else environ)
+        inferred_environment = (
+            "MAINNET" if self.environ.get("BINANCE_API_ENV") == "prod" else "TESTNET"
+        )
+        self.environment = _parse_environment(environment or inferred_environment)
+        self.api_env, self.base_url, _ = _route_for_environment(self.environment)
         self.binary = (
             binary or self.environ.get("BINANCE_CLI_PATH") or DEFAULT_BINARY
         ).strip()
@@ -384,29 +425,40 @@ class BinanceCliResearchRunner:
         self,
         check: ReadOnlyCheck | str,
         *,
-        symbol: str = DEFAULT_SYMBOL,
+        symbol: str | None = None,
         order_id: int | None = None,
         client_order_id: str | None = None,
     ) -> BinanceCliResult:
         normalized_check = _as_check(check)
+        if self.environment is BinanceCliEnvironment.MAINNET:
+            effective_symbol = MAINNET_SYMBOL if symbol is None else symbol
+            if effective_symbol.strip().upper() != MAINNET_SYMBOL:
+                raise BinanceCliPolicyError(
+                    "Mainnet Binance CLI checks are restricted to ETHUSDC"
+                )
+        else:
+            effective_symbol = DEFAULT_SYMBOL if symbol is None else symbol
         command = build_read_only_command(
             normalized_check,
-            symbol=symbol,
+            symbol=effective_symbol,
             order_id=order_id,
             client_order_id=client_order_id,
         )
         spec = _CHECKS[normalized_check]
         child_env, credential_source = _prepare_environment(
             self.environ,
+            environment=self.environment,
             include_credentials=spec.requires_credentials,
         )
         if spec.requires_credentials and credential_source == "NONE":
             return BinanceCliResult(
                 check=normalized_check.value,
                 status="NOT_RUN",
+                environment=self.environment.value,
+                base_url=self.base_url,
                 command=command,
                 credential_source=credential_source,
-                error="signed read-only check requires explicit Testnet credentials",
+                error=f"signed read-only check requires explicit {self.environment.value} credentials",
             )
         try:
             self._validate_binary_name()
@@ -416,6 +468,8 @@ class BinanceCliResearchRunner:
             return BinanceCliResult(
                 check=normalized_check.value,
                 status="NOT_RUN",
+                environment=self.environment.value,
+                base_url=self.base_url,
                 command=command,
                 credential_source=credential_source,
                 error=str(exc),
@@ -426,6 +480,8 @@ class BinanceCliResearchRunner:
             return BinanceCliResult(
                 check=normalized_check.value,
                 status="NOT_RUN",
+                environment=self.environment.value,
+                base_url=self.base_url,
                 command=command,
                 credential_source=credential_source,
                 error="binance-cli is not installed or not on PATH",
@@ -457,6 +513,8 @@ class BinanceCliResearchRunner:
             return BinanceCliResult(
                 check=normalized_check.value,
                 status="FAIL",
+                environment=self.environment.value,
+                base_url=self.base_url,
                 command=command,
                 credential_source=credential_source,
                 error=f"binance-cli timed out after {self.timeout_sec:g} seconds",
@@ -465,6 +523,8 @@ class BinanceCliResearchRunner:
             return BinanceCliResult(
                 check=normalized_check.value,
                 status="NOT_RUN",
+                environment=self.environment.value,
+                base_url=self.base_url,
                 command=command,
                 credential_source=credential_source,
                 error=f"could not start binance-cli: {type(exc).__name__}",
@@ -474,6 +534,8 @@ class BinanceCliResearchRunner:
         return BinanceCliResult(
             check=normalized_check.value,
             status="PASS" if completed.returncode == 0 else "FAIL",
+            environment=self.environment.value,
+            base_url=self.base_url,
             command=command,
             credential_source=credential_source,
             returncode=completed.returncode,
@@ -485,12 +547,13 @@ class BinanceCliResearchRunner:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run one allowlisted, read-only Binance USDⓈ-M Testnet CLI check."
+        description="Run one allowlisted, read-only Binance USDⓈ-M CLI check."
     )
+    parser.add_argument("--environment", choices=("testnet", "mainnet"), default="testnet")
     parser.add_argument(
         "--check", required=True, choices=[check.value for check in ReadOnlyCheck]
     )
-    parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
+    parser.add_argument("--symbol", default=None)
     parser.add_argument("--order-id", type=int)
     parser.add_argument("--client-order-id")
     parser.add_argument(
@@ -508,6 +571,7 @@ def main(argv: list[str] | None = None) -> int:
         result = BinanceCliResearchRunner(
             binary=args.binary,
             timeout_sec=args.timeout_sec,
+            environment=args.environment,
         ).run(
             args.check,
             symbol=args.symbol,

@@ -3,7 +3,7 @@
 ## Authoritative System State
 The system state is fundamentally driven by the Python Trading Worker, defining
 the boundaries between pure UI simulations, connected Testnet trading, and the
-permanently disabled real-capital Live mode.
+explicitly gated real-capital Live mode.
 
 ### Contract Definition
 ```typescript
@@ -33,11 +33,14 @@ interface TradingSystemState {
 - \`PAPER\` can be armed when its local simulation controls allow it.
 - \`TESTNET\` can be armed only after the Worker completes configuration,
   authentication, stream, account, market-data, and reconciliation preflight.
-- \`LIVE\` is permanently rejected in this sprint. No capability flag,
-  acknowledgement, or UI state can enable Mainnet mutable execution.
+- \`LIVE\` is available only behind dedicated Mainnet credentials,
+  \`MAINNET_LIVE_APPROVED=true\`, and the Worker's complete Mainnet account,
+  stream, reconciliation, risk, and execution-lease preflight. The default
+  approval remains false; no UI acknowledgement or capability flag can bypass
+  those gates.
 - The **Kill Switch** overrides all local states and enforces \`EMERGENCY\` state universally across all components.
 
 ## Provenance
 All orders and strategy intents now include a \`source\` field:
-\`SIMULATED\` | \`BINANCE_TESTNET\` | \`BINANCE_LIVE\`
+\`SIMULATED\` | \`BINANCE_TESTNET\` | \`BINANCE_MAINNET\`
 This prevents UI spoofing where a simulated paper order is visually mistaken for a real live order.

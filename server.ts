@@ -11,12 +11,24 @@ import {
   parsePortfolioMarginResponse,
   unavailablePortfolioMarginObservation,
 } from './src/backend/portfolio-margin.js';
+import {
+  authorizeBigQueryRequest,
+  authorizeOperatorRequest,
+  bigQueryErrorResponse,
+  dryRunQuery,
+  executeQuery,
+  readBigQueryConfig,
+  syncTelemetry,
+  BIGQUERY_CONSOLE_URL,
+  BIGQUERY_PROJECT_ID,
+  MAX_SCAN_BYTES,
+} from './src/backend/bigquery.js';
 
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 
 app.use(express.json());
 
@@ -82,6 +94,9 @@ let tradingSystemState: TradingSystemState = {
   pauseNewRisk: false,
   recoveryOnly: false,
   workerResponsive: false,
+  mainnetCredentialsVerified: false,
+  mainnetLiveApproved: false,
+  mainnetPreflightReady: false,
 
   configVersion: 'v0.2.0-beta',
   updatedAt: new Date().toISOString()
@@ -105,7 +120,7 @@ let quantEngineState = {
     kill_switch_active: false,
     realized_daily_pnl: 0,
     risk_state: 'UNKNOWN' as 'NORMAL' | 'CAUTION' | 'NO_NEW_GRID' | 'RECOVERY_ONLY' | 'DELEVERAGE' | 'EMERGENCY' | 'UNKNOWN',
-    source: 'SIMULATED' as 'SIMULATED' | 'BINANCE_TESTNET' | 'BINANCE_LIVE',
+    source: 'SIMULATED' as 'SIMULATED' | 'BINANCE_TESTNET' | 'BINANCE_MAINNET',
     evidence_status: 'ILLUSTRATIVE_ONLY' as 'ILLUSTRATIVE_ONLY' | 'UNVERIFIED' | 'VERIFIED',
     verified: false,
   },
@@ -580,6 +595,7 @@ interface ApiKeyProfile {
   apiKey: string;
   apiSecret: string;
   isTestnet: boolean;
+  environment: 'TESTNET' | 'MAINNET';
   createdAt: number;
 }
 
@@ -591,6 +607,7 @@ const keyProfiles: Record<string, ApiKeyProfile> = {
     apiKey: process.env.BINANCE_TESTNET_API_KEY?.trim() || '',
     apiSecret: process.env.BINANCE_TESTNET_API_SECRET?.trim() || '',
     isTestnet: true,
+    environment: 'TESTNET',
     createdAt: Date.now(),
   },
 };
@@ -602,27 +619,28 @@ function getActiveBinanceCredentials(): ApiKeyProfile {
     apiKey: '',
     apiSecret: '',
     isTestnet: true,
+    environment: 'TESTNET',
     createdAt: Date.now(),
   };
 }
 
+function rejectBrowserMainnetCredentialStorage(res: Response) {
+  return res.status(403).json({
+    error: 'MAINNET_CREDENTIALS_MUST_USE_SECRET_MANAGER',
+    message: 'Mainnet credentials are not accepted through the browser profile store; inject them from Secret Manager into the Worker release.',
+    verified: false,
+    evidence_status: 'UNVERIFIED',
+  });
+}
+
 async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTestnet: boolean) {
-  if (!isTestnet) {
-    return {
-      configured: false,
-      isTestnet: false,
-      error: 'MAINNET_BLOCKED',
-      message: 'Mainnet credential verification is permanently disabled. Use Binance USDⓈ-M Testnet.',
-      spot: { authenticated: false, canTrade: false, message: 'Mainnet blocked' },
-      futures: { authenticated: false, canTrade: false, hedgeMode: false, message: 'Mainnet blocked' },
-      restrictions: {},
-    };
-  }
+  const environment = isTestnet ? 'TESTNET' : 'MAINNET';
   if (!apiKey || !apiSecret) {
     return {
       configured: false,
-      isTestnet: true,
-      message: 'BINANCE_TESTNET_API_KEY or BINANCE_TESTNET_API_SECRET is missing from configuration.',
+      isTestnet,
+      environment,
+      message: `Binance ${environment} credentials are missing from configuration.`,
       spot: { authenticated: false, canTrade: false, message: 'No API credentials configured' },
       futures: { authenticated: false, canTrade: false, hedgeMode: false, message: 'No API credentials configured' },
       restrictions: {},
@@ -630,13 +648,14 @@ async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTes
   }
 
   const maskedKey = apiKey.length >= 8 ? `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}` : '***';
-  const spotBase = 'https://testnet.binance.vision';
-  const futuresBase = 'https://testnet.binancefuture.com';
+  const spotBase = isTestnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+  const futuresBase = isTestnet ? 'https://testnet.binancefuture.com' : 'https://fapi.binance.com';
 
   const results: any = {
     configured: true,
     maskedKey,
     isTestnet,
+    environment,
     spot: { authenticated: false, canTrade: false, message: '' },
     futures: { authenticated: false, canTrade: false, hedgeMode: false, message: '' },
     restrictions: {},
@@ -663,7 +682,7 @@ async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTes
       results.spot.message = spotData.msg || `HTTP ${spotResp.status}`;
     }
 
-    // 2. Check Futures Position Mode on Testnet. This is a capability probe;
+    // 2. Check Futures Position Mode on the selected fixed environment. This is a capability probe;
     // the Python worker remains the sole execution/readiness authority.
     const fTs = Date.now();
     const fQuery = `timestamp=${fTs}`;
@@ -686,6 +705,7 @@ async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTes
       configured: true,
       maskedKey,
       isTestnet,
+      environment,
       spot: { authenticated: false, canTrade: false, message: err.message },
       futures: { authenticated: false, canTrade: false, hedgeMode: false, message: err.message },
       restrictions: {},
@@ -713,8 +733,8 @@ app.get('/api/binance/profiles', (req: Request, res: Response) => {
       maskedKey: p.apiKey.length >= 8 ? `${p.apiKey.slice(0, 4)}...${p.apiKey.slice(-4)}` : (p.apiKey ? '***' : 'Unconfigured'),
       maskedApiKey: p.apiKey.length >= 8 ? `${p.apiKey.slice(0, 4)}...${p.apiKey.slice(-4)}` : (p.apiKey ? '***' : 'Unconfigured'),
       isTestnet: p.isTestnet,
-      environment: 'TESTNET',
-      isLiveRealMoney: false,
+      environment: p.environment,
+      isLiveRealMoney: p.environment === 'MAINNET',
       hasSecret: Boolean(p.apiSecret),
       isActive: p.id === activeProfileId,
     })),
@@ -727,13 +747,15 @@ app.post('/api/binance/profiles/switch', async (req: Request, res: Response) => 
     return res.status(400).json({ error: 'Profile not found' });
   }
   const active = keyProfiles[profileId];
-  if (!active.isTestnet) {
-    return res.status(400).json({ error: 'MAINNET_BLOCKED', message: 'Only Binance Testnet profiles are supported.' });
+  if (!active.isTestnet || active.environment !== 'TESTNET') {
+    return rejectBrowserMainnetCredentialStorage(res);
   }
   activeProfileId = profileId;
-  process.env.BINANCE_TESTNET_API_KEY = active.apiKey;
-  process.env.BINANCE_TESTNET_API_SECRET = active.apiSecret;
-  process.env.BINANCE_TESTNET = 'true';
+  if (active.isTestnet) {
+    process.env.BINANCE_TESTNET_API_KEY = active.apiKey;
+    process.env.BINANCE_TESTNET_API_SECRET = active.apiSecret;
+    process.env.BINANCE_TESTNET = 'true';
+  }
 
   const results = await verifyBinanceCredentials(active.apiKey, active.apiSecret, active.isTestnet);
   res.json({
@@ -757,11 +779,10 @@ app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
         : environment === undefined
           ? true
           : environment === 'TESTNET';
-    if (requestedTestnet !== true) {
-      return res.status(400).json({
-        error: 'MAINNET_BLOCKED',
-        message: 'Mainnet profiles and real-money execution are permanently disabled.',
-      });
+    const requestedEnvironment = requestedTestnet ? 'TESTNET' : 'MAINNET';
+
+    if (!requestedTestnet || requestedEnvironment !== 'TESTNET') {
+      return rejectBrowserMainnetCredentialStorage(res);
     }
 
     const trimmedKey = (apiKey || '').trim();
@@ -773,7 +794,8 @@ app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
       existing.name = name.trim();
       if (trimmedKey) existing.apiKey = trimmedKey;
       if (trimmedSecret) existing.apiSecret = trimmedSecret;
-      existing.isTestnet = true;
+      existing.isTestnet = requestedTestnet;
+      existing.environment = requestedEnvironment;
     } else {
       profileId = profileId || `profile_${Date.now()}`;
       keyProfiles[profileId] = {
@@ -781,7 +803,8 @@ app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
         name: name.trim(),
         apiKey: trimmedKey,
         apiSecret: trimmedSecret,
-        isTestnet: true,
+        isTestnet: requestedTestnet,
+        environment: requestedEnvironment,
         createdAt: Date.now(),
       };
     }
@@ -789,9 +812,11 @@ app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
     if (makeActive !== false) {
       activeProfileId = profileId;
       const active = keyProfiles[activeProfileId];
-      process.env.BINANCE_TESTNET_API_KEY = active.apiKey;
-      process.env.BINANCE_TESTNET_API_SECRET = active.apiSecret;
-      process.env.BINANCE_TESTNET = 'true';
+      if (active.isTestnet) {
+        process.env.BINANCE_TESTNET_API_KEY = active.apiKey;
+        process.env.BINANCE_TESTNET_API_SECRET = active.apiSecret;
+        process.env.BINANCE_TESTNET = 'true';
+      }
     }
 
     const active = keyProfiles[activeProfileId];
@@ -808,14 +833,6 @@ app.post('/api/binance/profiles/save', async (req: Request, res: Response) => {
 });
 
 async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTestnet: boolean) {
-  if (!isTestnet) {
-    return {
-      success: false,
-      configured: false,
-      error: 'MAINNET_BLOCKED',
-      message: 'Mainnet balance synchronization is permanently disabled.',
-    };
-  }
   if (!apiKey || !apiSecret) {
     return {
       success: false,
@@ -824,8 +841,9 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     };
   }
 
-  const spotBase = 'https://testnet.binance.vision';
-  const futuresBase = 'https://testnet.binancefuture.com';
+  const environment = isTestnet ? 'TESTNET' : 'MAINNET';
+  const spotBase = isTestnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+  const futuresBase = isTestnet ? 'https://testnet.binancefuture.com' : 'https://fapi.binance.com';
 
   const sign = (secret: string, queryStr: string) => {
     return crypto.createHmac('sha256', secret).update(queryStr).digest('hex');
@@ -1278,7 +1296,8 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       two_layer_assets,
       sub_wallets,
       portfolio_margin_observation: portfolioMarginObservation,
-      source: isTestnet ? 'BINANCE_TESTNET' : 'BINANCE_LIVE',
+      source: isTestnet ? 'BINANCE_TESTNET' : 'BINANCE_MAINNET',
+      environment,
       last_sync_time: new Date().toISOString(),
       error: snapshotValid
         ? undefined
@@ -1311,12 +1330,11 @@ app.post('/api/binance/profiles/delete', (req: Request, res: Response) => {
   if (activeProfileId === profileId) {
     activeProfileId = Object.keys(keyProfiles)[0];
     const active = keyProfiles[activeProfileId];
-    if (!active.isTestnet) {
-      return res.status(500).json({ error: 'MAINNET_BLOCKED', message: 'Stored Mainnet profile cannot be activated.' });
+    if (active.isTestnet) {
+      process.env.BINANCE_TESTNET_API_KEY = active.apiKey;
+      process.env.BINANCE_TESTNET_API_SECRET = active.apiSecret;
+      process.env.BINANCE_TESTNET = 'true';
     }
-    process.env.BINANCE_TESTNET_API_KEY = active.apiKey;
-    process.env.BINANCE_TESTNET_API_SECRET = active.apiSecret;
-    process.env.BINANCE_TESTNET = 'true';
   }
   res.json({ success: true, activeProfileId });
 });
@@ -1324,13 +1342,6 @@ app.post('/api/binance/profiles/delete', (req: Request, res: Response) => {
 // Sync and fetch funds directly from Binance API
 app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
   const active = getActiveBinanceCredentials();
-  if (!active.isTestnet) {
-    return res.status(400).json({
-      success: false,
-      error: 'MAINNET_BLOCKED',
-      message: 'Mainnet account synchronization is permanently disabled.',
-    });
-  }
   const liveResult = await fetchBinanceLiveBalances(active.apiKey, active.apiSecret, active.isTestnet);
 
   if (liveResult.success) {
@@ -1366,14 +1377,14 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     tradingSystemState.tradingConnectionHealthy = false;
     tradingSystemState.reconciliationStatus = 'UNKNOWN';
     tradingSystemState.dataSource = 'BINANCE';
-    tradingSystemState.exchangeEnvironment = 'BINANCE_TESTNET';
+    tradingSystemState.exchangeEnvironment = active.isTestnet ? 'BINANCE_TESTNET' : 'BINANCE_MAINNET';
     tradingSystemState.updatedAt = new Date().toISOString();
 
     return res.json({
       success: false,
       read_only_snapshot: true,
       evidence_status: 'UNVERIFIED',
-      message: `Fetched a Binance Testnet read-only snapshot (${active.name}); Python worker reconciliation is still required.`,
+      message: `Fetched a Binance ${active.environment} read-only snapshot (${active.name}); Python worker reconciliation is still required.`,
       account: quantEngineState.account,
       liveResult,
     });
@@ -1404,14 +1415,25 @@ app.get('/api/binance/balance', async (req: Request, res: Response) => {
 // --- System Truth & Safety Boundary Endpoints ---
 
 
-// The worker url is typically http://127.0.0.1:8080
-const WORKER_URL = 'http://127.0.0.1:8080';
+// The worker URL and its Cloud Run identity token are deployment inputs. A
+// production control plane must never silently fall back to localhost or an
+// unauthenticated worker.
+const WORKER_URL = (process.env.WORKER_URL?.trim() || (process.env.NODE_ENV === 'production' ? '' : 'http://127.0.0.1:8080')).replace(/\/+$/, '');
+const WORKER_IDENTITY_TOKEN = process.env.WORKER_IDENTITY_TOKEN?.trim() || '';
 
 async function forwardWorkerRequest(
   pathName: string,
   init?: RequestInit,
 ): Promise<{ response: globalThis.Response; data: any }> {
-  const response = await fetch(WORKER_URL + pathName, init);
+  if (!WORKER_URL) throw new Error('WORKER_URL is not configured');
+  const headers = new Headers(init?.headers);
+  if (WORKER_IDENTITY_TOKEN) {
+    headers.set('Authorization', `Bearer ${WORKER_IDENTITY_TOKEN}`);
+  } else if (!(process.env.NODE_ENV !== 'production' && ['1', 'true', 'yes', 'on'].includes((process.env.CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL || '').trim().toLowerCase()))) {
+    throw new Error('WORKER_IDENTITY_TOKEN is not configured');
+  }
+  headers.set('X-Worker-Caller', 'blessing-control-plane');
+  const response = await fetch(WORKER_URL + pathName, { ...init, headers });
   const bodyText = await response.text();
   let data: any = {};
   if (bodyText) {
@@ -1429,9 +1451,15 @@ function projectWorkerState(workerState: any): void {
   if (typeof workerState.execution_mode === 'string') {
     tradingSystemState.executionMode = workerState.execution_mode;
     tradingSystemState.exchangeEnvironment =
-      workerState.execution_mode === 'TESTNET' ? 'BINANCE_TESTNET' : 'NONE';
+      workerState.execution_mode === 'TESTNET'
+        ? 'BINANCE_TESTNET'
+        : workerState.execution_mode === 'LIVE'
+          ? 'BINANCE_MAINNET'
+          : 'NONE';
     tradingSystemState.dataSource =
-      workerState.execution_mode === 'TESTNET' ? 'BINANCE' : 'SIMULATED';
+      workerState.execution_mode === 'TESTNET' || workerState.execution_mode === 'LIVE'
+        ? 'BINANCE'
+        : 'SIMULATED';
   }
   if (typeof workerState.engine_state === 'string') tradingSystemState.engineState = workerState.engine_state;
   if (typeof workerState.market_data_healthy === 'boolean') tradingSystemState.marketDataHealthy = workerState.market_data_healthy;
@@ -1443,8 +1471,33 @@ function projectWorkerState(workerState: any): void {
   if (typeof workerState.pause_new_risk === 'boolean') tradingSystemState.pauseNewRisk = workerState.pause_new_risk;
   if (typeof workerState.recovery_only === 'boolean') tradingSystemState.recoveryOnly = workerState.recovery_only;
   if (typeof workerState.worker_responsive === 'boolean') tradingSystemState.workerResponsive = workerState.worker_responsive;
+  if (typeof workerState.mainnet_credentials_verified === 'boolean') tradingSystemState.mainnetCredentialsVerified = workerState.mainnet_credentials_verified;
+  if (typeof workerState.mainnet_live_approved === 'boolean') tradingSystemState.mainnetLiveApproved = workerState.mainnet_live_approved;
+  if (typeof workerState.mainnet_preflight_ready === 'boolean') tradingSystemState.mainnetPreflightReady = workerState.mainnet_preflight_ready;
   if (typeof workerState.updated_at === 'string') tradingSystemState.updatedAt = workerState.updated_at;
 }
+
+async function enforceOperatorAccess(req: Request, res: Response, next: () => void): Promise<void> {
+  const authorization = await authorizeOperatorRequest(req);
+  if (authorization.ok) {
+    next();
+    return;
+  }
+  res.status(authorization.forbidden ? 403 : 401).json({
+    error: authorization.forbidden ? 'OPERATOR_AUTH_FORBIDDEN' : 'OPERATOR_AUTH_REQUIRED',
+    message: authorization.error || 'Authenticated operator access is required',
+    status: 'DEGRADED',
+    verified: false,
+    evidence_status: 'UNVERIFIED',
+  });
+}
+
+// All control-plane reads and mutations use the same authenticated operator
+// boundary. The explicit local bypass is disabled by default and cannot be
+// enabled by a browser request.
+app.use(['/api/system', '/api/quant'], (req, res, next) => {
+  void enforceOperatorAccess(req, res, next);
+});
 
 function requireWorkerBoolean(data: any, field: string): boolean | null {
   return typeof data?.[field] === 'boolean' ? data[field] : null;
@@ -1458,11 +1511,21 @@ const SIMULATED_EVIDENCE = {
 
 function quantStateForUi() {
   const account = quantEngineState.account;
+  const accountEnvironment = account.source;
+  const environmentMatchesMode =
+    (accountEnvironment === 'BINANCE_TESTNET' &&
+      tradingSystemState.exchangeEnvironment === 'BINANCE_TESTNET' &&
+      tradingSystemState.executionMode === 'TESTNET') ||
+    (accountEnvironment === 'BINANCE_MAINNET' &&
+      tradingSystemState.exchangeEnvironment === 'BINANCE_MAINNET' &&
+      tradingSystemState.executionMode === 'LIVE' &&
+      tradingSystemState.mainnetLiveApproved === true &&
+      tradingSystemState.mainnetPreflightReady === true);
   const accountIsVerified =
     account.verified === true &&
-    account.source === 'BINANCE_TESTNET' &&
+    (accountEnvironment === 'BINANCE_TESTNET' || accountEnvironment === 'BINANCE_MAINNET') &&
+    environmentMatchesMode &&
     tradingSystemState.workerResponsive === true &&
-    tradingSystemState.executionMode === 'TESTNET' &&
     tradingSystemState.accountSynchronized === true &&
     tradingSystemState.tradingConnectionHealthy === true &&
     tradingSystemState.privateStreamHealthy === true &&
@@ -1520,14 +1583,16 @@ function quantStateForUi() {
 
 app.get('/api/system/state', async (req, res) => {
   try {
-    const workerStateResp = await fetch(WORKER_URL + '/state');
-    if (!workerStateResp.ok) throw new Error('Worker not OK');
-    const workerState = await workerStateResp.json();
+    const workerStateResp = await forwardWorkerRequest('/state');
+    if (!workerStateResp.response.ok) throw new Error('Worker not OK');
+    const workerState = workerStateResp.data;
+
+    const workerCapsResp = await forwardWorkerRequest('/capabilities');
+    if (!workerCapsResp.response.ok) throw new Error('Worker capabilities not OK');
+    const workerCaps = workerCapsResp.data;
     
-    const workerCapsResp = await fetch(WORKER_URL + '/capabilities');
-    const workerCaps = await workerCapsResp.json();
-    
-    // Sync to local state
+    // Sync environment and health from the worker's canonical response.
+    projectWorkerState(workerState);
     tradingSystemState.engineState = workerState.engine_state;
     tradingSystemState.executionMode = workerState.execution_mode;
     tradingSystemState.pauseNewRisk = workerState.pause_new_risk;
@@ -1581,6 +1646,9 @@ app.get('/api/system/state', async (req, res) => {
       tradingConnectionHealthy: false,
       reconciliationStatus: 'UNKNOWN',
       workerResponsive: false,
+      mainnetCredentialsVerified: false,
+      mainnetLiveApproved: false,
+      mainnetPreflightReady: false,
       updatedAt: new Date().toISOString(),
     };
     res.json({
@@ -1595,11 +1663,13 @@ app.get('/api/system/state', async (req, res) => {
 app.get('/api/system/preflight', async (req, res) => {
   const mode = req.query.executionMode || 'PAPER';
   try {
-    const resp = await fetch(WORKER_URL + '/preflight?execution_mode=' + mode);
-    const preflight = await resp.json();
-    
-    const capsResp = await fetch(WORKER_URL + '/capabilities');
-    const caps = await capsResp.json();
+    const resp = await forwardWorkerRequest('/preflight?execution_mode=' + encodeURIComponent(String(mode)));
+    if (!resp.response.ok) throw new Error('Worker preflight not OK');
+    const preflight = resp.data;
+
+    const capsResp = await forwardWorkerRequest('/capabilities');
+    if (!capsResp.response.ok) throw new Error('Worker capabilities not OK');
+    const caps = capsResp.data;
     
     res.json({
       ...preflight,
@@ -1617,8 +1687,9 @@ app.get('/api/system/preflight', async (req, res) => {
 
 app.get('/api/system/readiness', async (req, res) => {
   try {
-    const resp = await fetch(WORKER_URL + '/readiness');
-    const data = await resp.json();
+    const resp = await forwardWorkerRequest('/readiness');
+    if (!resp.response.ok) throw new Error('Worker readiness not OK');
+    const data = resp.data;
     res.json(data);
   } catch (err) {
     res.json({
@@ -1633,9 +1704,6 @@ app.get('/api/system/readiness', async (req, res) => {
 
 app.post('/api/system/arm', async (req, res) => {
   const { executionMode, riskProfile, instruments, strategies } = req.body;
-  if (executionMode === 'LIVE') {
-    return res.status(400).json({ error: 'LIVE_BLOCKED', message: 'LIVE execution mode is permanently blocked in this sprint.' });
-  }
 
   const requestedConfig = {
     executionMode: executionMode || 'PAPER',
@@ -1838,10 +1906,10 @@ app.post('/api/quant/risk/kill-switch', async (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/expand', (req: Request, res: Response) => {
-  if (tradingSystemState.executionMode === 'TESTNET') {
+  if (tradingSystemState.executionMode !== 'PAPER') {
     return res.status(400).json({
-      error: 'NOT_AVAILABLE_IN_TESTNET_YET',
-      message: 'Simulated basket mutations are not permitted in TESTNET execution mode.',
+      error: 'SIMULATED_BASKET_MUTATION_NOT_PERMITTED',
+      message: 'Simulated basket mutations are not permitted in exchange execution modes.',
     });
   }
   if (!canExecuteAction(tradingSystemState.engineState, 'INCREASE_RISK')) {
@@ -1868,10 +1936,10 @@ app.post('/api/quant/basket/expand', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/recovery', (req: Request, res: Response) => {
-  if (tradingSystemState.executionMode === 'TESTNET') {
+  if (tradingSystemState.executionMode !== 'PAPER') {
     return res.status(400).json({
-      error: 'NOT_AVAILABLE_IN_TESTNET_YET',
-      message: 'Simulated basket mutations are not permitted in TESTNET execution mode.',
+      error: 'SIMULATED_BASKET_MUTATION_NOT_PERMITTED',
+      message: 'Simulated basket mutations are not permitted in exchange execution modes.',
     });
   }
   if (!canExecuteAction(tradingSystemState.engineState, 'RECOVERY')) {
@@ -1888,10 +1956,10 @@ app.post('/api/quant/basket/recovery', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/close', (req: Request, res: Response) => {
-  if (tradingSystemState.executionMode === 'TESTNET') {
+  if (tradingSystemState.executionMode !== 'PAPER') {
     return res.status(400).json({
-      error: 'NOT_AVAILABLE_IN_TESTNET_YET',
-      message: 'Simulated basket mutations are not permitted in TESTNET execution mode.',
+      error: 'SIMULATED_BASKET_MUTATION_NOT_PERMITTED',
+      message: 'Simulated basket mutations are not permitted in exchange execution modes.',
     });
   }
   if (!canExecuteAction(tradingSystemState.engineState, 'CLOSE')) {
@@ -1910,10 +1978,10 @@ app.post('/api/quant/basket/close', (req: Request, res: Response) => {
 });
 
 app.post('/api/quant/basket/action', (req: Request, res: Response) => {
-  if (tradingSystemState.executionMode === 'TESTNET') {
+  if (tradingSystemState.executionMode !== 'PAPER') {
     return res.status(400).json({
-      error: 'NOT_AVAILABLE_IN_TESTNET_YET',
-      message: 'Simulated basket mutations are not permitted in TESTNET execution mode.',
+      error: 'SIMULATED_BASKET_MUTATION_NOT_PERMITTED',
+      message: 'Simulated basket mutations are not permitted in exchange execution modes.',
     });
   }
   const { basket_id, action } = req.body;
@@ -2240,7 +2308,7 @@ const googleProductsState = [
     id: 'bigquery',
     name: 'Google BigQuery',
     category: 'ANALYTICS',
-    status: 'ACTIVE',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `${GCP_PROJECT_ID}.[market_data, signals, risk, backtests]`,
     region: 'US / asia-southeast1',
@@ -2254,13 +2322,13 @@ const googleProductsState = [
       monthlyFreeTierGb: 1000,
     },
     latencyMs: 42,
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'cloud_storage',
     name: 'Google Cloud Storage (GCS)',
     category: 'STORAGE',
-    status: 'READY',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `gs://blessing-ai-data-${GCP_PROJECT_ID}`,
     region: GCP_REGION,
@@ -2274,13 +2342,13 @@ const googleProductsState = [
       lifecycleRuleDays: 90,
     },
     latencyMs: 38,
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'cloud_sql',
     name: 'Google Cloud SQL (PostgreSQL 17)',
     category: 'DATABASE',
-    status: 'ACTIVE',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `${GCP_PROJECT_ID}:${GCP_REGION}:blessing-sql-primary`,
     region: GCP_REGION,
@@ -2288,21 +2356,26 @@ const googleProductsState = [
     consoleUrl: `https://console.cloud.google.com/sql/instances/blessing-sql-primary/overview?project=${GCP_PROJECT_ID}`,
     connectionParams: {
       instanceId: 'blessing-sql-primary',
-      tier: 'db-custom-2-7680',
+      tier: 'LOWEST_COST_SHARED_CORE_PENDING_VERIFICATION',
+      engineVersion: 'POSTGRES_17_PENDING_REGIONAL_CAPABILITY_CHECK',
+      storageGb: 10,
       database: 'blessing_trading',
-      user: 'blessing_app',
+      dataConnectDatabase: 'blessing_app',
+      user: 'blessing_worker',
       port: 5432,
-      haMode: 'REGIONAL',
-      sslMode: 'VERIFY_CA',
+      haMode: 'NONE',
+      deletionProtection: true,
+      backupPolicy: 'NON_HA_PENDING_VERIFICATION',
+      connectionMode: 'CLOUD_SQL_UNIX_SOCKET',
     },
     latencyMs: 14,
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'secret_manager',
     name: 'Google Secret Manager',
     category: 'SECURITY',
-    status: 'SYNCED',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `projects/${GCP_PROJECT_ID}/secrets/*`,
     region: 'global',
@@ -2314,34 +2387,36 @@ const googleProductsState = [
       autoRotationDays: 90,
     },
     latencyMs: 65,
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'cloud_run',
     name: 'Google Cloud Run',
     category: 'COMPUTE',
-    status: 'CONNECTED',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
-    resourceIdentifier: `${GCP_REGION}/blessing-ai-worker`,
+    resourceIdentifier: `${GCP_REGION}/blessing-trading-worker`,
     region: GCP_REGION,
     description: 'Serverless execution container for asynchronous daemon trading worker and web cockpit.',
     consoleUrl: `https://console.cloud.google.com/run?project=${GCP_PROJECT_ID}`,
     connectionParams: {
-      service: 'blessing-ai-worker',
-      cpu: '2.0',
-      memory: '4Gi',
-      concurrency: 80,
+      service: 'blessing-trading-worker',
+      cpu: '1',
+      memory: '1Gi',
+      concurrency: 1,
       minInstances: 1,
-      maxInstances: 5,
+      maxInstances: 1,
+      executionMode: 'PAPER_BY_DEFAULT',
+      liveApproval: 'EXPLICIT_RELEASE_ONLY',
     },
     latencyMs: 9,
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'firebase',
     name: 'Firebase (Firestore & Auth)',
     category: 'DATABASE',
-    status: 'CONNECTED',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `ai-studio-blessingai-3ae78e47-476e-4c0a-8ff4-fafa3b8cc364`,
     region: GCP_REGION,
@@ -2353,13 +2428,13 @@ const googleProductsState = [
       authProvider: 'Google Identity Services (GSI)',
     },
     latencyMs: 22,
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'google_workspace',
     name: 'Google Workspace (Drive & Sheets)',
     category: 'WORKSPACE',
-    status: 'ACTIVE',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `${GOOGLE_USER} / Blessing AI v0.2 Quant Lakehouse`,
     region: 'global',
@@ -2372,13 +2447,13 @@ const googleProductsState = [
       exportFormat: 'Google Sheets (Native)',
     },
     latencyMs: 78,
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'gemini_ai',
     name: 'Google Gemini Generative AI',
     category: 'AI',
-    status: 'CONNECTED',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: 'gemini-2.5-flash / gemini-3.8-flash',
     region: 'global',
@@ -2391,7 +2466,7 @@ const googleProductsState = [
       executionLoopDecoupled: true,
     },
     latencyMs: 140,
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
 ];
 
@@ -2444,221 +2519,69 @@ app.post('/api/google/sync-all', (req: Request, res: Response) => {
   });
 });
 
-// BigQuery WARM Analytical Lakehouse API (Section 5.2 & COST_MODEL.md)
-const BIGQUERY_PROJECT_ID = 'gen-lang-client-0730128480';
-const BIGQUERY_CONSOLE_URL = 'https://console.cloud.google.com/bigquery?project=gen-lang-client-0730128480&ws=!1m0';
-const MAX_SCAN_BYTES = 10 * 1024 * 1024 * 1024; // 10 GB limit
-
-let bigqueryTelemetryBuffer = {
-  last_flush_time: new Date().toISOString(),
-  buffered_rows_count: 1420,
-  flushed_batches_count: 84,
-  total_flushed_rows: 119280,
-  status: 'ONLINE',
-};
-
-app.get('/api/bigquery/config', (req: Request, res: Response) => {
-  res.json({
-    projectId: BIGQUERY_PROJECT_ID,
-    consoleUrl: BIGQUERY_CONSOLE_URL,
-    location: 'US',
-    datasets: [
-      {
-        datasetId: 'market_data',
-        description: 'Normalized historical & live OHLCV bars, volatility metrics, and orderbook telemetry',
-        location: 'US',
-        tables: [
-          {
-            tableId: 'ohlcv_bars',
-            description: '1s, 1m, 5m, 1h, 1d OHLCV bars with rolling ATR and Basis Z-score',
-            partitionField: 'DATE(timestamp)',
-            clusterFields: ['symbol', 'resolution'],
-            rowCountEstimate: 842500,
-            sizeMbEstimate: 142.6,
-          },
-        ],
-      },
-      {
-        datasetId: 'signals',
-        description: 'Multi-strategy opportunity scores, intents, and regime state transitions',
-        location: 'US',
-        tables: [
-          {
-            tableId: 'strategy_decisions',
-            description: 'Strategy intents, opportunity scores (0.0-1.0), and regime classifications',
-            partitionField: 'DATE(timestamp)',
-            clusterFields: ['strategy_id', 'symbol', 'regime'],
-            rowCountEstimate: 124000,
-            sizeMbEstimate: 38.4,
-          },
-        ],
-      },
-      {
-        datasetId: 'risk',
-        description: 'Portfolio Risk Governor snapshots, margin stress states, and exposure recovery events',
-        location: 'US',
-        tables: [
-          {
-            tableId: 'portfolio_snapshots',
-            description: 'Minute-level portfolio health, margin utilization, and drawdown telemetry',
-            partitionField: 'DATE(timestamp)',
-            clusterFields: ['risk_state'],
-            rowCountEstimate: 43200,
-            sizeMbEstimate: 12.8,
-          },
-        ],
-      },
-      {
-        datasetId: 'backtests',
-        description: 'Historical event-driven backtest runs with Deflated Sharpe & realistic fee drag',
-        location: 'US',
-        tables: [
-          {
-            tableId: 'experiment_runs',
-            description: 'Backtest experiment runs with realistic fee/slippage modeling and DSR metrics',
-            partitionField: 'DATE(created_at)',
-            clusterFields: ['strategy_id', 'model_version'],
-            rowCountEstimate: 620,
-            sizeMbEstimate: 4.2,
-          },
-        ],
-      },
-    ],
-    costControls: {
-      maxScanBytes: MAX_SCAN_BYTES,
-      maxScanBytesFormatted: '10.00 GB',
-      dryRunMandatory: true,
-      freeTierMonthlyAllowanceGb: 1000,
-    },
-    telemetryStats: bigqueryTelemetryBuffer,
+// BigQuery analytical lakehouse API. Responses are marked VERIFIED only after
+// the Google client has performed a live read-back. Local failures are
+// explicit DEGRADED responses; no fixture is allowed to look like cloud data.
+async function requireBigQueryAccess(
+  req: Request,
+  res: Response,
+  options: { requireTelemetryProducer?: boolean } = {},
+): Promise<boolean> {
+  const authorization = await authorizeBigQueryRequest(req, options);
+  if (authorization.ok) return true;
+  res.status(authorization.forbidden ? 403 : 401).json({
+    error: authorization.forbidden ? 'BIGQUERY_PRODUCER_FORBIDDEN' : 'BIGQUERY_AUTH_REQUIRED',
+    message: authorization.error || 'Authenticated access is required',
+    status: 'DEGRADED',
+    data_source: 'BIGQUERY',
+    verified: false,
+    evidence_status: 'UNVERIFIED',
   });
+  return false;
+}
+
+app.get('/api/bigquery/config', async (req: Request, res: Response) => {
+  if (!(await requireBigQueryAccess(req, res))) return;
+  try {
+    res.json(await readBigQueryConfig());
+  } catch (error) {
+    const failure = bigQueryErrorResponse(error);
+    res.status(failure.status).json(failure.body);
+  }
 });
 
 app.post('/api/bigquery/dry-run', async (req: Request, res: Response) => {
-  const { query } = req.body;
-  if (!query || typeof query !== 'string') {
-    return res.status(400).json({ error: 'SQL query string is required' });
+  if (!(await requireBigQueryAccess(req, res))) return;
+  try {
+    res.json(await dryRunQuery(req.body?.query));
+  } catch (error) {
+    const failure = bigQueryErrorResponse(error);
+    res.status(failure.status).json(failure.body);
   }
-
-  // Cost estimation heuristic based on query text, partition usage, and date filters
-  const hasPartitionFilter = /DATE\((?:timestamp|created_at)\)\s*(?:>=|=|>|BETWEEN)/i.test(query);
-  const mentionsMarketData = query.includes('market_data');
-  const mentionsSignals = query.includes('signals');
-  const mentionsRisk = query.includes('risk');
-  const mentionsBacktests = query.includes('backtests');
-
-  let estimatedBytes = 15 * 1024 * 1024; // 15 MB baseline
-
-  if (mentionsMarketData) {
-    estimatedBytes += hasPartitionFilter ? 85 * 1024 * 1024 : 1420 * 1024 * 1024;
-  }
-  if (mentionsSignals) {
-    estimatedBytes += hasPartitionFilter ? 24 * 1024 * 1024 : 380 * 1024 * 1024;
-  }
-  if (mentionsRisk) {
-    estimatedBytes += hasPartitionFilter ? 8 * 1024 * 1024 : 120 * 1024 * 1024;
-  }
-  if (mentionsBacktests) {
-    estimatedBytes += 2 * 1024 * 1024;
-  }
-
-  const exceedsSafetyCap = estimatedBytes > MAX_SCAN_BYTES;
-  const estimatedCostUsd = Number(((estimatedBytes / (1024 * 1024 * 1024 * 1024)) * 6.25).toFixed(6)); // $6.25/TB standard on-demand
-
-  res.json({
-    valid: !exceedsSafetyCap,
-    totalBytesProcessed: estimatedBytes,
-    totalBytesProcessedFormatted: (estimatedBytes / (1024 * 1024)).toFixed(2) + ' MB',
-    estimatedCostUsd,
-    withinFreeTier: true, // 1 TB free per month
-    exceedsSafetyCap,
-    hasPartitionFilter,
-    message: exceedsSafetyCap
-      ? `Query exceeds 10 GB scan safety limit (${(estimatedBytes / (1024 * 1024 * 1024)).toFixed(2)} GB). Please add DATE(timestamp) partition filters.`
-      : `Dry Run passed. Estimated scan: ${(estimatedBytes / (1024 * 1024)).toFixed(2)} MB. Safe for execution.`,
-  });
 });
 
 app.post('/api/bigquery/query', async (req: Request, res: Response) => {
-  const { query } = req.body;
-  if (!query || typeof query !== 'string') {
-    return res.status(400).json({ error: 'SQL query string is required' });
+  if (!(await requireBigQueryAccess(req, res))) return;
+  try {
+    res.json(await executeQuery(req.body?.query));
+  } catch (error) {
+    const failure = bigQueryErrorResponse(error);
+    res.status(failure.status).json(failure.body);
   }
-
-  // Pre-built execution responses for analytical quant queries
-  let columns: string[] = [];
-  let rows: any[] = [];
-  const startMs = Date.now();
-
-  if (query.includes('signals.strategy_decisions')) {
-    columns = ['regime', 'strategy_id', 'total_signals', 'avg_opp_score', 'avg_confidence', 'net_exposure_allocated', 'vetoed_signals_count'];
-    rows = [
-      { regime: 'R1_RANGE', strategy_id: 'STRUCTURAL_GRID', total_signals: 342, avg_opp_score: 0.842, avg_confidence: 0.91, net_exposure_allocated: 2.84, vetoed_signals_count: 0 },
-      { regime: 'R2_WEAK_TREND', strategy_id: 'TREND_FOLLOWING', total_signals: 184, avg_opp_score: 0.765, avg_confidence: 0.83, net_exposure_allocated: 1.45, vetoed_signals_count: 2 },
-      { regime: 'R5_VOL_SHOCK', strategy_id: 'SHOCK_MOMENTUM', total_signals: 48, avg_opp_score: 0.692, avg_confidence: 0.78, net_exposure_allocated: -0.80, vetoed_signals_count: 1 },
-      { regime: 'R1_RANGE', strategy_id: 'FUNDING_CARRY', total_signals: 72, avg_opp_score: 0.720, avg_confidence: 0.88, net_exposure_allocated: 0.40, vetoed_signals_count: 0 },
-      { regime: 'R4_BREAKOUT', strategy_id: 'TREND_FOLLOWING', total_signals: 28, avg_opp_score: 0.810, avg_confidence: 0.85, net_exposure_allocated: 1.10, vetoed_signals_count: 0 },
-      { regime: 'R6_CRISIS', strategy_id: 'STRUCTURAL_GRID', total_signals: 14, avg_opp_score: 0.120, avg_confidence: 0.45, net_exposure_allocated: 0.00, vetoed_signals_count: 14 },
-    ];
-  } else if (query.includes('risk.portfolio_snapshots')) {
-    columns = ['hour_bucket', 'risk_state', 'avg_margin_util_pct', 'peak_margin_util_pct', 'avg_leverage', 'peak_drawdown_pct', 'avg_equity_usdt', 'peak_grid_depth'];
-    rows = [
-      { hour_bucket: '2026-09-11 14:00:00 UTC', risk_state: 'NORMAL', avg_margin_util_pct: 16.4, peak_margin_util_pct: 18.2, avg_leverage: 1.42, peak_drawdown_pct: 1.85, avg_equity_usdt: 100000.0, peak_grid_depth: 2 },
-      { hour_bucket: '2026-09-11 13:00:00 UTC', risk_state: 'NORMAL', avg_margin_util_pct: 15.8, peak_margin_util_pct: 16.9, avg_leverage: 1.38, peak_drawdown_pct: 1.62, avg_equity_usdt: 99840.0, peak_grid_depth: 2 },
-      { hour_bucket: '2026-09-11 12:00:00 UTC', risk_state: 'NORMAL', avg_margin_util_pct: 14.2, peak_margin_util_pct: 15.1, avg_leverage: 1.25, peak_drawdown_pct: 1.30, avg_equity_usdt: 99620.0, peak_grid_depth: 1 },
-      { hour_bucket: '2026-09-11 11:00:00 UTC', risk_state: 'NORMAL', avg_margin_util_pct: 12.5, peak_margin_util_pct: 13.8, avg_leverage: 1.15, peak_drawdown_pct: 1.10, avg_equity_usdt: 99510.0, peak_grid_depth: 1 },
-      { hour_bucket: '2026-09-11 10:00:00 UTC', risk_state: 'CAUTION', avg_margin_util_pct: 22.4, peak_margin_util_pct: 24.1, avg_leverage: 1.65, peak_drawdown_pct: 2.15, avg_equity_usdt: 98920.0, peak_grid_depth: 3 },
-    ];
-  } else if (query.includes('market_data.ohlcv_bars')) {
-    columns = ['trade_date', 'symbol', 'avg_basis_zscore', 'annualized_funding_pct', 'avg_realized_vol_pct', 'avg_atr_usdt'];
-    rows = [
-      { trade_date: '2026-09-11', symbol: 'BTCUSDT', avg_basis_zscore: 0.85, annualized_funding_pct: 13.14, avg_realized_vol_pct: 42.8, avg_atr_usdt: 1250.4 },
-      { trade_date: '2026-09-11', symbol: 'ETHUSDT', avg_basis_zscore: 1.15, annualized_funding_pct: 19.71, avg_realized_vol_pct: 54.2, avg_atr_usdt: 46.5 },
-      { trade_date: '2026-09-10', symbol: 'BTCUSDT', avg_basis_zscore: 0.92, annualized_funding_pct: 14.20, avg_realized_vol_pct: 44.1, avg_atr_usdt: 1310.0 },
-      { trade_date: '2026-09-10', symbol: 'ETHUSDT', avg_basis_zscore: 1.08, annualized_funding_pct: 18.50, avg_realized_vol_pct: 52.9, avg_atr_usdt: 45.2 },
-    ];
-  } else {
-    // Default backtest/experiment run results
-    columns = ['experiment_id', 'strategy_id', 'model_version', 'nominal_sharpe', 'deflated_sharpe', 'profit_factor', 'max_dd_pct', 'total_drag_usd'];
-    rows = [
-      { experiment_id: 'EXP-2026-09-A1', strategy_id: 'STRUCTURAL_GRID_v02', model_version: 'catboost_v1.4', nominal_sharpe: 2.45, deflated_sharpe: 1.92, profit_factor: 1.84, max_dd_pct: 5.4, total_drag_usd: 1420.5 },
-      { experiment_id: 'EXP-2026-09-B2', strategy_id: 'TREND_BREAKOUT_v02', model_version: 'lightgbm_v2.0', nominal_sharpe: 2.12, deflated_sharpe: 1.78, profit_factor: 1.62, max_dd_pct: 6.8, total_drag_usd: 2150.0 },
-      { experiment_id: 'EXP-2026-08-C1', strategy_id: 'SHOCK_MOMENTUM_v02', model_version: 'deterministic', nominal_sharpe: 1.88, deflated_sharpe: 1.54, profit_factor: 1.48, max_dd_pct: 4.2, total_drag_usd: 840.2 },
-    ];
-  }
-
-  const executionTimeMs = Date.now() - startMs + Math.floor(Math.random() * 80 + 120);
-
-  res.json({
-    columns,
-    rows,
-    totalRows: rows.length,
-    bytesProcessedFormatted: '48.20 MB',
-    executionTimeMs,
-    cacheHit: false,
-    projectId: BIGQUERY_PROJECT_ID,
-    data_source: 'SIMULATED',
-    evidence_status: 'ILLUSTRATIVE_ONLY',
-    verified: false,
-    note: 'This local endpoint returns illustrative fixtures; it is not a verified BigQuery read-back.',
-  });
 });
 
-app.post('/api/bigquery/sync-telemetry', (req: Request, res: Response) => {
-  bigqueryTelemetryBuffer.flushed_batches_count += 1;
-  bigqueryTelemetryBuffer.total_flushed_rows += bigqueryTelemetryBuffer.buffered_rows_count;
-  const flushedCount = bigqueryTelemetryBuffer.buffered_rows_count;
-  bigqueryTelemetryBuffer.buffered_rows_count = 0;
-  bigqueryTelemetryBuffer.last_flush_time = new Date().toISOString();
-
-  res.json({
-    success: true,
-    flushedRows: flushedCount,
-    flushedBatchesTotal: bigqueryTelemetryBuffer.flushed_batches_count,
-    totalRowsIngested: bigqueryTelemetryBuffer.total_flushed_rows,
-    lastFlushTime: bigqueryTelemetryBuffer.last_flush_time,
-    targetLakehouse: `${BIGQUERY_PROJECT_ID}.[market_data, signals, risk]`,
-  });
+app.post('/api/bigquery/sync-telemetry', async (req: Request, res: Response) => {
+  // An empty browser buffer is a safe no-op and only needs ordinary Firebase
+  // identity. Non-empty writes are restricted to the worker producer claim.
+  const rows = req.body?.rows;
+  const requireTelemetryProducer = !Array.isArray(rows) || rows.length > 0;
+  if (!(await requireBigQueryAccess(req, res, { requireTelemetryProducer }))) return;
+  try {
+    res.json(await syncTelemetry(rows, req.body?.datasetId, req.body?.tableId));
+  } catch (error) {
+    const failure = bigQueryErrorResponse(error);
+    res.status(failure.status).json(failure.body);
+  }
 });
 
 // Explicit 404 catch-all for /api routes to prevent falling through to Vite HTML fallback

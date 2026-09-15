@@ -1,3 +1,5 @@
+import { getFirebaseIdToken } from './firebase';
+
 /**
  * Blessing AI v0.2 — BigQuery Analytical Lakehouse Service
  * Target Project: gen-lang-client-0730128480
@@ -31,19 +33,28 @@ export interface BigQueryDryRunResult {
   exceedsSafetyCap: boolean;
   statementType?: string;
   message?: string;
+  data_source?: 'BIGQUERY';
+  evidence_status?: 'UNVERIFIED' | 'VERIFIED';
+  verified?: boolean;
 }
 
 export interface BigQueryQueryResult {
   columns: string[];
   rows: any[];
   totalRows: number;
+  returnedRows?: number;
+  hasMore?: boolean;
+  nextPageToken?: string;
+  maxResultRows?: number;
   bytesProcessedFormatted: string;
   executionTimeMs: number;
   cacheHit: boolean;
-  data_source?: 'SIMULATED' | 'BIGQUERY';
-  evidence_status?: 'ILLUSTRATIVE_ONLY' | 'UNVERIFIED' | 'VERIFIED';
+  data_source?: 'BIGQUERY';
+  evidence_status?: 'UNVERIFIED' | 'VERIFIED';
   verified?: boolean;
   note?: string;
+  bytesProcessed?: number;
+  projectId?: string;
 }
 
 export const PRESET_BIGQUERY_QUERIES = [
@@ -63,7 +74,7 @@ SELECT
 FROM
   \`gen-lang-client-0730128480.signals.strategy_decisions\`
 WHERE
-  DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+  timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
 GROUP BY
   regime, strategy_id
 ORDER BY
@@ -86,7 +97,7 @@ SELECT
 FROM
   \`gen-lang-client-0730128480.risk.portfolio_snapshots\`
 WHERE
-  DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+  timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
 GROUP BY
   hour_bucket, risk_state
 ORDER BY
@@ -98,7 +109,7 @@ ORDER BY
     description: 'Spot vs Perpetual Basis Z-score, Annualized Funding Drag, and Rolling ATR Volatility',
     sql: `-- Spot vs Futures Basis Z-Score and Funding Rate Arbitrage Telemetry
 SELECT
-  DATE(timestamp) as trade_date,
+  TIMESTAMP_TRUNC(timestamp, DAY) as trade_day,
   symbol,
   ROUND(AVG(basis_zscore), 2) as avg_basis_zscore,
   ROUND(AVG(funding_rate * 100 * 3 * 365), 2) as annualized_funding_pct,
@@ -107,12 +118,12 @@ SELECT
 FROM
   \`gen-lang-client-0730128480.market_data.ohlcv_bars\`
 WHERE
-  DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+  timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 14 DAY)
   AND resolution = '1h'
 GROUP BY
-  trade_date, symbol
+  trade_day, symbol
 ORDER BY
-  trade_date DESC, symbol;`,
+  trade_day DESC, symbol;`,
   },
   {
     id: 'backtest_deflated_sharpe',
@@ -131,7 +142,7 @@ SELECT
 FROM
   \`gen-lang-client-0730128480.backtests.experiment_runs\`
 WHERE
-  DATE(created_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+  created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
 ORDER BY
   deflated_sharpe DESC;`,
   },
@@ -140,8 +151,16 @@ ORDER BY
 /**
  * Fetch BigQuery Lakehouse Configuration & Metadata
  */
-export async function getBigQueryConfig() {
-  const resp = await fetch('/api/bigquery/config');
+async function firebaseAuthHeaders(): Promise<Record<string, string>> {
+  const token = await getFirebaseIdToken();
+  if (!token) throw new Error('Firebase sign-in is required for BigQuery access');
+  return { Authorization: `Bearer ${token}` };
+}
+
+export async function getBigQueryConfig(firebaseIdToken?: string | null) {
+  const token = firebaseIdToken || await getFirebaseIdToken();
+  if (!token) throw new Error('Firebase sign-in is required for BigQuery access');
+  const resp = await fetch('/api/bigquery/config', { headers: { Authorization: `Bearer ${token}` } });
   if (!resp.ok) {
     throw new Error('Failed to fetch BigQuery configuration');
   }
@@ -151,13 +170,11 @@ export async function getBigQueryConfig() {
 /**
  * Execute a Dry Run to estimate scanned bytes and enforce the 10GB scan safety cap
  */
-export async function executeDryRun(query: string, accessToken?: string | null): Promise<BigQueryDryRunResult> {
+export async function executeDryRun(query: string, firebaseIdToken?: string | null): Promise<BigQueryDryRunResult> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  if (accessToken) {
-    headers['Authorization'] = `Bearer ${accessToken}`;
-  }
+  Object.assign(headers, firebaseIdToken ? { Authorization: `Bearer ${firebaseIdToken}` } : await firebaseAuthHeaders());
 
   const resp = await fetch('/api/bigquery/dry-run', {
     method: 'POST',
@@ -176,13 +193,11 @@ export async function executeDryRun(query: string, accessToken?: string | null):
 /**
  * Execute query against BigQuery lakehouse
  */
-export async function executeQuery(query: string, accessToken?: string | null): Promise<BigQueryQueryResult> {
+export async function executeQuery(query: string, firebaseIdToken?: string | null): Promise<BigQueryQueryResult> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  if (accessToken) {
-    headers['Authorization'] = `Bearer ${accessToken}`;
-  }
+  Object.assign(headers, firebaseIdToken ? { Authorization: `Bearer ${firebaseIdToken}` } : await firebaseAuthHeaders());
 
   const resp = await fetch('/api/bigquery/query', {
     method: 'POST',
@@ -199,20 +214,20 @@ export async function executeQuery(query: string, accessToken?: string | null): 
 }
 
 /**
- * Trigger immediate streaming flush from in-memory ring-buffer to BigQuery
+ * Trigger an explicit telemetry flush request. An omitted browser-side buffer
+ * is represented as an empty batch, which is a safe no-op rather than a fake
+ * telemetry payload; the worker producer can supply real rows separately.
  */
-export async function flushRingBufferToBigQuery(accessToken?: string | null) {
+export async function flushRingBufferToBigQuery(firebaseIdToken?: string | null) {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  if (accessToken) {
-    headers['Authorization'] = `Bearer ${accessToken}`;
-  }
+  Object.assign(headers, firebaseIdToken ? { Authorization: `Bearer ${firebaseIdToken}` } : await firebaseAuthHeaders());
 
   const resp = await fetch('/api/bigquery/sync-telemetry', {
     method: 'POST',
     headers,
-    body: JSON.stringify({}),
+    body: JSON.stringify({ rows: [] }),
   });
 
   if (!resp.ok) {

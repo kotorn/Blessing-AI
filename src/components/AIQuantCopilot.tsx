@@ -1,5 +1,13 @@
 import React, { useState } from 'react';
 import { Bot, Sparkles, Send, ShieldAlert, CheckCircle, Cpu } from 'lucide-react';
+import { apiClient } from '../api/client';
+
+interface ResearchResponse {
+  analysis?: string;
+  error?: string;
+  model?: string;
+  evidence_status?: string;
+}
 
 export const AIQuantCopilot: React.FC = () => {
   const [prompt, setPrompt] = useState('');
@@ -22,32 +30,21 @@ export const AIQuantCopilot: React.FC = () => {
     setIsLoading(true);
     setResponse(null);
     try {
-      const resp = await fetch('/api/quant/ai/research', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          task: selectedTask,
-          prompt: taskPrompt,
-          query: taskPrompt,
-          context: {
-            data_source: 'SIMULATED',
-            evidence_status: 'ILLUSTRATIVE_ONLY',
-            execution_authority: 'PYTHON_TRADING_WORKER',
-          },
-        }),
+      const data = await apiClient.post<ResearchResponse>('/api/quant/ai/research', {
+        task: selectedTask,
+        prompt: taskPrompt,
+        query: taskPrompt,
+        context: {
+          data_source: 'SIMULATED',
+          evidence_status: 'ILLUSTRATIVE_ONLY',
+          execution_authority: 'PYTHON_TRADING_WORKER',
+        },
       });
-      const contentType = resp.headers.get('content-type');
-      if (contentType && contentType.includes('application/json')) {
-        const data = await resp.json();
-        setResponse(data.analysis || data.error || 'No response returned');
-        setResponseMeta({
-          model: data.model || 'unknown provider',
-          evidence: data.evidence_status || 'UNVERIFIED',
-        });
-      } else {
-        const text = await resp.text();
-        setResponse(text.slice(0, 300) || 'Quant engine processing completed.');
-      }
+      setResponse(data.analysis || data.error || 'No response returned');
+      setResponseMeta({
+        model: data.model || 'unknown provider',
+        evidence: data.evidence_status || 'UNVERIFIED',
+      });
     } catch (e) {
       console.warn('AI Copilot request failed:', e);
       setResponse('Failed to communicate with Quant Research Engine.');

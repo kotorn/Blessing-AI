@@ -9,14 +9,14 @@ export interface GoogleProductConfig {
   id: string;
   name: string;
   category: 'DATABASE' | 'STORAGE' | 'ANALYTICS' | 'SECURITY' | 'COMPUTE' | 'AI' | 'WORKSPACE';
-  status: 'CONNECTED' | 'READY' | 'ACTIVE' | 'SYNCED';
+  status: 'CONNECTED' | 'READY' | 'ACTIVE' | 'SYNCED' | 'CONFIGURATION_DECLARED_NOT_VERIFIED';
   projectId: string;
   resourceIdentifier: string;
   region: string;
   description: string;
   consoleUrl: string;
   connectionParams: Record<string, string | number | boolean | string[]>;
-  lastVerified: string;
+  lastVerified: string | null;
 }
 
 export const GCP_PROJECT_ID = 'gen-lang-client-0730128480';
@@ -28,7 +28,7 @@ export const GOOGLE_PRODUCTS: GoogleProductConfig[] = [
     id: 'bigquery',
     name: 'Google BigQuery',
     category: 'ANALYTICS',
-    status: 'ACTIVE',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `${GCP_PROJECT_ID}.[market_data, signals, risk, backtests]`,
     region: 'US / asia-southeast1',
@@ -42,13 +42,13 @@ export const GOOGLE_PRODUCTS: GoogleProductConfig[] = [
       maxScanBytesLimitGb: 10.0,
       monthlyFreeTierGb: 1000,
     },
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'cloud_storage',
     name: 'Google Cloud Storage (GCS)',
     category: 'STORAGE',
-    status: 'READY',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `gs://blessing-ai-data-${GCP_PROJECT_ID}`,
     region: GCP_REGION,
@@ -61,13 +61,13 @@ export const GOOGLE_PRODUCTS: GoogleProductConfig[] = [
       modelsPrefix: 'models/catboost_v1.4/',
       lifecycleRuleDays: 90,
     },
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'cloud_sql',
     name: 'Google Cloud SQL (PostgreSQL 17)',
     category: 'DATABASE',
-    status: 'ACTIVE',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `${GCP_PROJECT_ID}:${GCP_REGION}:blessing-sql-primary`,
     region: GCP_REGION,
@@ -75,20 +75,25 @@ export const GOOGLE_PRODUCTS: GoogleProductConfig[] = [
     consoleUrl: `https://console.cloud.google.com/sql/instances/blessing-sql-primary/overview?project=${GCP_PROJECT_ID}`,
     connectionParams: {
       instanceId: 'blessing-sql-primary',
-      tier: 'db-custom-2-7680',
+      tier: 'LOWEST_COST_SHARED_CORE_PENDING_VERIFICATION',
+      engineVersion: 'POSTGRES_17_PENDING_REGIONAL_CAPABILITY_CHECK',
+      storageGb: 10,
       database: 'blessing_trading',
-      user: 'blessing_app',
+      dataConnectDatabase: 'blessing_app',
+      user: 'blessing_worker',
       port: 5432,
-      haMode: 'REGIONAL',
-      sslMode: 'VERIFY_CA',
+      haMode: 'NONE',
+      deletionProtection: true,
+      backupPolicy: 'NON_HA_PENDING_VERIFICATION',
+      connectionMode: 'CLOUD_SQL_UNIX_SOCKET',
     },
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'secret_manager',
     name: 'Google Secret Manager',
     category: 'SECURITY',
-    status: 'SYNCED',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `projects/${GCP_PROJECT_ID}/secrets/*`,
     region: 'global',
@@ -99,33 +104,35 @@ export const GOOGLE_PRODUCTS: GoogleProductConfig[] = [
       secretKeys: ['binance-api-key', 'binance-api-secret', 'postgres-password', 'telegram-bot-token'],
       autoRotationDays: 90,
     },
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'cloud_run',
     name: 'Google Cloud Run',
     category: 'COMPUTE',
-    status: 'CONNECTED',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
-    resourceIdentifier: `${GCP_REGION}/blessing-ai-worker`,
+    resourceIdentifier: `${GCP_REGION}/blessing-trading-worker`,
     region: GCP_REGION,
     description: 'Serverless execution container for asynchronous daemon trading worker and web cockpit.',
     consoleUrl: `https://console.cloud.google.com/run?project=${GCP_PROJECT_ID}`,
     connectionParams: {
-      service: 'blessing-ai-worker',
-      cpu: '2.0',
-      memory: '4Gi',
-      concurrency: 80,
+      service: 'blessing-trading-worker',
+      cpu: '1',
+      memory: '1Gi',
+      concurrency: 1,
       minInstances: 1, // Zero cold start for trading loop
-      maxInstances: 5,
+      maxInstances: 1,
+      executionMode: 'PAPER_BY_DEFAULT',
+      liveApproval: 'EXPLICIT_RELEASE_ONLY',
     },
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'firebase',
     name: 'Firebase (Firestore & Auth)',
     category: 'DATABASE',
-    status: 'CONNECTED',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `ai-studio-blessingai-3ae78e47-476e-4c0a-8ff4-fafa3b8cc364`,
     region: GCP_REGION,
@@ -136,13 +143,13 @@ export const GOOGLE_PRODUCTS: GoogleProductConfig[] = [
       collections: ['baskets', 'risk_states', 'audit_logs', 'strategy_configs', 'google_connections'],
       authProvider: 'Google Identity Services (GSI)',
     },
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'google_workspace',
     name: 'Google Workspace (Drive & Sheets)',
     category: 'WORKSPACE',
-    status: 'ACTIVE',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: `${USER_EMAIL} / Blessing AI v0.2 Quant Lakehouse`,
     region: 'global',
@@ -154,13 +161,13 @@ export const GOOGLE_PRODUCTS: GoogleProductConfig[] = [
       sheetsSpreadsheetName: 'Blessing AI v0.2 - Live Baskets & Risk Telemetry',
       exportFormat: 'Google Sheets (Native)',
     },
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
   {
     id: 'gemini_ai',
     name: 'Google Gemini Generative AI',
     category: 'AI',
-    status: 'CONNECTED',
+    status: 'CONFIGURATION_DECLARED_NOT_VERIFIED',
     projectId: GCP_PROJECT_ID,
     resourceIdentifier: 'gemini-2.5-flash / gemini-3.8-flash',
     region: 'global',
@@ -172,7 +179,7 @@ export const GOOGLE_PRODUCTS: GoogleProductConfig[] = [
       serverSideProxy: true,
       executionLoopDecoupled: true,
     },
-    lastVerified: new Date().toISOString(),
+    lastVerified: null,
   },
 ];
 

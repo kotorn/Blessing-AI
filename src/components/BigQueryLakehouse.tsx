@@ -33,7 +33,7 @@ import { useAuth } from '../context/AuthContext';
 import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
 
 export const BigQueryLakehouse: React.FC = () => {
-  const { accessToken, user, cloudAudit } = useAuth();
+  const { user, cloudAudit } = useAuth();
 
   const [config, setConfig] = useState<any>(null);
   const [loadingConfig, setLoadingConfig] = useState<boolean>(true);
@@ -50,15 +50,37 @@ export const BigQueryLakehouse: React.FC = () => {
   // Ingestion buffer flush state
   const [isFlushing, setIsFlushing] = useState<boolean>(false);
   const [flushSuccessMsg, setFlushSuccessMsg] = useState<string | null>(null);
+  const [telemetryProducer, setTelemetryProducer] = useState<boolean>(false);
 
   // Copy helper
   const [copiedSql, setCopiedSql] = useState<boolean>(false);
 
   useEffect(() => {
-    loadConfig();
+    if (!user) {
+      setLoadingConfig(false);
+      setExecutionError('Firebase sign-in is required for BigQuery access.');
+      return;
+    }
+    void loadConfig();
     // Run initial dry run for the default query
-    runDryRun(PRESET_BIGQUERY_QUERIES[0].sql);
-  }, []);
+    void runDryRun(PRESET_BIGQUERY_QUERIES[0].sql);
+  }, [user]);
+
+  useEffect(() => {
+    let mounted = true;
+    if (!user) {
+      setTelemetryProducer(false);
+      return () => { mounted = false; };
+    }
+    void user.getIdTokenResult().then(({ claims }) => {
+      if (mounted) {
+        setTelemetryProducer(claims.telemetryProducer === true || claims.bigqueryTelemetryProducer === true);
+      }
+    }).catch(() => {
+      if (mounted) setTelemetryProducer(false);
+    });
+    return () => { mounted = false; };
+  }, [user]);
 
   const loadConfig = async () => {
     try {
@@ -87,7 +109,7 @@ export const BigQueryLakehouse: React.FC = () => {
     setIsDryRunning(true);
     setExecutionError(null);
     try {
-      const res = await executeDryRun(queryText, accessToken);
+      const res = await executeDryRun(queryText);
       setDryRunResult(res);
     } catch (err: any) {
       setExecutionError(err.message || 'Dry run evaluation failed');
@@ -103,9 +125,9 @@ export const BigQueryLakehouse: React.FC = () => {
     try {
       // First ensure dry run passes safety limit
       if (dryRunResult?.exceedsSafetyCap) {
-        throw new Error('Query blocked: Exceeds 10 GB scan safety limit. Add partition filter DATE(timestamp).');
+        throw new Error('Query blocked: Exceeds 10 GB scan safety limit. Add a direct timestamp or created_at partition filter.');
       }
-      const res = await executeQuery(sqlQuery, accessToken);
+      const res = await executeQuery(sqlQuery);
       setQueryResult(res);
       await cloudAudit('BIGQUERY_QUERY_EXECUTE', undefined, `Scanned: ${res.bytesProcessedFormatted}, Rows: ${res.totalRows}`);
     } catch (err: any) {
@@ -119,8 +141,12 @@ export const BigQueryLakehouse: React.FC = () => {
     setIsFlushing(true);
     setFlushSuccessMsg(null);
     try {
-      const res = await flushRingBufferToBigQuery(accessToken);
-      setFlushSuccessMsg(`Successfully flushed ${res.flushedRows} rows to BigQuery Lakehouse`);
+      const res = await flushRingBufferToBigQuery();
+      setFlushSuccessMsg(
+        res.status === 'NOOP'
+          ? 'No browser telemetry rows were available; flush completed as a safe no-op.'
+          : `Successfully flushed ${res.flushedRows} rows to BigQuery Lakehouse`,
+      );
       await loadConfig();
       await cloudAudit('BIGQUERY_BUFFER_FLUSH', undefined, `Flushed ${res.flushedRows} rows to ${res.targetLakehouse}`);
       setTimeout(() => setFlushSuccessMsg(null), 5000);
@@ -253,7 +279,7 @@ export const BigQueryLakehouse: React.FC = () => {
             }}
             rows={8}
             className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-3 font-mono text-xs text-zinc-200 focus:outline-none focus:border-cyan-500 leading-relaxed resize-y"
-            placeholder="SELECT ... FROM `gen-lang-client-0730128480.market_data.ohlcv_bars` WHERE DATE(timestamp) >= ..."
+            placeholder="SELECT ... FROM `gen-lang-client-0730128480.market_data.ohlcv_bars` WHERE timestamp >= TIMESTAMP_SUB(...)"
           />
           <button
             type="button"
@@ -412,26 +438,26 @@ export const BigQueryLakehouse: React.FC = () => {
           </div>
 
           <p className="text-xs text-zinc-400 leading-relaxed">
-            Trading events accumulate in worker RAM and flush asynchronously into BigQuery and GCS Parquet, ensuring zero jitter on the critical execution path.
+            The execution worker is the only telemetry producer. This browser panel never fabricates rows; live buffer counts remain UNKNOWN until the worker reports a verified destination read-back.
           </p>
 
           <div className="grid grid-cols-3 gap-2 text-[11px]">
             <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800">
               <span className="text-zinc-500 block text-[10px]">Buffer Rows</span>
               <span className="font-semibold text-zinc-200">
-                {config?.telemetryStats?.buffered_rows_count ?? 1420}
+                {config?.telemetryStats?.buffered_rows_count ?? 'UNKNOWN'}
               </span>
             </div>
             <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800">
               <span className="text-zinc-500 block text-[10px]">Total Ingested</span>
               <span className="font-semibold text-cyan-400">
-                {(config?.telemetryStats?.total_flushed_rows ?? 119280).toLocaleString()}
+                {config?.telemetryStats?.total_flushed_rows?.toLocaleString?.() ?? 'UNKNOWN'}
               </span>
             </div>
             <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800">
               <span className="text-zinc-500 block text-[10px]">Batches Flushed</span>
               <span className="font-semibold text-emerald-400">
-                {config?.telemetryStats?.flushed_batches_count ?? 84}
+                {config?.telemetryStats?.flushed_batches_count ?? 'UNKNOWN'}
               </span>
             </div>
           </div>
@@ -446,11 +472,11 @@ export const BigQueryLakehouse: React.FC = () => {
           <button
             type="button"
             onClick={handleFlushBuffer}
-            disabled={isFlushing}
+            disabled={isFlushing || !telemetryProducer}
             className="w-full py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded-lg text-xs font-medium flex items-center justify-center space-x-1.5 transition-colors cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isFlushing ? 'animate-spin' : ''}`} />
-            <span>{isFlushing ? 'Flushing Ring-Buffer...' : 'Flush Buffer to BigQuery Now'}</span>
+            <span>{isFlushing ? 'Flushing Ring-Buffer...' : telemetryProducer ? 'Flush Buffer to BigQuery Now' : 'Telemetry producer claim required'}</span>
           </button>
         </div>
 

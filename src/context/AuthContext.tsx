@@ -19,6 +19,10 @@ import {
   GoogleDriveFile,
   SheetExportResult,
 } from '../lib/workspace';
+import {
+  saveCloudBasketWithDataConnect,
+  saveRiskSettingsWithDataConnect,
+} from '../dataconnect/client';
 
 interface AuthContextType {
   user: User | null;
@@ -122,6 +126,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const saveCloudBasket = async (basket: any) => {
     if (!user) return;
+    // SQL Connect is an exclusive cutover path. A true result means the
+    // Firestore write below must not run, preventing dual authoritative data.
+    if (await saveCloudBasketWithDataConnect(basket)) return;
     const path = `users/${user.uid}/baskets/${basket.basket_id || basket.basketId}`;
     try {
       const basketRef = doc(db, 'users', user.uid, 'baskets', basket.basket_id || basket.basketId);
@@ -154,6 +161,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     killSwitchActive?: boolean;
   }) => {
     if (!user) return;
+    if (await saveRiskSettingsWithDataConnect(settings)) return;
     const path = `users/${user.uid}/settings/risk`;
     try {
       const riskRef = doc(db, 'users', user.uid, 'settings', 'risk');

@@ -128,11 +128,11 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
   const rawTwoLayerAssets = account?.two_layer_assets ?? [];
   const lastSyncTime = account?.last_sync_time;
   const source = account?.source ?? 'SIMULATED';
-  const hasVerifiedSnapshot = account?.verified === true && source === 'BINANCE_TESTNET';
+  const hasVerifiedSnapshot = account?.verified === true && (source === 'BINANCE_TESTNET' || source === 'BINANCE_MAINNET');
   const snapshotLabel =
-    source === 'BINANCE_TESTNET'
-      ? hasVerifiedSnapshot ? 'BINANCE TESTNET' : 'BINANCE TESTNET / UNVERIFIED'
-      : 'NO VERIFIED TESTNET SNAPSHOT';
+    source === 'BINANCE_TESTNET' || source === 'BINANCE_MAINNET'
+      ? hasVerifiedSnapshot ? source.replace('_', ' ') : `${source.replace('_', ' ')} / UNVERIFIED`
+      : 'NO VERIFIED BINANCE SNAPSHOT';
   const subWallets: SubWalletSummary[] = rawSubWallets;
   const twoLayerAssets: TwoLayerAsset[] = rawTwoLayerAssets;
 

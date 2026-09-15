@@ -10,10 +10,10 @@ UI / TypeScript control plane
           |
           v
 Python Trading Worker
-  decision gate -> order gate -> Testnet adapter
+  decision gate -> order gate -> fixed-environment Binance adapter
           |
           v
-Binance USDⓈ-M Testnet
+Binance USDⓈ-M Testnet (default) or explicitly gated Mainnet
 ```
 
 No ML, RL, Transformer, Gemini, Claude, Codex, or other LLM is part of the
@@ -29,11 +29,17 @@ own REST observation to execution readiness.
 ## Environment invariant
 
 The mutable native Binance adapter, REST execution client, and private user
-stream are Testnet-only. `LIVE` ARM is rejected, mutable Mainnet adapter
-construction is rejected, and `liveExecutionReady` / `small_live_ready` stay
-false.
+stream address only the fixed Binance USDⓈ-M Testnet or Mainnet endpoints. The
+default is `EXECUTION_MODE=PAPER` with `MAINNET_LIVE_APPROVED=false`. Mainnet
+adapter construction and `LIVE` ARM require the explicit deployment approval;
+without it, Mainnet remains disarmed and `liveExecutionReady` stays false.
 
-The worker requires `BINANCE_TESTNET=true` plus dedicated Testnet credentials.
+Testnet execution requires `BINANCE_TESTNET=true` plus dedicated Testnet
+credentials. Mainnet execution requires dedicated Mainnet credentials, the
+approval flag, a fresh explicit USDC collateral record, a known supported margin
+mode, configured ETHUSDC leverage at or below 10x, effective leverage at or
+below 10x, daily net PnL including commissions and funding, and an acquired
+account/environment-scoped execution lease. Unknown values fail closed.
 Authentication is authoritative only after capability discovery has succeeded
 and a signed `/fapi/v2/account` request has returned a valid account payload.
 Execution authorization additionally requires that payload's `canTrade`
@@ -44,7 +50,7 @@ establishment alone is not a readiness signal.
 ## Spot and Portfolio Margin boundary
 
 Spot and Portfolio Margin are separate Binance account products from the
-USDⓈ-M Futures Testnet account owned by the Worker. A Spot-to-Portfolio-Margin
+USDⓈ-M Futures account owned by the Worker. A Spot-to-Portfolio-Margin
 transfer is therefore not Testnet Futures collateral, does not populate the
 Worker's `ExchangeAccountSnapshot`, and cannot make `testnetExecutionReady`
 true. The TypeScript control-plane may show a signed Portfolio Margin balance
@@ -55,9 +61,10 @@ transfer and never promotes that observation into execution authority.
 ## Readiness and reconciliation
 
 An adapter is not ready merely because it exists. Before `READY`, the worker
-requires symbol rules, a connected private stream, a complete fresh Testnet
-account snapshot, fresh market data for each active symbol, and authoritative
-reconciliation. Bootstrap fetches positions, open orders, and account data;
+requires symbol rules, a connected private stream, a complete fresh account
+snapshot for the selected environment, fresh market data for each active
+symbol, and authoritative reconciliation. Bootstrap fetches positions, open
+orders, and account data;
 an empty ledger may adopt that authoritative snapshot, while existing local
 orders/positions are compared before any refresh. It recovers fills, compares
 the ledger with the exchange, and only then reports `IN_SYNC`.
@@ -65,7 +72,7 @@ the ledger with the exchange, and only then reports `IN_SYNC`.
 Liquidation distance is calculated from position-side-aware mark and
 liquidation prices. Missing or unusable liquidation information is
 `UNKNOWN`, not an invented percentage; risk-increasing decisions fail closed.
-Risk-increasing decisions also require positive available Testnet balance and
+Risk-increasing decisions also require positive available balance and
 margin utilization below the 70% safety limit.
 
 ## Execution gates

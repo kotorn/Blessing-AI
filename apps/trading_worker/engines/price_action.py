@@ -123,14 +123,14 @@ class PriceActionEngine:
 
     def process_event(self, event: MarketEvent) -> Optional[PriceActionState]:
         sym = event.symbol
-        if sym not in self.trackers:
-            self.trackers[sym] = InstrumentTracker()
-            
         event_timestamp = event.event_time
         if event_timestamp.tzinfo is None:
-            event_timestamp = event_timestamp.replace(tzinfo=UTC)
-        else:
-            event_timestamp = event_timestamp.astimezone(UTC)
+            logger.warning("Rejecting market event with a naive timestamp for %s", sym)
+            return None
+        event_timestamp = event_timestamp.astimezone(UTC)
+
+        if sym not in self.trackers:
+            self.trackers[sym] = InstrumentTracker()
             
         tracker = self.trackers[sym]
         state = tracker.process(event_timestamp, event.last_price)

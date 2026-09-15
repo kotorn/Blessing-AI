@@ -43,25 +43,26 @@ OPTIONS (
 -- -------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `gen-lang-client-0730128480.market_data.ohlcv_bars`
 (
+  bar_id STRING NOT NULL,              -- Stable producer identity for idempotent read-back
   timestamp TIMESTAMP NOT NULL,
   symbol STRING NOT NULL,            -- e.g. 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'
   venue STRING NOT NULL,             -- 'binance_spot' or 'binance_usdm'
   resolution STRING NOT NULL,        -- '1s', '1m', '5m', '15m', '1h', '4h', '1d'
-  open NUMERIC(28, 10) NOT NULL,
-  high NUMERIC(28, 10) NOT NULL,
-  low NUMERIC(28, 10) NOT NULL,
-  close NUMERIC(28, 10) NOT NULL,
-  volume NUMERIC(28, 10) NOT NULL,
-  quote_volume NUMERIC(28, 10) NOT NULL,
+  open BIGNUMERIC(38, 18) NOT NULL,
+  high BIGNUMERIC(38, 18) NOT NULL,
+  low BIGNUMERIC(38, 18) NOT NULL,
+  close BIGNUMERIC(38, 18) NOT NULL,
+  volume BIGNUMERIC(38, 18) NOT NULL,
+  quote_volume BIGNUMERIC(38, 18) NOT NULL,
   trade_count INT64,
-  taker_buy_base_volume NUMERIC(28, 10),
-  taker_buy_quote_volume NUMERIC(28, 10),
-  vwap NUMERIC(28, 10),
-  atr_14 NUMERIC(28, 10),
-  realized_vol_24h NUMERIC(28, 10),
-  basis_zscore NUMERIC(28, 10),
-  funding_rate NUMERIC(28, 10),
-  open_interest NUMERIC(28, 10),
+  taker_buy_base_volume BIGNUMERIC(38, 18),
+  taker_buy_quote_volume BIGNUMERIC(38, 18),
+  vwap BIGNUMERIC(38, 18),
+  atr_14 BIGNUMERIC(38, 18),
+  realized_vol_24h BIGNUMERIC(38, 18),
+  basis_zscore BIGNUMERIC(38, 18),
+  funding_rate BIGNUMERIC(38, 18),
+  open_interest BIGNUMERIC(38, 18),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
 )
 PARTITION BY DATE(timestamp)
@@ -84,7 +85,7 @@ CREATE TABLE IF NOT EXISTS `gen-lang-client-0730128480.signals.strategy_decision
   regime STRING NOT NULL,            -- 'R0_STRONG_MR', 'R1_RANGE', 'R2_WEAK_TREND', 'R3_STRONG_TREND', 'R4_BREAKOUT', 'R5_VOL_SHOCK', 'R6_CRISIS'
   opportunity_score FLOAT64 NOT NULL, -- Continuous 0.0 to 1.0 (No rigid boolean filters)
   confidence FLOAT64 NOT NULL,
-  target_exposure_delta NUMERIC(28, 10) NOT NULL,
+  target_exposure_delta BIGNUMERIC(38, 18) NOT NULL,
   direction STRING NOT NULL,         -- 'LONG', 'SHORT', 'FLAT'
   grid_depth INT64,
   hedge_multiplier FLOAT64,
@@ -108,18 +109,18 @@ CREATE TABLE IF NOT EXISTS `gen-lang-client-0730128480.risk.portfolio_snapshots`
   timestamp TIMESTAMP NOT NULL,
   snapshot_id STRING NOT NULL,
   risk_state STRING NOT NULL,        -- 'NORMAL', 'CAUTION', 'NO_NEW_GRID', 'RECOVERY_ONLY', 'DELEVERAGE', 'EMERGENCY'
-  equity NUMERIC(28, 10) NOT NULL,
-  balance NUMERIC(28, 10) NOT NULL,
-  used_margin NUMERIC(28, 10) NOT NULL,
-  free_margin NUMERIC(28, 10) NOT NULL,
+  equity BIGNUMERIC(38, 18) NOT NULL,
+  balance BIGNUMERIC(38, 18) NOT NULL,
+  used_margin BIGNUMERIC(38, 18) NOT NULL,
+  free_margin BIGNUMERIC(38, 18) NOT NULL,
   margin_utilization_pct FLOAT64 NOT NULL,
   effective_leverage FLOAT64 NOT NULL,
   portfolio_drawdown_pct FLOAT64 NOT NULL,
-  daily_pnl NUMERIC(28, 10) NOT NULL,
+  daily_pnl BIGNUMERIC(38, 18) NOT NULL,
   kill_switch_active BOOLEAN NOT NULL,
-  gross_exposure_usd NUMERIC(28, 10) NOT NULL,
-  net_delta_btc NUMERIC(28, 10) NOT NULL,
-  net_delta_eth NUMERIC(28, 10) NOT NULL,
+  gross_exposure_usd BIGNUMERIC(38, 18) NOT NULL,
+  net_delta_btc BIGNUMERIC(38, 18) NOT NULL,
+  net_delta_eth BIGNUMERIC(38, 18) NOT NULL,
   active_baskets_count INT64 NOT NULL,
   max_grid_depth_reached INT64 NOT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
@@ -143,9 +144,9 @@ CREATE TABLE IF NOT EXISTS `gen-lang-client-0730128480.backtests.experiment_runs
   model_version STRING NOT NULL,
   start_time TIMESTAMP NOT NULL,
   end_time TIMESTAMP NOT NULL,
-  symbols ARRAY<STRING> NOT NULL,
-  initial_capital NUMERIC(28, 10) NOT NULL,
-  final_equity NUMERIC(28, 10) NOT NULL,
+  symbols ARRAY<STRING>,
+  initial_capital BIGNUMERIC(38, 18) NOT NULL,
+  final_equity BIGNUMERIC(38, 18) NOT NULL,
   total_trades INT64 NOT NULL,
   win_rate_pct FLOAT64 NOT NULL,
   sharpe_ratio FLOAT64 NOT NULL,
@@ -153,9 +154,9 @@ CREATE TABLE IF NOT EXISTS `gen-lang-client-0730128480.backtests.experiment_runs
   sortino_ratio FLOAT64,
   max_drawdown_pct FLOAT64 NOT NULL,
   profit_factor FLOAT64 NOT NULL,
-  total_funding_cost NUMERIC(28, 10),
-  total_slippage_cost NUMERIC(28, 10),
-  total_commission_cost NUMERIC(28, 10),
+  total_funding_cost BIGNUMERIC(38, 18),
+  total_slippage_cost BIGNUMERIC(38, 18),
+  total_commission_cost BIGNUMERIC(38, 18),
   parameters JSON,
   notes STRING
 )

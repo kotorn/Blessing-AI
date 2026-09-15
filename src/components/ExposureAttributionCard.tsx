@@ -33,9 +33,9 @@ export const ExposureAttributionCard: React.FC<ExposureAttributionCardProps> = (
   const btcBaskets = baskets.filter((b) => b.instrument.includes('BTC'));
   const ethBaskets = baskets.filter((b) => b.instrument.includes('ETH'));
 
-  const hasVerifiedAccount = account.verified === true && account.source === 'BINANCE_TESTNET';
+  const hasVerifiedAccount = account.verified === true && (account.source === 'BINANCE_TESTNET' || account.source === 'BINANCE_MAINNET');
   const hasVerifiedBaskets = baskets.some(
-    (basket) => basket.verified === true && basket.data_source === 'BINANCE_TESTNET',
+    (basket) => basket.verified === true && (basket.data_source === 'BINANCE_TESTNET' || basket.data_source === 'BINANCE_MAINNET'),
   );
   const btcNetDelta = hasVerifiedBaskets ? btcBaskets.reduce(
     (sum, b) => sum + (b.direction === 'LONG' ? b.total_size : -b.total_size),

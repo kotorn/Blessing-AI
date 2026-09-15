@@ -37,13 +37,17 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 export const db = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId);
 export const auth = getAuth(app);
 
-// Configure Google Auth Provider with Google Drive, Google Sheets, and BigQuery Scopes
+/** Return the short-lived Firebase ID token used for backend identity checks. */
+export async function getFirebaseIdToken(): Promise<string | null> {
+  return auth.currentUser ? auth.currentUser.getIdToken() : null;
+}
+
+// Configure Google Auth Provider only for Drive/Sheets. BigQuery browser
+// identity uses Firebase ID tokens and never this OAuth access token.
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
 googleProvider.addScope('https://www.googleapis.com/auth/spreadsheets');
 googleProvider.addScope('https://www.googleapis.com/auth/drive.readonly');
-googleProvider.addScope('https://www.googleapis.com/auth/bigquery');
-googleProvider.addScope('https://www.googleapis.com/auth/bigquery.readonly');
 
 // In-memory token cache (never stored in localStorage)
 let cachedAccessToken: string | null = null;

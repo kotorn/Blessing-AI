@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Mapping, Optional, Protocol
 
-from apps.trading_worker.persistence.postgres.client import PostgresClient
+from apps.trading_worker.persistence.postgres.client import PostgresClient, redact_error
 from domain.models import (
     ExchangeFill,
     ExchangePosition,
@@ -49,7 +49,7 @@ def _utc_datetime(value: object) -> datetime:
         raise ValueError(f"unsupported timestamp type: {type(value).__name__}")
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
+        raise ValueError("persistence timestamps must be timezone-aware")
     return parsed.astimezone(UTC)
 
 
@@ -238,6 +238,8 @@ class RiskSnapshotRepository:
             {
                 "hard_violations": snapshot.hard_violations,
                 "soft_violations": snapshot.soft_violations,
+                "realized_pnl_24h": str(snapshot.realized_pnl_24h),
+                "realized_pnl_24h_known": snapshot.realized_pnl_24h_known,
             }
         )
         await connection.execute(
@@ -376,10 +378,23 @@ class PersistenceRepository:
         row: Any = None
         try:
             async with self.db.transaction() as connection:
+                await connection.execute(
+                    """
+                    UPDATE persistence_outbox
+                    SET status = 'PENDING', claimed_at = NULL
+                    WHERE status = 'PROCESSING'
+                      AND (
+                          claimed_at IS NULL
+                          OR claimed_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+                      )
+                    """
+                )
                 row = await connection.fetchrow(
                     """
                     UPDATE persistence_outbox
-                    SET status = 'PROCESSING', attempt_count = attempt_count + 1
+                    SET status = 'PROCESSING',
+                        claimed_at = CURRENT_TIMESTAMP,
+                        attempt_count = attempt_count + 1
                     WHERE event_id = (
                         SELECT event_id
                         FROM persistence_outbox
@@ -397,7 +412,10 @@ class PersistenceRepository:
                 await connection.execute(
                     """
                     UPDATE persistence_outbox
-                    SET status = 'PROCESSED', processed_at = CURRENT_TIMESTAMP, last_error = NULL
+                    SET status = 'PROCESSED',
+                        claimed_at = NULL,
+                        processed_at = CURRENT_TIMESTAMP,
+                        last_error = NULL
                     WHERE event_id = $1
                     """,
                     row["event_id"],
@@ -415,6 +433,7 @@ class PersistenceRepository:
             """
             UPDATE persistence_outbox
             SET status = 'PENDING',
+                claimed_at = NULL,
                 attempt_count = attempt_count + 1,
                 next_attempt_at = CURRENT_TIMESTAMP + INTERVAL '1 second'
                     * LEAST(300, GREATEST(1, POWER(2, attempt_count))),
@@ -423,7 +442,7 @@ class PersistenceRepository:
               AND status = 'PENDING'
             """,
             event_id,
-            f"{type(error).__name__}: {str(error)[:500]}",
+            redact_error(f"{type(error).__name__}: {str(error)}"),
         )
 
     async def _apply_event(self, connection: Any, row: Mapping[str, Any]) -> None:

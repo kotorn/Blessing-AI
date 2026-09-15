@@ -61,7 +61,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
   };
 
   const handleArm = async () => {
-    if (!preflightResult?.canArm || executionMode === 'LIVE') return;
+    if (!preflightResult?.canArm) return;
     setLoading(true);
     try {
       await onComplete({
@@ -92,16 +92,16 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
               key={mode}
               type="button"
               onClick={() => {
-                if (mode !== 'LIVE') setExecutionMode(mode);
+                setExecutionMode(mode);
+                setInstruments(mode === 'LIVE' ? { ETHUSDC: true } : { BTCUSDT: true });
               }}
-              disabled={mode === 'LIVE'}
               className={`p-3 border rounded-xl text-left transition-all relative ${
                 executionMode === mode
                   ? mode === 'LIVE'
                     ? 'bg-rose-950/40 border-rose-600 text-rose-300'
                     : 'bg-indigo-900/30 border-indigo-500 text-indigo-300'
                   : mode === 'LIVE'
-                    ? 'bg-zinc-950 border-zinc-800 text-zinc-700 cursor-not-allowed'
+                    ? 'bg-zinc-950 border-zinc-800 text-zinc-500 hover:border-rose-800'
                     : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:border-zinc-700'
               }`}
             >
@@ -109,12 +109,12 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
                 <span className="font-bold text-sm">{mode}</span>
                 {mode === 'LIVE' && (
                   <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-900/60 border border-rose-700 text-rose-300 font-mono font-bold">
-                    BLOCKED
+                    RELEASE GATED
                   </span>
                 )}
               </div>
               <div className="text-[10px] mt-1 opacity-80">
-                {mode === 'PAPER' ? 'Simulated execution' : mode === 'TESTNET' ? 'Binance Testnet' : 'Blocked in this sprint'}
+                {mode === 'PAPER' ? 'Simulated execution' : mode === 'TESTNET' ? 'Binance Testnet' : 'Binance USDⓈ-M Mainnet (approval required)'}
               </div>
             </button>
           ))}
@@ -271,7 +271,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
         </button>
         <button
           onClick={handleArm}
-          disabled={loading || !preflightResult?.canArm || executionMode === 'LIVE'}
+          disabled={loading || !preflightResult?.canArm}
           className="flex items-center space-x-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors"
         >
           <Play className="w-4 h-4" />

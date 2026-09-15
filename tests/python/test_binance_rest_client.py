@@ -58,6 +58,16 @@ def make_client(responses):
 
 
 @pytest.mark.asyncio
+async def test_transport_rejects_unreviewed_endpoint_before_network_call():
+    client, session, _ = make_client([])
+
+    with pytest.raises(ValueError, match="endpoint allowlist"):
+        await client.request("GET", "/fapi/v1/leverageBracket")
+
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_mutable_timestamp_error_resyncs_without_resubmitting():
     client, session, sync_calls = make_client(
         [FakeResponse(400, {"code": -1021, "msg": "timestamp outside recvWindow"})]

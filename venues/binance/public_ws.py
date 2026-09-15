@@ -27,9 +27,11 @@ class BinancePublicWebSocket:
         symbols: List[str],
         base_ws_url: str = "wss://fstream.binance.com/ws",
         event_callback: Optional[Callable[[MarketEvent], Coroutine[Any, Any, None]]] = None,
+        venue: str = "BINANCE_TESTNET",
     ):
         self.symbols = [s.lower() for s in symbols]
         self.base_ws_url = base_ws_url
+        self.venue = str(venue).strip().upper()
         self.event_callback = event_callback
         self.is_running = False
         self._task: Optional[asyncio.Task] = None
@@ -109,7 +111,7 @@ class BinancePublicWebSocket:
                     event_id=f"ws_{payload.get('u', 0)}",
                     event_time=datetime.fromtimestamp(payload.get("E", 0) / 1000, tz=timezone.utc),
                     symbol=sym,
-                    venue="BINANCE_TESTNET",
+                    venue=self.venue,
                     market_type=MarketType.USDM_FUTURES,
                     last_price=Decimal(str(payload.get("b", "0"))),
                     best_bid=Decimal(str(payload.get("b", "0"))),
@@ -121,7 +123,7 @@ class BinancePublicWebSocket:
                     event_id=f"mp_{payload.get('E', 0)}",
                     event_time=datetime.fromtimestamp(payload.get("E", 0) / 1000, tz=timezone.utc),
                     symbol=sym,
-                    venue="BINANCE_TESTNET",
+                    venue=self.venue,
                     market_type=MarketType.USDM_FUTURES,
                     last_price=Decimal(str(payload.get("p", "0"))),
                     best_bid=Decimal(str(payload.get("p", "0"))),

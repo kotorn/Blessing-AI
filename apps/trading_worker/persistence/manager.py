@@ -14,7 +14,12 @@ from enum import Enum
 from decimal import Decimal
 from typing import Any, Mapping, Optional
 
-from apps.trading_worker.persistence.postgres.client import PostgresClient, get_postgres_client
+from apps.trading_worker.persistence.postgres.client import (
+    PostgresClient,
+    get_postgres_client,
+    redact_error,
+)
+from apps.trading_worker.execution_lease import PostgresExecutionLease
 from apps.trading_worker.persistence.postgres.repositories import (
     InstrumentRulesProvider,
     PersistenceRepository,
@@ -38,6 +43,7 @@ class PersistenceConfig:
     retry_max_seconds: float = 30.0
     drain_timeout_seconds: float = 10.0
     poll_interval_seconds: float = 0.25
+    pre_submission_timeout_seconds: float = 5.0
 
     @classmethod
     def from_environment(
@@ -81,6 +87,9 @@ class PersistenceConfig:
                 "PERSISTENCE_DRAIN_TIMEOUT_SECONDS", 10.0
             ),
             poll_interval_seconds=positive_float("PERSISTENCE_POLL_INTERVAL_SECONDS", 0.25),
+            pre_submission_timeout_seconds=positive_float(
+                "PERSISTENCE_PRE_SUBMISSION_TIMEOUT_SECONDS", 5.0
+            ),
         )
 
 
@@ -119,7 +128,7 @@ def _utc(value: object) -> datetime:
     else:
         raise ValueError(f"unsupported timestamp type: {type(value).__name__}")
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
+        raise ValueError("persistence timestamps must be timezone-aware")
     return parsed.astimezone(UTC)
 
 
@@ -194,6 +203,24 @@ class PersistenceManager:
         self.instrument_rules_provider = provider
         if self.repository is not None:
             self.repository.instrument_rules_provider = provider
+
+    def create_execution_lease(
+        self,
+        scope_key: str,
+        *,
+        owner_id: Optional[str] = None,
+        ttl_seconds: float = 10.0,
+    ) -> PostgresExecutionLease:
+        """Create a DB-backed fencing lease; callers must acquire it explicitly."""
+
+        if not self.is_connected or self.db.pool is None:
+            raise RuntimeError("Durable persistence is required before creating an execution lease")
+        return PostgresExecutionLease(
+            self.db,
+            scope_key,
+            owner_id=owner_id,
+            ttl_seconds=ttl_seconds,
+        )
 
     def validate_execution_mode(self, execution_mode: str) -> None:
         """Require durable persistence before any future live-capital mode."""
@@ -319,15 +346,22 @@ class PersistenceManager:
 
     def _record_error(self, error: Exception | str) -> None:
         if isinstance(error, str):
-            self._last_error = error[:500]
+            self._last_error = redact_error(error)
         else:
-            self._last_error = f"{type(error).__name__}: {str(error)[:450]}"
+            self._last_error = redact_error(
+                f"{type(error).__name__}: {str(error)}"
+            )
 
     def _record_failure(self, error: Exception) -> None:
         self._failed_writes += 1
         self._retry_count += 1
         self._state = "DEGRADED"
         self._record_error(error)
+        logger.error(
+            "monitor_event=persistence_outbox_failure mode=%s error_class=%s",
+            self.mode.value,
+            type(error).__name__,
+        )
 
     def _enqueue(
         self,
@@ -340,36 +374,17 @@ class PersistenceManager:
         created_at: object,
         instrument: Optional[Instrument] = None,
     ) -> bool:
-        if self.mode is PersistenceMode.DISABLED:
-            self._disabled_writes += 1
-            return False
-        if not self._accepting or not self.is_connected:
-            self._dropped_writes += 1
-            self._record_error("persistence is not connected")
-            return False
-
-        payload: dict[str, Any] = {"entity": _jsonable(entity)}
-        if instrument is not None:
-            payload["instrument"] = _jsonable(instrument)
-        event = _PersistenceEvent(
-            event_id=_event_id(event_type, idempotency_key),
-            event_type=event_type,
-            idempotency_key=idempotency_key,
-            aggregate_type=aggregate_type,
-            aggregate_id=aggregate_id,
-            created_at=_utc(created_at),
-            payload=payload,
+        return self._enqueue_event(
+            self._event(
+                entity,
+                event_type,
+                idempotency_key=idempotency_key,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                created_at=created_at,
+                instrument=instrument,
+            )
         )
-        try:
-            self._write_queue.put_nowait(event)
-        except asyncio.QueueFull:
-            self._failed_writes += 1
-            self._dropped_writes += 1
-            self._record_error("persistence write queue is full")
-            if self.mode is PersistenceMode.REQUIRED:
-                self._state = "DEGRADED"
-            return False
-        return True
 
     def _instrument_for(self, symbol: str) -> Optional[Instrument]:
         if self.instrument_rules_provider is None:
@@ -392,22 +407,94 @@ class PersistenceManager:
             )
         return instrument
 
-    def enqueue_order(self, order: ExecutionOrder) -> bool:
+    def _order_event(self, order: ExecutionOrder) -> Optional[_PersistenceEvent]:
+        """Build the single canonical outbox event for an order observation."""
+
         instrument = self._require_instrument(order.symbol)
         if instrument is None:
-            return False
-        return self._enqueue(
+            return None
+        timestamp = _utc(order.timestamp)
+        idempotency_key = (
+            f"{order.client_order_id}:{order.status}:{timestamp.isoformat()}"
+        )
+        return self._event(
             order,
             "ORDER",
-            idempotency_key=(
-                f"{order.client_order_id}:{order.status}:"
-                f"{_utc(order.timestamp).isoformat()}"
-            ),
+            idempotency_key=idempotency_key,
             aggregate_type="ORDER",
             aggregate_id=order.client_order_id,
-            created_at=order.timestamp,
+            created_at=timestamp,
             instrument=instrument,
         )
+
+    def _event(
+        self,
+        entity: object,
+        event_type: str,
+        *,
+        idempotency_key: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        created_at: object,
+        instrument: Optional[Instrument] = None,
+    ) -> _PersistenceEvent:
+        payload: dict[str, Any] = {"entity": _jsonable(entity)}
+        if instrument is not None:
+            payload["instrument"] = _jsonable(instrument)
+        return _PersistenceEvent(
+            event_id=_event_id(event_type, idempotency_key),
+            event_type=event_type,
+            idempotency_key=idempotency_key,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            created_at=_utc(created_at),
+            payload=payload,
+        )
+
+    async def ensure_order_durable(self, order: ExecutionOrder) -> bool:
+        """Synchronously append an order observation to PostgreSQL outbox.
+
+        This is the pre-submission barrier for risk-increasing exchange orders.
+        It intentionally bypasses the in-memory queue: returning ``True`` means
+        the database acknowledged the outbox insert, so a crash or dispatcher
+        outage can still be recovered by replaying the event.
+        """
+
+        if self.mode is PersistenceMode.DISABLED:
+            self._disabled_writes += 1
+            self._record_error("durable order submission is disabled")
+            return False
+        if not self._accepting or not self.is_connected or self.repository is None:
+            self._dropped_writes += 1
+            self._record_error("durable order submission requires a connected outbox")
+            return False
+
+        event = self._order_event(order)
+        if event is None:
+            return False
+        try:
+            await asyncio.wait_for(
+                self._append_with_retry(event),
+                timeout=self.config.pre_submission_timeout_seconds,
+            )
+            await self._refresh_pending_count()
+            return True
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            self._record_error("durable order outbox acknowledgement timed out")
+            self._state = "DEGRADED"
+            return False
+        except Exception as exc:
+            self._record_error(exc)
+            self._state = "DEGRADED"
+            return False
+
+    def enqueue_order(self, order: ExecutionOrder) -> bool:
+        event = self._order_event(order)
+        if event is None:
+            return False
+        return self._enqueue_event(event)
 
     def enqueue_fill(self, fill: ExchangeFill) -> bool:
         instrument = self._require_instrument(fill.symbol)
@@ -483,6 +570,30 @@ class PersistenceManager:
                         max(0.0, self._stop_deadline - time.monotonic()),
                     )
                 await asyncio.sleep(delay)
+
+    def _enqueue_event(self, event: _PersistenceEvent) -> bool:
+        if self.mode is PersistenceMode.DISABLED:
+            self._disabled_writes += 1
+            return False
+        if not self._accepting or not self.is_connected:
+            self._dropped_writes += 1
+            self._record_error("persistence is not connected")
+            return False
+        try:
+            self._write_queue.put_nowait(event)
+        except asyncio.QueueFull:
+            self._failed_writes += 1
+            self._dropped_writes += 1
+            self._record_error("persistence write queue is full")
+            logger.error(
+                "monitor_event=persistence_outbox_queue_full mode=%s queue_capacity=%d",
+                self.mode.value,
+                self.config.queue_capacity,
+            )
+            if self.mode is PersistenceMode.REQUIRED:
+                self._state = "DEGRADED"
+            return False
+        return True
 
     async def _outbox_writer(self) -> None:
         while self._accepting or not self._write_queue.empty():

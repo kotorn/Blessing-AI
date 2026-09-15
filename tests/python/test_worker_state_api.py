@@ -317,8 +317,8 @@ async def test_global_heartbeat_background_updater():
         await asyncio.sleep(0.01)
 
 
-def test_worker_preflight_and_live_blocking():
-    """Verify preflight rejects LIVE mode unconditionally and validates TESTNET readiness."""
+def test_worker_preflight_and_live_release_gate():
+    """Verify LIVE is release-gated and TESTNET still validates readiness."""
     worker = TradingWorkerApp(symbols=["BTCUSDT", "ETHUSDT"])
     set_worker_engine(worker)
 
@@ -327,12 +327,13 @@ def test_worker_preflight_and_live_blocking():
     assert live_resp.status_code == 200
     live_data = live_resp.json()
     assert live_data["canArm"] is False
-    assert any("permanently blocked" in c["message"] for c in live_data["checks"])
+    assert any(c["id"] == "CHK-MAINNET-APPROVAL" for c in live_data["checks"])
+    assert any("MAINNET_LIVE_APPROVED" in c["message"] for c in live_data["checks"])
 
-    # 2. Arming in LIVE mode must be hard-blocked with HTTP 400
-    arm_live = client.post("/arm", json={"executionMode": "LIVE"})
+    # 2. Arming in LIVE mode remains fail-closed without release credentials.
+    arm_live = client.post("/arm", json={"executionMode": "LIVE", "instruments": ["ETHUSDC"]})
     assert arm_live.status_code == 400
-    assert "permanently blocked" in arm_live.json()["detail"]
+    assert "MAINNET_LIVE_APPROVED" in str(arm_live.json()) or "credential" in str(arm_live.json()).lower()
 
     # 3. TESTNET preflight when unconfigured / unauthenticated
     testnet_resp = client.get("/preflight?execution_mode=TESTNET")

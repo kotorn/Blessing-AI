@@ -65,11 +65,12 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
   // Empty state is intentional: fixture balances are not account evidence.
   const twoLayerAssets: TwoLayerAsset[] = rawTwoLayerAssets;
   const subWallets: SubWalletSummary[] = rawSubWallets;
-  const hasVerifiedSnapshot = account?.verified === true && source === 'BINANCE_TESTNET';
+  const hasBinanceSource = source === 'BINANCE_TESTNET' || source === 'BINANCE_MAINNET';
+  const hasVerifiedSnapshot = account?.verified === true && hasBinanceSource;
   const snapshotLabel =
-    source === 'BINANCE_TESTNET'
-      ? hasVerifiedSnapshot ? 'BINANCE TESTNET' : 'BINANCE TESTNET / UNVERIFIED'
-      : 'NO VERIFIED TESTNET SNAPSHOT';
+    hasBinanceSource
+      ? hasVerifiedSnapshot ? source.replace('_', ' ') : `${source.replace('_', ' ')} / UNVERIFIED`
+      : 'NO VERIFIED BINANCE SNAPSHOT';
   const formatCurrency = (value: number, digits = 2) =>
     hasVerifiedSnapshot
       ? `$${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
@@ -96,14 +97,14 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
       if (
         data.success &&
         data.account?.verified === true &&
-        data.account?.source === 'BINANCE_TESTNET'
+        (data.account?.source === 'BINANCE_TESTNET' || data.account?.source === 'BINANCE_MAINNET')
       ) {
         if (onAccountUpdated) {
           onAccountUpdated(data.account);
         }
         setSyncFeedback({
           type: 'success',
-          msg: `ดึง snapshot Binance Testnet ที่ยืนยันแล้วสำเร็จ! ยอดรวมพอร์ต $${data.account.equity.toLocaleString('en-US', {
+          msg: `ดึง snapshot ${String(data.account.source).replace('_', ' ')} ที่ยืนยันแล้วสำเร็จ! ยอดรวมพอร์ต $${data.account.equity.toLocaleString('en-US', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
           })}`,

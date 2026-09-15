@@ -254,7 +254,10 @@ class InMemoryLedger:
         )
         raw_margin_type = pos.get("marginType")
         if raw_margin_type in (None, ""):
-            margin_type = "cross"
+            # Missing exchange margin mode is an unknown observation.  Never
+            # turn it into a cross-margin claim because Mainnet risk gates must
+            # fail closed when the mode cannot be verified.
+            margin_type = "UNKNOWN"
         elif not isinstance(raw_margin_type, str) or not raw_margin_type.strip():
             raise ValueError("Exchange position has invalid marginType")
         else:
@@ -282,7 +285,7 @@ class InMemoryLedger:
             unrealized_pnl=unrealized_pnl,
             margin_type=margin_type,
             event_time=pos.get("eventTime"),
-            source=pos.get("source", "BINANCE_TESTNET"),
+            source=pos.get("source", "UNKNOWN"),
             liquidation_price=liquidation_price,
             leverage=leverage,
         )

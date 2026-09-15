@@ -8,24 +8,21 @@ ENV PYTHONPATH=/app
 
 WORKDIR /app
 
-# System dependencies for scientific packages if necessary (not heavily required for this MVP logic)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Assuming requirements are mounted or we install them explicitly
-# We'll install the required packages dynamically since there isn't a dedicated worker requirements.txt
-RUN pip install --no-cache-dir \
-    httpx \
-    pydantic \
-    numpy \
-    pandas
+# Runtime dependencies are pinned in-repository and contain only the worker
+# path. The Binance CLI is a separate read-only research tool and is not part
+# of the execution image.
+COPY requirements-worker.txt ./requirements-worker.txt
+RUN pip install --no-cache-dir --requirement requirements-worker.txt
 
 # Copy domain models and worker codebase
 COPY domain/ ./domain/
+COPY venues/ ./venues/
 COPY apps/trading_worker/ ./apps/trading_worker/
 
-# In Cloud Run, the container must bind to $PORT for health checks, 
-# but for a background worker, Cloud Run Jobs or standalone execution is used.
-# If running as a service, we'd add a simple FastAPI health endpoint.
+# The worker starts its background loop and FastAPI health/control server in
+# one process. Cloud Run supplies PORT; defaults remain PAPER/DISARMED.
+ENV EXECUTION_MODE=PAPER
+ENV MAINNET_LIVE_APPROVED=false
+ENV PERSISTENCE_MODE=REQUIRED
+ENV EXECUTION_LEASE_REQUIRED=true
 CMD ["python", "-m", "apps.trading_worker.main"]

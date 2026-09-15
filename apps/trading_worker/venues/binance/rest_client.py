@@ -61,6 +61,24 @@ _DEFINITIVE_REJECTION_CODES = {
 }
 _RATE_LIMIT_CODES = {-1003, -1008, -1015}
 
+# Keep the fixed-host transport from becoming a generic Binance request
+# proxy.  Every path is reviewed for the worker's USDⓈ-M read, private-stream,
+# reconciliation, and order lifecycle operations.
+_ALLOWED_REQUEST_METHODS: dict[str, frozenset[str]] = {
+    "/fapi/v1/time": frozenset({"GET"}),
+    "/fapi/v1/exchangeInfo": frozenset({"GET"}),
+    "/fapi/v1/positionSide/dual": frozenset({"GET"}),
+    "/fapi/v2/account": frozenset({"GET"}),
+    "/fapi/v2/positionRisk": frozenset({"GET"}),
+    "/fapi/v1/openOrders": frozenset({"GET"}),
+    "/fapi/v1/userTrades": frozenset({"GET"}),
+    "/fapi/v1/income": frozenset({"GET"}),
+    "/fapi/v1/premiumIndex": frozenset({"GET"}),
+    "/fapi/v1/ticker/bookTicker": frozenset({"GET"}),
+    "/fapi/v1/order": frozenset({"GET", "POST", "PUT", "DELETE"}),
+    "/fapi/v1/listenKey": frozenset({"POST", "PUT", "DELETE"}),
+}
+
 
 def _numeric_error_code(value: Any, fallback: int) -> int:
     """Normalize Binance's numeric error code without trusting response types."""
@@ -88,8 +106,8 @@ class BinanceAPIError(Exception):
 
 class BinanceRestClient:
     def __init__(self, api_key: str, api_secret: str, env: BinanceEnvironment):
-        if env != BinanceEnvironment.TESTNET:
-            raise ValueError("Binance REST execution client is restricted to Testnet")
+        if not isinstance(env, BinanceEnvironment):
+            raise ValueError("Binance REST execution client requires TESTNET or MAINNET")
         self.api_key = api_key
         self.api_secret = api_secret
         self.env = env
@@ -160,11 +178,17 @@ class BinanceRestClient:
         signed: bool = False,
         **kwargs,
     ) -> Any:
+        method_upper = method.upper()
+        allowed_methods = _ALLOWED_REQUEST_METHODS.get(path)
+        if allowed_methods is None or method_upper not in allowed_methods:
+            raise ValueError(
+                "Binance request is outside the fixed USDⓈ-M endpoint allowlist: "
+                f"{method_upper} {path}"
+            )
         if not self.session:
             await self.init_session()
 
         base_params = dict(kwargs.pop("params", {}) or {})
-        method_upper = method.upper()
         # A timestamp retry is safe for read-only requests only. Mutable calls
         # intentionally receive the error after clock resynchronization so a
         # caller never blindly submits an order twice.
@@ -194,7 +218,12 @@ class BinanceRestClient:
                         code = data.get("code") if isinstance(data, dict) else None
                         message = data.get("msg", str(data)) if isinstance(data, dict) else str(data)
                         headers = {str(k): str(v) for k, v in resp.headers.items()}
-                        logger.error("Binance REST Error: %s %s - %s", resp.status, path, data)
+                        logger.error(
+                            "Binance REST error status=%s path=%s code=%s",
+                            resp.status,
+                            path,
+                            code,
+                        )
 
                         if resp.status in {408, 500, 502, 503, 504}:
                             raise BinanceTransportAmbiguity(

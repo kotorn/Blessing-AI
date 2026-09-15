@@ -1,16 +1,17 @@
 # Small-Live Mainnet checklist
 
-Status for this sprint: `DISABLED` / `NOT_IMPLEMENTED`. This repository does
-not authorize Mainnet execution, and no shortcut or approval flag can enable
-it. `LIVE` ARM and mutable Mainnet adapter construction are rejected.
+Status for this sprint: `DISABLED_BY_DEFAULT` / `NOT_OPERATIONAL`. The
+Mainnet path is implemented only behind dedicated credentials,
+`MAINNET_LIVE_APPROVED=true`, and the complete Worker preflight; the checked-in
+default remains disarmed and no Mainnet order has been authorized.
 
 Evidence status is intentionally separate from implementation status:
 `CODE_PRESENT` does not mean `LOCAL_VERIFIED`, and local verification does not
 mean `CI_VERIFIED` or operational approval.
 
-The following is a future-only checklist. Each item must become
+The following is an evidence checklist. Each item must become
 `LOCAL_VERIFIED`, then `CI_VERIFIED`, and finally receive independent
-operational approval before any Mainnet implementation is considered.
+operational approval before Mainnet can be enabled.
 
 ## Required future evidence
 
@@ -30,8 +31,8 @@ operational approval before any Mainnet implementation is considered.
       fills, positions, risk state, and reconciliation evidence.
 - [ ] Crash/restart and ambiguous-response recovery proven against durable
       state.
-- [ ] Mainnet-specific adapter and endpoint audit, implemented in a separate
-      approved change.
+- [x] Mainnet-specific adapter and endpoint audit with explicit approval and
+      execution-lease gates; operational enablement remains pending.
 
 Current sprint evidence: local non-secret gates are `LOCAL_VERIFIED` and
 verified safety/research implementation checkpoint recorded in the generated

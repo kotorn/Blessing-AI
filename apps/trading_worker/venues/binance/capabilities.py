@@ -35,8 +35,8 @@ class BinanceCapabilities:
         self.hedge_mode = False
         self.symbol_rules.clear()
         self.environment = rest_client.env
-        if rest_client.env != BinanceEnvironment.TESTNET:
-            logger.error("Capability discovery rejected outside Binance Testnet.")
+        if rest_client.env not in {BinanceEnvironment.TESTNET, BinanceEnvironment.MAINNET}:
+            logger.error("Capability discovery rejected for an unknown Binance environment.")
             return False
 
         try:
@@ -44,10 +44,10 @@ class BinanceCapabilities:
             account = await rest_client.request("GET", "/fapi/v2/account", signed=True)
             if (
                 not isinstance(account, dict)
-                or "totalWalletBalance" not in account
+                or not isinstance(account.get("assets"), list)
                 or "canTrade" not in account
             ):
-                raise ValueError("Signed account response is not a valid USDⓈ-M account snapshot")
+                raise ValueError("Signed account response is missing explicit assets or canTrade")
             self.account_request_succeeded = True
             self.trade_authorized = _exchange_bool(account["canTrade"])
             

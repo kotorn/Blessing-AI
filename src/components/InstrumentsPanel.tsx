@@ -46,7 +46,7 @@ export const InstrumentsPanel: React.FC<InstrumentsPanelProps> = ({ instruments 
         {(Object.values(instruments) as InstrumentData[]).map((inst) => {
           const hasVerifiedData =
             inst.verified === true &&
-            inst.data_source === 'BINANCE_TESTNET';
+            (inst.data_source === 'BINANCE_TESTNET' || inst.data_source === 'BINANCE_MAINNET');
           const safety = hasVerifiedData
             ? getSafetyBadge(inst.grid_safety_score)
             : { label: 'UNKNOWN', color: 'text-amber-400 bg-amber-500/10 border-amber-500/30' };

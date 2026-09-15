@@ -20,6 +20,11 @@ jobs:
         
     - name: Install Node Dependencies
       run: npm ci
+
+    - name: Validate Firebase SQL Connect schema and generated SDK
+      run: |
+        npm run dataconnect:generate
+        git diff --exit-code -- src/dataconnect-generated
       
     - name: TypeScript Lint
       run: npm run lint

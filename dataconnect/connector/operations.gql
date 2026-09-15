@@ -1,0 +1,135 @@
+query GetMyProfile @auth(level: USER) {
+  userProfiles(where: { uid: { eq_expr: "auth.uid" } }) {
+    uid
+    email
+    displayName
+    role
+    isActive
+    createdAt
+    updatedAt
+  }
+}
+
+mutation UpdateMyProfile(
+  $email: String
+  $displayName: String
+) @auth(level: USER) {
+  userProfile_update(
+    key: { uid_expr: "auth.uid" }
+    data: {
+      email: $email
+      displayName: $displayName
+      updatedAt_expr: "request.time"
+    }
+  )
+}
+
+# Role and activation state are provisioned only by a trusted Admin SDK/server
+# path. They are intentionally not present in any USER-authorized operation.
+mutation SetUserProfileAccess(
+  $uid: String!
+  $role: String!
+  $isActive: Boolean!
+) @auth(level: NO_ACCESS) {
+  userProfile_upsert(
+    data: {
+      uid: $uid
+      role: $role
+      isActive: $isActive
+      updatedAt_expr: "request.time"
+    }
+  )
+}
+
+query ListMyBaskets @auth(level: USER) {
+  baskets(where: { ownerUid: { eq_expr: "auth.uid" } }) {
+    id
+    ownerUid
+    name
+    symbol
+    enabled
+    configuration
+    createdAt
+    updatedAt
+  }
+}
+
+mutation CreateMyBasket(
+  $name: String!
+  $symbol: String!
+  $enabled: Boolean!
+  $configuration: String!
+) @auth(level: USER) {
+  basket_insert(
+    data: {
+      id_expr: "uuidV4()"
+      ownerUid_expr: "auth.uid"
+      name: $name
+      symbol: $symbol
+      enabled: $enabled
+      configuration: $configuration
+      createdAt_expr: "request.time"
+      updatedAt_expr: "request.time"
+    }
+  )
+}
+
+mutation UpdateMyBasket(
+  $id: UUID!
+  $name: String!
+  $symbol: String!
+  $enabled: Boolean!
+  $configuration: String!
+) @auth(level: USER) {
+  basket_update(
+    first: { where: {
+      id: { eq: $id }
+      ownerUid: { eq_expr: "auth.uid" }
+    }}
+    data: {
+      name: $name
+      symbol: $symbol
+      enabled: $enabled
+      configuration: $configuration
+      updatedAt_expr: "request.time"
+    }
+  )
+}
+
+mutation DeleteMyBasket($id: UUID!) @auth(level: USER) {
+  basket_delete(
+    first: { where: {
+      id: { eq: $id }
+      ownerUid: { eq_expr: "auth.uid" }
+    }}
+  )
+}
+
+query GetMyRiskSettings @auth(level: USER) {
+  riskSettingss(where: { ownerUid: { eq_expr: "auth.uid" } }) {
+    ownerUid
+    riskProfile
+    maxPortfolioDrawdownPct
+    maxGrossLeverage
+    maxMarginUtilizationPct
+    updatedAt
+  }
+}
+
+mutation UpsertMyRiskSettings(
+  $riskProfile: String!
+  $maxPortfolioDrawdownPct: Float!
+  $maxGrossLeverage: Float!
+  $maxMarginUtilizationPct: Float!
+) @auth(level: USER) {
+  riskSettings_upsert(
+    data: {
+      ownerUid_expr: "auth.uid"
+      riskProfile: $riskProfile
+      maxPortfolioDrawdownPct: $maxPortfolioDrawdownPct
+      maxGrossLeverage: $maxGrossLeverage
+      maxMarginUtilizationPct: $maxMarginUtilizationPct
+      updatedAt_expr: "request.time"
+    }
+  )
+}

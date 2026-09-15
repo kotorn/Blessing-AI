@@ -1,0 +1,13 @@
+specVersion: "v1alpha"
+serviceId: "blessing-app"
+location: "asia-southeast1"
+schema:
+  source: "./schema"
+  datasource:
+    postgresql:
+      database: "blessing_app"
+      cloudSql:
+        instanceId: "blessing-sql-primary"
+        schemaValidation: "COMPATIBLE"
+connectorDirs:
+  - "./connector"

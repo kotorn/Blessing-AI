@@ -1,4 +1,8 @@
-"""Native, Testnet-only Binance USDⓈ-M execution adapter."""
+"""Native, environment-aware Binance USDⓈ-M execution adapter.
+
+The adapter can speak to Testnet or Mainnet, but the Trading Worker remains the
+only mutable authority and Mainnet still requires the deployment launch gate.
+"""
 
 import asyncio
 import hashlib
@@ -7,7 +11,7 @@ import math
 import os
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from domain.enums import (
     EconomicRiskClass,
@@ -25,9 +29,14 @@ from domain.models import (
     OrderIntent,
     utc_now,
 )
+from apps.trading_worker.execution_lease import (
+    ExecutionLease,
+    LeaseLostError,
+    execution_lease_required,
+)
 
 from .capabilities import BinanceCapabilities
-from .config import BinanceEnvironment
+from .config import BinanceEnvironment, environment_label
 from .gates import OrderExecutionGate
 from .ledger import ExecutionLedger, InMemoryLedger
 from .models import (
@@ -59,7 +68,7 @@ def _exchange_bool(value: object) -> bool:
 
 
 class BinanceExecutionAdapter:
-    """Blessing AI's sole mutable exchange adapter, restricted to Testnet."""
+    """Blessing AI's sole mutable exchange adapter for a fixed Binance route."""
 
     testnet_environment = BinanceEnvironment.TESTNET
 
@@ -70,14 +79,18 @@ class BinanceExecutionAdapter:
         env: BinanceEnvironment = BinanceEnvironment.TESTNET,
         ledger: Optional[ExecutionLedger] = None,
     ):
-        if env != BinanceEnvironment.TESTNET:
-            raise ValueError("LIVE/Mainnet mutable execution is permanently blocked.")
+        if not isinstance(env, BinanceEnvironment):
+            raise ValueError("Binance execution requires TESTNET or MAINNET")
+        if env == BinanceEnvironment.MAINNET and os.getenv(
+            "MAINNET_LIVE_APPROVED", ""
+        ).strip().lower() not in {"1", "true", "yes", "on"}:
+            raise ValueError("Mainnet adapter construction requires MAINNET_LIVE_APPROVED=true")
 
         self.env = env
         self.api_key = api_key
         self.api_secret = api_secret
         self.ledger = ledger or InMemoryLedger()
-        self.safety_limits = TestnetSafetyLimits.from_environment()
+        self.safety_limits = TestnetSafetyLimits.from_environment(env)
         self.rest_client = BinanceRestClient(api_key, api_secret, env)
         self.capabilities = BinanceCapabilities()
         self.user_stream = BinanceUserStream(
@@ -111,6 +124,18 @@ class BinanceExecutionAdapter:
         # submit path; direct adapter calls remain blocked.
         self._worker_authority: Optional[object] = None
         self._mutation_lock = asyncio.Lock()
+        self.execution_lease: Optional[ExecutionLease] = None
+        # TradingWorkerApp installs the durable outbox barrier.  Keeping the
+        # callback on the adapter makes the ordering explicit at the only REST
+        # mutation boundary and leaves the adapter testable without a database.
+        self.before_order_submission: Optional[
+            Callable[[ExecutionOrder], Awaitable[bool]]
+        ] = None
+        # Cloud Run and Mainnet always require a distributed lease. Local
+        # Testnet tests can opt into the same requirement with an env flag.
+        self.execution_lease_required = bool(
+            env == BinanceEnvironment.MAINNET or execution_lease_required()
+        )
 
     @property
     def connection_state(self) -> ConnectionState:
@@ -118,15 +143,21 @@ class BinanceExecutionAdapter:
         return self.state
 
     @property
+    def environment_label(self) -> str:
+        """Canonical exchange provenance label for this adapter instance."""
+
+        return environment_label(self.env)
+
+    @property
     def mutation_lock(self) -> asyncio.Lock:
-        """Serialize all mutable Testnet REST operations with kill switch."""
+        """Serialize all mutable Binance REST operations with the kill switch."""
         return self._mutation_lock
 
     @property
     def authenticated(self) -> bool:
         """Authentication is true only after signed account capability discovery."""
         return bool(
-            self.env == BinanceEnvironment.TESTNET
+            self.env in {BinanceEnvironment.TESTNET, BinanceEnvironment.MAINNET}
             and getattr(self.capabilities, "account_request_succeeded", False)
             and getattr(self.capabilities, "authenticated", False)
             and not getattr(self.reconciliation, "authentication_failed", False)
@@ -136,6 +167,22 @@ class BinanceExecutionAdapter:
     def symbol_rules(self) -> Dict[str, SymbolTradingRules]:
         """Canonical symbol-rule API for worker readiness and order validation."""
         return self.capabilities.symbol_rules
+
+    def is_symbol_ready_for_execution(self, symbol: str) -> bool:
+        """Validate a selected symbol against live exchange metadata.
+
+        Mainnet is intentionally limited to the USDⓈ-M ETHUSDC perpetual. The
+        filters themselves remain entirely exchange-derived in
+        ``SymbolTradingRules``; this method only validates contract identity.
+        """
+
+        normalized = str(symbol).strip().upper()
+        rules = self.symbol_rules.get(normalized)
+        if rules is None or not rules.is_ready_for("LIMIT") or not rules.is_ready_for("MARKET"):
+            return False
+        if self.env == BinanceEnvironment.MAINNET and not rules.is_usdc_perpetual():
+            return False
+        return True
 
     @property
     def account_snapshot(self):
@@ -154,13 +201,13 @@ class BinanceExecutionAdapter:
         snapshot = self.account_snapshot
         if snapshot is None or not getattr(snapshot, "valid", False):
             return False
-        if getattr(snapshot, "exchange_environment", None) != "BINANCE_TESTNET":
+        if getattr(snapshot, "exchange_environment", None) != environment_label(self.env):
             return False
         timestamp = getattr(snapshot, "timestamp", None)
         if not isinstance(timestamp, datetime):
             return False
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            return False
         age = (utc_now() - timestamp).total_seconds()
         try:
             max_age = float(os.getenv("ACCOUNT_SNAPSHOT_MAX_AGE_SEC", "30"))
@@ -220,6 +267,35 @@ class BinanceExecutionAdapter:
     def _worker_authorized(self, authority: object) -> bool:
         return self._worker_authority is not None and authority is self._worker_authority
 
+    def set_execution_lease(
+        self, lease: Optional[ExecutionLease], *, required: Optional[bool] = None
+    ) -> None:
+        """Attach the account/environment-scoped lease owned by the Worker."""
+
+        self.execution_lease = lease
+        if required is not None:
+            self.execution_lease_required = bool(required)
+
+    async def _assert_execution_lease(self, risk_class: EconomicRiskClass) -> None:
+        """Fence the worker immediately before any request that can add risk."""
+
+        risk = (
+            risk_class
+            if isinstance(risk_class, EconomicRiskClass)
+            else EconomicRiskClass(str(risk_class))
+        )
+        if risk not in {
+            EconomicRiskClass.NEW_RISK,
+            EconomicRiskClass.INCREASE_RISK,
+        }:
+            return
+        lease = self.execution_lease
+        if lease is None:
+            if self.execution_lease_required:
+                raise LeaseLostError("Distributed execution lease is required before submission")
+            return
+        await lease.assert_valid()
+
     @staticmethod
     def _exchange_event_time(payload: Dict[str, Any]) -> Optional[datetime]:
         raw_timestamp = payload.get("E")
@@ -259,8 +335,9 @@ class BinanceExecutionAdapter:
             return False
         self.last_market_event_at[normalized_symbol] = timestamp
         self.last_market_price[normalized_symbol] = price
-        self.last_market_event_source[normalized_symbol] = "BINANCE_TESTNET_REST"
-        self.last_market_event_venue[normalized_symbol] = "BINANCE_TESTNET"
+        label = environment_label(self.env)
+        self.last_market_event_source[normalized_symbol] = f"{label}_REST"
+        self.last_market_event_venue[normalized_symbol] = label
         self.last_market_event_market_type[normalized_symbol] = MarketType.USDM_FUTURES.value
         if (
             reference_price is not None
@@ -282,8 +359,12 @@ class BinanceExecutionAdapter:
         normalized_symbol = str(symbol).upper()
         return (
             self.last_market_event_source.get(normalized_symbol)
-            in {"BINANCE_TESTNET_WS", "BINANCE_TESTNET_REST"}
-            and self.last_market_event_venue.get(normalized_symbol) == "BINANCE_TESTNET"
+            in {
+                f"{environment_label(self.env)}_WS",
+                f"{environment_label(self.env)}_REST",
+            }
+            and self.last_market_event_venue.get(normalized_symbol)
+            == environment_label(self.env)
             and self.last_market_event_market_type.get(normalized_symbol)
             == MarketType.USDM_FUTURES.value
         )
@@ -302,7 +383,7 @@ class BinanceExecutionAdapter:
         ):
             return None
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            return None
         age = (utc_now() - timestamp).total_seconds()
         if age < 0 or age > self._market_data_max_age():
             return None
@@ -312,9 +393,11 @@ class BinanceExecutionAdapter:
         """Record a real market sample for per-symbol freshness checks."""
         market_type = getattr(event.market_type, "value", event.market_type)
         venue = str(event.venue).upper()
-        if market_type != MarketType.USDM_FUTURES.value or venue != "BINANCE_TESTNET":
+        expected_venue = environment_label(self.env)
+        if market_type != MarketType.USDM_FUTURES.value or venue != expected_venue:
             logger.warning(
-                "Ignoring market event outside Binance Testnet USDⓈ-M: venue=%s market_type=%s",
+                "Ignoring market event outside Binance %s USDⓈ-M: venue=%s market_type=%s",
+                self.env.value,
                 event.venue,
                 market_type,
             )
@@ -328,12 +411,12 @@ class BinanceExecutionAdapter:
             return False
         timestamp = event.event_time
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            return False
         symbol = str(event.symbol).upper()
         self.last_market_event_at[symbol] = timestamp
         self.last_market_price[symbol] = price
-        self.last_market_event_source[symbol] = "BINANCE_TESTNET_WS"
-        self.last_market_event_venue[symbol] = "BINANCE_TESTNET"
+        self.last_market_event_source[symbol] = f"{expected_venue}_WS"
+        self.last_market_event_venue[symbol] = expected_venue
         self.last_market_event_market_type[symbol] = MarketType.USDM_FUTURES.value
         if event.mark_price is not None:
             try:
@@ -364,7 +447,7 @@ class BinanceExecutionAdapter:
     async def get_fresh_market_price(
         self, symbol: str, side: Optional[str] = None
     ) -> Optional[Decimal]:
-        """Return a fresh executable Testnet price; never synthesize one.
+        """Return a fresh executable route price; never synthesize one.
 
         ``side`` is optional for compatibility with mark-price consumers.  A
         MARKET order passes BUY/SELL and therefore uses the executable ask/bid
@@ -397,7 +480,7 @@ class BinanceExecutionAdapter:
             or normalized_side not in {OrderSide.BUY.value, OrderSide.SELL.value}
         ):
             if event_at.tzinfo is None:
-                event_at = event_at.replace(tzinfo=timezone.utc)
+                return None
             age = (utc_now() - event_at).total_seconds()
             if 0 <= age <= self._market_data_max_age():
                 return cached
@@ -443,7 +526,7 @@ class BinanceExecutionAdapter:
             return None
 
     async def get_best_bid_ask(self, symbol: str) -> Optional[Tuple[Decimal, Decimal]]:
-        """Fetch a current Testnet book quote for passive manual validation."""
+        """Fetch a current route book quote for final order validation."""
         normalized_symbol = symbol.upper()
         try:
             payload = await self.rest_client.request(
@@ -532,8 +615,6 @@ class BinanceExecutionAdapter:
             )
 
     async def connect(self) -> bool:
-        if self.env != BinanceEnvironment.TESTNET:
-            raise ValueError("Mutable Binance connection is restricted to Testnet")
         self.state = ConnectionState.CONNECTING
         try:
             await self.rest_client.init_session()
@@ -558,7 +639,7 @@ class BinanceExecutionAdapter:
             return False
         except Exception as exc:
             self.invalidate_authentication()
-            logger.error("Binance Testnet adapter connection failed: %s", exc)
+            logger.error("Binance %s adapter connection failed: %s", self.env.value, exc)
             return False
 
     async def arm(self) -> bool:
@@ -581,7 +662,8 @@ class BinanceExecutionAdapter:
                 # adopt it as if this worker authorized it; reconciliation
                 # must remain non-IN_SYNC until the operator resolves it.
                 logger.error(
-                    "Quarantining unowned Testnet order event %s for %s",
+                    "Quarantining unowned %s order event %s for %s",
+                    self.environment_label,
                     client_order_id,
                     symbol,
                 )
@@ -654,7 +736,7 @@ class BinanceExecutionAdapter:
                     maker=_exchange_bool(order_info.get("m", False)),
                     event_time=event_time,
                     transaction_time=order_info["T"],
-                    source="BINANCE_TESTNET",
+                    source=self.environment_label,
                     strategy_id=(existing_order.strategy_id if existing_order else "portfolio"),
                     decision_id=(existing_order.decision_id if existing_order else None),
                     target_exposure_id=(
@@ -666,7 +748,7 @@ class BinanceExecutionAdapter:
                 )
                 await self.ledger.append_fill(fill)
             except (InvalidOperation, KeyError, ValueError, TypeError) as exc:
-                logger.error("Invalid Testnet fill event ignored: %s", exc)
+                logger.error("Invalid %s fill event ignored: %s", self.environment_label, exc)
         elif event_type == "ACCOUNT_UPDATE":
             update_data = event.get("a", {})
             if not isinstance(update_data, dict):
@@ -739,7 +821,7 @@ class BinanceExecutionAdapter:
                     "unRealizedProfit": position.get("up"),
                     "marginType": position.get("mt"),
                     "eventTime": event.get("E"),
-                    "source": "BINANCE_TESTNET",
+                    "source": self.environment_label,
                 }
                 if existing_position is not None:
                     for raw_name, attribute in (
@@ -835,7 +917,7 @@ class BinanceExecutionAdapter:
         self, context_id: str, symbol: str, order_index: int = 0, attempt: int = 1
     ) -> str:
         raw_str = f"{context_id}-{symbol}"
-        hash_str = hashlib.md5(raw_str.encode()).hexdigest()[:8]
+        hash_str = hashlib.sha256(raw_str.encode()).hexdigest()[:12]
         return f"BAI-{hash_str}-{order_index}-{attempt}"
 
     @staticmethod
@@ -1073,7 +1155,8 @@ class BinanceExecutionAdapter:
             return False
         except Exception as exc:
             logger.error(
-                "Post-mutation Testnet reconciliation failed for %s: %s",
+                "Post-mutation %s reconciliation failed for %s: %s",
+                self.environment_label,
                 order.client_order_id,
                 exc,
             )
@@ -1150,7 +1233,7 @@ class BinanceExecutionAdapter:
                 authority, "kill_switch_active", False
             ):
                 self.state = ConnectionState.DEGRADED
-                logger.warning("Kill switch blocked remaining Testnet order mutations")
+                logger.warning("Kill switch blocked remaining %s order mutations", environment_label(self.env))
                 return executed_orders
             gate_result = await self.order_gate.check(
                 intent,
@@ -1163,8 +1246,18 @@ class BinanceExecutionAdapter:
                 logger.warning("Order blocked by final gate: %s", gate_result.reason)
                 continue
             prepared = gate_result.prepared
-            client_order_id = intent.client_order_id or self._generate_client_order_id(
-                str(decision.decision_id), prepared.symbol, order_index=index
+            # Mainnet retries/restarts must reuse the same exchange identity
+            # for one worker decision. The risk governor's human-readable
+            # intent id contains a runtime sequence, so it is not sufficient
+            # as the exchange idempotency key on its own.
+            client_order_id = (
+                self._generate_client_order_id(
+                    str(decision.decision_id), prepared.symbol, order_index=index
+                )
+                if self.env == BinanceEnvironment.MAINNET
+                else intent.client_order_id or self._generate_client_order_id(
+                    str(decision.decision_id), prepared.symbol, order_index=index
+                )
             )
             params: Dict[str, Any] = {
                 "symbol": prepared.symbol,
@@ -1187,6 +1280,63 @@ class BinanceExecutionAdapter:
                 params["reduceOnly"] = "true"
 
             try:
+                planned_order = ExecutionOrder(
+                    symbol=prepared.symbol,
+                    side=intent.side,
+                    quantity=prepared.quantity,
+                    price=prepared.price or prepared.estimated_price,
+                    order_type=prepared.order_type,
+                    client_order_id=client_order_id,
+                    status="PENDING",
+                    timestamp=utc_now(),
+                    market_type=getattr(intent, "market_type", MarketType.USDM_FUTURES),
+                    position_side=getattr(intent, "position_side", PositionSide.BOTH),
+                    reduce_only=bool(getattr(intent, "reduce_only", False)),
+                    time_in_force=getattr(intent, "time_in_force", TimeInForce.GTC),
+                    strategy_id=str(getattr(intent, "strategy_id", "portfolio")),
+                    decision_id=getattr(decision, "decision_id", None),
+                    target_exposure_id=getattr(decision, "target_exposure_id", None),
+                    source_intent_ids=list(
+                        getattr(decision, "source_intent_ids", None)
+                        or getattr(intent, "source_intent_ids", None)
+                        or []
+                    ),
+                    risk_class=decision.risk_class,
+                )
+
+                durable_barrier = self.before_order_submission
+                is_risk_increasing = decision.risk_class in {
+                    EconomicRiskClass.NEW_RISK,
+                    EconomicRiskClass.INCREASE_RISK,
+                }
+                if durable_barrier is None:
+                    if self.env == BinanceEnvironment.MAINNET and is_risk_increasing:
+                        raise LeaseLostError(
+                            "Mainnet risk-increasing order requires a durable outbox barrier"
+                        )
+                else:
+                    durable = await durable_barrier(planned_order)
+                    if not durable and is_risk_increasing:
+                        logger.error(
+                            "Risk-increasing order %s blocked because the durable outbox was not acknowledged",
+                            client_order_id,
+                        )
+                        self.state = ConnectionState.DEGRADED
+                        continue
+                    if not durable:
+                        logger.warning(
+                            "Durable outbox unavailable for risk-reducing order %s; emergency path remains allowed",
+                            client_order_id,
+                        )
+
+                # Keep the pending observation in the local ledger as well. If
+                # the response is ambiguous, reconciliation has a lineage record
+                # even when the exchange private stream races the REST response.
+                await self.ledger.upsert_order(planned_order)
+                # Keep this directly adjacent to the mutating request.  A
+                # lease checked at arm time or at the first decision gate may
+                # have been fenced while this order was being prepared.
+                await self._assert_execution_lease(decision.risk_class)
                 response = await self.rest_client.request(
                     "POST", "/fapi/v1/order", signed=True, params=params
                 )
@@ -1198,7 +1348,8 @@ class BinanceExecutionAdapter:
                 await self.ledger.upsert_order(order)
                 if not await self._post_mutation_reconcile(order, response):
                     logger.error(
-                        "Testnet order %s acknowledged but not fully verified; keeping execution degraded",
+                        "%s order %s acknowledged but not fully verified; keeping execution degraded",
+                        environment_label(self.env),
                         client_order_id,
                     )
                     continue
@@ -1208,12 +1359,12 @@ class BinanceExecutionAdapter:
                     reserved_notional += prepared.notional
             except BinanceAuthenticationError as exc:
                 self.invalidate_authentication()
-                logger.error("Testnet authentication failed while submitting %s: %s", client_order_id, exc)
+                logger.error("%s authentication failed while submitting %s: %s", environment_label(self.env), client_order_id, exc)
             except (BinanceRateLimitError, BinanceTimestampError) as exc:
-                logger.error("Testnet mutable request was not submitted: %s", exc)
+                logger.error("%s mutable request was not submitted: %s", environment_label(self.env), exc)
                 self.state = ConnectionState.DEGRADED
             except BinanceDefinitiveRejection as exc:
-                logger.warning("Testnet order rejected definitively: %s", exc)
+                logger.warning("%s order rejected definitively: %s", environment_label(self.env), exc)
                 await self.ledger.upsert_order(
                     ExecutionOrder(
                         symbol=prepared.symbol,
@@ -1233,15 +1384,18 @@ class BinanceExecutionAdapter:
                         risk_class=decision.risk_class,
                     )
                 )
+            except LeaseLostError as exc:
+                self.state = ConnectionState.DEGRADED
+                logger.error("Order submission fenced before request: %s", exc)
             except (BinanceTransportAmbiguity, BinanceAPIError) as exc:
-                logger.error("Testnet order response is ambiguous: %s", exc)
+                logger.error("%s order response is ambiguous: %s", environment_label(self.env), exc)
                 recovered = await self._resolve_ambiguous_order(
                     intent, prepared, client_order_id, decision
                 )
                 if recovered is not None:
                     executed_orders.append(recovered)
             except Exception as exc:
-                logger.error("Unexpected Testnet order execution failure: %s", exc)
+                logger.error("Unexpected %s order execution failure: %s", environment_label(self.env), exc)
                 self.state = ConnectionState.DEGRADED
 
         return executed_orders
@@ -1264,7 +1418,7 @@ class BinanceExecutionAdapter:
         *,
         authority: Optional[object] = None,
     ) -> Dict[str, Any]:
-        """Cancel and verify all authoritative Testnet open orders.
+        """Cancel and verify all authoritative Binance open orders.
 
         This is the kill-switch mutation path. It shares the adapter's
         single-flight lock with submit, cancel, amend, and emergency flatten so
@@ -1274,7 +1428,7 @@ class BinanceExecutionAdapter:
         if not self._worker_authorized(authority):
             return {
                 "status": "UNKNOWN",
-                "reason": "Worker authority is required for Testnet cancellation",
+                "reason": f"Worker authority is required for {self.environment_label} cancellation",
             }
         async with self._mutation_lock:
             try:
@@ -1309,10 +1463,10 @@ class BinanceExecutionAdapter:
                         self.invalidate_authentication()
                         return {
                             "status": "UNKNOWN",
-                            "reason": "Testnet authentication failed; exchange cancellation is unknown",
+                            "reason": f"{self.environment_label} authentication failed; exchange cancellation is unknown",
                         }
                     except Exception as exc:
-                        logger.error("Testnet kill-switch cancellation failed: %s", exc)
+                        logger.error("%s kill-switch cancellation failed: %s", self.environment_label, exc)
                         cancel_failures += 1
 
                 remaining = await self.rest_client.request(
@@ -1334,10 +1488,10 @@ class BinanceExecutionAdapter:
                 self.invalidate_authentication()
                 return {
                     "status": "UNKNOWN",
-                    "reason": "Testnet authentication failed; exchange cancellation is unknown",
+                    "reason": f"{self.environment_label} authentication failed; exchange cancellation is unknown",
                 }
             except Exception as exc:
-                logger.error("Testnet kill-switch exchange cancellation is unknown: %s", exc)
+                logger.error("%s kill-switch exchange cancellation is unknown: %s", self.environment_label, exc)
                 return {
                     "status": "UNKNOWN",
                     "reason": "Exchange cancellation could not be verified",
@@ -1351,11 +1505,11 @@ class BinanceExecutionAdapter:
         authority: Optional[object] = None,
     ) -> bool:
         if not self._worker_authorized(authority):
-            logger.error("Blocked direct Testnet cancel outside the Trading Worker")
+            logger.error("Blocked direct %s cancel outside the Trading Worker", self.environment_label)
             return False
         async with self._mutation_lock:
             if getattr(authority, "kill_switch_active", False):
-                logger.warning("Kill switch blocked Testnet cancel mutation")
+                logger.warning("Kill switch blocked %s cancel mutation", self.environment_label)
                 return False
             return await self._cancel_order(
                 symbol, orig_client_order_id, authority=authority
@@ -1369,7 +1523,7 @@ class BinanceExecutionAdapter:
         authority: Optional[object] = None,
     ) -> bool:
         if not self._worker_authorized(authority):
-            logger.error("Blocked direct Testnet cancel outside the Trading Worker")
+            logger.error("Blocked direct %s cancel outside the Trading Worker", self.environment_label)
             return False
         if self.state != ConnectionState.READY:
             return False
@@ -1411,7 +1565,7 @@ class BinanceExecutionAdapter:
             try:
                 sync_result = await self.reconciliation.reconcile()
             except Exception as exc:
-                logger.error("Post-cancel Testnet reconciliation failed: %s", exc)
+                logger.error("Post-cancel %s reconciliation failed: %s", self.environment_label, exc)
                 sync_result = "UNKNOWN"
             verified = bool(
                 sync_result == "IN_SYNC"
@@ -1432,7 +1586,7 @@ class BinanceExecutionAdapter:
                 and resolved.get("status") in {"CANCELED", "CANCELLED"}
             )
         except (BinanceRateLimitError, BinanceTimestampError) as exc:
-            logger.error("Testnet cancel was not submitted: %s", exc)
+            logger.error("%s cancel was not submitted: %s", self.environment_label, exc)
             self.state = ConnectionState.DEGRADED
             return False
         except BinanceTransportAmbiguity as exc:
@@ -1459,11 +1613,11 @@ class BinanceExecutionAdapter:
         authority: Optional[object] = None,
     ) -> Optional[ExecutionOrder]:
         if not self._worker_authorized(authority):
-            logger.error("Blocked direct Testnet amendment outside the Trading Worker")
+            logger.error("Blocked direct %s amendment outside the Trading Worker", self.environment_label)
             return None
         async with self._mutation_lock:
             if getattr(authority, "kill_switch_active", False):
-                logger.warning("Kill switch blocked Testnet amendment mutation")
+                logger.warning("Kill switch blocked %s amendment mutation", self.environment_label)
                 return None
             return await self._modify_order(
                 symbol,
@@ -1485,7 +1639,10 @@ class BinanceExecutionAdapter:
         authority: Optional[object] = None,
     ) -> Optional[ExecutionOrder]:
         if not self._worker_authorized(authority):
-            logger.error("Blocked direct Testnet amendment outside the Trading Worker")
+            logger.error(
+                "Blocked direct %s amendment outside the Trading Worker",
+                self.environment_label,
+            )
             return None
         if self.state != ConnectionState.READY:
             return None
@@ -1595,6 +1752,7 @@ class BinanceExecutionAdapter:
                 params["positionSide"] = intent.position_side.value
             if intent.reduce_only and not self.capabilities.hedge_mode:
                 params["reduceOnly"] = "true"
+            await self._assert_execution_lease(amendment_risk)
             response = await self.rest_client.request(
                 "PUT",
                 "/fapi/v1/order",
@@ -1615,13 +1773,17 @@ class BinanceExecutionAdapter:
             logger.warning("Order amendment was rejected definitively: %s", exc)
             return None
         except (BinanceRateLimitError, BinanceTimestampError) as exc:
-            logger.error("Testnet amendment was not submitted: %s", exc)
+            logger.error("%s amendment was not submitted: %s", self.environment_label, exc)
             return None
         except BinanceTransportAmbiguity as exc:
-            logger.error("Testnet amendment response is ambiguous: %s", exc)
+            logger.error("%s amendment response is ambiguous: %s", self.environment_label, exc)
             return await self._resolve_ambiguous_order(
                 intent, prepared, orig_client_order_id, amendment_decision
             )
+        except LeaseLostError as exc:
+            self.state = ConnectionState.DEGRADED
+            logger.error("Order amendment fenced before submission: %s", exc)
+            return None
         except Exception as exc:
             logger.error("Order amendment is not verified: %s", exc)
             self.state = ConnectionState.DEGRADED
@@ -1688,7 +1850,7 @@ class BinanceExecutionAdapter:
         *,
         authority: Optional[object] = None,
     ) -> List[ExecutionOrder]:
-        """Reduce only Testnet positions through the Worker-owned emergency path."""
+        """Reduce only Binance positions through the Worker-owned emergency path."""
         if not self._worker_authorized(authority):
             logger.error("Blocked direct emergency flatten outside the Trading Worker")
             self.last_emergency_result = {
@@ -1706,19 +1868,19 @@ class BinanceExecutionAdapter:
             self.invalidate_authentication()
             self.last_emergency_result = {
                 "status": "UNKNOWN",
-                "reason": "Testnet authentication failed while reading positions",
+                "reason": f"{self.environment_label} authentication failed while reading positions",
             }
             return []
         except Exception as exc:
             self.last_emergency_result = {
                 "status": "UNKNOWN",
-                "reason": f"Authoritative Testnet position state is unknown: {exc}",
+                "reason": f"Authoritative {self.environment_label} position state is unknown: {exc}",
             }
             return []
         if not isinstance(positions, list):
             self.last_emergency_result = {
                 "status": "UNKNOWN",
-                "reason": "Authoritative Testnet positionRisk response is invalid",
+                "reason": f"Authoritative {self.environment_label} positionRisk response is invalid",
             }
             return []
 
@@ -1733,7 +1895,7 @@ class BinanceExecutionAdapter:
             self.state = ConnectionState.DEGRADED
             self.last_emergency_result = {
                 "status": "UNKNOWN",
-                "reason": f"Authoritative Testnet position state is invalid: {exc}",
+                "reason": f"Authoritative {self.environment_label} position state is invalid: {exc}",
             }
             return []
         flattened: List[ExecutionOrder] = []
@@ -1746,7 +1908,7 @@ class BinanceExecutionAdapter:
             except (InvalidOperation, TypeError, ValueError):
                 self.last_emergency_result = {
                     "status": "UNKNOWN",
-                    "reason": "Active Testnet position contained invalid emergency fields",
+                    "reason": f"Active {self.environment_label} position contained invalid emergency fields",
                 }
                 return flattened
             if not current_symbol or amount == 0 or (symbol and current_symbol != symbol.upper()):
@@ -1818,6 +1980,15 @@ class BinanceExecutionAdapter:
         return flattened
 
     async def close(self):
+        lease = self.execution_lease
+        self.execution_lease = None
+        if lease is not None:
+            try:
+                await lease.release()
+            except Exception as exc:
+                logger.warning(
+                    "Unable to release execution lease cleanly: %s", type(exc).__name__
+                )
         await self.user_stream.close()
         await self.rest_client.close()
         self.capabilities.authenticated = False

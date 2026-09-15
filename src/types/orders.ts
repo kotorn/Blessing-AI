@@ -1,5 +1,5 @@
 
-export type ExecutionSource = 'SIMULATED' | 'BINANCE_TESTNET' | 'BINANCE_LIVE';
+export type ExecutionSource = 'SIMULATED' | 'BINANCE_TESTNET' | 'BINANCE_MAINNET';
 
 export type OrderVenue = 'binance_usdm' | 'binance_spot';
 export type OrderSide = 'BUY' | 'SELL';

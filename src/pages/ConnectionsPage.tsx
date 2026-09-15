@@ -86,7 +86,7 @@ export const ConnectionsPage: React.FC<ConnectionsPageProps> = ({
               </div>
               <div className="flex justify-between">
                 <span>Key Source:</span>
-                <span className="text-cyan-400">{binanceStatus?.isTestnet ? 'BINANCE_TESTNET' : 'MAINNET BLOCKED'}</span>
+                <span className="text-cyan-400">{binanceStatus?.environment === 'MAINNET' ? 'BINANCE_MAINNET' : 'BINANCE_TESTNET'}</span>
               </div>
             </div>
           </div>
@@ -115,7 +115,7 @@ export const ConnectionsPage: React.FC<ConnectionsPageProps> = ({
                     : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                 }`}
               >
-                {firestoreConnected ? 'CLOUD ACTIVE' : 'STANDALONE'}
+                {firestoreConnected ? 'FIRESTORE CONNECTED' : 'READ-BACK REQUIRED'}
               </span>
             </div>
 
@@ -135,11 +135,11 @@ export const ConnectionsPage: React.FC<ConnectionsPageProps> = ({
               </div>
               <div className="flex justify-between">
                 <span>BigQuery Dataset:</span>
-                <span className="text-cyan-400">blessing_lakehouse</span>
+                <span className="text-cyan-400">market_data · signals · risk · backtests</span>
               </div>
               <div className="flex justify-between">
                 <span>Cloud Run Service:</span>
-                <span className="text-emerald-400">Active (Container)</span>
+                <span className="text-amber-400">Target declared · not verified</span>
               </div>
             </div>
           </div>

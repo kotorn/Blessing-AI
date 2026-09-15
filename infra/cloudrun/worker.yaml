@@ -1,0 +1,70 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: blessing-trading-worker
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "1"
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/cloudsql-instances: "gen-lang-client-0730128480:asia-southeast1:blessing-sql-primary"
+    spec:
+      containerConcurrency: 1
+      serviceAccountName: blessing-runtime@gen-lang-client-0730128480.iam.gserviceaccount.com
+      containers:
+        - image: REPLACE_WITH_IMMUTABLE_IMAGE_URI
+          ports:
+            - name: http1
+              containerPort: 8080
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: EXECUTION_MODE
+              value: PAPER
+            - name: PERSISTENCE_MODE
+              value: REQUIRED
+            - name: EXECUTION_LEASE_REQUIRED
+              value: "true"
+            - name: MAINNET_LIVE_APPROVED
+              value: "false"
+            - name: POSTGRES_HOST
+              value: /cloudsql/gen-lang-client-0730128480:asia-southeast1:blessing-sql-primary
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              value: blessing_trading
+            - name: POSTGRES_USER
+              value: blessing_worker
+            - name: BINANCE_MAINNET_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: blessing-binance-mainnet-api-key
+                  key: latest
+            - name: BINANCE_MAINNET_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: blessing-binance-mainnet-api-secret
+                  key: latest
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: blessing-cloud-sql-password
+                  key: latest
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 10

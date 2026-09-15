@@ -385,6 +385,7 @@ CREATE TABLE IF NOT EXISTS persistence_outbox (
     attempt_count INT NOT NULL DEFAULT 0,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claimed_at TIMESTAMPTZ,
     processed_at TIMESTAMPTZ,
     last_error TEXT,
     CONSTRAINT persistence_outbox_status_check
@@ -395,3 +396,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_persistence_outbox_idempotency
     ON persistence_outbox(event_type, idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_persistence_outbox_pending
     ON persistence_outbox(status, next_attempt_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_persistence_outbox_claimed
+    ON persistence_outbox(status, claimed_at);
+
+-- 24. Distributed execution lease and fencing token
+-- One account/environment scope can have only one unexpired owner.  The
+-- monotonically increasing token lets a replacement instance fence an older
+-- worker before its next risk-increasing submission.
+CREATE TABLE IF NOT EXISTS execution_leases (
+    scope_key VARCHAR(256) PRIMARY KEY,
+    owner_id VARCHAR(128) NOT NULL,
+    fencing_token BIGINT NOT NULL,
+    lease_until TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_execution_leases_expiry
+    ON execution_leases(lease_until);
