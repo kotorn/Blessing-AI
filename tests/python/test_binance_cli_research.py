@@ -25,10 +25,45 @@ def test_only_allowlisted_read_command_can_be_built():
         build_read_only_command("new_order")
 
 
-def test_mainnet_or_demo_environment_is_blocked():
+def test_mainnet_read_only_route_is_fixed_and_other_routes_are_blocked(monkeypatch):
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda binary: "C:/tools/binance-cli.exe" if binary == "binance-cli" else None,
+    )
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout='{"serverTime": 1700000000000}', stderr=""
+        ),
+    )
+
+    mainnet = BinanceCliResearchRunner(
+        environ={
+            "BINANCE_API_ENV": "prod",
+            "BINANCE_FUTURES_USDS_BASE_PATH": "https://fapi.binance.com/",
+        }
+    ).run(ReadOnlyCheck.SERVER_TIME)
+    assert mainnet.status == "PASS"
+    assert mainnet.environment == "MAINNET"
+    assert mainnet.base_url == "https://fapi.binance.com"
+    explicit_environment = BinanceCliResearchRunner(
+        environment="mainnet",
+        environ={"PATH": "C:/tools"},
+    ).run(ReadOnlyCheck.SERVER_TIME)
+    assert explicit_environment.status == "PASS"
+    assert explicit_environment.base_url == "https://fapi.binance.com"
+    with pytest.raises(BinanceCliPolicyError, match="ETHUSDC"):
+        mainnet_runner = BinanceCliResearchRunner(
+            environ={
+                "BINANCE_API_ENV": "prod",
+                "BINANCE_FUTURES_USDS_BASE_PATH": "https://fapi.binance.com/",
+            }
+        )
+        mainnet_runner.run(ReadOnlyCheck.POSITIONS, symbol="BTCUSDT")
+
     for api_env, base_url in (
         ("prod", "https://api.binance.com"),
-        ("demo", "https://demo-api Binance"),
+        ("demo", "https://demo-api.binance.com"),
         ("testnet", "https://api.binance.com"),
     ):
         runner = BinanceCliResearchRunner(

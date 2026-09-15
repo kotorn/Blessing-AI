@@ -22,7 +22,7 @@ export const BasisFundingCarryMonitor: React.FC<BasisFundingCarryMonitorProps> =
 }) => {
   const hasVerifiedData =
     instrument?.verified === true &&
-    instrument.data_source === 'BINANCE_TESTNET';
+    (instrument.data_source === 'BINANCE_TESTNET' || instrument.data_source === 'BINANCE_MAINNET');
   const basisUsd = hasVerifiedData ? instrument?.basis ?? null : null;
   const basisZScore = hasVerifiedData ? instrument?.basis_zscore ?? null : null;
   const fundingRate8h = hasVerifiedData ? instrument?.funding_rate ?? null : null;

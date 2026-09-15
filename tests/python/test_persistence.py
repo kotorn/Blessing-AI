@@ -326,6 +326,50 @@ async def test_outbox_insert_is_idempotent_and_preserves_utc_timestamp():
 
 
 @pytest.mark.asyncio
+async def test_order_submission_barrier_acknowledges_outbox_before_returning():
+    class DurableRepository:
+        def __init__(self) -> None:
+            self.events: list[Any] = []
+
+        async def append_outbox(self, event: Any) -> bool:
+            self.events.append(event)
+            return True
+
+        async def pending_count(self) -> int:
+            return len(self.events)
+
+    repository = DurableRepository()
+    manager = PersistenceManager(
+        db=FailingDatabase(),
+        config=PersistenceConfig(
+            mode=PersistenceMode.REQUIRED,
+            pre_submission_timeout_seconds=1,
+        ),
+        instrument_rules_provider=lambda symbol: _instrument()
+        if symbol == "BTCUSDT"
+        else None,
+    )
+    manager.repository = repository  # type: ignore[assignment]
+    manager.is_connected = True
+    manager._accepting = True
+    order = ExecutionOrder(
+        symbol="BTCUSDT",
+        side=OrderSide.BUY,
+        quantity=Decimal("0.1"),
+        price=Decimal("50000"),
+        client_order_id="pre-submit-1",
+        status="PENDING",
+        timestamp=PERSISTED_AT,
+    )
+
+    assert await manager.ensure_order_durable(order) is True
+    assert len(repository.events) == 1
+    assert repository.events[0].event_type == "ORDER"
+    assert repository.events[0].aggregate_id == "pre-submit-1"
+    assert manager.readiness()["pending_outbox"] == 1
+
+
+@pytest.mark.asyncio
 async def test_outbox_failed_apply_remains_replayable_and_backoff_is_recorded():
     class ReplayConnection:
         def __init__(self, row: dict[str, object]) -> None:

@@ -1,0 +1,192 @@
+[
+  {
+    "displayName": "Blessing AI - Readiness degraded",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Required worker readiness degraded",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_readiness_degraded\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [
+            {
+              "alignmentPeriod": "60s",
+              "perSeriesAligner": "ALIGN_RATE",
+              "crossSeriesReducer": "REDUCE_SUM"
+            }
+          ]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": {
+      "mimeType": "text/markdown",
+      "content": "Required worker readiness degraded. Keep Mainnet disarmed and inspect Cloud Run readiness, SQL persistence, and the latest sanitized error."
+    },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "readiness", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - Persistence outbox failure",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Outbox write or queue failure",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_outbox_failure\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [
+            {
+              "alignmentPeriod": "60s",
+              "perSeriesAligner": "ALIGN_RATE",
+              "crossSeriesReducer": "REDUCE_SUM"
+            }
+          ]
+        }
+      },
+      {
+        "displayName": "Outbox queue full",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_outbox_queue_full\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [
+            {
+              "alignmentPeriod": "60s",
+              "perSeriesAligner": "ALIGN_RATE",
+              "crossSeriesReducer": "REDUCE_SUM"
+            }
+          ]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": {
+      "mimeType": "text/markdown",
+      "content": "Transactional outbox failure or queue saturation observed. Risk-increasing execution must remain blocked until persistence is durable again."
+    },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "persistence", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - Private stream disconnected",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Binance private stream disconnected",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_private_stream_disconnected\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [
+            {
+              "alignmentPeriod": "60s",
+              "perSeriesAligner": "ALIGN_RATE",
+              "crossSeriesReducer": "REDUCE_SUM"
+            }
+          ]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": {
+      "mimeType": "text/markdown",
+      "content": "Private stream disconnected. The Worker must block new risk until the stream and reconciliation are verified."
+    },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "private_stream", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - Reconciliation drift",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Exchange and ledger state diverged",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_reconciliation_drift\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [
+            {
+              "alignmentPeriod": "60s",
+              "perSeriesAligner": "ALIGN_RATE",
+              "crossSeriesReducer": "REDUCE_SUM"
+            }
+          ]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": {
+      "mimeType": "text/markdown",
+      "content": "Exchange and durable ledger reconciliation drift or unknown state observed. Require operator reconciliation before any risk increase."
+    },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "reconciliation", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - Daily loss cap breached",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Daily loss cap breached",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_daily_loss_breach\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [
+            {
+              "alignmentPeriod": "60s",
+              "perSeriesAligner": "ALIGN_RATE",
+              "crossSeriesReducer": "REDUCE_SUM"
+            }
+          ]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": {
+      "mimeType": "text/markdown",
+      "content": "Daily loss cap breach observed. Keep the kill switch active and do not release Mainnet."
+    },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "daily_loss", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - Kill switch active",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Kill switch activation",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_kill_switch_active\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [
+            {
+              "alignmentPeriod": "60s",
+              "perSeriesAligner": "ALIGN_RATE",
+              "crossSeriesReducer": "REDUCE_SUM"
+            }
+          ]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": {
+      "mimeType": "text/markdown",
+      "content": "Kill switch activation event observed. Retain the incident trail and require explicit operator recovery."
+    },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "kill_switch", "environment": "all" }
+  }
+]

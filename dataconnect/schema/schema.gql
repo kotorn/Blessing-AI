@@ -1,0 +1,35 @@
+"""Firebase Auth-backed application profile."""
+type UserProfile @table(key: ["uid"]) {
+  uid: String!
+  email: String
+  displayName: String
+  role: String!
+  isActive: Boolean!
+  createdAt: Timestamp! @default(expr: "request.time")
+  updatedAt: Timestamp! @default(expr: "request.time")
+}
+
+"""A user-owned trading basket. Execution remains controlled by the worker."""
+type Basket @table {
+  id: UUID! @default(expr: "uuidV4()")
+  ownerUid: String!
+  name: String!
+  symbol: String!
+  enabled: Boolean!
+  # Data Connect has no implicit JSON scalar in this schema version. Keep the
+  # user-owned configuration as canonical JSON text and validate/parse it at the
+  # application boundary.
+  configuration: String!
+  createdAt: Timestamp! @default(expr: "request.time")
+  updatedAt: Timestamp! @default(expr: "request.time")
+}
+
+"""User-owned risk configuration; hard exchange caps remain worker-owned."""
+type RiskSettings @table(key: ["ownerUid"]) {
+  ownerUid: String!
+  riskProfile: String!
+  maxPortfolioDrawdownPct: Float!
+  maxGrossLeverage: Float!
+  maxMarginUtilizationPct: Float!
+  updatedAt: Timestamp! @default(expr: "request.time")
+}

@@ -1,3 +1,20 @@
+# Builder stage for official Binance CLI
+FROM debian:bookworm-slim AS cli-builder
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates xz-utils && rm -rf /var/lib/apt/lists/*
+ARG BINANCE_CLI_VERSION=2.1.1
+ARG BINANCE_CLI_ARCHIVE=binance-cli-x86_64-unknown-linux-gnu.tar.xz
+ARG BINANCE_CLI_SHA256=6b836a24f281abf590988207b0d19d4933971ca66dcf45a9e255cdc237c4deee
+RUN set -eux; \
+    archive_path="/tmp/${BINANCE_CLI_ARCHIVE}"; \
+    curl --fail --silent --show-error --location \
+      --output "${archive_path}" \
+      "https://github.com/binance/binance-cli/releases/download/v${BINANCE_CLI_VERSION}/${BINANCE_CLI_ARCHIVE}"; \
+    printf '%s  %s\n' "${BINANCE_CLI_SHA256}" "${archive_path}" | sha256sum --check --strict -; \
+    tar -xJf "${archive_path}" -C /tmp; \
+    test -x "/tmp/binance-cli-x86_64-unknown-linux-gnu/binance-cli"; \
+    install -m 0755 "/tmp/binance-cli-x86_64-unknown-linux-gnu/binance-cli" /usr/local/bin/binance-cli; \
+    rm -rf "${archive_path}" /tmp/binance-cli-x86_64-unknown-linux-gnu
+
 # Phase 5: Cloud Run Deployment for Blessing AI Trading Worker
 FROM python:3.13-slim
 
@@ -8,24 +25,22 @@ ENV PYTHONPATH=/app
 
 WORKDIR /app
 
-# System dependencies for scientific packages if necessary (not heavily required for this MVP logic)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Copy binance-cli from builder
+COPY --from=cli-builder /usr/local/bin/binance-cli /usr/local/bin/binance-cli
 
-# Assuming requirements are mounted or we install them explicitly
-# We'll install the required packages dynamically since there isn't a dedicated worker requirements.txt
-RUN pip install --no-cache-dir \
-    httpx \
-    pydantic \
-    numpy \
-    pandas
+# Runtime dependencies are pinned in-repository and contain only the worker path.
+COPY requirements-worker.txt ./requirements-worker.txt
+RUN pip install --no-cache-dir --requirement requirements-worker.txt
 
 # Copy domain models and worker codebase
 COPY domain/ ./domain/
+COPY venues/ ./venues/
 COPY apps/trading_worker/ ./apps/trading_worker/
 
-# In Cloud Run, the container must bind to $PORT for health checks, 
-# but for a background worker, Cloud Run Jobs or standalone execution is used.
-# If running as a service, we'd add a simple FastAPI health endpoint.
+# The worker starts its background loop and FastAPI health/control server in
+# one process. Cloud Run supplies PORT; defaults remain PAPER/DISARMED.
+ENV EXECUTION_MODE=PAPER
+ENV MAINNET_LIVE_APPROVED=false
+ENV PERSISTENCE_MODE=REQUIRED
+ENV EXECUTION_LEASE_REQUIRED=true
 CMD ["python", "-m", "apps.trading_worker.main"]

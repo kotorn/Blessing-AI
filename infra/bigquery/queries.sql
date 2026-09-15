@@ -19,7 +19,7 @@ SELECT
 FROM
   `gen-lang-client-0730128480.signals.strategy_decisions`
 WHERE
-  DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+  timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
 GROUP BY
   regime, strategy_id
 ORDER BY
@@ -41,7 +41,7 @@ SELECT
 FROM
   `gen-lang-client-0730128480.risk.portfolio_snapshots`
 WHERE
-  DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+  timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
 GROUP BY
   hour_bucket, risk_state
 ORDER BY
@@ -52,7 +52,7 @@ ORDER BY
 -- Compares Spot vs Perpetual Basis Z-score against Funding Rate
 -- -------------------------------------------------------------------------------------
 SELECT
-  DATE(timestamp) as trade_date,
+  TIMESTAMP_TRUNC(timestamp, DAY) as trade_day,
   symbol,
   ROUND(AVG(basis_zscore), 2) as avg_basis_zscore,
   ROUND(AVG(funding_rate * 100 * 3 * 365), 2) as annualized_funding_pct,
@@ -61,12 +61,12 @@ SELECT
 FROM
   `gen-lang-client-0730128480.market_data.ohlcv_bars`
 WHERE
-  DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+  timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 14 DAY)
   AND resolution = '1h'
 GROUP BY
-  trade_date, symbol
+  trade_day, symbol
 ORDER BY
-  trade_date DESC, symbol;
+  trade_day DESC, symbol;
 
 -- -------------------------------------------------------------------------------------
 -- QUERY 4: Backtest Overfitting Audit (Deflated Sharpe Ratio)
@@ -84,6 +84,6 @@ SELECT
 FROM
   `gen-lang-client-0730128480.backtests.experiment_runs`
 WHERE
-  DATE(created_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+  created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
 ORDER BY
   deflated_sharpe_ratio DESC;

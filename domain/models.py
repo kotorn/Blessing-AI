@@ -239,6 +239,10 @@ class RiskSnapshot(BaseModel):
     current_drawdown_pct: Decimal
     liquidation_distance_pct: Optional[Decimal]
     risk_state: RiskState
+    # A zero value is not evidence that the exchange reported zero PnL.
+    # Live snapshots set this only when the signed UTC-day income query was
+    # complete and fee/funding inclusive.
+    realized_pnl_24h_known: bool = False
     hard_violations: List[str] = Field(default_factory=list)
     soft_violations: List[str] = Field(default_factory=list)
 

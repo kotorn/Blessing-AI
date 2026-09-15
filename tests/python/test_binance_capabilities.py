@@ -12,7 +12,11 @@ class FakeCapabilityRestClient:
 
     async def request(self, method, path, **kwargs):
         if path == "/fapi/v2/account":
-            return {"totalWalletBalance": "100", "canTrade": self.can_trade}
+            return {
+                "totalWalletBalance": "100",
+                "canTrade": self.can_trade,
+                "assets": [{"asset": "USDT", "walletBalance": "100"}],
+            }
         if path == "/fapi/v1/positionSide/dual":
             return {"dualSidePosition": False}
         if path == "/fapi/v1/exchangeInfo":

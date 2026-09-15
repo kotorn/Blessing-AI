@@ -239,11 +239,11 @@ export const OrdersTable: React.FC<OrdersTableProps> = ({
                     {/* Provenance */}
                     <td className="py-3 px-3 text-center">
                       <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                        ord.source === 'BINANCE_TESTNET'
+                        (ord.source === 'BINANCE_TESTNET' || ord.source === 'BINANCE_MAINNET')
                           ? 'bg-amber-950 text-amber-300 border-amber-800/80'
                           : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                       }`}>
-                        {ord.source === 'BINANCE_TESTNET' ? 'BINANCE_TESTNET' : `${ord.source} / UNVERIFIED`}
+                        {(ord.source === 'BINANCE_TESTNET' || ord.source === 'BINANCE_MAINNET') ? ord.source : `${ord.source} / UNVERIFIED`}
                       </span>
                     </td>
 

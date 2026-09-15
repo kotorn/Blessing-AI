@@ -37,12 +37,12 @@ export const CommandDecisionFlow: React.FC<CommandDecisionFlowProps> = ({
 }) => {
   // 1. Market State Summary
   const btcData = instruments['BTCUSDT'];
-  const hasVerifiedAccount = account.verified === true && account.source === 'BINANCE_TESTNET';
+  const hasVerifiedAccount = account.verified === true && (account.source === 'BINANCE_TESTNET' || account.source === 'BINANCE_MAINNET');
   const hasVerifiedMarket =
     btcData?.verified === true &&
-    btcData.data_source === 'BINANCE_TESTNET';
+    (btcData.data_source === 'BINANCE_TESTNET' || btcData.data_source === 'BINANCE_MAINNET');
   const hasVerifiedBaskets = baskets.some(
-    (basket) => basket.verified === true && basket.data_source === 'BINANCE_TESTNET',
+    (basket) => basket.verified === true && (basket.data_source === 'BINANCE_TESTNET' || basket.data_source === 'BINANCE_MAINNET'),
   );
   const btcRegime = hasVerifiedMarket && btcData?.regime ? btcData.regime.replace(/_/g, ' ') : 'UNKNOWN';
 
@@ -63,7 +63,11 @@ export const CommandDecisionFlow: React.FC<CommandDecisionFlowProps> = ({
   const totalNetPnl = hasVerifiedBaskets ? baskets.reduce((sum, b) => sum + b.net_pnl, 0) : null;
   const executionInfrastructureHealthy = Boolean(
     systemState?.workerResponsive === true &&
-      systemState.executionMode === 'TESTNET' &&
+      ((systemState.executionMode === 'TESTNET' && systemState.exchangeEnvironment === 'BINANCE_TESTNET') ||
+        (systemState.executionMode === 'LIVE' &&
+          systemState.exchangeEnvironment === 'BINANCE_MAINNET' &&
+          systemState.mainnetLiveApproved === true &&
+          systemState.mainnetPreflightReady === true)) &&
       systemState.tradingConnectionHealthy &&
       systemState.privateStreamHealthy &&
       systemState.marketDataHealthy &&

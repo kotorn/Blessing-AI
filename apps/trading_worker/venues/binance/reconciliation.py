@@ -1,6 +1,7 @@
 """Authoritative Binance USDⓈ-M account, order, fill, and position reconciliation."""
 
 import logging
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,6 +11,7 @@ from domain.enums import OrderSide, PositionSide
 from domain.models import ExchangeFill, utc_now
 
 from .ledger import ExecutionLedger
+from .config import BinanceEnvironment, environment_label
 from .models import BinanceAuthenticationError, ExchangeAccountSnapshot
 from .rest_client import BinanceRestClient
 
@@ -49,6 +51,123 @@ def _required_decimal(payload: Dict[str, Any], field: str) -> Decimal:
     if not result.is_finite():
         raise ValueError(f"Non-finite Binance account field: {field}")
     return result
+
+
+def _required_asset(account: Dict[str, Any], asset_name: str) -> Dict[str, Any]:
+    """Return exactly one explicit Binance account-asset record.
+
+    The account-level USD totals are not interchangeable with a USDC (or
+    USDT) collateral balance, especially when Binance multi-assets mode is
+    enabled.  Risk gates therefore use this record exclusively.
+    """
+
+    assets = account.get("assets")
+    if not isinstance(assets, list):
+        raise ValueError("Binance account response is missing the assets array")
+    normalized = str(asset_name).strip().upper()
+    matches = [
+        item
+        for item in assets
+        if isinstance(item, dict)
+        and str(item.get("asset", "")).strip().upper() == normalized
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Binance account does not contain exactly one collateral asset {normalized}"
+        )
+    return matches[0]
+
+
+def _utc_day_window(now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Return the current UTC calendar-day window, using an exclusive end."""
+
+    current = now or utc_now()
+    if current.tzinfo is None:
+        raise ValueError("reconciliation timestamps must be timezone-aware")
+    current = current.astimezone(timezone.utc)
+    start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start, start + timedelta(days=1)
+
+
+def _margin_mode_observation(
+    account: Dict[str, Any], position_risk: List[Dict[str, Any]]
+) -> tuple[str, bool]:
+    """Derive a supported margin-mode observation without inventing defaults."""
+
+    # This account-level signal takes precedence over per-position
+    # ``marginType``. Binance can report individual positions as CROSS while
+    # the account is in multi-assets mode; that mode must not be interpreted
+    # as single-asset USDC collateral by the Mainnet gate.
+    if "multiAssetsMargin" in account and _exchange_bool(account.get("multiAssetsMargin")):
+        return "MULTI_ASSET_CROSS", True
+
+    modes: set[str] = set()
+    unknown_active_mode = False
+    for position in position_risk:
+        if not isinstance(position, dict):
+            continue
+        try:
+            active = _position_amount(position) != 0
+        except ValueError:
+            active = True
+        raw_mode = position.get("marginType")
+        if raw_mode in (None, ""):
+            if active:
+                unknown_active_mode = True
+            continue
+        mode = str(raw_mode).strip().upper()
+        if mode not in {"CROSS", "ISOLATED"}:
+            return mode or "UNKNOWN", False
+        modes.add(mode)
+
+    if unknown_active_mode or len(modes) > 1:
+        return ("UNKNOWN" if unknown_active_mode else "MIXED"), False
+    if len(modes) == 1:
+        return next(iter(modes)), True
+
+    # A flat account still has an account-level mode signal.
+    if "multiAssetsMargin" in account:
+        return "SINGLE_ASSET_CROSS", True
+    return "UNKNOWN", False
+
+
+def _configured_leverage_observation(
+    position_risk: List[Dict[str, Any]],
+    *,
+    environment: str,
+    configured_symbol: str,
+    explicit: Decimal | None,
+) -> tuple[Decimal | None, bool]:
+    """Read the exchange-configured leverage for the exact launch symbol."""
+
+    if environment != environment_label(BinanceEnvironment.MAINNET):
+        return None, False
+    if explicit is not None:
+        if explicit.is_finite() and explicit > 0:
+            return explicit, True
+        return None, False
+
+    candidates: list[Decimal] = []
+    saw_target = False
+    for position in position_risk:
+        if not isinstance(position, dict):
+            continue
+        if str(position.get("symbol", "")).strip().upper() != configured_symbol:
+            continue
+        saw_target = True
+        raw = position.get("leverage")
+        if raw in (None, ""):
+            return None, False
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return None, False
+        if not value.is_finite() or value <= 0:
+            return None, False
+        candidates.append(value)
+    if not saw_target or not candidates or len(set(candidates)) != 1:
+        return None, False
+    return candidates[0], True
 
 
 def _position_amount(position: Dict[str, Any]) -> Decimal:
@@ -100,21 +219,39 @@ def build_account_snapshot(
     position_risk: List[Dict[str, Any]],
     *,
     environment: str = "BINANCE_TESTNET",
+    daily_realized_pnl: Decimal | None = None,
+    daily_loss_known: bool = False,
+    daily_loss_asset: str = "UNKNOWN",
+    daily_pnl_includes_fees: bool = False,
+    daily_pnl_includes_funding: bool = False,
+    daily_loss_window_start: datetime | None = None,
+    daily_loss_window_end: datetime | None = None,
+    configured_leverage: Decimal | None = None,
+    configured_symbol: str = "ETHUSDC",
 ) -> ExchangeAccountSnapshot:
     """Build a truthful snapshot from current Binance v2 account and position responses."""
 
-    if environment != "BINANCE_TESTNET":
-        raise ValueError("Account snapshots are accepted only from Binance Testnet")
+    if environment not in {
+        environment_label(BinanceEnvironment.TESTNET),
+        environment_label(BinanceEnvironment.MAINNET),
+    }:
+        raise ValueError("Account snapshots are accepted only from fixed Binance environments")
     if not isinstance(account, dict) or not isinstance(position_risk, list):
         raise ValueError("Binance account snapshot payload is invalid")
 
-    wallet_balance = _required_decimal(account, "totalWalletBalance")
-    margin_balance = _required_decimal(account, "totalMarginBalance")
-    available_balance = _required_decimal(account, "availableBalance")
-    unrealized_pnl = _required_decimal(account, "totalUnrealizedProfit")
-    total_initial_margin = _required_decimal(account, "totalInitialMargin")
-    total_maint_margin = _required_decimal(account, "totalMaintMargin")
-    position_initial_margin = _required_decimal(account, "totalPositionInitialMargin")
+    collateral_asset = (
+        "USDC"
+        if environment == environment_label(BinanceEnvironment.MAINNET)
+        else "USDT"
+    )
+    asset = _required_asset(account, collateral_asset)
+    wallet_balance = _required_decimal(asset, "walletBalance")
+    margin_balance = _required_decimal(asset, "marginBalance")
+    available_balance = _required_decimal(asset, "availableBalance")
+    unrealized_pnl = _required_decimal(asset, "unrealizedProfit")
+    total_initial_margin = _required_decimal(asset, "initialMargin")
+    total_maint_margin = _required_decimal(asset, "maintMargin")
+    position_initial_margin = _required_decimal(asset, "positionInitialMargin")
 
     for field, value in (
         ("totalWalletBalance", wallet_balance),
@@ -142,6 +279,13 @@ def build_account_snapshot(
         symbol = position.get("symbol")
         if not symbol:
             raise ValueError("Active Binance position is missing symbol")
+        if (
+            environment == environment_label(BinanceEnvironment.MAINNET)
+            and str(symbol).strip().upper() != str(configured_symbol).strip().upper()
+        ):
+            raise ValueError(
+                f"Mainnet active position is outside the configured symbol {configured_symbol}"
+            )
         raw_position_side = position.get("positionSide")
         if raw_position_side in (None, ""):
             raise ValueError(f"Active position {symbol} is missing positionSide")
@@ -191,6 +335,14 @@ def build_account_snapshot(
         else:
             liquidation_distances.append(distance)
 
+    margin_mode, margin_mode_known = _margin_mode_observation(account, position_risk)
+    observed_configured_leverage, configured_leverage_known = _configured_leverage_observation(
+        position_risk,
+        environment=environment,
+        configured_symbol=str(configured_symbol).strip().upper(),
+        explicit=configured_leverage,
+    )
+
     if margin_balance > 0:
         effective_leverage = total_notional / margin_balance
         margin_utilization_pct = (total_initial_margin / margin_balance) * Decimal("100")
@@ -216,6 +368,19 @@ def build_account_snapshot(
         ),
         liquidation_safety="KNOWN" if liquidation_known else "UNKNOWN",
         exchange_environment=environment,
+        daily_realized_pnl=daily_realized_pnl,
+        daily_loss_known=daily_loss_known,
+        collateral_asset=collateral_asset,
+        risk_currency=collateral_asset,
+        daily_loss_asset=(str(daily_loss_asset).strip().upper() or "UNKNOWN"),
+        daily_pnl_includes_fees=daily_pnl_includes_fees,
+        daily_pnl_includes_funding=daily_pnl_includes_funding,
+        daily_loss_window_start=daily_loss_window_start,
+        daily_loss_window_end=daily_loss_window_end,
+        configured_leverage=observed_configured_leverage,
+        configured_leverage_known=configured_leverage_known,
+        margin_mode=margin_mode,
+        margin_mode_known=margin_mode_known,
         valid=True,
         timestamp=utc_now(),
     )
@@ -306,10 +471,108 @@ class BinanceReconciliation:
     def __init__(self, rest_client: BinanceRestClient, ledger: ExecutionLedger):
         self.rest_client = rest_client
         self.ledger = ledger
+        # Test doubles may not expose the enum, but production clients always
+        # do.  Keeping this fallback preserves read-only reconciliation tests
+        # without weakening the fixed-environment production client.
+        client_environment = getattr(rest_client, "env", BinanceEnvironment.TESTNET)
+        self.environment = environment_label(client_environment)
         self.last_diffs: List[ReconciliationDiff] = []
         self.last_status = "UNKNOWN"
         self.authentication_failed = False
         self._unattributed_fill_diffs: List[ReconciliationDiff] = []
+        self.daily_loss_window_start: datetime | None = None
+        self.daily_loss_window_end: datetime | None = None
+
+    def _validate_mainnet_scope(
+        self,
+        positions: List[Dict[str, Any]],
+        open_orders: List[Dict[str, Any]],
+    ) -> None:
+        """Reject exchange state outside the single configured Mainnet chain."""
+
+        if self.environment != environment_label(BinanceEnvironment.MAINNET):
+            return
+        for order in open_orders:
+            symbol = str(order.get("symbol", "")).strip().upper()
+            if symbol != "ETHUSDC":
+                raise ValueError(
+                    f"Mainnet open order is outside the configured symbol ETHUSDC: {symbol or 'UNKNOWN'}"
+                )
+        # ``build_account_snapshot`` validates active positions, including
+        # mark/notional/position-side fields, so this loop only documents the
+        # scope boundary for callers that invoke the validator independently.
+        for position in positions:
+            if _position_amount(position) == 0:
+                continue
+            symbol = str(position.get("symbol", "")).strip().upper()
+            if symbol != "ETHUSDC":
+                raise ValueError(
+                    f"Mainnet position is outside the configured symbol ETHUSDC: {symbol or 'UNKNOWN'}"
+                )
+
+    async def _daily_realized_pnl(self) -> tuple[Decimal | None, bool]:
+        """Read restart-safe UTC-day net PnL for the exact Mainnet launch pair.
+
+        Binance exposes pagination by ``page`` and returns all income types when
+        ``incomeType`` is omitted.  We deliberately include only realized PnL,
+        commissions, and funding for USDC/ETHUSDC.  A short page is complete;
+        a full page at the configured safety bound is unknown and therefore
+        blocks Mainnet rather than silently under-counting loss.
+        """
+
+        if getattr(self.rest_client, "env", BinanceEnvironment.TESTNET) != BinanceEnvironment.MAINNET:
+            return None, True
+        start, end = _utc_day_window()
+        query_end = utc_now()
+        self.daily_loss_window_start = start
+        self.daily_loss_window_end = end
+        try:
+            total = Decimal("0")
+            max_pages = 100
+            page = 1
+            while page <= max_pages:
+                payload = await self.rest_client.request(
+                    "GET",
+                    "/fapi/v1/income",
+                    signed=True,
+                    params={
+                        "symbol": "ETHUSDC",
+                        "startTime": int(start.timestamp() * 1000),
+                        "endTime": int(query_end.timestamp() * 1000),
+                        "page": page,
+                        "limit": 1000,
+                    },
+                )
+                if not isinstance(payload, list):
+                    return None, False
+                for item in payload:
+                    if not isinstance(item, dict):
+                        return None, False
+                    item_asset = str(item.get("asset", "")).strip().upper()
+                    item_symbol = str(item.get("symbol", "")).strip().upper()
+                    item_type = str(item.get("incomeType", "")).strip().upper()
+                    if item_asset != "USDC" or item_symbol != "ETHUSDC":
+                        # The server-side symbol filter is an optimization,
+                        # not an authorization boundary.  Ignore unrelated
+                        # rows, but never let them enter USDC pair PnL.
+                        continue
+                    if item_type not in {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}:
+                        continue
+                    if item.get("income") in (None, ""):
+                        return None, False
+                    value = Decimal(str(item["income"]))
+                    if not value.is_finite():
+                        return None, False
+                    total += value
+                if len(payload) < 1000:
+                    return total, True
+                page += 1
+            # A full page on the last allowed request means there may be more
+            # USDC income records.  The daily loss value is not complete.
+            return None, False
+        except Exception as exc:
+            logger.warning("Unable to verify Mainnet UTC-day net PnL: %s", type(exc).__name__)
+            return None, False
 
     def _set_status(
         self, status: str, diffs: Optional[List[ReconciliationDiff]] = None
@@ -317,6 +580,17 @@ class BinanceReconciliation:
         self.last_status = status
         if diffs is not None:
             self.last_diffs = diffs
+        if status == "MISMATCH":
+            logger.error(
+                "monitor_event=reconciliation_drift environment=%s diff_count=%d",
+                self.environment,
+                len(diffs or []),
+            )
+        elif status == "UNKNOWN":
+            logger.error(
+                "monitor_event=readiness_degraded environment=%s reason=reconciliation_unknown",
+                self.environment,
+            )
         return status
 
     async def _recover_recent_trades(
@@ -355,7 +629,7 @@ class BinanceReconciliation:
                     )
                     continue
                 fill = _exchange_fill_from_trade(
-                    trade, local_order, source="BINANCE_TESTNET_BOOTSTRAP"
+                    trade, local_order, source=f"{self.environment}_BOOTSTRAP"
                 )
                 await self.ledger.append_fill(fill)
         self._unattributed_fill_diffs = diffs
@@ -382,7 +656,7 @@ class BinanceReconciliation:
         for trade in matching_trades:
             recovered_fills.append(
                 _exchange_fill_from_trade(
-                    trade, local_order, source="BINANCE_TESTNET_RECOVERY"
+                    trade, local_order, source=f"{self.environment}_RECOVERY"
                 )
             )
         recovered_quantity = sum(
@@ -876,10 +1150,23 @@ class BinanceReconciliation:
             account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
             if not isinstance(positions, list) or not isinstance(open_orders, list):
                 raise ValueError("Binance bootstrap response is invalid")
+            self._validate_mainnet_scope(positions, open_orders)
             # Validate account math and every active position before any
             # recovery/ledger mutation. A malformed mark/notional row must not
             # leave a partial position with fabricated zero fields behind.
-            snapshot = build_account_snapshot(account, positions)
+            daily_realized_pnl, daily_loss_known = await self._daily_realized_pnl()
+            snapshot = build_account_snapshot(
+                account,
+                positions,
+                environment=self.environment,
+                daily_realized_pnl=daily_realized_pnl,
+                daily_loss_known=daily_loss_known,
+                daily_loss_asset=("USDC" if self.environment == environment_label(BinanceEnvironment.MAINNET) else "UNKNOWN"),
+                daily_pnl_includes_fees=(daily_loss_known and self.environment == environment_label(BinanceEnvironment.MAINNET)),
+                daily_pnl_includes_funding=(daily_loss_known and self.environment == environment_label(BinanceEnvironment.MAINNET)),
+                daily_loss_window_start=self.daily_loss_window_start,
+                daily_loss_window_end=self.daily_loss_window_end,
+            )
 
             active_positions = [p for p in positions if _position_amount(p) != 0]
             # Bootstrap never silently adopts exchange exposure or orders that
@@ -988,9 +1275,22 @@ class BinanceReconciliation:
             account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
             if not isinstance(exchange_positions, list) or not isinstance(exchange_open_orders, list):
                 raise ValueError("Binance reconciliation response is invalid")
+            self._validate_mainnet_scope(exchange_positions, exchange_open_orders)
             # Validate the authoritative account/position snapshot before
             # _collect_diffs can seed any recovered position into the ledger.
-            snapshot = build_account_snapshot(account, exchange_positions)
+            daily_realized_pnl, daily_loss_known = await self._daily_realized_pnl()
+            snapshot = build_account_snapshot(
+                account,
+                exchange_positions,
+                environment=self.environment,
+                daily_realized_pnl=daily_realized_pnl,
+                daily_loss_known=daily_loss_known,
+                daily_loss_asset=("USDC" if self.environment == environment_label(BinanceEnvironment.MAINNET) else "UNKNOWN"),
+                daily_pnl_includes_fees=(daily_loss_known and self.environment == environment_label(BinanceEnvironment.MAINNET)),
+                daily_pnl_includes_funding=(daily_loss_known and self.environment == environment_label(BinanceEnvironment.MAINNET)),
+                daily_loss_window_start=self.daily_loss_window_start,
+                daily_loss_window_end=self.daily_loss_window_end,
+            )
 
             symbols = {
                 str(position.get("symbol"))

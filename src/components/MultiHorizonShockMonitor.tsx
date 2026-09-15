@@ -24,7 +24,7 @@ export const MultiHorizonShockMonitor: React.FC<MultiHorizonShockMonitorProps> =
 }) => {
   const hasVerifiedData =
     instrument?.verified === true &&
-    instrument.data_source === 'BINANCE_TESTNET';
+    (instrument.data_source === 'BINANCE_TESTNET' || instrument.data_source === 'BINANCE_MAINNET');
   // InstrumentData currently carries no verified multi-horizon velocity,
   // acceleration, or percentile series. Do not synthesize those values in the
   // presentation layer; the worker/market-data service must supply them.

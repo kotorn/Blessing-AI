@@ -40,7 +40,7 @@ class RiskGovernor:
         if not isinstance(value, datetime):
             raise ValueError("RiskGovernor clock must return a datetime")
         if value.tzinfo is None:
-            value = value.replace(tzinfo=UTC)
+            raise ValueError("RiskGovernor clock must return a timezone-aware datetime")
         return value.astimezone(UTC)
 
     def _next_id(self, prefix: str, timestamp: datetime | None = None) -> str:

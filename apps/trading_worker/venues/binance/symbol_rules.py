@@ -13,6 +13,8 @@ class SymbolTradingRules:
         self.symbol = symbol
         self.base_asset = ""
         self.quote_asset = ""
+        self.margin_asset = ""
+        self.contract_type = ""
         self.price_precision: Optional[int] = None
         self.quantity_precision: Optional[int] = None
         self.status = "UNKNOWN"
@@ -57,6 +59,8 @@ class SymbolTradingRules:
         self.status = str(symbol_data.get("status", "UNKNOWN")).upper()
         self.base_asset = str(symbol_data.get("baseAsset", "")).upper()
         self.quote_asset = str(symbol_data.get("quoteAsset", "")).upper()
+        self.margin_asset = str(symbol_data.get("marginAsset", "")).upper()
+        self.contract_type = str(symbol_data.get("contractType", "")).upper()
         self.supported_order_types = [
             str(order_type).upper() for order_type in symbol_data.get("orderTypes", [])
         ]
@@ -400,6 +404,16 @@ class SymbolTradingRules:
         if self._parsed_from_exchange_info and not self.supported_order_types:
             return False
         return not self.supported_order_types or normalized_type in self.supported_order_types
+
+    def is_usdc_perpetual(self) -> bool:
+        """Check the runtime contract identity required by the Mainnet pilot."""
+
+        return (
+            self.status == "TRADING"
+            and self.contract_type == "PERPETUAL"
+            and self.quote_asset == "USDC"
+            and self.margin_asset == "USDC"
+        )
 
     def normalize_quantity(self, quantity: Decimal, is_market: bool = False) -> Decimal:
         step = self.market_step_size if is_market and self.market_step_size else self.step_size

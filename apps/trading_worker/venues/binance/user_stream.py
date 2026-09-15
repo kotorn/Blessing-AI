@@ -31,8 +31,8 @@ class BinanceUserStream:
         on_reconnected=None,
         on_authentication_failed=None,
     ):
-        if env != BinanceEnvironment.TESTNET:
-            raise ValueError("Mutable user streams are restricted to Binance Testnet")
+        if not isinstance(env, BinanceEnvironment):
+            raise ValueError("Binance user streams require TESTNET or MAINNET")
         self.rest_client = rest_client
         self.env = env
         self.base_ws_url = get_ws_url(env)
@@ -64,7 +64,7 @@ class BinanceUserStream:
         if timestamp is None:
             return False
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            return False
         try:
             max_age = float(os.getenv("PRIVATE_STREAM_MAX_AGE_SEC", "60"))
         except (TypeError, ValueError):
@@ -152,7 +152,11 @@ class BinanceUserStream:
         except BinanceAuthenticationError as exc:
             self.listen_key = None
             self.authentication_failed = True
-            logger.error("Testnet authentication failed while starting user stream: %s", exc)
+            logger.error(
+                "%s authentication failed while starting user stream: %s",
+                self.env.value,
+                exc,
+            )
             self._notify_authentication_failure()
         except Exception as e:
             logger.error("Failed to acquire listenKey: %s", e)
@@ -195,7 +199,7 @@ class BinanceUserStream:
             break
 
     async def keepalive(self) -> bool:
-        """Refresh the active Testnet listen key and record the verification time."""
+        """Refresh the active environment listen key and record verification time."""
         if not self.listen_key:
             return False
         try:
@@ -225,6 +229,10 @@ class BinanceUserStream:
         finally:
             self.is_connected = False
             if self.running:
+                logger.error(
+                    "monitor_event=private_stream_disconnected environment=%s",
+                    self.env.value,
+                )
                 logger.warning("User stream closed unexpectedly. Triggering bounded reconnect.")
                 if self.on_disconnect:
                     try:

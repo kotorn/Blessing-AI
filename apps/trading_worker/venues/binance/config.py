@@ -4,12 +4,44 @@ class BinanceEnvironment(str, Enum):
     TESTNET = "TESTNET"
     MAINNET = "MAINNET"
 
+
+# These are the only exchange environments that the execution adapter may
+# address.  Keeping the map in one module prevents a runtime configuration
+# value from becoming an arbitrary REST/WebSocket endpoint.
+REST_URLS = {
+    BinanceEnvironment.TESTNET: "https://testnet.binancefuture.com",
+    BinanceEnvironment.MAINNET: "https://fapi.binance.com",
+}
+WS_URLS = {
+    BinanceEnvironment.TESTNET: "wss://stream.binancefuture.com/ws",
+    BinanceEnvironment.MAINNET: "wss://fstream.binance.com/ws",
+}
+
+
+def environment_label(env: BinanceEnvironment) -> str:
+    """Return the explicit provenance label used in evidence and ledgers."""
+
+    return f"BINANCE_{env.value}"
+
+
+def parse_environment(value: str | BinanceEnvironment) -> BinanceEnvironment:
+    """Parse only the two supported Binance routes."""
+
+    if isinstance(value, BinanceEnvironment):
+        return value
+    try:
+        return BinanceEnvironment(str(value).strip().upper())
+    except ValueError as exc:
+        raise ValueError("Binance environment must be TESTNET or MAINNET") from exc
+
 def get_rest_url(env: BinanceEnvironment) -> str:
-    if env == BinanceEnvironment.TESTNET:
-        return "https://testnet.binancefuture.com"
-    return "https://fapi.binance.com"
+    try:
+        return REST_URLS[parse_environment(env)]
+    except KeyError as exc:
+        raise ValueError("Unsupported Binance REST environment") from exc
 
 def get_ws_url(env: BinanceEnvironment) -> str:
-    if env == BinanceEnvironment.TESTNET:
-        return "wss://stream.binancefuture.com/ws"
-    return "wss://fstream.binance.com/ws"
+    try:
+        return WS_URLS[parse_environment(env)]
+    except KeyError as exc:
+        raise ValueError("Unsupported Binance WebSocket environment") from exc

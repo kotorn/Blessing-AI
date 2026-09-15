@@ -37,6 +37,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { AccountData, SubWalletSummary, TwoLayerAsset } from '../types';
+import { apiClient } from '../api/client';
 
 interface BalanceAllocationProps {
   account: AccountData;
@@ -128,11 +129,11 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
   const rawTwoLayerAssets = account?.two_layer_assets ?? [];
   const lastSyncTime = account?.last_sync_time;
   const source = account?.source ?? 'SIMULATED';
-  const hasVerifiedSnapshot = account?.verified === true && source === 'BINANCE_TESTNET';
+  const hasVerifiedSnapshot = account?.verified === true && (source === 'BINANCE_TESTNET' || source === 'BINANCE_MAINNET');
   const snapshotLabel =
-    source === 'BINANCE_TESTNET'
-      ? hasVerifiedSnapshot ? 'BINANCE TESTNET' : 'BINANCE TESTNET / UNVERIFIED'
-      : 'NO VERIFIED TESTNET SNAPSHOT';
+    source === 'BINANCE_TESTNET' || source === 'BINANCE_MAINNET'
+      ? hasVerifiedSnapshot ? source.replace('_', ' ') : `${source.replace('_', ' ')} / UNVERIFIED`
+      : 'NO VERIFIED BINANCE SNAPSHOT';
   const subWallets: SubWalletSummary[] = rawSubWallets;
   const twoLayerAssets: TwoLayerAsset[] = rawTwoLayerAssets;
 
@@ -180,11 +181,11 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
     setIsSyncing(true);
     setSyncFeedback(null);
     try {
-      const res = await fetch('/api/binance/sync-account', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      const data = await res.json();
+      const data = await apiClient.post<{
+        success: boolean;
+        account?: AccountData;
+        message?: string;
+      }>('/api/binance/sync-account', {});
       if (data.success && data.account) {
         if (onAccountUpdated) {
           onAccountUpdated(data.account);

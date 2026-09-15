@@ -100,14 +100,14 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
         </div>
       </div>
 
-      {baskets.some((basket) => basket.verified !== true || basket.data_source !== 'BINANCE_TESTNET') && (
+      {baskets.some((basket) => basket.verified !== true || (basket.data_source !== 'BINANCE_TESTNET' && basket.data_source !== 'BINANCE_MAINNET')) && (
         <IllustrativeEvidenceBanner message="Displayed basket rows are not verified against the Python worker ledger; mutation controls stay hidden." />
       )}
 
       <div className="grid grid-cols-1 gap-4">
         {baskets.map((basket) => {
           const isLong = basket.direction === 'LONG';
-          const hasVerifiedData = basket.verified === true && basket.data_source === 'BINANCE_TESTNET';
+          const hasVerifiedData = basket.verified === true && (basket.data_source === 'BINANCE_TESTNET' || basket.data_source === 'BINANCE_MAINNET');
           return (
             <div
               key={basket.basket_id}

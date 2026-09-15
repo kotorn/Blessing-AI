@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator, Mapping, Optional
@@ -12,6 +13,28 @@ from urllib.parse import quote, urlsplit
 import asyncpg
 
 logger = logging.getLogger("blessing.persistence.postgres")
+
+
+def redact_error(value: object) -> str:
+    """Keep database diagnostics useful without exposing credentials."""
+
+    text = str(value)
+    text = re.sub(
+        r"(?i)(postgres(?:ql)?://)[^\s/@:]+(?::[^\s/@]*)?@",
+        r"\1<redacted>@",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(password\s*[=:]\s*)[^\s,;]+",
+        r"\1<redacted>",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(POSTGRES_PASSWORD\s*[=:]\s*)[^\s,;]+",
+        r"\1<redacted>",
+        text,
+    )
+    return text[:500]
 
 
 class PostgresConfigurationError(RuntimeError):
@@ -50,6 +73,12 @@ class PostgresSettings:
         host = str(values["POSTGRES_HOST"]).strip()
         port = str(values["POSTGRES_PORT"]).strip()
         database = str(values["POSTGRES_DB"]).strip()
+        if host.startswith("/"):
+            # Cloud Run exposes an attached Cloud SQL instance as a Unix
+            # socket. asyncpg requires the socket path in the query string;
+            # treating it as a TCP hostname would silently fail readiness.
+            socket_host = quote(host, safe="")
+            return cls(dsn=f"postgresql://{user}:{password}@/{database}?host={socket_host}")
         return cls(dsn=f"postgresql://{user}:{password}@{host}:{port}/{database}")
 
 

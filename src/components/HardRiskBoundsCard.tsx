@@ -26,7 +26,7 @@ export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
   liquidationDistancePct,
 }) => {
   const hasVerifiedAccount =
-    account.verified === true && account.source === 'BINANCE_TESTNET';
+    account.verified === true && (account.source === 'BINANCE_TESTNET' || account.source === 'BINANCE_MAINNET');
   const marginUtilization = hasVerifiedAccount ? account.margin_utilization_pct : null;
   const effectiveLeverage = hasVerifiedAccount ? account.effective_leverage : null;
   const drawdown = hasVerifiedAccount ? account.portfolio_drawdown_pct : null;

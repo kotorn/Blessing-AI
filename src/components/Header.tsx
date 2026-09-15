@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { RiskState } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { apiClient } from '../api/client';
 import { GoogleWorkspaceModal } from './GoogleWorkspaceModal';
 import { GoogleCloudCenterModal } from './GoogleCloudCenterModal';
 
@@ -100,13 +101,10 @@ export const Header: React.FC<HeaderProps> = ({
   const fetchBinanceStatus = async () => {
     setIsVerifyingKey(true);
     try {
-      const resp = await fetch('/api/binance/verify-key');
-      if (resp.ok) {
-        const data = await resp.json();
-        setBinanceStatus(data);
-        if (data.activeProfileId) {
-          setActiveProfileId(data.activeProfileId);
-        }
+      const data = await apiClient.get<BinanceStatus>('/api/binance/verify-key');
+      setBinanceStatus(data);
+      if (data.activeProfileId) {
+        setActiveProfileId(data.activeProfileId);
       }
     } catch (err) {
       console.warn('Failed to verify Binance API key:', err);
@@ -117,13 +115,10 @@ export const Header: React.FC<HeaderProps> = ({
 
   const fetchProfiles = async () => {
     try {
-      const resp = await fetch('/api/binance/profiles');
-      if (resp.ok) {
-        const data = await resp.json();
-        setProfiles(data.profiles || []);
-        if (data.activeProfileId) {
-          setActiveProfileId(data.activeProfileId);
-        }
+      const data = await apiClient.get<{ profiles: ApiProfile[]; activeProfileId?: string }>('/api/binance/profiles');
+      setProfiles(data.profiles || []);
+      if (data.activeProfileId) {
+        setActiveProfileId(data.activeProfileId);
       }
     } catch (err) {
       console.warn('Failed to fetch Binance profiles:', err);
@@ -139,18 +134,15 @@ export const Header: React.FC<HeaderProps> = ({
     setIsSwitchingProfile(true);
     setFeedbackMsg(null);
     try {
-      const res = await fetch('/api/binance/profiles/switch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profileId }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setActiveProfileId(data.activeProfileId);
-        setBinanceStatus(data.results);
-        await fetchProfiles();
-        setFeedbackMsg({ type: 'success', text: `Switched to ${data.activeProfileName}` });
-      }
+      const data = await apiClient.post<{
+        activeProfileId: string;
+        activeProfileName: string;
+        results: BinanceStatus;
+      }>('/api/binance/profiles/switch', { profileId });
+      setActiveProfileId(data.activeProfileId);
+      setBinanceStatus(data.results);
+      await fetchProfiles();
+      setFeedbackMsg({ type: 'success', text: `Switched to ${data.activeProfileName}` });
     } catch (err: any) {
       setFeedbackMsg({ type: 'error', text: err.message || 'Failed to switch profile' });
     } finally {
@@ -190,22 +182,17 @@ export const Header: React.FC<HeaderProps> = ({
     setIsSavingProfile(true);
     setFeedbackMsg(null);
     try {
-      const res = await fetch('/api/binance/profiles/save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: formData.id || undefined,
-          name: formData.name,
-          apiKey: formData.apiKey,
-          apiSecret: formData.apiSecret,
-          isTestnet: formData.isTestnet,
-          makeActive: true,
-        }),
+      const data = await apiClient.post<{
+        activeProfileId: string;
+        results: BinanceStatus;
+      }>('/api/binance/profiles/save', {
+        id: formData.id || undefined,
+        name: formData.name,
+        apiKey: formData.apiKey,
+        apiSecret: formData.apiSecret,
+        isTestnet: formData.isTestnet,
+        makeActive: true,
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to save credentials');
-      }
       setBinanceStatus(data.results);
       setActiveProfileId(data.activeProfileId);
       await fetchProfiles();
@@ -221,16 +208,10 @@ export const Header: React.FC<HeaderProps> = ({
   const handleDeleteProfile = async (profileId: string) => {
     if (!window.confirm('Delete this API Key profile?')) return;
     try {
-      const res = await fetch('/api/binance/profiles/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profileId }),
-      });
-      if (res.ok) {
-        await fetchProfiles();
-        await fetchBinanceStatus();
-        setFeedbackMsg({ type: 'success', text: 'Profile removed' });
-      }
+      await apiClient.post('/api/binance/profiles/delete', { profileId });
+      await fetchProfiles();
+      await fetchBinanceStatus();
+      setFeedbackMsg({ type: 'success', text: 'Profile removed' });
     } catch (err: any) {
       setFeedbackMsg({ type: 'error', text: err.message || 'Failed to delete' });
     }

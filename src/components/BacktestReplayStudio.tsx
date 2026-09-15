@@ -1,6 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Play, RotateCcw, AlertTriangle, CheckCircle2, BarChart2, ShieldAlert, Sliders, DollarSign, Activity } from 'lucide-react';
 import { BacktestMetrics } from '../types';
+import { apiClient } from '../api/client';
+
+interface BacktestResponse extends Partial<BacktestMetrics> {
+  metrics?: BacktestMetrics;
+}
 
 export const BacktestReplayStudio: React.FC = () => {
   const [selectedScenario, setSelectedScenario] = useState<'covid_2020' | 'luna_2022' | 'ftx_2022' | 'bull_2024'>('covid_2020');
@@ -13,21 +18,13 @@ export const BacktestReplayStudio: React.FC = () => {
   const runScenario = async (scenario: string) => {
     setIsRunning(true);
     try {
-      const resp = await fetch('/api/quant/backtest/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({
-          scenario,
-          initial_capital: initialCapital,
-          max_grid_levels: maxGridLevels,
-          simulated_latency_ms: simulatedLatencyMs,
-        }),
+      const data = await apiClient.post<BacktestResponse>('/api/quant/backtest/run', {
+        scenario,
+        initial_capital: initialCapital,
+        max_grid_levels: maxGridLevels,
+        simulated_latency_ms: simulatedLatencyMs,
       });
-      const contentType = resp.headers.get('content-type');
-      if (resp.ok && contentType && contentType.includes('application/json')) {
-        const data = await resp.json();
-        setResults(data.metrics || data);
-      }
+      setResults(data.metrics || (data as BacktestMetrics));
     } catch (e) {
       console.warn('Backtest run deferred:', e);
     } finally {

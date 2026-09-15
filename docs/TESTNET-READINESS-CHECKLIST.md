@@ -15,7 +15,7 @@ Testnet has been verified.
 | Causal Binance public event-dataset assembler | `UNIT_TESTED; LOCAL_VERIFIED; RESEARCH_ONLY` | Requires independent 1m klines, mark-price klines, and historical bookTicker observations; rejects gaps, stale/future quotes, conflicts, mixed symbols, and missing fields; supports source-archive SHA-256 verification and deterministic JSONL hashes; bounded real-data run at `e7da4f7` verified 15 events but produced negative net PnL, so it is not edge or launch evidence |
 | Worker/adapter state contract | `UNIT_TESTED` | Adapter state is canonical; worker mirrors it |
 | Truthful Testnet readiness | `UNIT_TESTED` | Requires credentials, signed account, rules, stream, fresh account/market data, and `IN_SYNC` |
-| Binance CLI research cross-check boundary | `UNIT_TESTED; LOCAL_VERIFIED` | The isolated wrapper allowlists read-only USDⓈ-M checks and blocks Mainnet/mutations; no CLI binary is configured |
+| Binance CLI research cross-check boundary | `UNIT_TESTED; LOCAL_VERIFIED` | The isolated wrapper allowlists read-only USDⓈ-M checks, pins both documented routes, and blocks mutations; no CLI binary is configured |
 | Public Testnet BTCUSDT rule spot-check | `LOCAL_VERIFIED` | Public GET-only `exchangeInfo` spot-check recorded on 2026-09-14 reports `TRADING`, `MIN_NOTIONAL=50 USDT`, `tickSize=0.10`, and `stepSize=0.0001`; this does not authenticate or authorize execution |
 | Account snapshot, liquidation math, and derived risk state | `UNIT_TESTED; LOCAL_VERIFIED` | Uses Binance account/position-risk fields; liquidation is `UNKNOWN` when unusable and unsafe account metrics set `NO_NEW_RISK` |
 | Spot/Portfolio Margin wallet observation | `CODE_PRESENT` (unverified) | Separate from USDⓈ-M Futures Testnet collateral; a Spot-to-Portfolio-Margin transfer cannot authorize the Worker or satisfy Testnet readiness |
@@ -26,7 +26,7 @@ Testnet has been verified.
 | Supervised bounded Testnet soak runner | `UNIT_TESTED` | Worker-owned market-event path, explicit caps, fill bounds, cleanup, and reconciliation are implemented; no soak approval or mutation was run |
 | GitHub CI for verified safety/research implementation candidate | `CI_VERIFIED` | The PR check and generated evidence artifact must report success for the same clean commit SHA; the workflow is the authoritative run record. |
 | Autonomous Testnet execution | `LOCKED` | Requires current-SHA evidence, successful manual trial, both explicit autonomous flags, approval, and runtime readiness; defaults are false |
-| Mainnet execution | `DISABLED` | LIVE ARM and mutable Mainnet adapter construction are rejected |
+| Mainnet execution | `DISARMED; NOT_RUN` | Fixed Mainnet support is code-reviewed but remains blocked until explicit deployment approval, signed preflight, and release gates pass; no order was sent |
 
 ## Required runtime formula
 

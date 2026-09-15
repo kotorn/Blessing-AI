@@ -29,9 +29,9 @@ export const ExecutionQualityCard: React.FC<ExecutionQualityCardProps> = ({
   const hasVerifiedAccount =
     account.verified === true &&
     account.evidence_status === 'VERIFIED' &&
-    account.source === 'BINANCE_TESTNET';
+    (account.source === 'BINANCE_TESTNET' || account.source === 'BINANCE_MAINNET');
   const verifiedOrders = orders.filter(
-    (order) => order.source === 'BINANCE_TESTNET' && order.status === 'FILLED',
+    (order) => (order.source === 'BINANCE_TESTNET' || order.source === 'BINANCE_MAINNET') && order.status === 'FILLED',
   );
   const hasVerifiedExecution = hasVerifiedAccount && verifiedOrders.length > 0;
   // Compute maker vs taker counts only from exchange-sourced orders.

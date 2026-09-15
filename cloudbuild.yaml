@@ -1,0 +1,17 @@
+substitutions:
+  # Build output is uniquely tagged for artifact lookup; Cloud Run deployment
+  # must resolve this tag to a sha256 digest before invoking deploy.ps1.
+  # BUILD_ID is populated for both trigger and manual Cloud Build runs.
+  _IMAGE_TAG: 'disarmed-$BUILD_ID'
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.worker'
+      - '-t'
+      - 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/trading-worker:${_IMAGE_TAG}'
+      - '.'
+images:
+  - 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/trading-worker:${_IMAGE_TAG}'
+timeout: '1200s'

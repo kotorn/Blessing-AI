@@ -63,7 +63,7 @@ describe('System Preflight Execution Enforcements', () => {
     expect(result.checks.find(c => c.id === 'CHK-ENV-MISMATCH')?.status).toBe('FAIL');
   });
 
-  it('should reject LIVE arming globally', () => {
+  it('should keep LIVE fail-closed until the Mainnet release gates pass', () => {
     const mockState: TradingSystemState = {
       dataSource: 'BINANCE',
       exchangeEnvironment: 'BINANCE_MAINNET',
@@ -81,11 +81,12 @@ describe('System Preflight Execution Enforcements', () => {
       updatedAt: 'now'
     };
 
-    const requestedConfig = { executionMode: 'LIVE', instruments: ['BTCUSDT'], strategies: { grid: true } };
+    const requestedConfig = { executionMode: 'LIVE', instruments: ['ETHUSDC'], strategies: { grid: true } };
     
     const result = evaluatePreflight(mockState, requestedConfig);
     
     expect(result.canArm).toBe(false);
+    expect(result.checks.find(c => c.id === 'CHK-MAINNET-APPROVAL')?.message).toContain('MAINNET_LIVE_APPROVED');
   });
 
   it('keeps UI action policy aligned with the worker risk classes', () => {

@@ -1,11 +1,14 @@
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import os
 import sys
+import time
+import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Dict, List, Optional, Literal
@@ -39,7 +42,11 @@ from apps.trading_worker.engines.risk_governor import RiskGovernor
 from apps.trading_worker.engines.shock_strategy import ShockStrategyEngine
 from apps.trading_worker.engines.trend_strategy import TrendStrategyEngine
 from apps.trading_worker.evidence import BuildEvidence
-from apps.trading_worker.venues.binance.config import BinanceEnvironment, get_ws_url
+from apps.trading_worker.venues.binance.config import (
+    BinanceEnvironment,
+    environment_label,
+    get_ws_url,
+)
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.gates import DecisionExecutionGate
 from apps.trading_worker.venues.binance.models import (
@@ -143,6 +150,11 @@ class LaunchReadiness(BaseModel):
     testnet_autonomous_soak_ready: bool = False
     testnet_autonomous_ready: bool
     small_live_ready: bool = False
+    mainnet_credentials_verified: bool = False
+    mainnet_live_approved: bool = False
+    mainnet_account_risk_ready: bool = False
+    mainnet_preflight_ready: bool = False
+    mainnet_autonomous_ready: bool = False
     persistence: Dict[str, Any] = Field(default_factory=dict)
 
 class WorkerRuntimeState(BaseModel):
@@ -182,6 +194,11 @@ class WorkerRuntimeState(BaseModel):
 
     # Readiness
     launch_readiness: Optional[LaunchReadiness] = None
+    # Explicit release evidence for the control plane. Presence of credentials
+    # alone is not enough to claim that Mainnet is ready.
+    mainnet_credentials_verified: bool = False
+    mainnet_live_approved: bool = False
+    mainnet_preflight_ready: bool = False
 
     # Configuration Details & Versioning
     config_version: str = "v0.2.0-beta"
@@ -250,7 +267,7 @@ class WorkerRuntimeState(BaseModel):
                     normalized.setdefault("data_source", "BINANCE")
                     normalized.setdefault("exchange_environment", "BINANCE_TESTNET")
                 elif mode in (WorkerExecutionMode.LIVE, "LIVE"):
-                    normalized.setdefault("provenance", "BINANCE_LIVE")
+                    normalized.setdefault("provenance", "BINANCE_MAINNET")
                     normalized.setdefault("data_source", "BINANCE")
                     normalized.setdefault("exchange_environment", "BINANCE_MAINNET")
                 else:
@@ -356,6 +373,29 @@ app = FastAPI(title="Blessing AI Worker Control API", lifespan=lifespan)
 def health_check():
     return {"status": "ok", "timestamp": utc_now()}
 
+@app.get("/ready")
+def readiness_probe():
+    """Cloud Run readiness: expose durable persistence truth, never a fixture."""
+    if WORKER_ENGINE is None:
+        raise HTTPException(status_code=503, detail="Worker is not initialized")
+    readiness = WORKER_ENGINE.get_launch_readiness()
+    persistence = readiness.get("persistence", {})
+    if not persistence.get("ready", False):
+        logger.error(
+            "monitor_event=readiness_degraded persistence_mode=%s state=%s",
+            persistence.get("mode", "UNKNOWN"),
+            persistence.get("state", "UNKNOWN"),
+        )
+    persistence_ready = (
+        persistence.get("mode") != "REQUIRED" or persistence.get("durable") is True
+    )
+    if not persistence_ready:
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "DEGRADED", "reason": "Required persistence is unavailable", "readiness": readiness},
+        )
+    return {"status": "ready", "readiness": readiness}
+
 @app.get(
     "/state",
     response_model=WorkerRuntimeState,
@@ -410,6 +450,16 @@ def get_preflight_endpoint(execution_mode: str = "PAPER"):
         raise HTTPException(status_code=503, detail="Worker not initialized")
     return WORKER_ENGINE.get_preflight(execution_mode)
 
+@app.post("/preflight/read-only")
+async def read_only_preflight_endpoint():
+    """Run a signed Mainnet observation without arming or submitting orders."""
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    runner = getattr(WORKER_ENGINE, "run_mainnet_read_only_preflight", None)
+    if not callable(runner):
+        raise HTTPException(status_code=503, detail="Read-only preflight is unavailable")
+    return await runner()
+
 @app.post("/pause-new-risk")
 async def pause_new_risk_endpoint(req: ToggleRequest):
     if not WORKER_ENGINE:
@@ -452,7 +502,9 @@ async def reconcile_endpoint():
 
 class TradingWorkerApp:
     def __init__(self, symbols: Optional[List[str]] = None):
-        self.symbols = [str(symbol).upper() for symbol in (symbols or ["BTCUSDT"])]
+        configured_mode = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper()
+        default_symbols = ["ETHUSDC"] if configured_mode == "LIVE" else ["BTCUSDT"]
+        self.symbols = [str(symbol).upper() for symbol in (symbols or default_symbols)]
         self.is_running = True
         
         self.session_start_equity: Optional[Decimal] = None
@@ -498,6 +550,10 @@ class TradingWorkerApp:
         self.persistence = PersistenceManager(
             instrument_rules_provider=self._persistence_instrument_rules
         )
+        self._mainnet_preflight_lock = asyncio.Lock()
+        self._execution_lease_owner_id = uuid.uuid4().hex
+        self._execution_lease_ttl_seconds = 10.0
+        self._execution_lease_last_renewed_at = 0.0
 
     def _persistence_instrument_rules(self, symbol: str) -> Optional[Instrument]:
         """Expose only exchange-discovered Binance rules to persistence."""
@@ -554,6 +610,83 @@ class TradingWorkerApp:
             and cls._env_flag("BINANCE_TESTNET", False)
         )
 
+    @classmethod
+    def _mainnet_configured(cls) -> bool:
+        """Return true only when the explicit Secret Manager env injection exists."""
+
+        return bool(
+            os.getenv("BINANCE_MAINNET_API_KEY", "").strip()
+            and os.getenv("BINANCE_MAINNET_API_SECRET", "").strip()
+        )
+
+    def _current_exchange_environment(self) -> BinanceEnvironment:
+        return (
+            BinanceEnvironment.MAINNET
+            if self.execution_mode == WorkerExecutionMode.LIVE
+            else BinanceEnvironment.TESTNET
+        )
+
+    def _current_exchange_label(self) -> str:
+        return environment_label(self._current_exchange_environment())
+
+    async def _restart_public_market_stream(self) -> bool:
+        """Rebind the public stream to the worker's current mode and symbols.
+
+        Binance's combined stream URL is fixed when the client is created.  A
+        mode switch therefore must stop the old stream before starting a new
+        one; leaving the previous client alive could feed Mainnet decisions
+        with Testnet symbols (or vice versa).
+        """
+
+        await self._stop_public_market_stream()
+
+        exchange_environment = self._current_exchange_environment()
+        symbols = [str(symbol).upper() for symbol in self.symbols if str(symbol).strip()]
+        self.symbols = symbols
+        self.ws_client = BinancePublicWebSocket(
+            symbols=symbols,
+            base_ws_url=get_ws_url(exchange_environment),
+            event_callback=self.handle_market_event,
+            venue=environment_label(exchange_environment),
+        )
+        started = await self.ws_client.start()
+        if not started:
+            self.market_data_healthy = False
+            logger.error(
+                "Binance %s public market stream could not be started for %s",
+                exchange_environment.value,
+                symbols,
+            )
+        return started
+
+    async def _stop_public_market_stream(self) -> None:
+        """Stop and detach any exchange stream before entering a non-exchange mode."""
+
+        stream = self.ws_client
+        self.ws_client = None
+        if stream is None:
+            return
+        try:
+            await stream.stop()
+        except Exception as exc:
+            logger.warning("Error stopping public market stream: %s", type(exc).__name__)
+
+    async def _resolve_startup_symbols(self, configured_mode: str) -> List[str]:
+        """Resolve startup symbols without letting research scanning rewrite them."""
+
+        configured = [str(symbol).upper() for symbol in self.symbols if str(symbol).strip()]
+        if configured_mode == "LIVE":
+            if set(configured) != {"ETHUSDC"}:
+                logger.error(
+                    "LIVE startup requires the explicitly bounded ETHUSDC instrument; refusing configured symbols %s",
+                    configured,
+                )
+                return []
+            return ["ETHUSDC"]
+        if configured_mode == "TESTNET":
+            return configured or ["BTCUSDT"]
+        return [str(symbol).upper() for symbol in await self.scanner.scan_active_symbols()]
+
     def _active_instruments(self) -> List[str]:
         if isinstance(self.active_configuration, dict):
             configured = self.active_configuration.get("instruments")
@@ -592,7 +725,10 @@ class TradingWorkerApp:
     async def _observed_grid_depth(self, symbol: str) -> int:
         """Read grid depth from Worker-owned ledger lineage before expansion."""
 
-        if self.execution_mode != WorkerExecutionMode.TESTNET:
+        if self.execution_mode not in {
+            WorkerExecutionMode.TESTNET,
+            WorkerExecutionMode.LIVE,
+        }:
             # Paper mode has no exchange fills and must remain explicitly
             # simulated; it cannot claim observed grid inventory.
             return 0
@@ -649,16 +785,20 @@ class TradingWorkerApp:
             return self.grid_engine.max_grid_levels
 
     def _symbol_rules_ready(self) -> bool:
-        """Require complete exchange rules for every active Testnet symbol."""
+        """Require complete, selected-environment exchange rules for all symbols."""
         active_symbols = self._active_instruments()
         adapter = self.execution_adapter
         return bool(
             adapter
             and active_symbols
             and all(
-                symbol in adapter.symbol_rules
-                and adapter.symbol_rules[symbol].is_ready_for("LIMIT")
-                and adapter.symbol_rules[symbol].is_ready_for("MARKET")
+                adapter.is_symbol_ready_for_execution(symbol)
+                if hasattr(adapter, "is_symbol_ready_for_execution")
+                else (
+                    symbol in adapter.symbol_rules
+                    and adapter.symbol_rules[symbol].is_ready_for("LIMIT")
+                    and adapter.symbol_rules[symbol].is_ready_for("MARKET")
+                )
                 for symbol in active_symbols
             )
         )
@@ -683,13 +823,13 @@ class TradingWorkerApp:
             snapshot = getattr(getattr(adapter, "ledger", None), "account_snapshot", None)
         if snapshot is None or not getattr(snapshot, "valid", False):
             return False
-        if getattr(snapshot, "exchange_environment", None) != "BINANCE_TESTNET":
+        if getattr(snapshot, "exchange_environment", None) != self._current_exchange_label():
             return False
         timestamp = getattr(snapshot, "timestamp", None)
         if not isinstance(timestamp, datetime):
             return False
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            return False
         age = (utc_now() - timestamp).total_seconds()
         if age < 0 or age > self._positive_env_float("ACCOUNT_SNAPSHOT_MAX_AGE_SEC", 30.0):
             return False
@@ -728,6 +868,151 @@ class TradingWorkerApp:
             return finite and nonnegative
         except (InvalidOperation, TypeError, ValueError):
             return False
+
+    def _is_mainnet_snapshot_risk_ready(
+        self,
+        snapshot: Any,
+        adapter: Any,
+        *,
+        freshness_verified: Optional[bool] = None,
+        require_execution_lease: bool = True,
+    ) -> bool:
+        """Apply the immutable Mainnet account/risk limits to one snapshot.
+
+        ``run_mainnet_read_only_preflight`` uses this same validator with the
+        temporary observation adapter and without an execution lease.  That
+        keeps preflight useful while ensuring it can never satisfy the
+        autonomous execution lease gate.
+        """
+
+        if snapshot is None or not getattr(snapshot, "valid", False):
+            return False
+        if getattr(adapter, "env", None) != BinanceEnvironment.MAINNET:
+            return False
+        if freshness_verified is None:
+            freshness_check = getattr(adapter, "is_account_snapshot_fresh", None)
+            freshness_verified = bool(callable(freshness_check) and freshness_check())
+        if not freshness_verified:
+            return False
+
+        lease = getattr(adapter, "execution_lease", None)
+        if require_execution_lease and bool(getattr(adapter, "execution_lease_required", True)) and (
+            lease is None or getattr(lease, "fencing_token", None) is None
+        ):
+            return False
+        if str(getattr(snapshot, "collateral_asset", "")).upper() != "USDC":
+            return False
+        if str(getattr(snapshot, "risk_currency", "")).upper() != "USDC":
+            return False
+        if str(getattr(snapshot, "daily_loss_asset", "")).upper() != "USDC":
+            return False
+        if not bool(getattr(snapshot, "daily_loss_known", False)):
+            return False
+        if not bool(getattr(snapshot, "daily_pnl_includes_fees", False)):
+            return False
+        if not bool(getattr(snapshot, "daily_pnl_includes_funding", False)):
+            return False
+        if not bool(getattr(snapshot, "configured_leverage_known", False)):
+            return False
+        if not bool(getattr(snapshot, "margin_mode_known", False)):
+            return False
+        if str(getattr(snapshot, "margin_mode", "")).upper() not in {
+            "CROSS",
+            "ISOLATED",
+            "SINGLE_ASSET_CROSS",
+        }:
+            return False
+        if str(getattr(snapshot, "liquidation_safety", "")).upper() != "KNOWN":
+            return False
+
+        try:
+            limits = TestnetSafetyLimits.from_environment(BinanceEnvironment.MAINNET)
+            collateral = Decimal(str(getattr(snapshot, "margin_balance", None)))
+            wallet_balance = Decimal(str(getattr(snapshot, "wallet_balance", None)))
+            available_balance = Decimal(str(getattr(snapshot, "available_balance", None)))
+            effective_leverage = Decimal(str(getattr(snapshot, "effective_leverage", None)))
+            configured_leverage = Decimal(str(getattr(snapshot, "configured_leverage", None)))
+            daily_pnl = Decimal(str(getattr(snapshot, "daily_realized_pnl", None)))
+            unrealized_pnl = Decimal(str(getattr(snapshot, "unrealized_pnl", None)))
+            total_position_notional = Decimal(
+                str(getattr(snapshot, "total_position_notional", None))
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+
+        if (
+            not collateral.is_finite()
+            or collateral <= 0
+            or collateral > limits.max_collateral
+            or not wallet_balance.is_finite()
+            or wallet_balance <= 0
+            or wallet_balance > limits.max_collateral
+            or not available_balance.is_finite()
+            or available_balance <= 0
+            or not effective_leverage.is_finite()
+            or effective_leverage < 0
+            or effective_leverage > limits.max_leverage
+            or not total_position_notional.is_finite()
+            or total_position_notional < 0
+            or total_position_notional > limits.max_total_open_notional
+        ):
+            return False
+        if (
+            not configured_leverage.is_finite()
+            or configured_leverage <= 0
+            or configured_leverage > limits.max_leverage
+        ):
+            return False
+        if not daily_pnl.is_finite() or not unrealized_pnl.is_finite():
+            return False
+        daily_loss = max(Decimal("0"), -(daily_pnl + unrealized_pnl))
+        if not daily_loss.is_finite() or daily_loss >= limits.max_daily_loss:
+            return False
+
+        liquidation_distance = getattr(snapshot, "min_liquidation_distance_pct", None)
+        if total_position_notional != 0:
+            try:
+                if liquidation_distance is None or not Decimal(str(liquidation_distance)).is_finite() or Decimal(str(liquidation_distance)) <= 0:
+                    return False
+            except (InvalidOperation, TypeError, ValueError):
+                return False
+
+        window_start = getattr(snapshot, "daily_loss_window_start", None)
+        window_end = getattr(snapshot, "daily_loss_window_end", None)
+        if not isinstance(window_start, datetime) or not isinstance(window_end, datetime):
+            return False
+        if window_start.tzinfo is None or window_end.tzinfo is None:
+            return False
+        start_utc = window_start.astimezone(timezone.utc)
+        end_utc = window_end.astimezone(timezone.utc)
+        now_utc = utc_now()
+        return (
+            start_utc.hour == 0
+            and start_utc.minute == 0
+            and start_utc.second == 0
+            and start_utc.microsecond == 0
+            and end_utc >= start_utc
+            and end_utc <= start_utc + timedelta(days=1)
+            and start_utc <= now_utc < end_utc
+        )
+
+    def is_mainnet_account_risk_ready(self) -> bool:
+        """Require independently observed Mainnet collateral, mode, leverage, and PnL."""
+
+        if self.execution_mode != WorkerExecutionMode.LIVE:
+            return False
+        adapter = self.execution_adapter
+        snapshot = getattr(adapter, "account_snapshot", None) if adapter else None
+        if snapshot is None:
+            snapshot = getattr(getattr(adapter, "ledger", None), "account_snapshot", None) if adapter else None
+        if snapshot is None or not self.is_account_snapshot_ready():
+            return False
+        return self._is_mainnet_snapshot_risk_ready(
+            snapshot,
+            adapter,
+            freshness_verified=True,
+            require_execution_lease=True,
+        )
 
     def _derive_testnet_risk_state(
         self,
@@ -817,7 +1102,7 @@ class TradingWorkerApp:
             if not isinstance(timestamp, datetime):
                 return False
             if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                return False
             age = (utc_now() - timestamp).total_seconds()
             if age < 0 or age > max_age:
                 return False
@@ -853,7 +1138,10 @@ class TradingWorkerApp:
         if self.kill_switch_active:
             self.engine_state = WorkerEngineState.EMERGENCY
         elif (
-            self.execution_mode == WorkerExecutionMode.TESTNET
+            self.execution_mode in {
+                WorkerExecutionMode.TESTNET,
+                WorkerExecutionMode.LIVE,
+            }
             and self.active_configuration is not None
             and (
                 self.connection_state != ConnectionState.READY.value
@@ -881,7 +1169,7 @@ class TradingWorkerApp:
 
     def get_state(self) -> WorkerRuntimeState:
         self._sync_adapter_state()
-            
+        launch_readiness = self.get_launch_readiness()
         uptime = (utc_now() - self.start_time).total_seconds()
         trading_healthy = bool(
             self.connection_state == "READY"
@@ -913,7 +1201,7 @@ class TradingWorkerApp:
             provenance = "BINANCE_TESTNET"
             exchange_env = "BINANCE_TESTNET"
         elif self.execution_mode == WorkerExecutionMode.LIVE:
-            provenance = "BINANCE_LIVE"
+            provenance = "BINANCE_MAINNET"
             exchange_env = "BINANCE_MAINNET"
 
         data_source = "BINANCE" if self.execution_mode != WorkerExecutionMode.PAPER else "SIMULATED"
@@ -936,6 +1224,15 @@ class TradingWorkerApp:
             kill_switch_active=self.kill_switch_active,
             pause_new_risk=self.pause_new_risk,
             recovery_only=self.recovery_only,
+            mainnet_credentials_verified=bool(
+                launch_readiness.get("mainnet_credentials_verified", False)
+            ),
+            mainnet_live_approved=bool(
+                launch_readiness.get("mainnet_live_approved", False)
+            ),
+            mainnet_preflight_ready=bool(
+                launch_readiness.get("mainnet_preflight_ready", False)
+            ),
             heartbeat_at=self.heartbeat_at,
             health_indicators=health,
             config_version="v0.2.0-beta",
@@ -945,6 +1242,7 @@ class TradingWorkerApp:
         
     def get_capabilities(self) -> dict:
         testnet_configured = self._testnet_configured()
+        mainnet_configured = self._mainnet_configured()
         self._sync_adapter_state()
         adapter_ready = (
             self.execution_adapter is not None
@@ -954,6 +1252,7 @@ class TradingWorkerApp:
         trade_authorized = self._adapter_trade_authorized()
         symbol_rules_loaded = self._symbol_rules_ready()
         account_snapshot_ready = self.is_account_snapshot_ready()
+        mainnet_account_risk_ready = self.is_mainnet_account_risk_ready()
         market_data_fresh = self.is_market_data_fresh()
         testnet_ready = (
             self.execution_mode == WorkerExecutionMode.TESTNET
@@ -968,6 +1267,22 @@ class TradingWorkerApp:
             and market_data_fresh
             and not self.kill_switch_active
         )
+        mainnet_ready = (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and mainnet_configured
+            and self._env_flag("MAINNET_LIVE_APPROVED", False)
+            and self.authenticated
+            and trade_authorized
+            and adapter_ready
+            and symbol_rules_loaded
+            and self.private_stream_healthy
+            and self.reconciliation_status == "IN_SYNC"
+            and account_snapshot_ready
+            and mainnet_account_risk_ready
+            and market_data_fresh
+            and self.persistence.readiness()["durable"]
+            and not self.kill_switch_active
+        )
         return {
             "paper": True,
             "testnetConfigured": testnet_configured,
@@ -976,12 +1291,21 @@ class TradingWorkerApp:
             "testnetPrivateStreamHealthy": self.private_stream_healthy,
             "testnetReconciliationInSync": self.reconciliation_status == "IN_SYNC",
             "testnetSymbolRulesLoaded": symbol_rules_loaded,
-            "testnetAdapterReady": adapter_ready,
+            "testnetAdapterReady": bool(
+                self.execution_mode == WorkerExecutionMode.TESTNET and adapter_ready
+            ),
+            "testnetExecutionAdapterReady": bool(
+                self.execution_mode == WorkerExecutionMode.TESTNET and adapter_ready
+            ),
             "testnetAccountSnapshotReady": account_snapshot_ready,
             "testnetMarketDataFresh": market_data_fresh,
             "testnetExecutionReady": testnet_ready,
-            "liveConfigured": False,
-            "liveExecutionReady": False,
+            "liveConfigured": mainnet_configured,
+            "liveExecutionReady": mainnet_ready,
+            "mainnetCredentialsVerified": bool(mainnet_configured and self.authenticated),
+            "mainnetLiveApproved": self._env_flag("MAINNET_LIVE_APPROVED", False),
+            "mainnetAccountRiskReady": mainnet_account_risk_ready,
+            "mainnetPreflightReady": mainnet_ready,
             "spotSupported": False,
             "usdmFuturesSupported": True,
             "hedgeModeSupported": bool(
@@ -993,6 +1317,7 @@ class TradingWorkerApp:
     def get_launch_readiness(self) -> dict:
         self._sync_adapter_state()
         testnet_configured = self._testnet_configured()
+        mainnet_configured = self._mainnet_configured()
         auto_flag = self._env_flag("AUTONOMOUS_TESTNET_EXECUTION", False)
         auto_soak_flag = self._env_flag("AUTONOMOUS_TESTNET_SOAK_APPROVED", False)
 
@@ -1065,6 +1390,7 @@ class TradingWorkerApp:
         trade_authorized = self._adapter_trade_authorized()
         rules_ready = self._symbol_rules_ready()
         account_ready = self.is_account_snapshot_ready()
+        mainnet_account_risk_ready = self.is_mainnet_account_risk_ready()
         market_data_fresh = self.is_market_data_fresh()
         persistence = self.persistence.readiness()
         persistence_required_ready = (
@@ -1092,6 +1418,11 @@ class TradingWorkerApp:
             testnet_autonomous_soak_ready=False,
             testnet_autonomous_ready=False,
             small_live_ready=False,
+            mainnet_credentials_verified=mainnet_configured and self.authenticated,
+            mainnet_live_approved=self._env_flag("MAINNET_LIVE_APPROVED", False),
+            mainnet_account_risk_ready=mainnet_account_risk_ready,
+            mainnet_preflight_ready=False,
+            mainnet_autonomous_ready=False,
             persistence=persistence,
         )
         
@@ -1122,24 +1453,148 @@ class TradingWorkerApp:
             readiness.testnet_soak_verified and
             readiness.autonomous_flag_enabled
         )
+
+        readiness.mainnet_preflight_ready = (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and readiness.mainnet_credentials_verified
+            and readiness.mainnet_live_approved
+            and readiness.adapter_ready
+            and readiness.private_stream_healthy
+            and readiness.reconciliation_in_sync
+            and readiness.account_snapshot_ready
+            and mainnet_account_risk_ready
+            and readiness.symbol_rules_ready
+            and readiness.market_data_fresh
+            and persistence_required_ready
+            and not self.kill_switch_active
+        )
+        # Mainnet intentionally has no second per-order confirmation flag. The
+        # deployment approval and the full preflight are the launch gate.
+        readiness.mainnet_autonomous_ready = readiness.mainnet_preflight_ready
         
         return readiness.model_dump()
 
     def get_preflight(self, execution_mode: str) -> dict:
         mode_upper = str(execution_mode).upper()
         if mode_upper == "LIVE":
+            self._sync_adapter_state()
+            adapter_ready = bool(
+                self.execution_adapter
+                and self.execution_adapter.env == BinanceEnvironment.MAINNET
+                and self.execution_adapter.connection_state == ConnectionState.READY
+                and self._adapter_trade_authorized()
+            )
+            persistence = self.persistence.readiness()
+            checks = [
+                {
+                    "id": "CHK-MAINNET-CREDS",
+                    "name": "Mainnet Credentials",
+                    "required": True,
+                    "status": "PASS" if self._mainnet_configured() else "FAIL",
+                    "message": "Secret Manager Mainnet credential pair is injected"
+                    if self._mainnet_configured()
+                    else "BINANCE_MAINNET_API_KEY/SECRET are missing",
+                },
+                {
+                    "id": "CHK-MAINNET-APPROVAL",
+                    "name": "Deployment Launch Approval",
+                    "required": True,
+                    "status": "PASS" if self._env_flag("MAINNET_LIVE_APPROVED", False) else "FAIL",
+                    "message": "MAINNET_LIVE_APPROVED is enabled for this revision"
+                    if self._env_flag("MAINNET_LIVE_APPROVED", False)
+                    else "Deployment is disarmed until MAINNET_LIVE_APPROVED=true",
+                },
+                {
+                    "id": "CHK-MAINNET-ADAPTER",
+                    "name": "Mainnet Adapter",
+                    "required": True,
+                    "status": "PASS" if adapter_ready else "FAIL",
+                    "message": "Fixed Binance Mainnet adapter is READY"
+                    if adapter_ready
+                    else "Mainnet adapter is not READY",
+                },
+                {
+                    "id": "CHK-MAINNET-AUTH",
+                    "name": "Signed Authentication",
+                    "required": True,
+                    "status": "PASS" if self.authenticated else "FAIL",
+                    "message": "Signed Mainnet account request succeeded"
+                    if self.authenticated
+                    else "Mainnet authentication is not verified",
+                },
+                {
+                    "id": "CHK-MAINNET-TRADE-PERMISSION",
+                    "name": "Mainnet Trade Permission",
+                    "required": True,
+                    "status": "PASS" if self._adapter_trade_authorized() else "FAIL",
+                    "message": "Account canTrade is true"
+                    if self._adapter_trade_authorized()
+                    else "Account canTrade is false or unverified",
+                },
+                {
+                    "id": "CHK-MAINNET-RULES",
+                    "name": "ETHUSDC Contract Rules",
+                    "required": True,
+                    "status": "PASS" if self._symbol_rules_ready() else "FAIL",
+                    "message": "Runtime exchangeInfo proves a TRADING USDC perpetual"
+                    if self._symbol_rules_ready()
+                    else "ETHUSDC exchange-derived contract/filter rules are incomplete",
+                },
+                {
+                    "id": "CHK-MAINNET-SYNC",
+                    "name": "Reconciliation",
+                    "required": True,
+                    "status": "PASS" if self.reconciliation_status == "IN_SYNC" else "FAIL",
+                    "message": f"Reconciliation status: {self.reconciliation_status}",
+                },
+                {
+                    "id": "CHK-MAINNET-STREAM",
+                    "name": "Private User Stream",
+                    "required": True,
+                    "status": "PASS" if self.private_stream_healthy else "FAIL",
+                    "message": "Private Mainnet user stream active"
+                    if self.private_stream_healthy
+                    else "Private stream offline",
+                },
+                {
+                    "id": "CHK-MAINNET-ACCOUNT",
+                    "name": "Account Risk Snapshot",
+                    "required": True,
+                    "status": "PASS" if self.is_mainnet_account_risk_ready() else "FAIL",
+                    "message": "Fresh Mainnet USDC collateral, margin mode, leverage, and daily PnL are verified"
+                    if self.is_mainnet_account_risk_ready()
+                    else "Mainnet risk snapshot is missing explicit USDC, mode, leverage, or fee/funding-inclusive daily PnL evidence",
+                },
+                {
+                    "id": "CHK-MAINNET-MARKET",
+                    "name": "Market Data Freshness",
+                    "required": True,
+                    "status": "PASS" if self.is_market_data_fresh() else "FAIL",
+                    "message": "Fresh ETHUSDC market data is available"
+                    if self.is_market_data_fresh()
+                    else "ETHUSDC market data is missing or stale",
+                },
+                {
+                    "id": "CHK-MAINNET-PERSISTENCE",
+                    "name": "Required SQL Outbox",
+                    "required": True,
+                    "status": "PASS" if persistence["durable"] else "FAIL",
+                    "message": "Cloud SQL transactional outbox is durable"
+                    if persistence["durable"]
+                    else "LIVE requires PERSISTENCE_MODE=REQUIRED and a durable outbox",
+                },
+                {
+                    "id": "CHK-MAINNET-KILL",
+                    "name": "Kill Switch",
+                    "required": True,
+                    "status": "FAIL" if self.kill_switch_active else "PASS",
+                    "message": "Kill switch is active" if self.kill_switch_active else "Kill switch inactive",
+                },
+            ]
             return {
                 "executionMode": "LIVE",
-                "canArm": False,
-                "checks": [
-                    {
-                        "id": "CHK-LIVE-BLOCKED",
-                        "name": "Live Execution Mode",
-                        "required": True,
-                        "status": "FAIL",
-                        "message": "LIVE execution mode is permanently blocked in this sprint."
-                    }
-                ]
+                "canArm": all(check["status"] == "PASS" for check in checks if check["required"]),
+                "checks": checks,
             }
 
         if mode_upper == "TESTNET":
@@ -1306,6 +1761,357 @@ class TradingWorkerApp:
             ]
         }
 
+    async def run_mainnet_read_only_preflight(self) -> dict:
+        """Collect signed Mainnet evidence without changing worker lifecycle.
+
+        This path deliberately creates a disposable adapter that is allowed to
+        perform only the read/stream/reconciliation lifecycle.  It never binds
+        the adapter to this worker, never acquires an execution lease, never
+        calls an order endpoint, and always closes the private stream before
+        returning.  A successful observation is evidence for a later release
+        gate; it is not an ARM operation.
+        """
+
+        async with self._mainnet_preflight_lock:
+            observed_at = utc_now()
+            checks: List[dict[str, Any]] = []
+
+            def add_check(
+                check_id: str,
+                name: str,
+                passed: bool,
+                message: str,
+                *,
+                required: bool = True,
+            ) -> None:
+                checks.append(
+                    {
+                        "id": check_id,
+                        "name": name,
+                        "required": required,
+                        "status": "PASS" if passed else "FAIL",
+                        "message": message,
+                    }
+                )
+
+            before_signature = (
+                self.execution_mode,
+                self.engine_state,
+                self.connection_state,
+                self.market_data_healthy,
+                self.private_stream_healthy,
+                self.authenticated,
+                self.reconciliation_status,
+                self.kill_switch_active,
+                self.pause_new_risk,
+                self.recovery_only,
+                tuple(self.symbols),
+                id(self.execution_adapter),
+                repr(self.active_configuration),
+            )
+            adapter: Optional[BinanceExecutionAdapter] = None
+            order_submission_attempts = 0
+            order_endpoint_attempts = 0
+            credentials_configured = self._mainnet_configured()
+            add_check(
+                "CHK-PREFLIGHT-CREDENTIALS",
+                "Mainnet Credentials",
+                credentials_configured,
+                "Secret-injected Mainnet credential pair is present"
+                if credentials_configured
+                else "Mainnet credentials are not injected into this revision",
+            )
+
+            connected = False
+            market_fresh = False
+            persistence_ready = False
+            persistence_error = False
+            try:
+                try:
+                    persistence = self.persistence.readiness()
+                    persistence_ready = bool(
+                        persistence.get("mode") == "REQUIRED"
+                        and persistence.get("durable") is True
+                    )
+                except Exception:
+                    persistence_error = True
+                add_check(
+                    "CHK-PREFLIGHT-PERSISTENCE",
+                    "Required SQL Persistence",
+                    persistence_ready and not persistence_error,
+                    "Required transactional outbox is durable"
+                    if persistence_ready and not persistence_error
+                    else "Required persistence is unavailable; preflight evidence is not durable",
+                )
+                add_check(
+                    "CHK-PREFLIGHT-KILL-SWITCH",
+                    "Kill Switch",
+                    not self.kill_switch_active,
+                    "Kill switch is inactive"
+                    if not self.kill_switch_active
+                    else "Kill switch is active",
+                )
+
+                if credentials_configured:
+                    adapter = BinanceExecutionAdapter(
+                        api_key=os.getenv("BINANCE_MAINNET_API_KEY", ""),
+                        api_secret=os.getenv("BINANCE_MAINNET_API_SECRET", ""),
+                        env=BinanceEnvironment.MAINNET,
+                        preflight_only=True,
+                    )
+                    connected = await adapter.connect()
+                    try:
+                        market_fresh = await adapter.refresh_market_data(["ETHUSDC"])
+                    except Exception:
+                        market_fresh = False
+
+                    capabilities = adapter.capabilities
+                    add_check(
+                        "CHK-PREFLIGHT-CONNECTION",
+                        "Mainnet Read-only Connection",
+                        connected and adapter.connection_state == ConnectionState.READY,
+                        "Fixed Mainnet adapter reached READY for observation"
+                        if connected and adapter.connection_state == ConnectionState.READY
+                        else "Mainnet read-only connection did not reach READY",
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-AUTH",
+                        "Signed Account Authentication",
+                        bool(
+                            capabilities.account_request_succeeded
+                            and adapter.authenticated
+                        ),
+                        "Signed Mainnet account request succeeded"
+                        if capabilities.account_request_succeeded and adapter.authenticated
+                        else "Signed Mainnet account authentication is unverified",
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-CAN-TRADE",
+                        "Account Trade Permission",
+                        bool(capabilities.trade_authorized),
+                        "Binance account canTrade is true"
+                        if capabilities.trade_authorized
+                        else "Binance account canTrade is false or unverified",
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-POSITION-MODE",
+                        "Position Mode",
+                        bool(capabilities.position_mode_known),
+                        "Binance position mode was read successfully"
+                        if capabilities.position_mode_known
+                        else "Binance position mode is unknown",
+                    )
+                    rules_ready = adapter.is_symbol_ready_for_execution("ETHUSDC")
+                    add_check(
+                        "CHK-PREFLIGHT-RULES",
+                        "ETHUSDC Exchange Rules",
+                        rules_ready,
+                        "Runtime exchangeInfo proves a TRADING USDC perpetual with complete filters"
+                        if rules_ready
+                        else "ETHUSDC exchange-derived contract or filters are incomplete",
+                    )
+                    reconciliation_ready = (
+                        adapter.reconciliation.last_status == "IN_SYNC"
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-RECONCILIATION",
+                        "Account Reconciliation",
+                        reconciliation_ready,
+                        "Mainnet positions, open orders, fills, and account snapshot are in sync"
+                        if reconciliation_ready
+                        else "Mainnet exchange state is not reconciled with the disposable preflight ledger",
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-PRIVATE-STREAM",
+                        "Private Stream",
+                        bool(adapter.private_stream_healthy),
+                        "Private stream transport heartbeat was verified"
+                        if adapter.private_stream_healthy
+                        else "Private stream is unavailable or stale",
+                    )
+                    snapshot = adapter.account_snapshot
+                    account_ready = self._is_mainnet_snapshot_risk_ready(
+                        snapshot,
+                        adapter,
+                        require_execution_lease=False,
+                    )
+                    add_check(
+                        "CHK-PREFLIGHT-ACCOUNT-RISK",
+                        "USDC Account Risk Snapshot",
+                        account_ready,
+                        "USDC collateral, balance, leverage, exposure, liquidation, and fee/funding-inclusive daily PnL are within locked limits"
+                        if account_ready
+                        else "USDC collateral, mode, leverage, exposure, liquidation, or complete daily PnL evidence is unsafe or unavailable",
+                    )
+                    market_timestamp = adapter.last_market_event_at.get("ETHUSDC")
+                    if market_timestamp is not None and market_timestamp.tzinfo is not None:
+                        market_age = (utc_now() - market_timestamp).total_seconds()
+                        market_fresh = bool(
+                            market_fresh
+                            and adapter.has_authoritative_market_sample("ETHUSDC")
+                            and 0 <= market_age <= adapter._market_data_max_age()
+                        )
+                    else:
+                        market_fresh = False
+                    add_check(
+                        "CHK-PREFLIGHT-MARKET",
+                        "ETHUSDC Market Freshness",
+                        market_fresh,
+                        "Fresh Mainnet ETHUSDC book data was observed"
+                        if market_fresh
+                        else "Fresh Mainnet ETHUSDC market data is unavailable",
+                    )
+                else:
+                    for check_id, name, message in (
+                        (
+                            "CHK-PREFLIGHT-CONNECTION",
+                            "Mainnet Read-only Connection",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-AUTH",
+                            "Signed Account Authentication",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-CAN-TRADE",
+                            "Account Trade Permission",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-POSITION-MODE",
+                            "Position Mode",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-RULES",
+                            "ETHUSDC Exchange Rules",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-RECONCILIATION",
+                            "Account Reconciliation",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-PRIVATE-STREAM",
+                            "Private Stream",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-ACCOUNT-RISK",
+                            "USDC Account Risk Snapshot",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                        (
+                            "CHK-PREFLIGHT-MARKET",
+                            "ETHUSDC Market Freshness",
+                            "Skipped because Mainnet credentials are not injected",
+                        ),
+                    ):
+                        add_check(check_id, name, False, message)
+            except Exception as exc:
+                logger.error(
+                    "Mainnet read-only preflight failed: %s",
+                    type(exc).__name__,
+                )
+                add_check(
+                    "CHK-PREFLIGHT-ERROR",
+                    "Preflight Lifecycle",
+                    False,
+                    "Read-only preflight could not complete; see sanitized server logs",
+                )
+            finally:
+                if adapter is not None:
+                    order_submission_attempts = int(
+                        getattr(adapter, "order_submission_attempts", 0) or 0
+                    )
+                    order_endpoint_attempts = int(
+                        getattr(
+                            getattr(adapter, "rest_client", None),
+                            "order_endpoint_attempts",
+                            0,
+                        )
+                        or 0
+                    )
+                    try:
+                        await adapter.close()
+                    except Exception as exc:
+                        logger.error(
+                            "Mainnet read-only preflight cleanup failed: %s",
+                            type(exc).__name__,
+                        )
+
+            after_signature = (
+                self.execution_mode,
+                self.engine_state,
+                self.connection_state,
+                self.market_data_healthy,
+                self.private_stream_healthy,
+                self.authenticated,
+                self.reconciliation_status,
+                self.kill_switch_active,
+                self.pause_new_risk,
+                self.recovery_only,
+                tuple(self.symbols),
+                id(self.execution_adapter),
+                repr(self.active_configuration),
+            )
+            state_unchanged = before_signature == after_signature
+            add_check(
+                "CHK-PREFLIGHT-WORKER-STATE",
+                "Worker Lifecycle Unchanged",
+                state_unchanged,
+                "Worker remained in its prior lifecycle state"
+                if state_unchanged
+                else "Worker lifecycle changed during read-only preflight",
+            )
+            add_check(
+                "CHK-PREFLIGHT-NO-ORDER-ENDPOINT",
+                "No Order Endpoint",
+                order_endpoint_attempts == 0,
+                "No Binance order endpoint was called"
+                if order_endpoint_attempts == 0
+                else "A Binance order endpoint was called during read-only preflight",
+            )
+            add_check(
+                "CHK-PREFLIGHT-NO-ORDER-SUBMISSION",
+                "No Order Submission",
+                order_submission_attempts == 0,
+                "No order submission was attempted"
+                if order_submission_attempts == 0
+                else "An order submission was attempted during read-only preflight",
+            )
+            operational_checks = [
+                check for check in checks if check["required"]
+            ]
+            preflight_passed = bool(
+                operational_checks
+                and all(check["status"] == "PASS" for check in operational_checks)
+            )
+            approval = self._env_flag("MAINNET_LIVE_APPROVED", False)
+            logger.info(
+                "monitor_event=mainnet_read_only_preflight preflight_passed=%s order_submission_attempts=%d order_endpoint_attempts=%d",
+                preflight_passed,
+                order_submission_attempts,
+                order_endpoint_attempts,
+            )
+            return {
+                "executionMode": "LIVE",
+                "preflightOnly": True,
+                "preflightPassed": preflight_passed,
+                # A read-only observation can never arm this Worker, even if a
+                # deployment happens to carry a stale approval flag.
+                "canArm": False,
+                "mainnetLiveApproved": approval,
+                "engineState": self.engine_state.value,
+                "orderSubmissionAttempts": order_submission_attempts,
+                "order_submission_attempts": order_submission_attempts,
+                "orderEndpointAttempts": order_endpoint_attempts,
+                "checks": checks,
+                "observedAt": observed_at.isoformat(),
+            }
+
     async def set_pause_new_risk(self, active: bool):
         self.pause_new_risk = bool(active)
         self._refresh_engine_state()
@@ -1322,10 +2128,13 @@ class TradingWorkerApp:
                     self.kill_switch_active = False
                     self._refresh_engine_state()
                     return {"status": "CONFIRMED", "environment": "PAPER"}
-                if self.execution_mode != WorkerExecutionMode.TESTNET or adapter is None:
+                if self.execution_mode not in {
+                    WorkerExecutionMode.TESTNET,
+                    WorkerExecutionMode.LIVE,
+                } or adapter is None:
                     return {
                         "status": "UNKNOWN",
-                        "reason": "Kill switch remains active until a verified Testnet restart/reconciliation.",
+                        "reason": f"Kill switch remains active until a verified {self._current_exchange_label()} restart/reconciliation.",
                     }
                 try:
                     open_orders = await adapter.rest_client.request(
@@ -1340,7 +2149,7 @@ class TradingWorkerApp:
                         return {
                             "status": "PARTIAL",
                             "remaining_orders": len(open_orders),
-                            "reason": "Kill switch remains active while Testnet open orders exist.",
+                            "reason": f"Kill switch remains active while {self._current_exchange_label()} open orders exist.",
                         }
                     reconciliation = await self.trigger_reconciliation()
                     if (
@@ -1361,7 +2170,7 @@ class TradingWorkerApp:
                     logger.error("Kill switch release authentication failed: %s", exc)
                     return {
                         "status": "UNKNOWN",
-                        "reason": "Testnet authentication failed; kill switch remains active.",
+                        "reason": f"{self._current_exchange_label()} authentication failed; kill switch remains active.",
                     }
                 except Exception as exc:
                     logger.error("Kill switch release verification is unknown: %s", exc)
@@ -1375,16 +2184,23 @@ class TradingWorkerApp:
         # The local block is the first operation and survives every exchange failure.
         self.kill_switch_active = True
         self.engine_state = WorkerEngineState.EMERGENCY
+        logger.error(
+            "monitor_event=kill_switch_active environment=%s",
+            self._current_exchange_label(),
+        )
         adapter = self.execution_adapter
         if self.execution_mode == WorkerExecutionMode.PAPER and adapter is None:
             return {"status": "CONFIRMED", "environment": "PAPER"}
-        if self.execution_mode != WorkerExecutionMode.TESTNET:
+        if self.execution_mode not in {
+            WorkerExecutionMode.TESTNET,
+            WorkerExecutionMode.LIVE,
+        }:
             return {
                 "status": "UNKNOWN",
-                "reason": "Mutable cancellation is restricted to Binance Testnet.",
+                "reason": "Mutable cancellation is restricted to the fixed Binance execution environment.",
             }
         if adapter is None:
-            return {"status": "UNKNOWN", "reason": "Testnet exchange adapter is unavailable."}
+            return {"status": "UNKNOWN", "reason": f"{self._current_exchange_label()} exchange adapter is unavailable."}
         adapter.bind_worker_authority(self)
 
         # A kill-switch transition invalidates every prior account/order
@@ -1430,7 +2246,10 @@ class TradingWorkerApp:
             self._sync_adapter_state()
             return res
             
-        if self.execution_mode == WorkerExecutionMode.TESTNET:
+        if self.execution_mode in {
+            WorkerExecutionMode.TESTNET,
+            WorkerExecutionMode.LIVE,
+        }:
             self.authenticated = False
             self.private_stream_healthy = False
             self.reconciliation_status = "UNKNOWN"
@@ -1452,21 +2271,27 @@ class TradingWorkerApp:
         if not any(req.strategies.model_dump().values()):
             return "ARM requires at least one enabled strategy."
         if req.executionMode == "TESTNET":
-            supported = TestnetSafetyLimits.from_environment().allowed_symbols
+            supported = TestnetSafetyLimits.from_environment(BinanceEnvironment.TESTNET).allowed_symbols
+        elif req.executionMode == "LIVE":
+            supported = TestnetSafetyLimits.from_environment(BinanceEnvironment.MAINNET).allowed_symbols
         else:
-            supported = {"BTCUSDT", "ETHUSDT"}
+            supported = {"BTCUSDT", "ETHUSDT", "ETHUSDC"}
         unsupported = sorted(set(req.instruments) - set(supported))
         if unsupported:
             return f"Unsupported instruments: {', '.join(unsupported)}"
         return None
 
-    async def _reset_after_failed_testnet_arm(self) -> None:
+    async def _reset_after_failed_exchange_arm(self) -> None:
         """Close a partially initialized adapter and clear failed ARM state."""
+        # A failed LIVE arm may already have attached a Mainnet public stream.
+        # Detach it before falling back to PAPER so stale exchange events cannot
+        # continue feeding a disarmed runtime.
+        await self._stop_public_market_stream()
         if self.execution_adapter is not None:
             try:
                 await self.execution_adapter.close()
             except Exception as exc:
-                logger.warning("Error closing failed Testnet adapter: %s", exc)
+                logger.warning("Error closing failed exchange adapter: %s", exc)
             self.execution_adapter = None
         self.connection_state = "DISCONNECTED"
         self.execution_mode = WorkerExecutionMode.PAPER
@@ -1478,6 +2303,7 @@ class TradingWorkerApp:
         self.pause_new_risk = False
         self.recovery_only = False
         self.risk_governor.hedge_mode = False
+        self.risk_governor.max_leverage = Decimal("2.0")
         self.engine_state = WorkerEngineState.DISARMED
 
     async def arm(self, config: ArmRequest | dict):
@@ -1489,12 +2315,18 @@ class TradingWorkerApp:
         except ValidationError as exc:
             return False, f"Invalid ARM request: {exc.errors()[0].get('msg', str(exc))}"
 
-        # Keep the live invariant unconditional, including for otherwise
-        # incomplete requests.  No semantic validation or adapter creation may
-        # ever turn a LIVE request into a partially accepted state.
-        if req.executionMode == "LIVE":
-            return False, "LIVE execution mode is permanently blocked in this sprint."
+        mode = req.executionMode
+        if mode == "TESTNET" and not self._testnet_configured():
+            return False, "Configuration Preflight Failed: Testnet credentials or BINANCE_TESTNET=true missing."
+        if mode == "LIVE":
+            if not self._mainnet_configured():
+                return False, "Configuration Preflight Failed: Mainnet credentials are missing from Secret Manager injection."
+            if not self._env_flag("MAINNET_LIVE_APPROVED", False):
+                return False, "Mainnet remains disarmed until MAINNET_LIVE_APPROVED=true is set by the release gate."
 
+        validation_error = self._validate_arm_request(req)
+        if validation_error:
+            return False, validation_error
         try:
             self.persistence.validate_execution_mode(req.executionMode)
         except RuntimeError as exc:
@@ -1509,63 +2341,111 @@ class TradingWorkerApp:
                 "until the transactional outbox is durable."
             )
 
-        validation_error = self._validate_arm_request(req)
-        if validation_error:
-            return False, validation_error
-
-        mode = req.executionMode
-        if mode == "TESTNET" and not self._testnet_configured():
-            return False, "Configuration Preflight Failed: Testnet credentials or BINANCE_TESTNET=true missing."
-
         self.symbols = list(req.instruments)
         self.execution_mode = WorkerExecutionMode(mode)
+        if mode in {"TESTNET", "LIVE"}:
+            if not await self._restart_public_market_stream():
+                await self._reset_after_failed_exchange_arm()
+                return False, "Runtime preflight failed: public market data stream unavailable."
+        else:
+            await self._stop_public_market_stream()
 
-        if mode == "TESTNET":
+        if mode in {"TESTNET", "LIVE"}:
             self.engine_state = WorkerEngineState.ARMING
-            api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
-            api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+            exchange_environment = (
+                BinanceEnvironment.MAINNET
+                if mode == "LIVE"
+                else BinanceEnvironment.TESTNET
+            )
+            if mode == "LIVE":
+                api_key = os.getenv("BINANCE_MAINNET_API_KEY", "")
+                api_secret = os.getenv("BINANCE_MAINNET_API_SECRET", "")
+                self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
+                    exchange_environment
+                ).max_leverage
+            else:
+                api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
+                api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+                self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
+                    exchange_environment
+                ).max_leverage
 
             try:
+                if (
+                    self.execution_adapter is not None
+                    and self.execution_adapter.env != exchange_environment
+                ):
+                    await self.execution_adapter.close()
+                    self.execution_adapter = None
                 if self.execution_adapter is None:
                     self.execution_adapter = BinanceExecutionAdapter(
                         api_key=api_key,
                         api_secret=api_secret,
-                        env=BinanceEnvironment.TESTNET,
+                        env=exchange_environment,
                     )
-                    # Register persistence callbacks
-                    if self.execution_adapter.ledger:
-                        self.execution_adapter.ledger.on_order_update = self.persistence.enqueue_order
-                        self.execution_adapter.ledger.on_fill_update = self.persistence.enqueue_fill
-                        self.execution_adapter.ledger.on_position_update = self.persistence.enqueue_position
+
+                # Bind persistence callbacks on every arm. This also repairs
+                # an adapter that was retained while switching between repeated
+                # arms in the same environment.
+                if self.execution_adapter.ledger:
+                    self.execution_adapter.ledger.on_order_update = self.persistence.enqueue_order
+                    self.execution_adapter.ledger.on_fill_update = self.persistence.enqueue_fill
+                    self.execution_adapter.ledger.on_position_update = self.persistence.enqueue_position
+                # Risk-increasing exchange mutations must have a durable
+                # transactional-outbox acknowledgement before REST POST.
+                self.execution_adapter.before_order_submission = (
+                    self.persistence.ensure_order_durable
+                )
                 
                 self.execution_adapter.bind_worker_authority(self)
                 connected = await self.execution_adapter.connect()
                 self._sync_adapter_state()
                 if not connected or self.execution_adapter.connection_state != ConnectionState.READY:
                     failed_state = self.connection_state
-                    await self._reset_after_failed_testnet_arm()
-                    return False, f"Failed to initialize Testnet Execution Adapter. State: {failed_state}"
+                    await self._reset_after_failed_exchange_arm()
+                    return False, f"Failed to initialize {mode} Execution Adapter. State: {failed_state}"
+                if self.execution_adapter.execution_lease_required:
+                    try:
+                        raw_ttl = os.getenv("EXECUTION_LEASE_TTL_SECONDS", "10").strip()
+                        self._execution_lease_ttl_seconds = float(raw_ttl)
+                        if not math.isfinite(self._execution_lease_ttl_seconds) or self._execution_lease_ttl_seconds <= 0:
+                            raise ValueError
+                        account_scope = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:24]
+                        scope_key = f"binance:{environment_label(exchange_environment)}:{account_scope}"
+                        lease = self.persistence.create_execution_lease(
+                            scope_key,
+                            owner_id=self._execution_lease_owner_id,
+                            ttl_seconds=self._execution_lease_ttl_seconds,
+                        )
+                        self.execution_adapter.set_execution_lease(lease, required=True)
+                        if not await lease.acquire():
+                            raise RuntimeError("another worker owns the account/environment execution lease")
+                        self._execution_lease_last_renewed_at = time.monotonic()
+                    except Exception as exc:
+                        logger.error("Execution lease acquisition failed: %s", type(exc).__name__)
+                        await self._reset_after_failed_exchange_arm()
+                        return False, "Execution lease is unavailable; exchange execution remains disarmed."
                 self.risk_governor.hedge_mode = self.execution_adapter.capabilities.hedge_mode
                 if not await self.execution_adapter.refresh_market_data(self.symbols):
-                    await self._reset_after_failed_testnet_arm()
+                    await self._reset_after_failed_exchange_arm()
                     return False, "Runtime preflight failed: fresh market data unavailable."
                 self.last_market_event_at.update(self.execution_adapter.last_market_event_at)
                 self.market_data_healthy = True
             except Exception as exc:
-                logger.error("Error connecting Testnet Execution Adapter: %s", exc)
-                await self._reset_after_failed_testnet_arm()
+                logger.error("Error connecting %s Execution Adapter: %s", mode, exc)
+                await self._reset_after_failed_exchange_arm()
                 return False, f"Adapter connection failed: {exc}"
 
             # Runtime Preflight
-            preflight = self.get_preflight("TESTNET")
+            preflight = self.get_preflight(mode)
             if not preflight["canArm"]:
                 failures = [c["message"] for c in preflight["checks"] if c["status"] == "FAIL"]
-                await self._reset_after_failed_testnet_arm()
-                return False, f"TESTNET runtime preflight failed: {'; '.join(failures)}"
+                await self._reset_after_failed_exchange_arm()
+                return False, f"{mode} runtime preflight failed: {'; '.join(failures)}"
 
             self.engine_state = WorkerEngineState.ARMED
             self.active_configuration = req.model_dump()
-            logger.info("Worker ARMED in TESTNET mode")
+            logger.info("Worker ARMED in %s mode", mode)
             return True, ""
         else:
             # Switching from Testnet back to Paper must tear down the previous
@@ -1575,7 +2455,10 @@ class TradingWorkerApp:
                 try:
                     await self.execution_adapter.close()
                 except Exception as exc:
-                    logger.warning("Error closing Testnet adapter before Paper ARM: %s", exc)
+                    logger.warning(
+                        "Error closing exchange adapter before Paper ARM: %s",
+                        type(exc).__name__,
+                    )
                 self.execution_adapter = None
             self.connection_state = "DISCONNECTED"
             self.market_data_healthy = False
@@ -1650,7 +2533,7 @@ class TradingWorkerApp:
             self.kill_switch_active = True
             result = {
                 "status": "UNKNOWN",
-                "reason": "Autonomous execution failed and Testnet kill-switch verification is unknown.",
+                "reason": f"Autonomous {self._current_exchange_label()} execution failed and kill-switch verification is unknown.",
             }
             logger.error(
                 "Unable to complete autonomous-failure kill-switch workflow: %s",
@@ -1660,7 +2543,8 @@ class TradingWorkerApp:
         self.kill_switch_active = True
         self._refresh_engine_state()
         logger.error(
-            "Autonomous Testnet execution failed; local kill switch is ACTIVE: %s; result=%s",
+            "Autonomous %s execution failed; local kill switch is ACTIVE: %s; result=%s",
+            self._current_exchange_label(),
             error,
             result,
         )
@@ -1696,7 +2580,10 @@ class TradingWorkerApp:
         side: str,
     ):
         """Worker-owned wrapper for the verified Testnet LIMIT amendment path."""
-        if self.execution_mode != WorkerExecutionMode.TESTNET or self.execution_adapter is None:
+        if self.execution_mode not in {
+            WorkerExecutionMode.TESTNET,
+            WorkerExecutionMode.LIVE,
+        } or self.execution_adapter is None:
             return None
         self.execution_adapter.bind_worker_authority(self)
         return await self.execution_adapter.modify_order(
@@ -1710,7 +2597,10 @@ class TradingWorkerApp:
 
     async def cancel_testnet_order(self, symbol: str, client_order_id: str) -> bool:
         """Worker-owned wrapper for the verified Testnet cancellation path."""
-        if self.execution_mode != WorkerExecutionMode.TESTNET or self.execution_adapter is None:
+        if self.execution_mode not in {
+            WorkerExecutionMode.TESTNET,
+            WorkerExecutionMode.LIVE,
+        } or self.execution_adapter is None:
             return False
         self.execution_adapter.bind_worker_authority(self)
         return await self.execution_adapter.cancel_order(
@@ -1721,7 +2611,10 @@ class TradingWorkerApp:
 
     async def emergency_flatten(self, symbol: Optional[str] = None):
         """Route an explicitly emergency, Testnet-only flatten through the worker."""
-        if self.execution_mode != WorkerExecutionMode.TESTNET or self.execution_adapter is None:
+        if self.execution_mode not in {
+            WorkerExecutionMode.TESTNET,
+            WorkerExecutionMode.LIVE,
+        } or self.execution_adapter is None:
             raise RuntimeError("Emergency flatten is available only for an active Testnet adapter")
         self.pause_new_risk = True
         self._refresh_engine_state()
@@ -1733,13 +2626,21 @@ class TradingWorkerApp:
             self.last_market_event_at = {}
         event_timestamp = event.event_time
         if event_timestamp.tzinfo is None:
-            event_timestamp = event_timestamp.replace(tzinfo=timezone.utc)
+            logger.warning("Ignoring market event with a naive timestamp for %s", event.symbol)
+            return
         symbol = str(event.symbol).upper()
         if symbol != event.symbol:
             event = event.model_copy(update={"symbol": symbol})
-        if self.execution_mode == WorkerExecutionMode.TESTNET and self.execution_adapter is not None:
+        if self.execution_mode in {
+            WorkerExecutionMode.TESTNET,
+            WorkerExecutionMode.LIVE,
+        } and self.execution_adapter is not None:
             if not self.execution_adapter.record_market_event(event):
-                logger.warning("Ignoring invalid Testnet market event for %s", event.symbol)
+                logger.warning(
+                    "Ignoring invalid %s market event for %s",
+                    self._current_exchange_label(),
+                    event.symbol,
+                )
                 return
         self.last_market_event_at[symbol] = event_timestamp
         if symbol in self._active_instruments():
@@ -1781,9 +2682,12 @@ class TradingWorkerApp:
         intents = [i for i in [grid_intent, trend_intent, shock_intent, carry_intent] if i]
         
         # Real or simulated RiskSnapshot
-        if self.execution_mode == WorkerExecutionMode.TESTNET:
+        if self.execution_mode in {
+            WorkerExecutionMode.TESTNET,
+            WorkerExecutionMode.LIVE,
+        }:
             if self.execution_adapter is None:
-                logger.error("Testnet risk evaluation has no execution adapter")
+                logger.error("%s risk evaluation has no execution adapter", self._current_exchange_label())
                 self.connection_state = "DISCONNECTED"
                 self.private_stream_healthy = False
                 self.authenticated = False
@@ -1796,7 +2700,8 @@ class TradingWorkerApp:
                 if (
                     snapshot is None
                     or not getattr(snapshot, "valid", False)
-                    or getattr(snapshot, "exchange_environment", None) != "BINANCE_TESTNET"
+                    or getattr(snapshot, "exchange_environment", None)
+                    != self._current_exchange_label()
                     or not self.is_account_snapshot_ready()
                 ):
                     logger.error("No account snapshot available from execution adapter")
@@ -1824,7 +2729,12 @@ class TradingWorkerApp:
                 risk_snapshot = RiskSnapshot(
                     portfolio_equity=equity,
                     unrealized_pnl=snapshot.unrealized_pnl,
-                    realized_pnl_24h=Decimal("0.0"),
+                    realized_pnl_24h=(
+                        snapshot.daily_realized_pnl
+                        if snapshot.daily_loss_known
+                        and snapshot.daily_realized_pnl is not None
+                        else Decimal("0.0")
+                    ),
                     margin_utilization_pct=snapshot.margin_utilization_pct,
                     effective_leverage=snapshot.effective_leverage,
                     current_drawdown_pct=max(Decimal("0.0"), drawdown_pct),
@@ -1833,6 +2743,7 @@ class TradingWorkerApp:
                         snapshot,
                         max(Decimal("0.0"), drawdown_pct),
                     ),
+                    realized_pnl_24h_known=bool(snapshot.daily_loss_known),
                 )
                 self.persistence.enqueue_risk_snapshot(risk_snapshot)
                 
@@ -1858,12 +2769,13 @@ class TradingWorkerApp:
                     )
                     if gross_qty != abs(current_position_qty):
                         logger.warning(
-                            "Hedge Mode has opposing BTCUSDT legs; blocking autonomous decision until explicitly reconciled"
+                            "Hedge Mode has opposing %s legs; blocking autonomous decision until explicitly reconciled",
+                            normalized_event_symbol,
                         )
                         return
                 
             except Exception as e:
-                logger.error("Error extracting Testnet risk snapshot: %s", e)
+                logger.error("Error extracting %s risk snapshot: %s", self._current_exchange_label(), e)
                 self.connection_state = "DEGRADED"
                 self.pause_new_risk = True
                 self._refresh_engine_state()
@@ -1892,7 +2804,10 @@ class TradingWorkerApp:
             # keep the worker in pause-new-risk until an operator explicitly
             # clears the condition; reductions remain available at the gates.
             logger.error("Strategy intent pipeline rejected the event: %s", exc)
-            if self.execution_mode == WorkerExecutionMode.TESTNET:
+            if self.execution_mode in {
+                WorkerExecutionMode.TESTNET,
+                WorkerExecutionMode.LIVE,
+            }:
                 self.pause_new_risk = True
                 self._refresh_engine_state()
             return
@@ -1907,29 +2822,51 @@ class TradingWorkerApp:
         
         if decision.action != "NOOP":
             if self.engine_state in EXECUTABLE_ENGINE_STATES:
-                if self.execution_mode == WorkerExecutionMode.TESTNET and self.execution_adapter is not None:
-                    autonomous_enabled = self._env_flag("AUTONOMOUS_TESTNET_EXECUTION", False)
+                if self.execution_mode in {
+                    WorkerExecutionMode.TESTNET,
+                    WorkerExecutionMode.LIVE,
+                } and self.execution_adapter is not None:
                     launch_readiness = self.get_launch_readiness()
-                    readiness_key = (
-                        "testnet_autonomous_soak_ready"
-                        if self._env_flag("AUTONOMOUS_TESTNET_SOAK_APPROVED", False)
-                        else "testnet_autonomous_ready"
-                    )
+                    if self.execution_mode == WorkerExecutionMode.LIVE:
+                        autonomous_enabled = self._env_flag("MAINNET_LIVE_APPROVED", False)
+                        readiness_key = "mainnet_autonomous_ready"
+                        environment_name = "MAINNET"
+                    else:
+                        autonomous_enabled = self._env_flag(
+                            "AUTONOMOUS_TESTNET_EXECUTION", False
+                        )
+                        readiness_key = (
+                            "testnet_autonomous_soak_ready"
+                            if self._env_flag("AUTONOMOUS_TESTNET_SOAK_APPROVED", False)
+                            else "testnet_autonomous_ready"
+                        )
+                        environment_name = "TESTNET"
                     if autonomous_enabled and launch_readiness[readiness_key]:
                         is_safe, reason = self._evaluate_execution_gate(decision)
                         if is_safe:
-                            logger.info(f"[TESTNET][AUTONOMOUS_EXEC] Executing decision {decision.decision_id} for {decision.symbol}")
+                            logger.info(
+                                "[%s][AUTONOMOUS_EXEC] Executing decision %s for %s",
+                                environment_name,
+                                decision.decision_id,
+                                decision.symbol,
+                            )
                             try:
                                 await self.execute_manual_decision(decision)
                             except Exception as exc:
                                 await self._fail_closed_after_autonomous_execution_error(exc)
                         else:
-                            logger.info(f"[TESTNET][EXECUTION_BLOCKED] Decision {decision.decision_id} blocked: {reason}")
+                            logger.info(
+                                "[%s][EXECUTION_BLOCKED] Decision %s blocked: %s",
+                                environment_name,
+                                decision.decision_id,
+                                reason,
+                            )
                     else:
                         logger.info(
-                            "[TESTNET][MONITOR_ONLY] Decision %s for %s "
-                            "(autonomous flag, launch approval, current-build evidence, "
-                            "and runtime readiness are all required)",
+                            "[%s][MONITOR_ONLY] Decision %s for %s "
+                            "(deployment approval, current-build evidence, and "
+                            "runtime readiness are all required)",
+                            environment_name,
                             decision.decision_id,
                             decision.symbol,
                         )
@@ -1945,22 +2882,63 @@ class TradingWorkerApp:
     async def start(self):
         logger.info("Initializing Blessing AI Trading Worker v0.2...")
         
-        persistence_started = await self.persistence.start()
+        try:
+            persistence_started = await self.persistence.start()
+        except Exception as exc:
+            # Keep the HTTP control/readiness surface alive so Cloud Run can
+            # report a truthful 503 instead of turning a DB outage into an
+            # apparently healthy replacement process. Risk-increasing gates
+            # remain closed while REQUIRED persistence is unavailable.
+            persistence_started = False
+            logger.error("Required persistence startup failed (%s)", type(exc).__name__)
         if not persistence_started:
             logger.warning(
-                "Persistence is not available; worker continues in explicitly degraded OPTIONAL mode."
+                "Persistence is unavailable; worker remains explicitly degraded and risk-increasing execution stays blocked until the configured mode is ready."
             )
         
-        self.symbols = await self.scanner.scan_active_symbols()
-        
-        logger.info("Connecting to Binance WS for: %s", self.symbols)
+        configured_mode = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper()
+        if configured_mode not in {"PAPER", "TESTNET", "LIVE"}:
+            logger.error(
+                "Unsupported EXECUTION_MODE=%s; keeping the worker in PAPER mode",
+                configured_mode,
+            )
+            configured_mode = "PAPER"
+        self.execution_mode = WorkerExecutionMode(configured_mode)
+        self.symbols = await self._resolve_startup_symbols(configured_mode)
+        if not self.symbols:
+            self.market_data_healthy = False
+            logger.error("No safe startup symbols resolved for EXECUTION_MODE=%s", configured_mode)
+            self.start_heartbeat()
+            self.scan_task = asyncio.create_task(self._periodic_scanner())
+            return
+
+        # PAPER is a local simulation boundary. Do not attach an exchange
+        # market stream while reporting simulated provenance.
+        if configured_mode == "PAPER":
+            self.market_data_healthy = False
+            self.start_heartbeat()
+            self.scan_task = asyncio.create_task(self._periodic_scanner())
+            return
+
+        stream_environment = (
+            BinanceEnvironment.MAINNET
+            if configured_mode == "LIVE"
+            else BinanceEnvironment.TESTNET
+        )
+        stream_venue = environment_label(stream_environment)
+        logger.info(
+            "Connecting to Binance %s public WS for: %s",
+            stream_environment.value,
+            self.symbols,
+        )
         self.ws_client = BinancePublicWebSocket(
             symbols=self.symbols,
-            base_ws_url=get_ws_url(BinanceEnvironment.TESTNET),
+            base_ws_url=get_ws_url(stream_environment),
             event_callback=self.handle_market_event,
+            venue=stream_venue,
         )
         if not await self.ws_client.start():
-            logger.error("Testnet public market stream could not be started")
+            logger.error("Binance %s public market stream could not be started", stream_environment.value)
         self.start_heartbeat()
         self.scan_task = asyncio.create_task(self._periodic_scanner())
         
@@ -1970,6 +2948,21 @@ class TradingWorkerApp:
         """Background task periodically updating heartbeat_at for Control Plane liveness monitoring."""
         while self.is_running:
             self.record_heartbeat()
+            adapter = self.execution_adapter
+            lease = getattr(adapter, "execution_lease", None) if adapter else None
+            if lease is not None and time.monotonic() - self._execution_lease_last_renewed_at >= max(
+                0.5, self._execution_lease_ttl_seconds / 3
+            ):
+                try:
+                    if not await lease.renew():
+                        adapter.state = ConnectionState.DEGRADED
+                        adapter.reconciliation.last_status = "UNKNOWN"
+                        logger.error("Execution lease renewal failed; worker is degraded")
+                    self._execution_lease_last_renewed_at = time.monotonic()
+                except Exception as exc:
+                    adapter.state = ConnectionState.DEGRADED
+                    adapter.reconciliation.last_status = "UNKNOWN"
+                    logger.error("Execution lease renewal failed: %s", type(exc).__name__)
             try:
                 await asyncio.sleep(self.heartbeat_interval_sec)
             except asyncio.CancelledError:
@@ -1980,8 +2973,11 @@ class TradingWorkerApp:
     async def _periodic_scanner(self):
         while self.is_running:
             await asyncio.sleep(self.scanner.refresh_interval_sec)
-            if self.execution_mode == WorkerExecutionMode.TESTNET:
-                # Testnet launch instruments are an explicit, bounded
+            if self.execution_mode in {
+                WorkerExecutionMode.TESTNET,
+                WorkerExecutionMode.LIVE,
+            }:
+                # Exchange launch instruments are an explicit, bounded
                 # configuration.  The research scanner must not expand them.
                 continue
             try:
@@ -2006,7 +3002,11 @@ class TradingWorkerApp:
 
 def serve_api(app_instance):
     set_worker_engine(app_instance)
-    config = uvicorn.Config(app, host="0.0.0.0", port=8080, log_level="info")
+    try:
+        port = int(os.getenv("PORT", "8080"))
+    except ValueError:
+        port = 8080
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
     return server.serve()
 

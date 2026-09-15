@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS persistence_outbox (
     attempt_count INT NOT NULL DEFAULT 0,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claimed_at TIMESTAMPTZ,
     processed_at TIMESTAMPTZ,
     last_error TEXT,
     CONSTRAINT persistence_outbox_status_check
@@ -82,5 +83,14 @@ CREATE TABLE IF NOT EXISTS persistence_outbox (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_persistence_outbox_idempotency
     ON persistence_outbox(event_type, idempotency_key);
+
+-- A worker crash can leave an outbox event in PROCESSING after its claim
+-- transaction has committed.  The dispatcher reclaims only stale claims;
+-- active claims remain fenced by SKIP LOCKED in the next transaction.
+ALTER TABLE IF EXISTS persistence_outbox
+    ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS idx_persistence_outbox_pending
     ON persistence_outbox(status, next_attempt_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_persistence_outbox_claimed
+    ON persistence_outbox(status, claimed_at);

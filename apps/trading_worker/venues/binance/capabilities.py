@@ -23,6 +23,7 @@ class BinanceCapabilities:
         self.authenticated = False
         self.account_request_succeeded = False
         self.trade_authorized = False
+        self.position_mode_known = False
         self.environment = BinanceEnvironment.TESTNET
         self.usdm_futures = True
         self.hedge_mode = False
@@ -32,11 +33,12 @@ class BinanceCapabilities:
         self.authenticated = False
         self.account_request_succeeded = False
         self.trade_authorized = False
+        self.position_mode_known = False
         self.hedge_mode = False
         self.symbol_rules.clear()
         self.environment = rest_client.env
-        if rest_client.env != BinanceEnvironment.TESTNET:
-            logger.error("Capability discovery rejected outside Binance Testnet.")
+        if rest_client.env not in {BinanceEnvironment.TESTNET, BinanceEnvironment.MAINNET}:
+            logger.error("Capability discovery rejected for an unknown Binance environment.")
             return False
 
         try:
@@ -44,10 +46,10 @@ class BinanceCapabilities:
             account = await rest_client.request("GET", "/fapi/v2/account", signed=True)
             if (
                 not isinstance(account, dict)
-                or "totalWalletBalance" not in account
+                or not isinstance(account.get("assets"), list)
                 or "canTrade" not in account
             ):
-                raise ValueError("Signed account response is not a valid USDⓈ-M account snapshot")
+                raise ValueError("Signed account response is missing explicit assets or canTrade")
             self.account_request_succeeded = True
             self.trade_authorized = _exchange_bool(account["canTrade"])
             
@@ -56,6 +58,7 @@ class BinanceCapabilities:
             if not isinstance(pos_mode, dict) or "dualSidePosition" not in pos_mode:
                 raise ValueError("Position mode response is invalid")
             self.hedge_mode = _exchange_bool(pos_mode["dualSidePosition"])
+            self.position_mode_known = True
             
             # Fetch Exchange Info
             exchange_info = await rest_client.request("GET", "/fapi/v1/exchangeInfo")
@@ -82,5 +85,6 @@ class BinanceCapabilities:
             self.authenticated = False
             self.account_request_succeeded = False
             self.trade_authorized = False
+            self.position_mode_known = False
             self.symbol_rules.clear()
             return False

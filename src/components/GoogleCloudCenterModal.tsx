@@ -4,12 +4,12 @@ import {
   Database,
   HardDrive,
   ShieldCheck,
+  ShieldAlert,
   Cpu,
   Flame,
   FileSpreadsheet,
   Sparkles,
   ExternalLink,
-  CheckCircle2,
   RefreshCw,
   X,
   Copy,
@@ -38,7 +38,7 @@ export const GoogleCloudCenterModal: React.FC<Props> = ({ isOpen, onClose }) => 
       fetch('/api/google/products')
         .then((res) => res.json())
         .then((data) => {
-          if (data.products) setProducts(data.products);
+          if (Array.isArray(data.products)) setProducts(data.products);
         })
         .catch((err) => console.warn('Failed to load Google products:', err));
     }
@@ -68,6 +68,11 @@ export const GoogleCloudCenterModal: React.FC<Props> = ({ isOpen, onClose }) => 
           type: 'success',
           text: `Verified ${data.productName} in ${data.latencyMs}ms. Auto-wired to ${GCP_PROJECT_ID}.`,
         });
+      } else {
+        setNotification({
+          type: 'info',
+          text: data.message || 'No live verification evidence is available for this product.',
+        });
       }
     } catch (err: any) {
       console.error(err);
@@ -82,12 +87,14 @@ export const GoogleCloudCenterModal: React.FC<Props> = ({ isOpen, onClose }) => 
     try {
       const res = await fetch('/api/google/sync-all', { method: 'POST' });
       const data = await res.json();
-      if (data.products) {
+      if (Array.isArray(data.products)) {
         setProducts(data.products);
       }
       setNotification({
-        type: 'success',
-        text: 'All 8 Google Cloud products successfully re-verified and synchronized!',
+        type: data.verified === true ? 'success' : 'info',
+        text: data.verified === true
+          ? 'All Google Cloud products were verified by live read-back.'
+          : data.message || 'Cloud product synchronization is not verified in this runtime.',
       });
     } catch (err) {
       console.error(err);
@@ -150,8 +157,8 @@ export const GoogleCloudCenterModal: React.FC<Props> = ({ isOpen, onClose }) => 
               </div>
               <h2 className="text-base sm:text-lg font-bold text-zinc-100 flex items-center space-x-2">
                 <span>Google Cloud & Products Auto-Configuration</span>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800/60">
-                  AUTO-WIRED
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60">
+                  CONFIGURATION DECLARED
                 </span>
               </h2>
             </div>
@@ -177,8 +184,8 @@ export const GoogleCloudCenterModal: React.FC<Props> = ({ isOpen, onClose }) => 
         <div className="bg-zinc-900/80 border border-zinc-800/80 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <div className="flex items-center space-x-4 text-xs">
             <div className="flex items-center space-x-1.5 text-emerald-400">
-              <CheckCircle2 className="w-4 h-4" />
-              <span className="font-semibold">8 / 8 Products Connected</span>
+              <ShieldAlert className="w-4 h-4" />
+              <span className="font-semibold">Cloud status requires live read-back</span>
             </div>
             <div className="hidden sm:block text-zinc-500">|</div>
             <div className="text-zinc-400 hidden sm:block">
@@ -193,7 +200,7 @@ export const GoogleCloudCenterModal: React.FC<Props> = ({ isOpen, onClose }) => 
               className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-md shadow-indigo-600/20 disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isSyncingAll ? 'animate-spin' : ''}`} />
-              <span>{isSyncingAll ? 'Verifying All...' : 'Re-verify All 8 Products'}</span>
+              <span>{isSyncingAll ? 'Verifying All...' : 'Verify Cloud Products'}</span>
             </button>
           </div>
         </div>
@@ -239,7 +246,11 @@ export const GoogleCloudCenterModal: React.FC<Props> = ({ isOpen, onClose }) => 
                   <div>
                     <div className="flex items-center space-x-2">
                       <h4 className="text-sm font-semibold text-zinc-100">{p.name}</h4>
-                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800/50">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                        p.status === 'CONFIGURATION_DECLARED_NOT_VERIFIED'
+                          ? 'bg-amber-950/80 text-amber-300 border-amber-800/50'
+                          : 'bg-emerald-950/80 text-emerald-400 border-emerald-800/50'
+                      }`}>
                         {p.status}
                       </span>
                       <span className="text-[10px] text-zinc-500 font-mono">[{p.region}]</span>
@@ -303,7 +314,7 @@ export const GoogleCloudCenterModal: React.FC<Props> = ({ isOpen, onClose }) => 
 
         {/* Footer */}
         <div className="pt-3 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-500 shrink-0">
-          <span>Connected to Google Cloud Platform • Fail-Closed Architecture</span>
+          <span>Configuration declared • live cloud read-back required • fail-closed architecture</span>
           <button
             onClick={onClose}
             className="px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-medium transition-all"

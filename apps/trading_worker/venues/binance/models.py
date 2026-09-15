@@ -28,6 +28,27 @@ class ExchangeAccountSnapshot(BaseModel):
     min_liquidation_distance_pct: Decimal | None = None
     liquidation_safety: str = "UNKNOWN"
     exchange_environment: str = "UNKNOWN"
+    # Mainnet risk-increasing decisions require a signed 24h realized-PnL
+    # observation.  ``None``/False means the observation is unavailable, not
+    # zero.
+    daily_realized_pnl: Decimal | None = None
+    daily_loss_known: bool = False
+    # Every balance and PnL used by a risk gate carries the asset that gave it
+    # meaning.  A value with an UNKNOWN asset is never safe for Mainnet.
+    collateral_asset: str = "UNKNOWN"
+    risk_currency: str = "UNKNOWN"
+    daily_loss_asset: str = "UNKNOWN"
+    daily_pnl_includes_fees: bool = False
+    daily_pnl_includes_funding: bool = False
+    daily_loss_window_start: datetime | None = None
+    daily_loss_window_end: datetime | None = None
+    # This is the exchange-reported symbol leverage configuration, not the
+    # effective exposure/equity ratio calculated below.  Mainnet requires both
+    # values to be independently known and within their separate limits.
+    configured_leverage: Decimal | None = None
+    configured_leverage_known: bool = False
+    margin_mode: str = "UNKNOWN"
+    margin_mode_known: bool = False
     valid: bool = False
     invalid_reason: str | None = None
 
@@ -45,38 +66,71 @@ class ConnectionState(str, Enum):
     RECONCILING = "RECONCILING"
 
 class TestnetSafetyLimits(BaseModel):
+    """Bounded limits shared by Testnet and explicitly-approved Mainnet.
+
+    The legacy class name is retained for import compatibility.  The selected
+    environment is now explicit, and Mainnet has a separate hard ceiling that
+    cannot be widened by environment variables.
+    """
+
+    environment: str = "TESTNET"
     allowed_symbols: Set[str] = Field(default_factory=lambda: {"BTCUSDT"})
     max_single_order_notional: Decimal = Decimal("100.0")
     max_total_open_notional: Decimal = Decimal("100.0")
     max_open_orders: int = 1
     max_active_exposure_chains: int = 1
+    max_collateral: Decimal = Decimal("100.0")
+    max_daily_loss: Decimal = Decimal("5.0")
+    max_leverage: Decimal = Decimal("2.0")
 
     @classmethod
-    def from_environment(cls) -> "TestnetSafetyLimits":
-        """Load bounded overrides without allowing malformed values to disable caps.
+    def from_environment(cls, environment: object = "TESTNET") -> "TestnetSafetyLimits":
+        """Load a route-specific configuration without allowing cap widening.
 
-        First-launch limits are a hard safety default.  Expanding them requires
-        an explicit operator acknowledgement; a typo or an inherited large
-        deployment value must never silently widen Testnet exposure.
+        Testnet keeps its historical bounded defaults and explicit override
+        acknowledgement. Mainnet is intentionally fixed to ETHUSDC and the
+        pilot caps from the launch plan: collateral 100, gross 1000, order 50,
+        daily loss 5, leverage 10x, and one active chain.
         """
 
-        defaults = cls()
+        normalized = getattr(environment, "value", environment)
+        normalized = str(normalized).strip().upper()
+        if normalized not in {"TESTNET", "MAINNET"}:
+            raise ValueError("Binance environment must be TESTNET or MAINNET")
 
-        raw_symbols = os.getenv("TESTNET_ALLOWED_SYMBOLS")
-        overrides_approved = os.getenv(
-            "TESTNET_LIMITS_OVERRIDE_APPROVED", ""
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        if normalized == "MAINNET":
+            defaults = cls(
+                environment="MAINNET",
+                allowed_symbols={"ETHUSDC"},
+                max_single_order_notional=Decimal("50"),
+                max_total_open_notional=Decimal("1000"),
+                max_open_orders=1,
+                max_active_exposure_chains=1,
+                max_collateral=Decimal("100"),
+                max_daily_loss=Decimal("5"),
+                max_leverage=Decimal("10"),
+            )
+            prefix = "MAINNET"
+            overrides_approved = False
+        else:
+            defaults = cls(environment="TESTNET")
+            prefix = "TESTNET"
+            overrides_approved = os.getenv(
+                "TESTNET_LIMITS_OVERRIDE_APPROVED", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+
+        raw_symbols = os.getenv(f"{prefix}_ALLOWED_SYMBOLS")
         if raw_symbols is None:
-            symbols = defaults.allowed_symbols
+            symbols = set(defaults.allowed_symbols)
         else:
             parsed_symbols = {
                 symbol.strip().upper()
                 for symbol in raw_symbols.split(",")
                 if symbol.strip()
             }
-            symbols = parsed_symbols or defaults.allowed_symbols
+            symbols = parsed_symbols or set(defaults.allowed_symbols)
             if not overrides_approved:
-                symbols = symbols & defaults.allowed_symbols or defaults.allowed_symbols
+                symbols = symbols & defaults.allowed_symbols or set(defaults.allowed_symbols)
 
         def positive_decimal(name: str, fallback: Decimal) -> Decimal:
             raw = os.getenv(name)
@@ -99,29 +153,45 @@ class TestnetSafetyLimits(BaseModel):
             return value if value > 0 else fallback
 
         single_order = positive_decimal(
-            "TESTNET_MAX_SINGLE_ORDER_NOTIONAL", defaults.max_single_order_notional
+            f"{prefix}_MAX_SINGLE_ORDER_NOTIONAL", defaults.max_single_order_notional
         )
         total_open = positive_decimal(
-            "TESTNET_MAX_TOTAL_OPEN_NOTIONAL", defaults.max_total_open_notional
+            f"{prefix}_MAX_TOTAL_OPEN_NOTIONAL", defaults.max_total_open_notional
         )
         max_open_orders = positive_int(
-            "TESTNET_MAX_OPEN_ORDERS", defaults.max_open_orders
+            f"{prefix}_MAX_OPEN_ORDERS", defaults.max_open_orders
         )
         max_chains = positive_int(
-            "TESTNET_MAX_ACTIVE_EXPOSURE_CHAINS", defaults.max_active_exposure_chains
+            f"{prefix}_MAX_ACTIVE_EXPOSURE_CHAINS", defaults.max_active_exposure_chains
+        )
+        max_collateral = positive_decimal(
+            f"{prefix}_MAX_COLLATERAL", defaults.max_collateral
+        )
+        max_daily_loss = positive_decimal(
+            f"{prefix}_MAX_DAILY_LOSS", defaults.max_daily_loss
+        )
+        max_leverage = positive_decimal(
+            f"{prefix}_MAX_LEVERAGE", defaults.max_leverage
         )
         if not overrides_approved:
             single_order = min(single_order, defaults.max_single_order_notional)
             total_open = min(total_open, defaults.max_total_open_notional)
             max_open_orders = min(max_open_orders, defaults.max_open_orders)
             max_chains = min(max_chains, defaults.max_active_exposure_chains)
+            max_collateral = min(max_collateral, defaults.max_collateral)
+            max_daily_loss = min(max_daily_loss, defaults.max_daily_loss)
+            max_leverage = min(max_leverage, defaults.max_leverage)
 
         return cls(
+            environment=normalized,
             allowed_symbols=symbols,
             max_single_order_notional=single_order,
-            max_total_open_notional=total_open,
+            max_total_open_notional=max(total_open, single_order),
             max_open_orders=max_open_orders,
             max_active_exposure_chains=max_chains,
+            max_collateral=max_collateral,
+            max_daily_loss=max_daily_loss,
+            max_leverage=max_leverage,
         )
 
 class BinanceExecutionError(Exception):

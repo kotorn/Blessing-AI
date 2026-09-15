@@ -1,3 +1,5 @@
+import { getFirebaseIdToken } from '../lib/firebase';
+
 export interface ApiError {
   message: string;
   status?: number;
@@ -38,26 +40,35 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return {} as T;
 }
 
+async function authenticatedHeaders(headers?: HeadersInit): Promise<Headers> {
+  const merged = new Headers(headers);
+  const token = await getFirebaseIdToken();
+  if (token) merged.set('Authorization', `Bearer ${token}`);
+  return merged;
+}
+
 export const apiClient = {
   async get<T>(url: string, headers?: HeadersInit): Promise<T> {
+    const requestHeaders = await authenticatedHeaders({
+      Accept: 'application/json',
+      ...headers,
+    });
     const res = await fetch(url, {
       method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        ...headers,
-      },
+      headers: requestHeaders,
     });
     return handleResponse<T>(res);
   },
 
   async post<T>(url: string, body?: any, headers?: HeadersInit): Promise<T> {
+    const requestHeaders = await authenticatedHeaders({
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...headers,
+    });
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        ...headers,
-      },
+      headers: requestHeaders,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     return handleResponse<T>(res);

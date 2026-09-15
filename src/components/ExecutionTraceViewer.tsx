@@ -40,7 +40,7 @@ export const ExecutionTraceViewer: React.FC<ExecutionTraceViewerProps> = ({
 
   const { trace } = order;
   const hasVerifiedTestnetEvidence =
-    order.source === 'BINANCE_TESTNET' &&
+    (order.source === 'BINANCE_TESTNET' || order.source === 'BINANCE_MAINNET') &&
     trace.sourceClassification === 'EXISTING' &&
     trace.riskGovernorCheck === 'PASS' &&
     order.status === 'FILLED';

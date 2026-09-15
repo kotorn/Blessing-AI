@@ -25,7 +25,7 @@ export const ExposureRecoveryEngineCard: React.FC<ExposureRecoveryEngineCardProp
   baskets,
   recoveryData,
 }) => {
-  const hasVerifiedAccount = account.verified === true && account.source === 'BINANCE_TESTNET';
+  const hasVerifiedAccount = account.verified === true && (account.source === 'BINANCE_TESTNET' || account.source === 'BINANCE_MAINNET');
   const hasVerifiedAssessment =
     hasVerifiedAccount &&
     recoveryData?.verified === true &&

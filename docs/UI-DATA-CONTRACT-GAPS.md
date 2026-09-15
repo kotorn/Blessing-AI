@@ -12,7 +12,7 @@
 
 | Field / Model | Status | Current Source / Notes | Temporary UI Behavior |
 |---|---|---|---|
-| `SystemMode` (`PAPER`, `TESTNET`, `LIVE`) | `EXISTING` | Inferred from `AccountData.source` (`BINANCE_LIVE`, `BINANCE_TESTNET`, `SIMULATED`) | Rendered in `StatusBar` mode pill |
+| `SystemMode` (`PAPER`, `TESTNET`, `LIVE`) | `EXISTING` | Inferred from `AccountData.source` (`BINANCE_MAINNET`, `BINANCE_TESTNET`, `SIMULATED`) | Rendered in `StatusBar` mode pill |
 | `ServiceHealth` (Worker heartbeat, DB latency, WS status) | `PROPOSED_BACKEND` | Only `/api/health` returns `{status: "ok"}` currently | Display basic HTTP status; mark detailed worker heartbeat as pending |
 | `PauseNewRisk` / `RecoveryOnly` system-wide endpoints | `PROPOSED_BACKEND` | Currently only per-basket recovery (`/api/quant/basket/recovery`) and kill-switch exist | Show control with disabled/confirmation or pending backend hook |
 | `KillSwitch` | `EXISTING` | `POST /api/quant/risk/kill-switch` and `POST /api/quant/killswitch` | Functional in StatusBar |
@@ -142,5 +142,5 @@
 |---|---|---|---|
 | `TradingSystemState` (Data Source, Execution Mode, Engine State) | `EXISTING` | Authoritative backend state via `/api/system/state` | Replaces local frontend state with strict backend authority |
 | `Preflight Checks` (Live vs Paper Guard) | `EXISTING` | Authoritative endpoint `/api/system/preflight` | Replaces simulated timeouts in StartTradingWizard |
-| `ExecutionSource` (Order/Intent Provenance) | `EXISTING` | Extended on `ExecutionOrder` and intents | Displays SIMULATED, BINANCE_TESTNET, or BINANCE_LIVE badges to prevent UI spoofing |
+| `ExecutionSource` (Order/Intent Provenance) | `EXISTING` | Extended on `ExecutionOrder` and intents | Displays SIMULATED, BINANCE_TESTNET, or BINANCE_MAINNET badges to prevent UI spoofing |
 | `Kill Switch Sync` | `EXISTING` | Synchronizes with `/api/system/state` | Enforces EMERGENCY state globally across all UI components |

@@ -1,0 +1,37 @@
+[
+  {
+    "name": "blessing_readiness_degraded",
+    "description": "Blessing AI Cloud Run readiness degraded or required persistence unavailable.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=readiness_degraded\""
+  },
+  {
+    "name": "blessing_outbox_failure",
+    "description": "Blessing AI transactional outbox write or dispatch failure.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=persistence_outbox_failure\""
+  },
+  {
+    "name": "blessing_outbox_queue_full",
+    "description": "Blessing AI bounded persistence queue rejected an event.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=persistence_outbox_queue_full\""
+  },
+  {
+    "name": "blessing_private_stream_disconnected",
+    "description": "Blessing AI Binance private stream disconnected.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=private_stream_disconnected\""
+  },
+  {
+    "name": "blessing_reconciliation_drift",
+    "description": "Blessing AI exchange and durable ledger reconciliation drift or unknown state.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND (textPayload:\"monitor_event=reconciliation_drift\" OR textPayload:\"reason=reconciliation_unknown\")"
+  },
+  {
+    "name": "blessing_daily_loss_breach",
+    "description": "Blessing AI daily loss cap breach observed.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=daily_loss_cap_breached\""
+  },
+  {
+    "name": "blessing_kill_switch_active",
+    "description": "Blessing AI kill switch activation event.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=kill_switch_active\""
+  }
+]

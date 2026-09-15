@@ -1,0 +1,13 @@
+{
+  "displayName": "Blessing AI monthly alert budget",
+  "budgetAmount": 10,
+  "currency": "billing-account-currency",
+  "thresholds": [
+    { "percent": 0.5, "basis": "CURRENT_SPEND" },
+    { "percent": 0.75, "basis": "CURRENT_SPEND" },
+    { "percent": 0.9, "basis": "CURRENT_SPEND" },
+    { "percent": 1.0, "basis": "FORECASTED_SPEND" }
+  ],
+  "scope": "gen-lang-client-0730128480",
+  "note": "Budget notifications are alerts only, not a hard spending cap or execution authorization."
+}
