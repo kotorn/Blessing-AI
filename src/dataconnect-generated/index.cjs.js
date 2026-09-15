@@ -16,7 +16,7 @@ getMyProfileRef.operationName = 'GetMyProfile';
 exports.getMyProfileRef = getMyProfileRef;
 
 exports.getMyProfile = function getMyProfile(dcOrOptions, options) {
-
+  
   const { dc: dcInstance, vars: inputVars, options: inputOpts } = validateArgsWithOptions(connectorConfig, dcOrOptions, options, undefined,false, false);
   return executeQuery(getMyProfileRef(dcInstance, inputVars), inputOpts && { fetchPolicy: inputOpts.fetchPolicy });
 }
@@ -59,7 +59,7 @@ listMyBasketsRef.operationName = 'ListMyBaskets';
 exports.listMyBasketsRef = listMyBasketsRef;
 
 exports.listMyBaskets = function listMyBaskets(dcOrOptions, options) {
-
+  
   const { dc: dcInstance, vars: inputVars, options: inputOpts } = validateArgsWithOptions(connectorConfig, dcOrOptions, options, undefined,false, false);
   return executeQuery(listMyBasketsRef(dcInstance, inputVars), inputOpts && { fetchPolicy: inputOpts.fetchPolicy });
 }
@@ -116,7 +116,7 @@ getMyRiskSettingsRef.operationName = 'GetMyRiskSettings';
 exports.getMyRiskSettingsRef = getMyRiskSettingsRef;
 
 exports.getMyRiskSettings = function getMyRiskSettings(dcOrOptions, options) {
-
+  
   const { dc: dcInstance, vars: inputVars, options: inputOpts } = validateArgsWithOptions(connectorConfig, dcOrOptions, options, undefined,false, false);
   return executeQuery(getMyRiskSettingsRef(dcInstance, inputVars), inputOpts && { fetchPolicy: inputOpts.fetchPolicy });
 }

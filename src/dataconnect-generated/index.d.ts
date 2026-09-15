@@ -229,3 +229,4 @@ export const upsertMyRiskSettingsRef: UpsertMyRiskSettingsRef;
 
 export function upsertMyRiskSettings(vars: UpsertMyRiskSettingsVariables): MutationPromise<UpsertMyRiskSettingsData, UpsertMyRiskSettingsVariables>;
 export function upsertMyRiskSettings(dc: DataConnect, vars: UpsertMyRiskSettingsVariables): MutationPromise<UpsertMyRiskSettingsData, UpsertMyRiskSettingsVariables>;
+

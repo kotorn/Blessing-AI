@@ -1,3 +1,8 @@
+# Builder stage for official Binance CLI
+FROM debian:bookworm-slim AS cli-builder
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates xz-utils && rm -rf /var/lib/apt/lists/*
+RUN curl -L https://github.com/binance/binance-cli/releases/download/v2.1.1/binance-cli-x86_64-unknown-linux-gnu.tar.xz | tar -xJ -C /usr/local/bin --strip-components=1 binance-cli-x86_64-unknown-linux-gnu/binance-cli && chmod +x /usr/local/bin/binance-cli
+
 # Phase 5: Cloud Run Deployment for Blessing AI Trading Worker
 FROM python:3.13-slim
 
@@ -8,9 +13,10 @@ ENV PYTHONPATH=/app
 
 WORKDIR /app
 
-# Runtime dependencies are pinned in-repository and contain only the worker
-# path. The Binance CLI is a separate read-only research tool and is not part
-# of the execution image.
+# Copy binance-cli from builder
+COPY --from=cli-builder /usr/local/bin/binance-cli /usr/local/bin/binance-cli
+
+# Runtime dependencies are pinned in-repository and contain only the worker path.
 COPY requirements-worker.txt ./requirements-worker.txt
 RUN pip install --no-cache-dir --requirement requirements-worker.txt
 
