@@ -35,6 +35,7 @@ function normalizeGeneratedFiles(directory) {
       continue;
     }
     const normalized = readFileSync(path, 'utf8')
+      .replace(/\r\n/g, '\n')
       .replace(/[ \t]+$/gm, '')
       .replace(/\n*$/, '\n');
     writeFileSync(path, normalized, 'utf8');
