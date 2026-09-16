@@ -30,6 +30,7 @@ __pycache__/
 .pytest_cache/
 .pytest-tmp*/
 .pytest_temp/
+.pytest_temp-*/
 .ruff_cache/
 .mypy_cache/
 src/dataconnect-generated/.guides/
