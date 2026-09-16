@@ -3,7 +3,8 @@ param(
   [string]$Region = "asia-southeast1",
   [string]$ServiceName = "blessing-trading-worker",
   [string]$ExpectedImageDigest = "",
-  [string]$RuntimeServiceAccount = "blessing-runtime@gen-lang-client-0730128480.iam.gserviceaccount.com"
+  [string]$RuntimeServiceAccount = "blessing-runtime@gen-lang-client-0730128480.iam.gserviceaccount.com",
+  [string]$ExpectedExecutionMode = "PAPER"
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,8 +63,8 @@ function Get-PlainEnvValue {
   return [string]$entry.value
 }
 
-if ((Get-PlainEnvValue "EXECUTION_MODE") -ne "PAPER") {
-  throw "Default Cloud Run revision must remain PAPER"
+if ((Get-PlainEnvValue "EXECUTION_MODE") -ne $ExpectedExecutionMode) {
+  throw "Default Cloud Run revision must remain $ExpectedExecutionMode"
 }
 if ((Get-PlainEnvValue "PERSISTENCE_MODE") -ne "REQUIRED") {
   throw "Cloud Run Worker must use REQUIRED persistence"
@@ -94,5 +95,5 @@ if ($traffic.Count -eq 0) {
 
 Write-Output "Cloud Run disarmed revision verified: $latestReadyRevision"
 Write-Output "Image digest verified: $image"
-Write-Output "Execution mode verified: PAPER; Mainnet approval verified: false"
+Write-Output "Execution mode verified: $ExpectedExecutionMode; Mainnet approval verified: false"
 Write-Output "Secret references verified: pinned numeric versions"
