@@ -78,7 +78,12 @@ async def test_mainnet_read_only_preflight_never_arms_worker_or_submits_orders(m
 
     worker = TradingWorkerApp(symbols=["BTCUSDT"])
     worker.persistence = SimpleNamespace(
-        readiness=lambda: {"mode": "REQUIRED", "durable": True},
+        readiness=lambda: {
+            "mode": "REQUIRED",
+            "durable": True,
+            "pending_outbox": 0,
+            "failed_writes": 0,
+        },
     )
     original_signature = (
         worker.execution_mode,
@@ -203,6 +208,29 @@ async def test_mainnet_read_only_preflight_never_arms_worker_or_submits_orders(m
         worker.execution_adapter,
         worker.active_configuration,
     ) == original_signature
+
+
+@pytest.mark.asyncio
+async def test_mainnet_preflight_rejects_unknown_persistence_counters(monkeypatch):
+    """Durable=True without explicit outbox counters is not Mainnet evidence."""
+
+    monkeypatch.delenv("BINANCE_MAINNET_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_MAINNET_API_SECRET", raising=False)
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.persistence = SimpleNamespace(
+        readiness=lambda: {"mode": "REQUIRED", "durable": True},
+    )
+
+    result = await worker.run_mainnet_read_only_preflight()
+
+    assert result["preflightPassed"] is False
+    persistence_check = next(
+        check
+        for check in result["checks"]
+        if check["id"] == "CHK-PREFLIGHT-PERSISTENCE"
+    )
+    assert persistence_check["status"] == "FAIL"
 
 
 @pytest.mark.asyncio
@@ -525,6 +553,5 @@ def test_reconcile_endpoint_integration():
     assert state_resp.json()["account_synchronized"] is False
 
     set_worker_engine(None)
-
 
 
