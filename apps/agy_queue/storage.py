@@ -39,6 +39,20 @@ class QueueConflictError(QueueStorageError):
     """Raised when an idempotent operation conflicts with prior state."""
 
 
+def _lease_expiry(now: str, lease_ttl_sec: int) -> str:
+    """Calculate a lease from the caller's logical UTC time.
+
+    Queue operations accept an explicit timestamp so replay, recovery, and
+    tests can use one consistent clock.  Do not mix it with wall-clock time
+    when calculating expiry.
+    """
+
+    parsed = datetime.fromisoformat(now)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return utc_iso(parsed.astimezone(UTC) + timedelta(seconds=lease_ttl_sec))
+
+
 @dataclass(frozen=True, slots=True)
 class QueuePaths:
     root: Path
@@ -582,7 +596,7 @@ class SQLiteQueueStore:
             if row is None:
                 connection.rollback()
                 return None
-            lease_until = utc_iso(datetime.now(UTC) + timedelta(seconds=lease_ttl_sec))
+            lease_until = _lease_expiry(now, lease_ttl_sec)
             connection.execute(
                 """
                 UPDATE jobs
@@ -1032,7 +1046,7 @@ class JsonlQueueStore:
             job = min(candidates, key=lambda item: (item.created_at, item.job_id))
             job.status = JobStatus.RUNNING
             job.attempt += 1
-            job.lease_until = utc_iso(datetime.now(UTC) + timedelta(seconds=lease_ttl_sec))
+            job.lease_until = _lease_expiry(now, lease_ttl_sec)
             job.worker_id = worker_id
             job.started_at = job.started_at or now
             job.updated_at = now
