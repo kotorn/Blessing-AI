@@ -458,6 +458,18 @@ class AgySession:
         # persistent session would make a later, otherwise valid related job
         # fail because of an unrelated earlier turn.
         self._stderr_lines = []
+        next_heartbeat_at = time.monotonic() + max(0.05, float(heartbeat_interval_sec))
+
+        def heartbeat_if_due() -> None:
+            nonlocal next_heartbeat_at
+            if on_heartbeat is None:
+                return
+            now = time.monotonic()
+            if now < next_heartbeat_at:
+                return
+            on_heartbeat()
+            next_heartbeat_at = time.monotonic() + max(0.05, float(heartbeat_interval_sec))
+
         message = {"event": "user", "message": {"content": job.prompt}}
         try:
             self._process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
@@ -468,10 +480,14 @@ class AgySession:
         while True:
             _, event = self._read_until(
                 deadline,
-                on_tick=on_heartbeat,
+                on_tick=heartbeat_if_due,
                 tick_interval_sec=heartbeat_interval_sec,
             )
             self._record_event(job, event)
+            # An event-rich AGY turn can return from _read_until before its
+            # local timer fires. Check the shared deadline after every event
+            # so a continuous stream cannot starve the lease heartbeat.
+            heartbeat_if_due()
             if event.get("event") != "result":
                 continue
             result = event.get("result")

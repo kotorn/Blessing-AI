@@ -470,6 +470,35 @@ def test_lease_expiry_requeues_local_job_but_blocks_external_effect(tmp_path: Pa
     service.close()
 
 
+@pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+def test_expired_job_at_attempt_limit_becomes_terminal(backend: str, tmp_path: Path) -> None:
+    service = make_service(tmp_path, backend=backend)
+    job = service.submit(
+        JobRequest(
+            prompt="Inspect the repository and return a short result.",
+            repo=str(REPOSITORY_ROOT),
+            kind=JobKind.READ_ONLY,
+            model="test-model",
+            effort="medium",
+            max_attempts=1,
+        )
+    )
+    assert service.store.claim_next(
+        "worker", now="2026-09-16T00:00:00.000Z", lease_ttl_sec=30,
+        eligible_kinds={JobKind.READ_ONLY},
+    ) is not None
+    assert service.store.recover_expired(now="2026-09-16T00:01:00.000Z") == [job.job_id]
+    recovered = service.get(job.job_id)
+    assert recovered.status == JobStatus.FAILED
+    assert recovered.gate_state == GateState.BLOCKED
+    assert recovered.error_code == "lease_expired_attempts_exhausted"
+    assert service.store.claim_next(
+        "second-worker", now="2026-09-16T00:02:00.000Z", lease_ttl_sec=30,
+        eligible_kinds={JobKind.READ_ONLY},
+    ) is None
+    service.close()
+
+
 class FakeSession:
     def __init__(
         self,
@@ -820,6 +849,46 @@ def test_stream_session_heartbeats_while_waiting_for_output(
     service.close()
     assert result.response == "slow-ok"
     assert beats
+
+
+def test_stream_session_heartbeats_during_continuous_events(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "fake_agy_event_rich.py"
+    script.write_text(
+        "import json, os, sys, time\n"
+        "print(json.dumps({'event':'init','init':{'cwd':os.getcwd(),'model':'test-model','permission_mode':'request-review'}}), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    for index in range(8):\n"
+        "        print(json.dumps({'event':'step_update','step_update':{'index':index}}), flush=True)\n"
+        "        time.sleep(0.02)\n"
+        "    print(json.dumps({'event':'result','result':{'status':'SUCCESS','response':'event-rich-ok'}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    service = make_service(tmp_path)
+    job = submit_read_only(service)
+    inspection = AgyCliInspection("test", "", True, False, False)
+    monkeypatch.setattr(
+        "apps.agy_queue.agy.build_argv",
+        lambda **_: [sys.executable, str(script)],
+    )
+    heartbeats: list[int] = []
+    session = AgySession(
+        executable=sys.executable,
+        inspection=inspection,
+        print_timeout="5m",
+        startup_timeout_sec=5,
+        on_event=lambda *_: None,
+    )
+    result = session.send(
+        job,
+        on_heartbeat=lambda: heartbeats.append(1),
+        heartbeat_interval_sec=0.05,
+    )
+    session.close()
+    assert result.response == "event-rich-ok"
+    assert heartbeats
+    service.close()
 
 
 def test_stream_session_missing_result_is_uncertain(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

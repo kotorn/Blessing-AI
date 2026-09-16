@@ -569,6 +569,7 @@ class SQLiteQueueStore:
             conditions = [
                 "jobs.status = 'pending'",
                 "jobs.gate_state = 'READY'",
+                "jobs.attempt < jobs.max_attempts",
                 "(jobs.next_attempt_at IS NULL OR jobs.next_attempt_at <= ?)",
                 (
                     "NOT EXISTS ("
@@ -634,7 +635,7 @@ class SQLiteQueueStore:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
-                SELECT job_id, external_effect_class FROM jobs
+                SELECT job_id, external_effect_class, attempt, max_attempts FROM jobs
                 WHERE status='running' AND lease_until IS NOT NULL AND lease_until < ?
                 """,
                 (now,),
@@ -647,15 +648,23 @@ class SQLiteQueueStore:
                     ExternalEffectClass.EXCHANGE_ORDER.value,
                     ExternalEffectClass.EMERGENCY_CONTROL.value,
                 }
-                if unsafe:
+                exhausted = int(row["attempt"] or 0) >= int(row["max_attempts"] or 0)
+                if unsafe or exhausted:
                     connection.execute(
                         """
                         UPDATE jobs SET status='failed', gate_state='BLOCKED',
-                          error_code='external_effect_uncertain', finished_at=?,
+                          error_code=?, finished_at=?,
                           updated_at=?, lease_until=NULL, worker_id=NULL
                         WHERE job_id=? AND status='running'
                         """,
-                        (now, now, job_id),
+                        (
+                            "external_effect_uncertain"
+                            if unsafe
+                            else "lease_expired_attempts_exhausted",
+                            now,
+                            now,
+                            job_id,
+                        ),
                     )
                 else:
                     connection.execute(
@@ -1037,6 +1046,7 @@ class JsonlQueueStore:
                 for job in jobs.values()
                 if job.status == JobStatus.PENDING
                 and job.gate_state == GateState.READY
+                and job.attempt < job.max_attempts
                 and (job.next_attempt_at is None or job.next_attempt_at <= now)
                 and (eligible is None or job.job_kind in eligible)
                 and (job.scope_key is None or job.scope_key not in running_scopes)
@@ -1077,10 +1087,15 @@ class JsonlQueueStore:
                     ExternalEffectClass.EXCHANGE_ORDER,
                     ExternalEffectClass.EMERGENCY_CONTROL,
                 }
-                if unsafe:
+                exhausted = job.attempt >= job.max_attempts
+                if unsafe or exhausted:
                     job.status = JobStatus.FAILED
                     job.gate_state = GateState.BLOCKED
-                    job.error_code = "external_effect_uncertain"
+                    job.error_code = (
+                        "external_effect_uncertain"
+                        if unsafe
+                        else "lease_expired_attempts_exhausted"
+                    )
                     job.finished_at = now
                 else:
                     job.status = JobStatus.PENDING
