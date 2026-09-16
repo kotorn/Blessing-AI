@@ -35,6 +35,12 @@ spec:
               value: "true"
             - name: MAINNET_LIVE_APPROVED
               value: "false"
+            - name: CLOUD_SQL_PASSWORD_VERSION
+              value: "1"
+            - name: BINANCE_MAINNET_API_KEY_VERSION
+              value: "1"
+            - name: BINANCE_MAINNET_API_SECRET_VERSION
+              value: "1"
             - name: POSTGRES_HOST
               value: /cloudsql/gen-lang-client-0730128480:asia-southeast1:blessing-sql-primary
             - name: POSTGRES_PORT

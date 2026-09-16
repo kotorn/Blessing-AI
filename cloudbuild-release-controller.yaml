@@ -1,0 +1,44 @@
+# Release Controller execution boundary.
+#
+# Every substitution is required at submission time.  In particular,
+# _CLOUD_SDK_IMAGE must be a Cloud SDK image digest and
+# _RELEASE_CONTROLLER_SCRIPT_SHA256 must match infra/cloudrun/release_controller.py.
+# The Cloud Build/Cloud Run Job service identity must be the dedicated Release
+# Controller service account; this config never uses local impersonation.
+substitutions:
+  _CLOUD_SDK_IMAGE: ''
+  _RELEASE_CONTROLLER_SCRIPT_SHA256: ''
+  _CONTROL_PLANE_URL: ''
+  _CANDIDATE_ID: ''
+  _IMAGE_URI: ''
+  _PROJECT_ID: 'gen-lang-client-0730128480'
+  _REGION: 'asia-southeast1'
+  _CLOUD_SQL_PASSWORD_VERSION: '1'
+  _BINANCE_API_KEY_VERSION: '1'
+  _BINANCE_API_SECRET_VERSION: '1'
+  _RELEASE_CONTROLLER_SERVICE_ACCOUNT: 'blessing-release-controller@gen-lang-client-0730128480.iam.gserviceaccount.com'
+
+serviceAccount: 'projects/${_PROJECT_ID}/serviceAccounts/${_RELEASE_CONTROLLER_SERVICE_ACCOUNT}'
+
+steps:
+  - name: '${_CLOUD_SDK_IMAGE}'
+    entrypoint: bash
+    env:
+      - 'CONTROLLER_IMAGE=${_CLOUD_SDK_IMAGE}'
+      - 'RELEASE_CONTROLLER_SCRIPT_SHA256=${_RELEASE_CONTROLLER_SCRIPT_SHA256}'
+      - 'CONTROL_PLANE_URL=${_CONTROL_PLANE_URL}'
+      - 'CANDIDATE_ID=${_CANDIDATE_ID}'
+      - 'IMAGE_URI=${_IMAGE_URI}'
+      - 'PROJECT_ID=${_PROJECT_ID}'
+      - 'REGION=${_REGION}'
+      - 'CLOUD_SQL_PASSWORD_VERSION=${_CLOUD_SQL_PASSWORD_VERSION}'
+      - 'BINANCE_API_KEY_VERSION=${_BINANCE_API_KEY_VERSION}'
+      - 'BINANCE_API_SECRET_VERSION=${_BINANCE_API_SECRET_VERSION}'
+      - 'RELEASE_CONTROLLER_SERVICE_ACCOUNT=${_RELEASE_CONTROLLER_SERVICE_ACCOUNT}'
+    args:
+      - '-ceu'
+      - |
+        test -n "$CONTROLLER_IMAGE"
+        [[ "$CONTROLLER_IMAGE" =~ @sha256:[0-9a-fA-F]{64}$ ]]
+        python3 infra/cloudrun/release_controller.py
+timeout: '1200s'

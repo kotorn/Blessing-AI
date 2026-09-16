@@ -233,6 +233,51 @@ def test_cli_result_redacts_credential_values_from_stdout(monkeypatch):
     assert "[REDACTED]" in rendered
 
 
+def test_signed_account_payload_is_summarized_without_account_values(monkeypatch):
+    monkeypatch.setattr(
+        "apps.trading_worker.research.binance_cli.shutil.which",
+        lambda _: "binance-cli",
+    )
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                '{"canTrade":true,"assets":[{"asset":"USDC",'
+                '"walletBalance":"100.00","availableBalance":"99.50"}],'
+                '"positions":[{"symbol":"ETHUSDC","positionAmt":"0.5",'
+                '"entryPrice":"2500.00","positionId":"position-123"}],'
+                '"openOrders":[{"orderId":987654,"origQty":"0.01",'
+                '"price":"2500.00"}],"apiKey":"cli-key-fixture",'
+                '"secret":"cli-secret-fixture"}'
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("apps.trading_worker.research.binance_cli.subprocess.run", fake_run)
+    result = BinanceCliResearchRunner(
+        binary=str(Path.cwd() / "binance-cli"),
+        environ={
+            "BINANCE_API_ENV": "prod",
+            "BINANCE_FUTURES_USDS_BASE_PATH": "https://fapi.binance.com",
+            "BINANCE_API_KEY": "cli-key-fixture",
+            "BINANCE_SECRET_KEY": "cli-secret-fixture",
+        },
+        environment="mainnet",
+    ).run(ReadOnlyCheck.ACCOUNT, symbol="ETHUSDC")
+
+    rendered = str(result.as_dict())
+    assert result.status == "PASS"
+    assert result.payload["safe_fields"]["canTrade"] is True
+    assert result.payload["payload_kind"] == "object"
+    assert "100.00" not in rendered
+    assert "99.50" not in rendered
+    assert "position-123" not in rendered
+    assert "987654" not in rendered
+    assert "[REDACTED]" in rendered
+
+
 def test_signed_check_without_explicit_official_binary_path_is_not_run(monkeypatch):
     monkeypatch.setattr(
         "apps.trading_worker.research.binance_cli.shutil.which",

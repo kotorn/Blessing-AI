@@ -1,0 +1,30 @@
+# Dedicated Control Plane image. It serves the UI and server-side APIs only;
+# Binance/SQL credentials are intentionally absent from this image.
+FROM node:24-bookworm-slim AS build
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY src/dataconnect-generated/ ./src/dataconnect-generated/
+RUN npm ci
+
+COPY . .
+RUN npm run dataconnect:generate
+RUN npm run build
+
+FROM node:24-bookworm-slim
+
+ENV NODE_ENV=production
+ENV CONTROL_PLANE_ONLY=true
+ENV CONTROL_PLANE_AUTH_REQUIRED=true
+ENV VITE_DATA_CONNECT_CUTOVER=false
+
+WORKDIR /app
+COPY --from=build /app/package.json /app/package-lock.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+
+# Cloud Run supplies PORT. No secret is accepted through the command line or
+# image environment; ADC is used only for Firebase Admin/BigQuery server APIs.
+USER node
+EXPOSE 8080
+CMD ["node", "dist/server.cjs"]

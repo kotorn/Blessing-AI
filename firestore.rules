@@ -120,5 +120,15 @@ service cloud.firestore {
         allow update, delete: if isAdmin(); // Audit logs are tamper-resistant
       }
     }
+
+    // Release candidates and evidence are server-side control-plane records.
+    // Firebase clients, including trading_admin clients, never write these
+    // documents directly; the Admin SDK applies the one-time state machine.
+    match /release_candidates/{candidateId} {
+      allow read, write: if false;
+    }
+    match /release_evidence/{candidateId} {
+      allow read, write: if false;
+    }
   }
 }

@@ -187,6 +187,92 @@ def test_cloud_write_waits_for_authorization_and_verification(tmp_path: Path) ->
     service.close()
 
 
+def test_mainnet_preflight_queue_uses_fixed_control_plane_without_agy(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    job = service.submit(
+        JobRequest(
+            prompt="Run the fixed read-only Mainnet preflight.",
+            repo=str(REPOSITORY_ROOT),
+            kind=JobKind.MAINNET_PREFLIGHT,
+            authorization_ref="release-preflight://candidate-1",
+        )
+    )
+    calls: list[str] = []
+
+    def runner(received: Any) -> dict[str, Any]:
+        calls.append(received.job_id)
+        return {
+            "executionMode": "LIVE",
+            "preflightOnly": True,
+            "preflightPassed": True,
+            "orderSubmissionAttempts": 0,
+            "orderEndpointAttempts": 0,
+            "observedAt": utc_iso(),
+            "checks": [
+                {
+                    "id": "PREFLIGHT",
+                    "name": "fixed",
+                    "required": True,
+                    "status": "PASS",
+                    "message": "OK",
+                }
+            ],
+        }
+
+    worker = QueueWorker(service, worker_id="preflight-worker", preflight_runner=runner)
+    result = worker.run_once()
+    assert result is not None and result.status == JobStatus.SUCCEEDED
+    assert calls == [job.job_id]
+    assert result.result_json is not None
+    assert result.result_json["verification"]["execution_authority"] == "PYTHON_TRADING_WORKER"
+    worker.close()
+    service.close()
+
+
+def test_mainnet_preflight_queue_rejects_non_verified_runner_result(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.submit(
+        JobRequest(
+            prompt="Run the fixed read-only Mainnet preflight.",
+            repo=str(REPOSITORY_ROOT),
+            kind=JobKind.MAINNET_PREFLIGHT,
+            authorization_ref="release-preflight://candidate-2",
+        )
+    )
+    worker = QueueWorker(
+        service,
+        worker_id="preflight-worker",
+        preflight_runner=lambda _job: {
+            "preflightOnly": True,
+            "preflightPassed": False,
+            "orderSubmissionAttempts": 0,
+            "orderEndpointAttempts": 0,
+        },
+    )
+    result = worker.run_once()
+    assert result is not None and result.status == JobStatus.FAILED
+    assert result.error_code == "mainnet_preflight_failed"
+    worker.close()
+    service.close()
+
+
+def test_mainnet_preflight_client_rejects_empty_sanitized_checks() -> None:
+    from apps.agy_queue.preflight import _sanitize_response
+
+    evidence = _sanitize_response(
+        {
+            "preflightOnly": True,
+            "preflightPassed": True,
+            "orderSubmissionAttempts": 0,
+            "orderEndpointAttempts": 0,
+            "checks": [{"id": "", "name": "", "status": "PASS", "message": "ok"}],
+        }
+    )
+    assert evidence["checks"] == []
+
+
 def _fake_inspection() -> AgyCliInspection:
     return AgyCliInspection(
         version="test",
@@ -201,7 +287,7 @@ def test_model_effort_suffix_and_flag_support() -> None:
     assert model_effort_suffix("gemini-3.8-flash-high") == "high"
     assert model_effort_suffix("claude-sonnet-4-6") is None
     assert model_effort_suffix("gpt-oss-120b-medium") == "medium"
-    # Verified against the installed AGY 1.2.3 release: claude-* rejects
+    # Verified against the installed AGY 1.2.4 release: claude-* rejects
     # --effort outright, and suffixed models reject a disagreeing value.
     assert model_accepts_effort_flag("claude-sonnet-4-6") is False
     assert model_accepts_effort_flag("gemini-3.8-flash-high") is False
@@ -381,6 +467,119 @@ def test_lease_expiry_requeues_local_job_but_blocks_external_effect(tmp_path: Pa
     assert blocked.status == JobStatus.FAILED
     assert blocked.gate_state == GateState.BLOCKED
     assert blocked.error_code == "external_effect_uncertain"
+    service.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+def test_stale_worker_cannot_complete_a_job_reclaimed_by_another_worker(
+    backend: str, tmp_path: Path
+) -> None:
+    """A worker whose lease expired and was reclaimed must not silently
+    overwrite the new owner's in-flight job on late completion (mark_success/
+    mark_failure previously had no worker_id ownership check, unlike
+    heartbeat)."""
+    service = make_service(tmp_path, backend=backend)
+    job = submit_read_only(service)
+    stale_claim = service.store.claim_next(
+        "worker-a", now="2026-09-16T00:00:00.000Z", lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
+    )
+    assert stale_claim is not None
+    recovered = service.store.recover_expired(now="2026-09-16T00:01:00.000Z")
+    assert job.job_id in recovered
+
+    fresh_claim = service.store.claim_next(
+        "worker-b", now="2026-09-16T00:01:00.000Z", lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
+    )
+    assert fresh_claim is not None
+    assert fresh_claim.worker_id == "worker-b"
+
+    # worker-a's stale call (from before its lease expired) must not succeed.
+    stale_result = {"job_id": job.job_id, "status": "succeeded", "error": None}
+    owned = service.store.mark_success(
+        job.job_id,
+        worker_id="worker-a",
+        result=stale_result,
+        result_path="/tmp/stale.json",
+        conversation_id=None,
+        head_sha=None,
+    )
+    assert owned is False
+    still_running = service.get(job.job_id)
+    assert still_running.status == JobStatus.RUNNING
+    assert still_running.worker_id == "worker-b"
+    assert still_running.result_json is None
+
+    # worker-b (the rightful current owner) can still complete it normally.
+    owned_by_rightful_worker = service.store.mark_success(
+        job.job_id,
+        worker_id="worker-b",
+        result={"job_id": job.job_id, "status": "succeeded", "error": None},
+        result_path="/tmp/real.json",
+        conversation_id=None,
+        head_sha=None,
+    )
+    assert owned_by_rightful_worker is True
+    assert service.get(job.job_id).status == JobStatus.SUCCEEDED
+    service.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+def test_stale_worker_mark_failure_cannot_overwrite_reclaimed_job(
+    backend: str, tmp_path: Path
+) -> None:
+    service = make_service(tmp_path, backend=backend)
+    job = submit_read_only(service)
+    stale_claim = service.store.claim_next(
+        "worker-a", now="2026-09-16T00:00:00.000Z", lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
+    )
+    assert stale_claim is not None
+    service.store.recover_expired(now="2026-09-16T00:01:00.000Z")
+    fresh_claim = service.store.claim_next(
+        "worker-b", now="2026-09-16T00:01:00.000Z", lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
+    )
+    assert fresh_claim is not None
+
+    owned = service.store.mark_failure(
+        job.job_id,
+        worker_id="worker-a",
+        error_code="stale_timeout",
+        stderr="stale worker's late failure report",
+        result=None,
+    )
+    assert owned is False
+    still_running = service.get(job.job_id)
+    assert still_running.status == JobStatus.RUNNING
+    assert still_running.worker_id == "worker-b"
+    assert still_running.error_code is None
+    service.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+def test_expired_job_at_attempt_limit_becomes_terminal(backend: str, tmp_path: Path) -> None:
+    service = make_service(tmp_path, backend=backend)
+    job = service.submit(
+        JobRequest(
+            prompt="Inspect the repository and return a short result.",
+            repo=str(REPOSITORY_ROOT),
+            kind=JobKind.READ_ONLY,
+            model="test-model",
+            effort="medium",
+            max_attempts=1,
+        )
+    )
+    assert service.store.claim_next(
+        "worker", now="2026-09-16T00:00:00.000Z", lease_ttl_sec=30,
+        eligible_kinds={JobKind.READ_ONLY},
+    ) is not None
+    assert service.store.recover_expired(now="2026-09-16T00:01:00.000Z") == [job.job_id]
+    recovered = service.get(job.job_id)
+    assert recovered.status == JobStatus.FAILED
+    assert recovered.gate_state == GateState.BLOCKED
+    assert recovered.error_code == "lease_expired_attempts_exhausted"
+    assert service.store.claim_next(
+        "second-worker", now="2026-09-16T00:02:00.000Z", lease_ttl_sec=30,
+        eligible_kinds={JobKind.READ_ONLY},
+    ) is None
     service.close()
 
 
@@ -614,7 +813,9 @@ def test_watch_yields_pending_then_terminal(tmp_path: Path) -> None:
         "watch-worker", now=utc_iso(), lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
     )
     assert claimed is not None
-    service.store.mark_failure(job.job_id, error_code="test", stderr="no", result=None)
+    service.store.mark_failure(
+        job.job_id, worker_id="watch-worker", error_code="test", stderr="no", result=None
+    )
     states = [item.status for item in service.watch(job.job_id, poll_interval_sec=0.01)]
     assert states == [JobStatus.FAILED]
     service.close()
@@ -736,6 +937,46 @@ def test_stream_session_heartbeats_while_waiting_for_output(
     assert beats
 
 
+def test_stream_session_heartbeats_during_continuous_events(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    script = tmp_path / "fake_agy_event_rich.py"
+    script.write_text(
+        "import json, os, sys, time\n"
+        "print(json.dumps({'event':'init','init':{'cwd':os.getcwd(),'model':'test-model','permission_mode':'request-review'}}), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    for index in range(8):\n"
+        "        print(json.dumps({'event':'step_update','step_update':{'index':index}}), flush=True)\n"
+        "        time.sleep(0.02)\n"
+        "    print(json.dumps({'event':'result','result':{'status':'SUCCESS','response':'event-rich-ok'}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    service = make_service(tmp_path)
+    job = submit_read_only(service)
+    inspection = AgyCliInspection("test", "", True, False, False)
+    monkeypatch.setattr(
+        "apps.agy_queue.agy.build_argv",
+        lambda **_: [sys.executable, str(script)],
+    )
+    heartbeats: list[int] = []
+    session = AgySession(
+        executable=sys.executable,
+        inspection=inspection,
+        print_timeout="5m",
+        startup_timeout_sec=5,
+        on_event=lambda *_: None,
+    )
+    result = session.send(
+        job,
+        on_heartbeat=lambda: heartbeats.append(1),
+        heartbeat_interval_sec=0.05,
+    )
+    session.close()
+    assert result.response == "event-rich-ok"
+    assert heartbeats
+    service.close()
+
+
 def test_stream_session_missing_result_is_uncertain(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     script = tmp_path / "fake_agy_exit.py"
     script.write_text(
@@ -854,7 +1095,7 @@ def test_stream_session_invalid_cwd_fails_permission(monkeypatch: pytest.MonkeyP
 def test_stream_session_accepts_always_proceed_permission_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # AGY 1.2.3 reports permission_mode="always-proceed" for every real
+    # AGY 1.2.4 reports permission_mode="always-proceed" for every real
     # launch we drive (--sandbox, --mode accept-edits, --mode plan alike);
     # the queue must not reject real jobs on this unverifiable self-report.
     script = tmp_path / "fake_agy_always_proceed.py"

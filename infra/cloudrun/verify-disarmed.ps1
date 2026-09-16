@@ -4,7 +4,9 @@ param(
   [string]$ServiceName = "blessing-trading-worker",
   [string]$ExpectedImageDigest = "",
   [string]$RuntimeServiceAccount = "blessing-runtime@gen-lang-client-0730128480.iam.gserviceaccount.com",
-  [string]$ExpectedExecutionMode = "PAPER"
+  [string]$ExpectedExecutionMode = "PAPER",
+  [ValidateSet("true", "false")]
+  [string]$ExpectedMainnetLiveApproved = "false"
 )
 
 $ErrorActionPreference = "Stop"
@@ -69,8 +71,8 @@ if ((Get-PlainEnvValue "EXECUTION_MODE") -ne $ExpectedExecutionMode) {
 if ((Get-PlainEnvValue "PERSISTENCE_MODE") -ne "REQUIRED") {
   throw "Cloud Run Worker must use REQUIRED persistence"
 }
-if ((Get-PlainEnvValue "MAINNET_LIVE_APPROVED").ToLowerInvariant() -ne "false") {
-  throw "Default Cloud Run revision must keep MAINNET_LIVE_APPROVED=false"
+if ((Get-PlainEnvValue "MAINNET_LIVE_APPROVED").ToLowerInvariant() -ne $ExpectedMainnetLiveApproved) {
+  throw "Cloud Run revision MAINNET_LIVE_APPROVED does not match expected value $ExpectedMainnetLiveApproved"
 }
 if ([string]$service.spec.template.spec.serviceAccountName -ne $RuntimeServiceAccount) {
   throw "Cloud Run runtime service account does not match the expected account"
@@ -95,5 +97,5 @@ if ($traffic.Count -eq 0) {
 
 Write-Output "Cloud Run disarmed revision verified: $latestReadyRevision"
 Write-Output "Image digest verified: $image"
-Write-Output "Execution mode verified: $ExpectedExecutionMode; Mainnet approval verified: false"
+Write-Output "Execution mode verified: $ExpectedExecutionMode; Mainnet approval verified: $ExpectedMainnetLiveApproved"
 Write-Output "Secret references verified: pinned numeric versions"

@@ -188,5 +188,195 @@
     },
     "enabled": true,
     "userLabels": { "blessing_signal": "kill_switch", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - Control Plane auth failure",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Firebase or RBAC authorization failure",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_control_plane_auth_failure\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "Control Plane authentication or RBAC failures observed. Keep release approval and Mainnet execution disarmed." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "control_plane_auth", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - Control Plane OIDC failure",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Worker OIDC or transport failure",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_control_plane_oidc_failure\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "Control Plane could not reach the Worker through the fixed Google OIDC boundary. Keep risk-increasing execution blocked." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "control_plane_oidc", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - AGY queue pressure",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Queue depth or lease recovery",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_agy_queue_depth_high\" resource.type=\"global\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "300s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      },
+      {
+        "displayName": "Lease expired",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_agy_lease_expired\" resource.type=\"global\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "AGY queue pressure or lease recovery observed. Inspect get/list/watch state; do not use AGY as an execution authority." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "agy_queue", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - AGY protocol failure",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "AGY stream timeout or protocol failure",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_agy_protocol_failure\" resource.type=\"global\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      },
+      {
+        "displayName": "AGY bounded timeout",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_agy_timeout\" resource.type=\"global\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "60s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "AGY stream or result validation failed. Treat the job as failed/uncertain and require independent verification." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "agy_protocol", "environment": "all" }
+  },
+  {
+    "displayName": "Blessing AI - Ambiguous order",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Order response requires reconciliation",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_ambiguous_order\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "1s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "A Binance order response is ambiguous. Do not retry blindly; reconcile using the deterministic client order ID." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "ambiguous_order", "environment": "mainnet" }
+  },
+  {
+    "displayName": "Blessing AI - Staged launch violation",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "First-order staged session violation",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_staged_session_violation\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "1s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "The staged first-order invariant was violated or could not be durably marked. Keep the Worker disarmed and reconcile before release." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "staged_session", "environment": "mainnet" }
+  },
+  {
+    "displayName": "Blessing AI - Autonomous continuation failure",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Continuation activation failed",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_autonomous_continuation_failure\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "1s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      },
+      {
+        "displayName": "Autonomous resume denied",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_autonomous_resume_denied\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "1s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "Autonomous continuation failed or resume was denied. Keep the Worker DISARMED and require fresh preflight and continuation approval." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "autonomous_continuation", "environment": "mainnet" }
+  },
+  {
+    "displayName": "Blessing AI - Release approval replay",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Expired or replayed continuation approval",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_release_approval_replay\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "1s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "A release or continuation approval was expired or replayed. Keep Mainnet disarmed and inspect the release evidence trail." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "release_approval_replay", "environment": "mainnet" }
   }
 ]

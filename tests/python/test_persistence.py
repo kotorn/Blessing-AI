@@ -514,7 +514,7 @@ def test_repositories_use_exchange_rules_and_hedge_position_identity():
         args for query, args in connection.calls if "INSERT INTO positions" in query
     ]
     assert "ON CONFLICT (client_order_id)" in order_query
-    assert "ON CONFLICT (fill_id)" in fill_query
+    assert "ON CONFLICT (venue, exchange_trade_id)" in fill_query
     assert "exchange_trade_id" in fill_query
     assert all("ON CONFLICT (venue, symbol, position_side)" in query for query in position_queries)
     assert [args[2] for args in position_args] == ["LONG", "SHORT"]
@@ -576,6 +576,31 @@ def test_incomplete_exchange_rules_are_rejected_before_durable_write():
 
     with pytest.raises(InstrumentRulesUnavailable):
         asyncio.run(PositionRepository(None).save_position(position, instrument, connection))  # type: ignore[arg-type]
+
+
+def test_rest_refreshed_position_reuses_instrument_venue_not_unknown():
+    """A REST-refreshed position (no .source) must not fragment outbox identity."""
+    manager = PersistenceManager(
+        db=FailingDatabase(),
+        config=PersistenceConfig(mode=PersistenceMode.REQUIRED),
+        instrument_rules_provider=lambda symbol: _instrument()
+        if symbol == "BTCUSDT"
+        else None,
+    )
+    manager.is_connected = True
+    manager._accepting = True
+
+    # apps/trading_worker/venues/binance/ledger.py's _to_exchange_position
+    # explicitly writes source="UNKNOWN" when parsing a raw REST position
+    # dict (emergency flatten, reconciliation) that never carried a "source"
+    # key -- unlike WebSocket ACCOUNT_UPDATE-derived positions, which tag it
+    # with the live environment label.
+    position = ExchangePosition(symbol="BTCUSDT", quantity=Decimal("1"), source="UNKNOWN")
+
+    assert manager.enqueue_position(position) is True
+    event = manager._write_queue.get_nowait()
+    assert event.aggregate_id == f"{_instrument().venue}:BTCUSDT:BOTH"
+    assert "UNKNOWN" not in event.aggregate_id
 
 
 def test_persistence_schema_matches_outbox_and_hedge_identity_contract():

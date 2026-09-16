@@ -17,6 +17,14 @@ also retain these stable event names from the worker log stream:
 - `daily_loss_cap_breached`
 - `kill_switch_active`
 - `readiness_degraded`
+- `control_plane_auth_failure`
+- `control_plane_oidc_failure`
+- `agy_queue_depth_high`
+- `agy_lease_expired`
+- `agy_protocol_failure`
+- `agy_timeout`
+- `ambiguous_order`
+- `staged_session_violation`
 
 Each signal must include only non-secret metadata such as environment,
 symbol, persistence mode, and a sanitized error class. API keys, passwords,
@@ -35,6 +43,9 @@ Create log-based metrics and alert policies in the target project for:
 | `reconciliation_drift` | Page immediately; require operator reconciliation. |
 | `daily_loss_cap_breached` | Page immediately and keep the kill switch active. |
 | `kill_switch_active` | Page and retain the event for the incident trail. |
+| `control_plane_auth_failure` or OIDC failure | Page on repeated failures; keep release actions blocked. |
+| AGY queue pressure/protocol failure | Investigate queue state independently; never use AGY to authorize execution. |
+| `ambiguous_order` or `staged_session_violation` | Page immediately; pause new risk and reconcile before any retry. |
 
 The deployment owner must confirm the alert notification channel, metric
 names, retention, and a test notification during the Cloud Run acceptance

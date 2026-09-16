@@ -5,6 +5,8 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 import { GoogleAuth } from 'google-auth-library';
+import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { TradingSystemState, RiskConfiguration } from './src/backend/types.js';
 import { evaluatePreflight, validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES, isWorkerTradingConnectionHealthy } from './src/backend/system.js';
 import { auditRepository } from './src/backend/audit.js';
@@ -26,14 +28,147 @@ import {
 } from './src/backend/bigquery.js';
 import {
   requiredControlPlaneRole,
+  authorizeInternalServiceRequest,
   type ControlPlaneRole,
 } from './src/backend/control-plane-auth.js';
+import {
+  hashEvidence,
+  newReleaseCandidate,
+  newContinuationApproval,
+  resolveReconciliationStatus,
+  sanitizePreflightEvidence,
+  validateApprovalPrerequisites,
+  validateContinuationPrerequisites,
+  type ContinuationApproval,
+  type ContinuationVerificationSnapshot,
+  type ReleaseCandidate,
+  type ReleaseVerificationSnapshot,
+  type SecretVersionSet,
+} from './src/backend/release.js';
+import {
+  getReleaseStore,
+  type ReleaseStore,
+} from './src/backend/release-store.js';
 
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
+const CONTROL_PLANE_ONLY = ['1', 'true', 'yes', 'on'].includes(
+  (process.env.CONTROL_PLANE_ONLY || '').trim().toLowerCase(),
+);
+const GCP_PROJECT_ID = (process.env.GCP_PROJECT_ID || 'gen-lang-client-0730128480').trim();
+const RELEASE_CONTROLLER_SERVICE_ACCOUNT =
+  (process.env.RELEASE_CONTROLLER_SERVICE_ACCOUNT ||
+    `blessing-release-controller@${GCP_PROJECT_ID}.iam.gserviceaccount.com`).trim();
+const CONTROL_PLANE_URL = (process.env.CONTROL_PLANE_URL || '').trim().replace(/\/+$/, '');
+let releaseStore: ReleaseStore | null = null;
+
+function getServerReleaseStore(): ReleaseStore {
+  if (!releaseStore) releaseStore = getReleaseStore();
+  return releaseStore;
+}
+
+function getFirebaseAdminApp() {
+  const projectId = (process.env.GCP_PROJECT_ID || 'gen-lang-client-0730128480').trim();
+  return getApps()[0] || initializeApp({
+    credential: applicationDefault(),
+    projectId,
+  });
+}
+
+async function controlPlaneReadiness() {
+  const checks: Array<{ id: string; status: 'PASS' | 'FAIL'; message: string }> = [];
+  const addCheck = (id: string, passed: boolean, message: string) => {
+    checks.push({ id, status: passed ? 'PASS' : 'FAIL', message });
+  };
+
+  addCheck(
+    'CONTROL_PLANE_PROCESS',
+    CONTROL_PLANE_ONLY && !['1', 'true', 'yes', 'on'].includes(
+      (process.env.VITE_DATA_CONNECT_CUTOVER || 'false').trim().toLowerCase(),
+    ),
+    CONTROL_PLANE_ONLY
+      ? 'Control Plane process is isolated and Data Connect cutover is disabled'
+      : 'Dedicated Control Plane mode is not enabled',
+  );
+
+  try {
+    getAuth(getFirebaseAdminApp());
+    addCheck('FIREBASE_ADMIN', true, 'Firebase Admin verification service is initialized');
+  } catch {
+    addCheck('FIREBASE_ADMIN', false, 'Firebase Admin verification service is unavailable');
+  }
+
+  try {
+    const candidate = await getServerReleaseStore().getCandidate(
+      'rc-00000000-0000-0000-0000-000000000000',
+    );
+    addCheck(
+      'RELEASE_STORE',
+      candidate === null,
+      candidate === null
+        ? 'Server-side release store is reachable'
+        : 'Release store returned an unexpected candidate',
+    );
+  } catch {
+    addCheck('RELEASE_STORE', false, 'Server-side release store is unavailable');
+  }
+
+  try {
+    // `/ready` is the Cloud Run health contract and returns an explicit HTTP
+    // 503 when REQUIRED persistence is unavailable. `/readiness` is the
+    // detailed launch-evidence document and intentionally has no top-level
+    // `status=ready` field.
+    const worker = await forwardWorkerRequest('/ready');
+    addCheck(
+      'WORKER_OIDC',
+      worker.response.ok && worker.data?.status === 'ready',
+      worker.response.ok && worker.data?.status === 'ready'
+        ? 'Worker readiness was read through the Google OIDC boundary'
+        : 'Worker readiness is unavailable through the Google OIDC boundary',
+    );
+  } catch {
+    addCheck('WORKER_OIDC', false, 'Worker OIDC transport is unavailable');
+  }
+
+  const passed = checks.length > 0 && checks.every((check) => check.status === 'PASS');
+  return {
+    status: passed ? 'ready' : 'degraded',
+    controlPlaneHealthy: true,
+    checks,
+    evidence_status: passed ? 'VERIFIED' : 'UNVERIFIED',
+  };
+}
+
+// Reject the browser Binance surface before express.json() consumes a request
+// body. In a dedicated Control Plane deployment even an authenticated browser
+// must not be able to submit credential material to this process. The Firebase
+// check still runs first so anonymous access receives the normal 401/403
+// boundary rather than a route-specific response.
+if (CONTROL_PLANE_ONLY) {
+  app.use('/api/binance', (req, res) => {
+    void enforceOperatorAccess(req, res, () => {
+      res.status(410).json({
+        error: 'CONTROL_PLANE_BINANCE_CREDENTIALS_DISABLED',
+        message: 'Browser Binance credential endpoints are disabled on the Control Plane; use the Worker release path.',
+        verified: false,
+        evidence_status: 'UNVERIFIED',
+      });
+    }).catch(() => {
+      if (!res.headersSent) {
+        res.status(503).json({
+          error: 'CONTROL_PLANE_AUTH_UNAVAILABLE',
+          message: 'Control-plane authorization service is unavailable',
+          status: 'DEGRADED',
+          verified: false,
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+    });
+  });
+}
 
 app.use(express.json());
 
@@ -41,7 +176,7 @@ app.use(express.json());
 // Binance profile/balance endpoints cannot bypass server-side Firebase RBAC.
 // The implementation is declared below as a function declaration and is
 // therefore available when Express starts handling requests.
-app.use(['/api/system', '/api/quant', '/api/binance'], (req, res, next) => {
+app.use(['/api/system', '/api/quant', '/api/binance', '/api/release'], (req, res, next) => {
   void enforceOperatorAccess(req, res, next).catch(() => {
     if (res.headersSent) return;
     res.status(503).json({
@@ -51,6 +186,19 @@ app.use(['/api/system', '/api/quant', '/api/binance'], (req, res, next) => {
       verified: false,
       evidence_status: 'UNVERIFIED',
     });
+  });
+});
+
+app.use('/internal/release', (req, res, next) => {
+  void enforceInternalServiceAccess(req, res, next).catch(() => {
+    if (!res.headersSent) {
+      res.status(503).json({
+        error: 'INTERNAL_AUTH_UNAVAILABLE',
+        message: 'Internal release authorization is unavailable',
+        verified: false,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
   });
 });
 
@@ -1475,7 +1623,20 @@ async function forwardWorkerRequest(
   const workerAuthorization = await workerAuthorizationHeader();
   if (workerAuthorization) headers.set('Authorization', workerAuthorization);
   headers.set('X-Worker-Caller', 'blessing-control-plane');
-  const response = await fetch(WORKER_URL + pathName, { ...init, headers });
+  let response: globalThis.Response;
+  try {
+    response = await fetch(WORKER_URL + pathName, { ...init, headers });
+  } catch (error) {
+    console.warn(
+      `monitor_event=control_plane_oidc_failure path=${pathName.split('?')[0]} error_class=${error instanceof Error ? error.name : 'unknown'}`,
+    );
+    throw error;
+  }
+  if (response.status === 401 || response.status === 403) {
+    console.warn(
+      `monitor_event=control_plane_oidc_failure path=${pathName.split('?')[0]} http_status=${response.status}`,
+    );
+  }
   const bodyText = await response.text();
   let data: any = {};
   if (bodyText) {
@@ -1486,6 +1647,63 @@ async function forwardWorkerRequest(
     }
   }
   return { response, data };
+}
+
+async function rollbackAutonomousContinuation(): Promise<{
+  verified: boolean;
+  workerState: any;
+  error?: string;
+}> {
+  // A successful Worker transition followed by a lost/failed release-store
+  // write is an uncertain external-effect boundary. Reconcile it by asking
+  // the Worker to DISARM, then verify the resulting state independently. Do
+  // not report the continuation as safely stopped unless both calls and the
+  // state read-back prove it.
+  try {
+    const disarm = await forwardWorkerRequest('/disarm', { method: 'POST' });
+    if (!disarm.response.ok) {
+      return {
+        verified: false,
+        workerState: disarm.data,
+        error: `Worker DISARM rejected with HTTP ${disarm.response.status}`,
+      };
+    }
+    const readback = await forwardWorkerRequest('/state');
+    const workerState = releaseRequestObject(readback.data) || {};
+    const verified = (
+      readback.response.ok
+      && ['DISARMED', 'EMERGENCY'].includes(String(workerState.engine_state || ''))
+      && workerState.mainnet_launch_state !== 'AUTONOMOUS_ACTIVE'
+    );
+    projectWorkerState(workerState);
+    return {
+      verified,
+      workerState,
+      ...(verified ? {} : { error: 'Worker DISARM read-back did not prove a safe state' }),
+    };
+  } catch (error) {
+    return {
+      verified: false,
+      workerState: {},
+      error: error instanceof Error ? error.message : 'Worker rollback failed',
+    };
+  }
+}
+
+async function releaseContinuationApprovalBestEffort(continuationId: string): Promise<void> {
+  // A claimed (PENDING -> ACTIVATING) continuation approval must not be
+  // stranded by a failure that happens after the claim -- otherwise every
+  // retry with the same continuationApprovalId fails immediately until its
+  // fixed expiry, forcing a brand new approval for what may be a purely
+  // transient failure. This is best-effort: a failure here must never mask
+  // the original error response.
+  try {
+    await getServerReleaseStore().releaseContinuationApproval(continuationId);
+  } catch (error) {
+    console.warn(
+      `monitor_event=continuation_approval_release_failed error=${error instanceof Error ? error.message : 'unknown'}`,
+    );
+  }
 }
 
 function projectWorkerState(workerState: any): void {
@@ -1516,16 +1734,34 @@ function projectWorkerState(workerState: any): void {
   if (typeof workerState.mainnet_credentials_verified === 'boolean') tradingSystemState.mainnetCredentialsVerified = workerState.mainnet_credentials_verified;
   if (typeof workerState.mainnet_live_approved === 'boolean') tradingSystemState.mainnetLiveApproved = workerState.mainnet_live_approved;
   if (typeof workerState.mainnet_preflight_ready === 'boolean') tradingSystemState.mainnetPreflightReady = workerState.mainnet_preflight_ready;
+  if (typeof workerState.mainnet_launch_policy === 'string') tradingSystemState.mainnetLaunchPolicy = workerState.mainnet_launch_policy;
+  if (typeof workerState.mainnet_launch_id === 'string') tradingSystemState.mainnetLaunchId = workerState.mainnet_launch_id;
+  if (typeof workerState.mainnet_launch_state === 'string') tradingSystemState.mainnetLaunchState = workerState.mainnet_launch_state;
+  if (typeof workerState.mainnet_continuation_approval_id === 'string') tradingSystemState.mainnetContinuationApprovalId = workerState.mainnet_continuation_approval_id;
   if (typeof workerState.updated_at === 'string') tradingSystemState.updatedAt = workerState.updated_at;
 }
 
 async function enforceOperatorAccess(req: Request, res: Response, next: () => void): Promise<void> {
-  const requiredRole: ControlPlaneRole = requiredControlPlaneRole(req);
+  // Express strips the mounted prefix from `req.path` inside app.use(). Use
+  // the reconstructed route so /api/release/mainnet/approve cannot be
+  // downgraded to the generic operator role when it is evaluated as
+  // /mainnet/approve.
+  const routeForAuthorization = {
+    method: req.method,
+    path: `${req.baseUrl || ''}${req.path || ''}`,
+    body: req.body,
+  };
+  const requiredRole: ControlPlaneRole = requiredControlPlaneRole(routeForAuthorization);
   const authorization = await authorizeOperatorRequest(req, { requiredRole });
   if (authorization.ok) {
+    res.locals.firebaseUid = authorization.uid;
+    res.locals.firebaseRoles = authorization.roles;
     next();
     return;
   }
+  console.warn(
+    `monitor_event=control_plane_auth_failure route=${req.path} reason=${authorization.forbidden ? 'forbidden' : 'unauthorized'}`,
+  );
   res.status(authorization.forbidden ? 403 : 401).json({
     error: authorization.forbidden ? 'CONTROL_PLANE_AUTH_FORBIDDEN' : 'CONTROL_PLANE_AUTH_REQUIRED',
     message: authorization.error || `Authenticated ${requiredRole} access is required`,
@@ -1534,6 +1770,316 @@ async function enforceOperatorAccess(req: Request, res: Response, next: () => vo
     verified: false,
     evidence_status: 'UNVERIFIED',
   });
+}
+
+async function enforceInternalServiceAccess(req: Request, res: Response, next: () => void): Promise<void> {
+  const authorization = await authorizeInternalServiceRequest(req, {
+    audience: CONTROL_PLANE_URL,
+    allowedServiceAccounts: [RELEASE_CONTROLLER_SERVICE_ACCOUNT],
+  });
+  if (authorization.ok) {
+    next();
+    return;
+  }
+  console.warn(
+    `monitor_event=control_plane_oidc_failure route=${req.path} reason=${authorization.error === 'Google service identity is required' ? 'missing_identity' : 'invalid_identity'}`,
+  );
+  res.status(authorization.error === 'Google service identity is required' ? 401 : 403).json({
+    error: 'INTERNAL_RELEASE_AUTH_DENIED',
+    message: authorization.error || 'Authorized release-controller identity is required',
+    verified: false,
+    evidence_status: 'UNVERIFIED',
+  });
+}
+
+function releaseRequestObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function secretVersionsFromState(value: unknown): SecretVersionSet {
+  const versions = releaseRequestObject(value) || {};
+  return {
+    sql: String(versions.sql || ''),
+    apiKey: String(versions.apiKey || ''),
+    apiSecret: String(versions.apiSecret || ''),
+  };
+}
+
+function secretVersionsMatch(expected: SecretVersionSet, actual: SecretVersionSet): boolean {
+  return expected.sql === actual.sql
+    && expected.apiKey === actual.apiKey
+    && expected.apiSecret === actual.apiSecret;
+}
+
+function hasCredentialLikeKey(value: unknown, allowSecretVersionMetadata = false): boolean {
+  if (!value || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some((child) => hasCredentialLikeKey(child, allowSecretVersionMetadata));
+  return Object.entries(value as Record<string, unknown>).some(([key, child]) => {
+    if (allowSecretVersionMetadata && key === 'secretVersions') {
+      const versions = releaseRequestObject(child);
+      if (!versions) return true;
+      return Object.entries(versions).some(([versionKey, version]) =>
+        !['sql', 'apiKey', 'apiSecret'].includes(versionKey)
+        || typeof version !== 'string'
+        || !/^[1-9][0-9]*$/.test(version),
+      );
+    }
+    return /api[-_ ]?(key|secret)|password|token|dsn|private[-_ ]?key/i.test(key)
+      || hasCredentialLikeKey(child, allowSecretVersionMetadata);
+  });
+}
+
+function releaseCandidateInputFromRequest(value: unknown): Parameters<typeof newReleaseCandidate>[0] {
+  const body = releaseRequestObject(value);
+  if (!body) throw new Error('Release candidate request must be an object');
+  if (hasCredentialLikeKey(body, true)) {
+    throw new Error('Release candidate payload must not contain credentials or tokens');
+  }
+  const versions = releaseRequestObject(body.secretVersions);
+  if (!versions) throw new Error('secretVersions is required');
+  return {
+    repoSha: String(body.repoSha || ''),
+    imageDigest: String(body.imageDigest || ''),
+    workerRevision: String(body.workerRevision || ''),
+    secretVersions: {
+      sql: String(versions.sql || ''),
+      apiKey: String(versions.apiKey || ''),
+      apiSecret: String(versions.apiSecret || ''),
+    },
+    preflightEvidenceHash: String(body.preflightEvidenceHash || ''),
+    repoGateEvidenceHash: String(body.repoGateEvidenceHash || ''),
+    cloudGateEvidenceHash: String(body.cloudGateEvidenceHash || ''),
+    expiresAt: String(body.expiresAt || ''),
+    nonce: String(body.nonce || ''),
+  };
+}
+
+function releaseEvidenceHashForPreflight(value: unknown): {
+  evidence: ReturnType<typeof sanitizePreflightEvidence>;
+  evidenceHash: string;
+} {
+  const evidence = sanitizePreflightEvidence(value);
+  return { evidence, evidenceHash: hashEvidence(evidence) };
+}
+
+async function runReleasePreflight(candidateId?: string): Promise<{
+  evidence: ReturnType<typeof sanitizePreflightEvidence>;
+  evidenceHash: string;
+}> {
+  const forwarded = await forwardWorkerRequest('/preflight/read-only', { method: 'POST' });
+  if (!forwarded.response.ok) throw new Error('Worker rejected read-only Mainnet preflight');
+  const result = releaseEvidenceHashForPreflight(forwarded.data);
+  if (candidateId) {
+    const candidate = await getServerReleaseStore().getCandidate(candidateId);
+    if (!candidate) throw new Error('Release candidate not found');
+    await getServerReleaseStore().updatePreflight(candidateId, result.evidence, result.evidenceHash);
+  }
+  return result;
+}
+
+async function currentReleaseVerification(
+  candidate: ReleaseCandidate,
+  preflight: ReturnType<typeof sanitizePreflightEvidence>,
+): Promise<ReleaseVerificationSnapshot> {
+  const [stateResponse, readinessResponse] = await Promise.all([
+    forwardWorkerRequest('/state'),
+    forwardWorkerRequest('/readiness'),
+  ]);
+  if (!stateResponse.response.ok || !readinessResponse.response.ok) {
+    throw new Error('Worker read-back is unavailable');
+  }
+  const state = releaseRequestObject(stateResponse.data) || {};
+  const readiness = releaseRequestObject(readinessResponse.data) || {};
+  const persistence = releaseRequestObject(readiness.persistence) || {};
+  const configuredDigest = (process.env.WORKER_IMAGE_DIGEST || '').trim();
+  const configuredRevision = (process.env.WORKER_REVISION || '').trim();
+  const workerImageDigest = String(state.worker_image_digest || '').trim();
+  const workerRevision = String(state.worker_revision || '').trim();
+  const workerBindingsMatch = (
+    (!configuredDigest || configuredDigest === workerImageDigest)
+    && (!configuredRevision || configuredRevision === workerRevision)
+  );
+  const reconciliationCheck = preflight.checks.find(
+    (check) => check.id === 'CHK-PREFLIGHT-RECONCILIATION',
+  );
+  const preflightReconciliationStatus = reconciliationCheck?.status === 'PASS'
+    ? 'IN_SYNC'
+    : String(state.reconciliation_status || '');
+  const preflightHasRequiredEvidence = preflight.checks.length > 0
+    && preflight.checks.every((check) => !check.required || check.status === 'PASS');
+  return {
+    currentImageDigest: workerBindingsMatch ? workerImageDigest : '',
+    currentWorkerRevision: workerBindingsMatch ? workerRevision : '',
+    currentExecutionMode: String(state.execution_mode || ''),
+    currentMainnetLiveApproved: state.mainnet_live_approved === true,
+    currentEngineState: String(state.engine_state || ''),
+    currentOrderSubmissionAttempts: Number.isInteger(Number(state.order_submission_attempts))
+      ? Number(state.order_submission_attempts)
+      : -1,
+    currentSecretVersions: secretVersionsFromState(state.secret_versions),
+    preflightPassed: preflight.preflightPassed
+      && preflightHasRequiredEvidence
+      && preflight.orderSubmissionAttempts === 0
+      && preflight.orderEndpointAttempts === 0,
+    preflightObservedAt: preflight.observedAt,
+    reconciliationStatus: preflightReconciliationStatus,
+    persistenceDurable: persistence.durable === true,
+    dataConnectCutover: ['1', 'true', 'yes', 'on'].includes((process.env.VITE_DATA_CONNECT_CUTOVER || 'false').trim().toLowerCase()),
+    killSwitchActive: state.kill_switch_active === true,
+  };
+}
+
+async function verifyReleaseCandidate(candidateId: string): Promise<{
+  candidate: ReleaseCandidate;
+  evidence: ReturnType<typeof sanitizePreflightEvidence>;
+  evidenceHash: string;
+  snapshot: ReleaseVerificationSnapshot;
+  failures: string[];
+}> {
+  const store = getServerReleaseStore();
+  const candidate = await store.getCandidate(candidateId);
+  if (!candidate) throw new Error('Release candidate not found');
+  const preflightResult = await runReleasePreflight(candidateId);
+  const refreshed = await store.getCandidate(candidateId);
+  if (!refreshed) throw new Error('Release candidate disappeared during verification');
+  const snapshot = await currentReleaseVerification(refreshed, preflightResult.evidence);
+  const failures = validateApprovalPrerequisites(refreshed, snapshot);
+  await store.putEvidence({
+    candidateId,
+    kind: 'VERIFY',
+    generatedAt: new Date().toISOString(),
+    evidenceHash: hashEvidence({ snapshot, failures }),
+    payload: { snapshot, failures },
+  });
+  return {
+    candidate: refreshed,
+    evidence: preflightResult.evidence,
+    evidenceHash: preflightResult.evidenceHash,
+    snapshot,
+    failures,
+  };
+}
+
+function sanitizeContinuationReadiness(value: unknown): {
+  executionMode: 'LIVE';
+  continuationOnly: true;
+  continuationReady: boolean;
+  launchId: string;
+  launchPolicy: string;
+  launchState: string;
+  mainnetLiveApproved: boolean;
+  engineState: string;
+  submittedOrders: number;
+  reservedOrders: number;
+  preflightPassed: boolean;
+  preflightOrderSubmissionAttempts: number;
+  preflightOrderEndpointAttempts: number;
+  secretVersions: SecretVersionSet;
+  persistenceDurable: boolean;
+  preflight: ReturnType<typeof sanitizePreflightEvidence>;
+  checks: Array<{ id: string; name: string; required: boolean; status: 'PASS' | 'FAIL'; message: string }>;
+  observedAt: string;
+} {
+  const raw = releaseRequestObject(value) || {};
+  const rawChecks = Array.isArray(raw.checks) ? raw.checks : [];
+  const checks = rawChecks.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const check = item as Record<string, unknown>;
+    if (check.status !== 'PASS' && check.status !== 'FAIL') return [];
+    const id = String(check.id || '').trim().slice(0, 80);
+    const name = String(check.name || '').trim().slice(0, 160);
+    if (!id || !name) return [];
+    const message = String(check.message || '')
+      .replace(/(authorization|api[-_ ]?key|api[-_ ]?secret|password|token|dsn)\s*[:=]\s*[^,;\s]+/gi, '$1=<redacted>')
+      .slice(0, 500);
+    return [{
+      id,
+      name,
+      required: check.required !== false,
+      status: check.status as 'PASS' | 'FAIL',
+      message,
+    }];
+  });
+  const preflight = sanitizePreflightEvidence(raw.preflight);
+  const intOr = (valueToParse: unknown, fallback = -1) => {
+    const number = Number(valueToParse);
+    return Number.isInteger(number) && number >= 0 ? number : fallback;
+  };
+  return {
+    executionMode: 'LIVE',
+    continuationOnly: true,
+    continuationReady: raw.continuationReady === true,
+    launchId: String(raw.launchId || '').trim(),
+    launchPolicy: String(raw.launchPolicy || '').trim(),
+    launchState: String(raw.launchState || '').trim(),
+    mainnetLiveApproved: raw.mainnetLiveApproved === true,
+    engineState: String(raw.engineState || '').trim(),
+    submittedOrders: intOr(raw.submittedOrders, 0),
+    reservedOrders: intOr(raw.reservedOrders, 0),
+    preflightPassed: raw.preflightPassed === true,
+    preflightOrderSubmissionAttempts: intOr(raw.preflightOrderSubmissionAttempts),
+    preflightOrderEndpointAttempts: intOr(raw.preflightOrderEndpointAttempts),
+    secretVersions: secretVersionsFromState(raw.secretVersions),
+    persistenceDurable: raw.persistenceDurable === true,
+    preflight,
+    checks,
+    observedAt: String(raw.observedAt || '').trim(),
+  };
+}
+
+async function runContinuationReadiness(launchId: string): Promise<{
+  evidence: ReturnType<typeof sanitizeContinuationReadiness>;
+  evidenceHash: string;
+}> {
+  const normalized = String(launchId || '').trim();
+  if (!/^launch-[A-Za-z0-9-]{8,127}$/.test(normalized)) {
+    throw new Error('Invalid continuation launch id');
+  }
+  const forwarded = await forwardWorkerRequest(
+    `/continuation/readiness?launch_id=${encodeURIComponent(normalized)}`,
+    { method: 'POST' },
+  );
+  if (!forwarded.response.ok) throw new Error('Worker rejected continuation readiness');
+  const evidence = sanitizeContinuationReadiness(forwarded.data);
+  return { evidence, evidenceHash: hashEvidence(evidence) };
+}
+
+function continuationVerificationSnapshot(
+  evidence: ReturnType<typeof sanitizeContinuationReadiness>,
+  workerState: Record<string, unknown>,
+): ContinuationVerificationSnapshot {
+  const workerImageDigest = String(workerState.worker_image_digest || '').trim();
+  const workerRevision = String(workerState.worker_revision || '').trim();
+  return {
+    currentImageDigest: workerImageDigest,
+    currentWorkerRevision: workerRevision,
+    currentExecutionMode: String(workerState.execution_mode || ''),
+    currentMainnetLiveApproved: workerState.mainnet_live_approved === true,
+    currentEngineState: String(workerState.engine_state || ''),
+    currentLaunchId: String(workerState.mainnet_launch_id || ''),
+    currentLaunchPolicy: String(workerState.mainnet_launch_policy || ''),
+    currentLaunchState: String(workerState.mainnet_launch_state || ''),
+    currentContinuationApprovalId: typeof workerState.mainnet_continuation_approval_id === 'string'
+      ? workerState.mainnet_continuation_approval_id
+      : undefined,
+    currentSubmittedOrders: evidence.submittedOrders,
+    currentSecretVersions: secretVersionsFromState(workerState.secret_versions),
+    preflightPassed: evidence.preflightPassed,
+    preflightObservedAt: evidence.observedAt,
+    preflightOrderEndpointAttempts: evidence.preflightOrderEndpointAttempts,
+    preflightOrderSubmissionAttempts: evidence.preflightOrderSubmissionAttempts,
+    reconciliationStatus: resolveReconciliationStatus(
+      evidence.preflight.checks,
+      workerState.reconciliation_status,
+    ),
+    persistenceDurable: evidence.persistenceDurable,
+    dataConnectCutover: ['1', 'true', 'yes', 'on'].includes(
+      (process.env.VITE_DATA_CONNECT_CUTOVER || 'false').trim().toLowerCase(),
+    ),
+    killSwitchActive: workerState.kill_switch_active === true,
+  };
 }
 
 function requireWorkerBoolean(data: any, field: string): boolean | null {
@@ -1741,6 +2287,211 @@ app.post('/api/system/preflight/read-only', async (req, res) => {
   }
 });
 
+// Release approval is a server-side, one-time Firebase trading_admin action.
+// It records approval only; a separate Release Controller consumes the record
+// and performs an independently verified Cloud Run deployment.
+app.post('/api/release/mainnet/approve', async (req: Request, res: Response) => {
+  const candidateId = typeof req.body?.candidateId === 'string' ? req.body.candidateId.trim() : '';
+  if (!candidateId) return res.status(400).json({ error: 'RELEASE_CANDIDATE_ID_REQUIRED' });
+  try {
+    const verification = await verifyReleaseCandidate(candidateId);
+    if (verification.failures.length) {
+      return res.status(409).json({
+        error: 'RELEASE_GATE_NOT_PASSED',
+        candidateId,
+        failures: verification.failures,
+        evidence_status: 'UNVERIFIED',
+        approved: false,
+      });
+    }
+    const authorizationUid = res.locals.firebaseUid;
+    if (typeof authorizationUid !== 'string' || !authorizationUid) {
+      return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+    }
+    const approved = await getServerReleaseStore().approveCandidate(
+      candidateId,
+      authorizationUid,
+      verification.snapshot,
+    );
+    return res.json({
+      approved: true,
+      candidateId: approved.candidateId,
+      approvalId: approved.approvalId,
+      status: approved.status,
+      expiresAt: approved.expiresAt,
+      imageDigest: approved.imageDigest,
+      workerRevision: approved.workerRevision,
+      launchPolicy: approved.launchPolicy,
+      orderSubmissionAttempts: approved.orderSubmissionAttempts,
+      evidence_status: 'VERIFIED',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Release approval failed';
+    const status = message.includes('not found') ? 404 : 503;
+    return res.status(status).json({ error: 'RELEASE_APPROVAL_FAILED', message });
+  }
+});
+
+// The second approval is deliberately separate from the initial release
+// approval. It records evidence for the staged first order but never changes
+// Worker state or the MAINNET_LIVE_APPROVED deployment flag.
+app.post('/api/release/mainnet/continuation/approve', async (req: Request, res: Response) => {
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body)) {
+    return res.status(400).json({ error: 'CONTINUATION_PAYLOAD_CONTAINS_CREDENTIALS' });
+  }
+  const candidateId = typeof body.candidateId === 'string' ? body.candidateId.trim() : '';
+  const launchId = typeof body.launchId === 'string' ? body.launchId.trim() : '';
+  if (!/^rc-[0-9a-f-]{36}$/i.test(candidateId)) {
+    return res.status(400).json({ error: 'RELEASE_CANDIDATE_ID_REQUIRED' });
+  }
+  if (!/^launch-[A-Za-z0-9-]{8,127}$/.test(launchId)) {
+    return res.status(400).json({ error: 'LAUNCH_ID_REQUIRED' });
+  }
+  const requesterUid = res.locals.firebaseUid;
+  if (typeof requesterUid !== 'string' || !requesterUid) {
+    return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  }
+  try {
+    const store = getServerReleaseStore();
+    const candidate = await store.getCandidate(candidateId);
+    if (!candidate) return res.status(404).json({ error: 'RELEASE_CANDIDATE_NOT_FOUND' });
+    if (candidate.status !== 'CONSUMED' || !candidate.approvalId) {
+      return res.status(409).json({
+        error: 'INITIAL_RELEASE_APPROVAL_NOT_CONSUMED',
+        message: 'Continuation requires the consumed staged-release approval',
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const consumed = await store.getConsumedApproval(candidate.approvalId);
+    if (!consumed || consumed.launchPolicy !== 'STAGED_FIRST_ORDER') {
+      return res.status(409).json({ error: 'INITIAL_RELEASE_APPROVAL_INVALID', evidence_status: 'UNVERIFIED' });
+    }
+
+    const readinessResult = await runContinuationReadiness(launchId);
+    const stateResponse = await forwardWorkerRequest('/state');
+    if (!stateResponse.response.ok) throw new Error('Worker state read-back is unavailable');
+    const workerState = releaseRequestObject(stateResponse.data) || {};
+    const snapshot = continuationVerificationSnapshot(readinessResult.evidence, workerState);
+    const now = new Date();
+    const approval = newContinuationApproval({
+      candidateId,
+      launchId,
+      initialApprovalId: consumed.approvalId,
+      imageDigest: consumed.imageDigest,
+      workerRevision: consumed.workerRevision,
+      secretVersions: consumed.secretVersions,
+      firstOrderEvidenceHash: readinessResult.evidenceHash,
+      preflightObservedAt: readinessResult.evidence.observedAt,
+      nonce: crypto.randomBytes(16).toString('hex'),
+      requesterUid,
+      expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+    }, now);
+    const failures = validateContinuationPrerequisites(approval, snapshot, now);
+    if (failures.length) {
+      return res.status(409).json({
+        error: 'CONTINUATION_GATE_NOT_PASSED',
+        candidateId,
+        launchId,
+        failures,
+        evidence_status: 'UNVERIFIED',
+        approved: false,
+      });
+    }
+    await store.createContinuationApproval(approval);
+    await store.putEvidence({
+      candidateId,
+      kind: 'CONTINUATION_APPROVAL',
+      generatedAt: now.toISOString(),
+      evidenceHash: hashEvidence({ approval, snapshot }),
+      payload: {
+        continuationId: approval.continuationId,
+        candidateId,
+        launchId,
+        firstOrderEvidenceHash: approval.firstOrderEvidenceHash,
+        reconciliationStatus: approval.reconciliationStatus,
+        requesterUid,
+        expiresAt: approval.expiresAt,
+      },
+    });
+    return res.status(201).json({
+      approved: true,
+      continuationId: approval.continuationId,
+      candidateId: approval.candidateId,
+      launchId: approval.launchId,
+      initialApprovalId: approval.initialApprovalId,
+      imageDigest: approval.imageDigest,
+      workerRevision: approval.workerRevision,
+      status: approval.status,
+      expiresAt: approval.expiresAt,
+      firstOrderEvidenceHash: approval.firstOrderEvidenceHash,
+      reconciliationStatus: approval.reconciliationStatus,
+      evidence_status: 'VERIFIED',
+      executionActivated: false,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Continuation approval failed';
+    return res.status(message.includes('not found') ? 404 : 503).json({
+      error: 'CONTINUATION_APPROVAL_FAILED',
+      message,
+      approved: false,
+      executionActivated: false,
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
+app.get('/api/release/mainnet/continuation/:continuationId', async (req: Request, res: Response) => {
+  try {
+    const approval = await getServerReleaseStore().getContinuationApproval(String(req.params.continuationId));
+    if (!approval) return res.status(404).json({ error: 'CONTINUATION_APPROVAL_NOT_FOUND' });
+    return res.json({
+      continuationId: approval.continuationId,
+      candidateId: approval.candidateId,
+      launchId: approval.launchId,
+      initialApprovalId: approval.initialApprovalId,
+      imageDigest: approval.imageDigest,
+      workerRevision: approval.workerRevision,
+      secretVersions: approval.secretVersions,
+      firstOrderEvidenceHash: approval.firstOrderEvidenceHash,
+      reconciliationStatus: approval.reconciliationStatus,
+      preflightObservedAt: approval.preflightObservedAt,
+      status: approval.status,
+      createdAt: approval.createdAt,
+      expiresAt: approval.expiresAt,
+      evidence_status: 'VERIFIED',
+    });
+  } catch {
+    return res.status(503).json({ error: 'RELEASE_STORE_UNAVAILABLE', evidence_status: 'UNVERIFIED' });
+  }
+});
+
+app.get('/api/release/mainnet/:candidateId', async (req: Request, res: Response) => {
+  try {
+    const candidate = await getServerReleaseStore().getCandidate(String(req.params.candidateId));
+    if (!candidate) return res.status(404).json({ error: 'RELEASE_CANDIDATE_NOT_FOUND' });
+    return res.json({
+      candidateId: candidate.candidateId,
+      status: candidate.status,
+      executionMode: candidate.executionMode,
+      symbol: candidate.symbol,
+      imageDigest: candidate.imageDigest,
+      workerRevision: candidate.workerRevision,
+      secretVersions: candidate.secretVersions,
+      launchPolicy: candidate.launchPolicy,
+      expiresAt: candidate.expiresAt,
+      createdAt: candidate.createdAt,
+      approvalId: candidate.status === 'PENDING_APPROVAL' ? undefined : candidate.approvalId,
+      orderSubmissionAttempts: candidate.orderSubmissionAttempts,
+      workerDisarmed: candidate.workerDisarmed,
+      viteDataConnectCutover: candidate.viteDataConnectCutover,
+      evidence_status: 'VERIFIED',
+    });
+  } catch {
+    return res.status(503).json({ error: 'RELEASE_STORE_UNAVAILABLE', evidence_status: 'UNVERIFIED' });
+  }
+});
+
 app.get('/api/system/readiness', async (req, res) => {
   try {
     const resp = await forwardWorkerRequest('/readiness');
@@ -1759,16 +2510,119 @@ app.get('/api/system/readiness', async (req, res) => {
 });
 
 app.post('/api/system/arm', async (req, res) => {
-  const { executionMode, riskProfile, instruments, strategies } = req.body;
+  const { executionMode, riskProfile, instruments, strategies, enforcePreflight, releaseApprovalId, launchPolicy } = req.body;
 
   const requestedConfig = {
     executionMode: executionMode || 'PAPER',
     instruments: instruments || [],
     strategies: strategies || { grid: false, trend: false, shock: false, carry: false },
-    riskProfile: riskProfile || 'BALANCED'
+    riskProfile: riskProfile || 'BALANCED',
+    enforcePreflight: executionMode === 'LIVE' ? true : Boolean(enforcePreflight),
+    releaseApprovalId: typeof releaseApprovalId === 'string' ? releaseApprovalId : undefined,
+    launchPolicy: launchPolicy || 'STAGED_FIRST_ORDER',
   };
 
   try {
+    if (requestedConfig.executionMode === 'LIVE') {
+      // A browser may submit an approval id, but it cannot create or assert an
+      // approval. The server must resolve the id to a consumed Firestore
+      // record before the Worker can see an ARM request.
+      if (
+        typeof requestedConfig.releaseApprovalId !== 'string'
+        || !/^approval-[0-9a-f-]{36}$/i.test(requestedConfig.releaseApprovalId)
+      ) {
+        return res.status(400).json({
+          error: 'RELEASE_APPROVAL_ID_REQUIRED',
+          message: 'LIVE ARM requires a server-consumed release approval',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+
+      let consumedApproval;
+      try {
+        consumedApproval = await getServerReleaseStore().getConsumedApproval(
+          requestedConfig.releaseApprovalId,
+        );
+      } catch {
+        return res.status(503).json({
+          error: 'RELEASE_STORE_UNAVAILABLE',
+          message: 'The server could not verify the release approval',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+      if (!consumedApproval) {
+        return res.status(409).json({
+          error: 'RELEASE_APPROVAL_NOT_CONSUMED',
+          message: 'LIVE ARM requires a valid, one-time approval consumed by the release controller',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+
+      const requestedInstruments = Array.isArray(requestedConfig.instruments)
+        ? requestedConfig.instruments.map((symbol) => String(symbol).trim().toUpperCase())
+        : [];
+      if (
+        consumedApproval.executionMode !== 'LIVE'
+        || consumedApproval.symbol !== 'ETHUSDC'
+        || consumedApproval.launchPolicy !== 'STAGED_FIRST_ORDER'
+        || consumedApproval.viteDataConnectCutover !== false
+        || consumedApproval.orderSubmissionAttempts !== 0
+        || consumedApproval.workerDisarmed !== true
+        || requestedInstruments.length !== 1
+        || requestedInstruments[0] !== consumedApproval.symbol
+      ) {
+        return res.status(409).json({
+          error: 'RELEASE_APPROVAL_SCOPE_MISMATCH',
+          message: 'The consumed approval does not authorize this LIVE ARM request',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+
+      const configuredDigest = (process.env.WORKER_IMAGE_DIGEST || '').trim();
+      const configuredRevision = (process.env.WORKER_REVISION || '').trim();
+      if (
+        (configuredDigest && configuredDigest !== consumedApproval.imageDigest)
+        || (configuredRevision && configuredRevision !== consumedApproval.workerRevision)
+      ) {
+        return res.status(409).json({
+          error: 'RELEASE_APPROVAL_RUNTIME_MISMATCH',
+          message: 'The consumed approval does not match the configured Worker revision',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+
+      let workerStateResponse;
+      try {
+        workerStateResponse = await forwardWorkerRequest('/state');
+      } catch {
+        return res.status(503).json({
+          error: 'WORKER_UNREACHABLE',
+          message: 'The Worker state could not be verified before LIVE ARM',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+      const workerState = releaseRequestObject(workerStateResponse.data) || {};
+      if (
+        !workerStateResponse.response.ok
+        || workerState.execution_mode !== 'LIVE'
+        || workerState.mainnet_live_approved !== true
+        || workerState.engine_state !== 'DISARMED'
+        || Number(workerState.order_submission_attempts) !== 0
+        || String(workerState.worker_image_digest || '').trim() !== consumedApproval.imageDigest
+        || String(workerState.worker_revision || '').trim() !== consumedApproval.workerRevision
+      ) {
+        return res.status(409).json({
+          error: 'WORKER_NOT_LIVE_DISARMED',
+          message: 'Worker must be LIVE-approved, DISARMED, and unused before ARM',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+
+      // Forward only the id resolved from the server-side consumed record.
+      requestedConfig.releaseApprovalId = consumedApproval.approvalId;
+      requestedConfig.instruments = requestedInstruments;
+    }
+
     const previousState = tradingSystemState.engineState;
     const forwarded = await forwardWorkerRequest('/arm', {
       method: 'POST',
@@ -1808,6 +2662,218 @@ app.post('/api/system/arm', async (req, res) => {
     res.json(forwarded.data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
+  }
+});
+
+// Continuation is a distinct trading_admin action. The browser supplies only
+// opaque identifiers and strategy configuration; the Control Plane resolves
+// the server-side approval and forwards a Google-authenticated request to the
+// Worker. No endpoint here can set MAINNET_LIVE_APPROVED itself.
+app.post('/api/system/continue', async (req: Request, res: Response) => {
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body)) {
+    return res.status(400).json({ error: 'CONTINUATION_PAYLOAD_CONTAINS_CREDENTIALS' });
+  }
+  const continuationApprovalId = typeof body.continuationApprovalId === 'string'
+    ? body.continuationApprovalId.trim()
+    : '';
+  const launchId = typeof body.launchId === 'string' ? body.launchId.trim() : '';
+  if (!/^continuation-[0-9a-f-]{36}$/i.test(continuationApprovalId)) {
+    return res.status(400).json({ error: 'CONTINUATION_APPROVAL_ID_REQUIRED' });
+  }
+  if (!/^launch-[A-Za-z0-9-]{8,127}$/.test(launchId)) {
+    return res.status(400).json({ error: 'LAUNCH_ID_REQUIRED' });
+  }
+
+  const rawStrategies = releaseRequestObject(body.strategies);
+  const strategies = {
+    grid: rawStrategies?.grid === true,
+    trend: rawStrategies?.trend === true,
+    shock: rawStrategies?.shock === true,
+    carry: rawStrategies?.carry === true,
+  };
+  if (!Object.values(strategies).some(Boolean)) {
+    return res.status(400).json({ error: 'CONTINUATION_STRATEGY_REQUIRED' });
+  }
+  const riskProfile = String(body.riskProfile || 'CONSERVATIVE').trim().toUpperCase();
+  if (!['CONSERVATIVE', 'BALANCED', 'AGGRESSIVE'].includes(riskProfile)) {
+    return res.status(400).json({ error: 'INVALID_RISK_PROFILE' });
+  }
+  if (body.executionMode !== 'LIVE' || body.enforcePreflight !== true) {
+    return res.status(400).json({
+      error: 'INVALID_CONTINUATION_CONFIGURATION',
+      message: 'Autonomous continuation requires executionMode=LIVE and enforcePreflight=true',
+    });
+  }
+  const instruments = Array.isArray(body.instruments)
+    ? body.instruments.map((symbol) => String(symbol).trim().toUpperCase()).filter(Boolean)
+    : ['ETHUSDC'];
+  if (instruments.length !== 1 || instruments[0] !== 'ETHUSDC') {
+    return res.status(400).json({ error: 'CONTINUATION_SYMBOL_MUST_BE_ETHUSDC' });
+  }
+
+  try {
+    const store = getServerReleaseStore();
+    let approval = await store.getContinuationApproval(continuationApprovalId);
+    if (!approval) return res.status(404).json({ error: 'CONTINUATION_APPROVAL_NOT_FOUND' });
+
+    const candidate = await store.getCandidate(approval.candidateId);
+    if (!candidate || candidate.status !== 'CONSUMED' || candidate.approvalId !== approval.initialApprovalId) {
+      return res.status(409).json({ error: 'INITIAL_RELEASE_APPROVAL_INVALID', evidence_status: 'UNVERIFIED' });
+    }
+    const consumed = await store.getConsumedApproval(approval.initialApprovalId);
+    if (!consumed || consumed.imageDigest !== approval.imageDigest || consumed.workerRevision !== approval.workerRevision) {
+      return res.status(409).json({ error: 'CONTINUATION_SCOPE_MISMATCH', evidence_status: 'UNVERIFIED' });
+    }
+
+    const stateForIdempotency = await forwardWorkerRequest('/state');
+    const existingWorkerState = releaseRequestObject(stateForIdempotency.data) || {};
+    const alreadyActive = stateForIdempotency.response.ok
+      && existingWorkerState.execution_mode === 'LIVE'
+      && existingWorkerState.engine_state === 'ARMED'
+      && existingWorkerState.mainnet_launch_state === 'AUTONOMOUS_ACTIVE'
+      && existingWorkerState.mainnet_continuation_approval_id === continuationApprovalId
+      && existingWorkerState.mainnet_live_approved === true
+      && String(existingWorkerState.worker_image_digest || '').trim() === approval.imageDigest
+      && String(existingWorkerState.worker_revision || '').trim() === approval.workerRevision;
+    if (alreadyActive) {
+      if (approval.status !== 'CONSUMED') {
+        approval = await store.consumeContinuationApproval(continuationApprovalId);
+      }
+      projectWorkerState(existingWorkerState);
+      return res.json({
+        ...existingWorkerState,
+        continuationApprovalId,
+        launchId,
+        status: 'AUTONOMOUS_ACTIVE',
+        idempotent: true,
+        evidence_status: 'VERIFIED',
+      });
+    }
+    if (approval.status === 'CONSUMED' || approval.status === 'EXPIRED') {
+      console.warn(
+        `monitor_event=release_approval_replay approval_kind=continuation status=${approval.status}`,
+      );
+      return res.status(409).json({ error: 'CONTINUATION_APPROVAL_REPLAYED', evidence_status: 'UNVERIFIED' });
+    }
+    approval = await store.claimContinuationApproval(continuationApprovalId);
+
+    const readinessResult = await runContinuationReadiness(launchId);
+    const latestStateResponse = await forwardWorkerRequest('/state');
+    if (!latestStateResponse.response.ok) throw new Error('Worker state read-back is unavailable');
+    const latestState = releaseRequestObject(latestStateResponse.data) || {};
+    const snapshot = continuationVerificationSnapshot(readinessResult.evidence, latestState);
+    const failures = validateContinuationPrerequisites(approval, snapshot);
+    if (approval.launchId !== launchId) failures.push('launch id does not match continuation approval');
+    if (failures.length) {
+      await releaseContinuationApprovalBestEffort(approval.continuationId);
+      return res.status(409).json({
+        error: 'CONTINUATION_GATE_NOT_PASSED',
+        failures,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+
+    const forwarded = await forwardWorkerRequest('/continue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        executionMode: 'LIVE',
+        instruments: ['ETHUSDC'],
+        strategies,
+        riskProfile,
+        enforcePreflight: true,
+        continuationApprovalId: approval.continuationId,
+        launchId: approval.launchId,
+        initialApprovalId: approval.initialApprovalId,
+      }),
+    });
+    if (!forwarded.response.ok) {
+      const rollback = await rollbackAutonomousContinuation();
+      await releaseContinuationApprovalBestEffort(approval.continuationId);
+      return res.status(forwarded.response.status).json({
+        error: 'WORKER_REJECTED_CONTINUATION',
+        detail: forwarded.data,
+        executionActivated: !rollback.verified,
+        rollbackVerified: rollback.verified,
+        rollbackError: rollback.error,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const workerState = releaseRequestObject(forwarded.data) || {};
+    if (
+      workerState.execution_mode !== 'LIVE'
+      || workerState.engine_state !== 'ARMED'
+      || workerState.mainnet_live_approved !== true
+      || workerState.mainnet_launch_state !== 'AUTONOMOUS_ACTIVE'
+      || workerState.mainnet_continuation_approval_id !== approval.continuationId
+      || String(workerState.worker_image_digest || '').trim() !== approval.imageDigest
+      || String(workerState.worker_revision || '').trim() !== approval.workerRevision
+    ) {
+      const rollback = await rollbackAutonomousContinuation();
+      await releaseContinuationApprovalBestEffort(approval.continuationId);
+      return res.status(409).json({
+        error: 'WORKER_AUTONOMOUS_READBACK_FAILED',
+        message: 'Worker did not prove the approved autonomous continuation state',
+        executionActivated: !rollback.verified,
+        rollbackVerified: rollback.verified,
+        rollbackError: rollback.error,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    let consumedContinuation: ContinuationApproval;
+    try {
+      consumedContinuation = await store.consumeContinuationApproval(approval.continuationId);
+    } catch (error) {
+      const rollback = await rollbackAutonomousContinuation();
+      // Safe even if consumeContinuationApproval failed because a
+      // concurrent request already legitimately consumed it -- release is a
+      // no-op for any status other than ACTIVATING.
+      await releaseContinuationApprovalBestEffort(approval.continuationId);
+      console.warn(
+        `monitor_event=autonomous_continuation_failure phase=consume rollback_verified=${rollback.verified}`,
+      );
+      return res.status(503).json({
+        error: 'CONTINUATION_APPROVAL_CONSUME_FAILED',
+        message: 'Worker activation was not independently committed; rollback verification is required.',
+        executionActivated: !rollback.verified,
+        rollbackVerified: rollback.verified,
+        rollbackError: rollback.error,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    projectWorkerState(workerState);
+    auditRepository.logEvent({
+      eventType: 'AUTONOMOUS_CONTINUATION_ACTIVATED',
+      previousState: tradingSystemState.engineState,
+      newState: 'ARMED',
+      executionMode: 'LIVE',
+      reason: 'Independent continuation approval and Worker read-back passed',
+      metadata: {
+        launchId: approval.launchId,
+        continuationId: approval.continuationId,
+        imageDigest: approval.imageDigest,
+        workerRevision: approval.workerRevision,
+      },
+    });
+    return res.json({
+      ...workerState,
+      continuationId: consumedContinuation.continuationId,
+      launchId: consumedContinuation.launchId,
+      status: 'AUTONOMOUS_ACTIVE',
+      evidence_status: 'VERIFIED',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Autonomous continuation failed';
+    console.warn(
+      `monitor_event=autonomous_continuation_failure error_class=${error instanceof Error ? error.name : 'unknown'}`,
+    );
+    return res.status(message.includes('not found') ? 404 : 503).json({
+      error: 'AUTONOMOUS_CONTINUATION_FAILED',
+      message,
+      executionActivated: false,
+      evidence_status: 'UNVERIFIED',
+    });
   }
 });
 
@@ -1910,6 +2976,246 @@ app.post('/api/system/reconcile', async (req, res) => {
     res.json(data);
   } catch (err) {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Internal release-controller protocol. These routes require a Google-signed
+// OIDC token from the fixed Release Controller service account. They never
+// accept Firebase tokens, Binance credentials, SQL passwords, or deployment
+// access tokens in request bodies.
+// ---------------------------------------------------------------------------
+app.post('/internal/release/candidate', async (req: Request, res: Response) => {
+  try {
+    const candidate = newReleaseCandidate(releaseCandidateInputFromRequest(req.body));
+    let workerStateResponse;
+    try {
+      workerStateResponse = await forwardWorkerRequest('/state');
+    } catch {
+      return res.status(503).json({
+        error: 'WORKER_RUNTIME_UNAVAILABLE',
+        message: 'Worker state could not be read before creating the release candidate',
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const workerState = releaseRequestObject(workerStateResponse.data) || {};
+    if (
+      !workerStateResponse.response.ok
+      || workerState.execution_mode !== 'LIVE'
+      || workerState.mainnet_live_approved !== false
+      || workerState.engine_state !== 'DISARMED'
+      || Number(workerState.order_submission_attempts) !== 0
+      || String(workerState.worker_image_digest || '').trim() !== candidate.imageDigest
+      || String(workerState.worker_revision || '').trim() !== candidate.workerRevision
+      || !secretVersionsMatch(candidate.secretVersions, secretVersionsFromState(workerState.secret_versions))
+    ) {
+      return res.status(409).json({
+        error: 'RELEASE_CANDIDATE_RUNTIME_MISMATCH',
+        message: 'Candidate must match the current LIVE-disarmed Worker revision before approval',
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    await getServerReleaseStore().createCandidate(candidate);
+    return res.status(201).json({
+      candidateId: candidate.candidateId,
+      status: candidate.status,
+      executionMode: candidate.executionMode,
+      symbol: candidate.symbol,
+      imageDigest: candidate.imageDigest,
+      workerRevision: candidate.workerRevision,
+      secretVersions: candidate.secretVersions,
+      launchPolicy: candidate.launchPolicy,
+      expiresAt: candidate.expiresAt,
+      orderSubmissionAttempts: candidate.orderSubmissionAttempts,
+      workerDisarmed: candidate.workerDisarmed,
+      viteDataConnectCutover: candidate.viteDataConnectCutover,
+      evidence_status: 'VERIFIED',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Invalid release candidate';
+    return res.status(400).json({ error: 'INVALID_RELEASE_CANDIDATE', message });
+  }
+});
+
+app.get('/internal/release/candidate/:candidateId', async (req: Request, res: Response) => {
+  try {
+    const candidate = await getServerReleaseStore().getCandidate(String(req.params.candidateId));
+    if (!candidate) return res.status(404).json({ error: 'RELEASE_CANDIDATE_NOT_FOUND' });
+    return res.json(candidate);
+  } catch {
+    return res.status(503).json({ error: 'RELEASE_STORE_UNAVAILABLE', evidence_status: 'UNVERIFIED' });
+  }
+});
+
+app.post('/internal/release/preflight', async (req: Request, res: Response) => {
+  const body = releaseRequestObject(req.body) || {};
+  const candidateId = typeof body.candidateId === 'string' ? body.candidateId.trim() : '';
+  try {
+    const result = await runReleasePreflight(candidateId || undefined);
+    return res.json({
+      ...result.evidence,
+      evidenceHash: result.evidenceHash,
+      candidateId: candidateId || undefined,
+      evidence_status: result.evidence.preflightPassed && result.evidence.orderSubmissionAttempts === 0 && result.evidence.orderEndpointAttempts === 0
+        ? 'VERIFIED'
+        : 'UNVERIFIED',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Mainnet preflight failed';
+    return res.status(503).json({
+      error: 'MAINNET_PREFLIGHT_FAILED',
+      message,
+      preflightPassed: false,
+      orderSubmissionAttempts: -1,
+      orderEndpointAttempts: -1,
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
+app.post('/internal/release/continuation-readiness', async (req: Request, res: Response) => {
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body)) {
+    return res.status(400).json({ error: 'CONTINUATION_PAYLOAD_CONTAINS_CREDENTIALS', evidence_status: 'UNVERIFIED' });
+  }
+  const launchId = typeof body.launchId === 'string' ? body.launchId.trim() : '';
+  if (!launchId) return res.status(400).json({ error: 'LAUNCH_ID_REQUIRED', evidence_status: 'UNVERIFIED' });
+  try {
+    const result = await runContinuationReadiness(launchId);
+    return res.status(result.evidence.continuationReady ? 200 : 409).json({
+      ...result.evidence,
+      evidenceHash: result.evidenceHash,
+      evidence_status: result.evidence.continuationReady ? 'VERIFIED' : 'UNVERIFIED',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Continuation readiness failed';
+    return res.status(503).json({
+      error: 'CONTINUATION_READINESS_FAILED',
+      message,
+      continuationReady: false,
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
+app.post('/internal/release/verify', async (req: Request, res: Response) => {
+  const candidateId = typeof req.body?.candidateId === 'string' ? req.body.candidateId.trim() : '';
+  if (!candidateId) return res.status(400).json({ error: 'RELEASE_CANDIDATE_ID_REQUIRED' });
+  try {
+    const verification = await verifyReleaseCandidate(candidateId);
+    return res.status(verification.failures.length ? 409 : 200).json({
+      candidateId,
+      verified: verification.failures.length === 0,
+      failures: verification.failures,
+      evidenceHash: verification.evidenceHash,
+      snapshot: verification.snapshot,
+      preflight: verification.evidence,
+      evidence_status: verification.failures.length ? 'UNVERIFIED' : 'VERIFIED',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Release verification failed';
+    return res.status(message.includes('not found') ? 404 : 503).json({
+      error: 'RELEASE_VERIFICATION_FAILED',
+      message,
+      verified: false,
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
+app.post('/internal/release/runtime', async (_req: Request, res: Response) => {
+  try {
+    const [stateResponse, readinessResponse] = await Promise.all([
+      forwardWorkerRequest('/state'),
+      forwardWorkerRequest('/readiness'),
+    ]);
+    if (!stateResponse.response.ok || !readinessResponse.response.ok) {
+      return res.status(503).json({ error: 'WORKER_RUNTIME_READBACK_UNAVAILABLE', verified: false });
+    }
+    const state = releaseRequestObject(stateResponse.data) || {};
+    const readiness = releaseRequestObject(readinessResponse.data) || {};
+    const persistence = releaseRequestObject(readiness.persistence) || {};
+    return res.json({
+      state: {
+        executionMode: state.execution_mode,
+        engineState: state.engine_state,
+        workerImageDigest: state.worker_image_digest,
+        workerRevision: state.worker_revision,
+        secretVersions: secretVersionsFromState(state.secret_versions),
+        mainnetLiveApproved: state.mainnet_live_approved === true,
+        mainnetLaunchId: state.mainnet_launch_id,
+        mainnetLaunchPolicy: state.mainnet_launch_policy,
+        mainnetLaunchState: state.mainnet_launch_state,
+        mainnetContinuationApprovalId: state.mainnet_continuation_approval_id,
+        orderSubmissionAttempts: Number(state.order_submission_attempts || 0),
+        privateStreamHealthy: state.private_stream_healthy === true,
+        killSwitchActive: state.kill_switch_active === true,
+        reconciliationStatus: state.reconciliation_status,
+      },
+      persistence: {
+        mode: persistence.mode,
+        durable: persistence.durable === true,
+        pendingOutbox: persistence.pending_outbox,
+        failedWrites: persistence.failed_writes,
+      },
+      evidence_status: 'VERIFIED',
+    });
+  } catch {
+    return res.status(503).json({ error: 'WORKER_RUNTIME_READBACK_FAILED', verified: false });
+  }
+});
+
+// Release Controller readiness is deliberately internal and authenticated. It
+// proves the Control Plane process, Firebase Admin verifier, server-side
+// release store, and the Worker OIDC/readiness path independently of any
+// browser token or exchange credential.
+app.post('/internal/release/readiness', async (_req: Request, res: Response) => {
+  const readiness = await controlPlaneReadiness();
+  return res.status(readiness.status === 'ready' ? 200 : 503).json(readiness);
+});
+
+// Consuming an approval is intentionally the only release-store transition
+// exposed to the controller after Firebase approval. It returns a proof for a
+// deployment step; it does not set MAINNET_LIVE_APPROVED or ARM the Worker.
+app.post('/internal/release/consume', async (req: Request, res: Response) => {
+  const candidateId = typeof req.body?.candidateId === 'string' ? req.body.candidateId.trim() : '';
+  if (!candidateId) return res.status(400).json({ error: 'RELEASE_CANDIDATE_ID_REQUIRED' });
+  try {
+    const store = getServerReleaseStore();
+    const candidate = await store.getCandidate(candidateId);
+    if (!candidate) return res.status(404).json({ error: 'RELEASE_CANDIDATE_NOT_FOUND' });
+    const workerStateResponse = await forwardWorkerRequest('/state');
+    const workerState = releaseRequestObject(workerStateResponse.data) || {};
+    if (
+      !workerStateResponse.response.ok
+      || workerState.execution_mode !== 'LIVE'
+      || workerState.mainnet_live_approved !== false
+      || workerState.engine_state !== 'DISARMED'
+      || Number(workerState.order_submission_attempts) !== 0
+      || String(workerState.worker_image_digest || '').trim() !== candidate.imageDigest
+      || String(workerState.worker_revision || '').trim() !== candidate.workerRevision
+      || !secretVersionsMatch(candidate.secretVersions, secretVersionsFromState(workerState.secret_versions))
+      || ['1', 'true', 'yes', 'on'].includes((process.env.VITE_DATA_CONNECT_CUTOVER || 'false').trim().toLowerCase())
+    ) {
+      console.warn('monitor_event=release_approval_replay reason=runtime_mismatch');
+      return res.status(409).json({
+        error: 'RELEASE_APPROVAL_RUNTIME_MISMATCH',
+        consumed: false,
+        executionActivated: false,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const approval = await store.consumeApproval(candidateId);
+    return res.json({ ...approval, consumed: true, executionActivated: false, evidence_status: 'VERIFIED' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Approval consumption failed';
+    return res.status(message.includes('not found') ? 404 : 409).json({
+      error: 'RELEASE_APPROVAL_NOT_CONSUMABLE',
+      message,
+      consumed: false,
+      executionActivated: false,
+      evidence_status: 'UNVERIFIED',
+    });
   }
 });
 
@@ -2355,7 +3661,8 @@ Provide a deep, rigorous, mathematically disciplined Senior Quant Engineer respo
 // Project ID: gen-lang-client-0730128480
 // User: kotorn@gmail.com | Region: asia-southeast1
 // ==========================================
-const GCP_PROJECT_ID = 'gen-lang-client-0730128480';
+// GCP_PROJECT_ID is configured once near the application bootstrap so the
+// Control Plane and the cloud product metadata cannot drift apart.
 const GCP_REGION = 'asia-southeast1';
 const GOOGLE_USER = 'kotorn@gmail.com';
 

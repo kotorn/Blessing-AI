@@ -51,6 +51,9 @@ class MockReconciliation:
         self.calls += 1
         return self.last_status
 
+    async def _recover_order_fills(self, order, response):
+        return None
+
 @pytest.fixture
 def adapter():
     ledger = InMemoryLedger()
@@ -129,6 +132,78 @@ async def test_timeout_ambiguity_handling(adapter):
     assert adapter.rest_client.calls.count(("POST", "/fapi/v1/order")) == 1
     assert adapter.rest_client.calls.count(("GET", "/fapi/v1/order")) == 3
     assert adapter.reconciliation.calls == 1
+
+
+async def test_ambiguous_order_confirmed_filled_notifies_confirmed(adapter):
+    """An ambiguous POST later confirmed FILLED must still notify CONFIRMED."""
+
+    class ConfirmingRestClient:
+        def __init__(self):
+            self.calls = []
+
+        async def request(self, method, path, **kwargs):
+            self.calls.append((method, path))
+            if method == "POST" and "order" in path:
+                raise BinanceTransportAmbiguity("Timeout ambiguity simulated")
+            if method == "GET" and "order" in path:
+                return {
+                    "orderId": 555,
+                    "status": "FILLED",
+                    "symbol": "BTCUSDT",
+                    "clientOrderId": "TEST-1",
+                    "side": "BUY",
+                    "positionSide": "BOTH",
+                    "origQty": "0.001",
+                    "price": "10000.0",
+                }
+            return {}
+
+        async def init_session(self):
+            pass
+
+        async def close(self):
+            pass
+
+    adapter.rest_client = ConfirmingRestClient()
+    adapter.state = ConnectionState.READY
+    notifications: list[tuple[str, str]] = []
+
+    async def record_notification(order, outcome):
+        notifications.append((order.client_order_id, outcome))
+
+    adapter.on_order_submission_result = record_notification
+
+    intent = OrderIntent(
+        client_order_id="TEST-1",
+        symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.001"),
+        price=Decimal("10000.0"),
+    )
+    decision = ExecutionDecision(
+        decision_id="D1",
+        symbol="BTCUSDT",
+        action="SUBMIT",
+        risk_class=EconomicRiskClass.NEW_RISK,
+        orders=[intent],
+    )
+
+    authority = object()
+    adapter.bind_worker_authority(authority)
+    executed = await adapter._execute_decision(decision, authority=authority)
+
+    assert adapter.state == ConnectionState.READY
+    assert len(executed) == 1
+    assert executed[0].status == "FILLED"
+    # The order was genuinely recovered and verified -- it must be reported
+    # CONFIRMED just like the direct (non-ambiguous) success path does,
+    # not left as a dangling AMBIGUOUS with no follow-up.
+    assert ("TEST-1", "AMBIGUOUS") in notifications
+    assert ("TEST-1", "CONFIRMED") in notifications
 
 
 async def test_direct_adapter_mutation_is_blocked(adapter):
