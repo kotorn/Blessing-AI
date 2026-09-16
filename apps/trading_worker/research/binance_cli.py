@@ -187,6 +187,25 @@ _SENSITIVE_ENV_KEYS = frozenset(
         "BINANCE_MAINNET_API_SECRET",
     }
 )
+_SENSITIVE_PAYLOAD_KEY_PATTERN = re.compile(
+    r"(?:api[_-]?key|secret|password|passphrase|token|authorization|signature|"
+    r"private[_-]?key|access[_-]?key|credential|dsn|database[_-]?url)",
+    re.IGNORECASE,
+)
+_SAFE_SIGNED_FIELDS = frozenset(
+    {
+        "canTrade",
+        "dualSidePosition",
+        "multiAssetsMargin",
+        "multiAssetsMode",
+        "status",
+        "contractType",
+        "quoteAsset",
+        "marginAsset",
+        "positionSide",
+        "serverTime",
+    }
+)
 
 
 def _as_check(value: ReadOnlyCheck | str) -> ReadOnlyCheck:
@@ -336,6 +355,84 @@ def _redact_text(value: str, environ: Mapping[str, str]) -> str:
     return redacted[:4000]
 
 
+def _payload_key_is_sensitive(key: object) -> bool:
+    return bool(_SENSITIVE_PAYLOAD_KEY_PATTERN.search(str(key)))
+
+
+def _redact_payload(value: Any, environ: Mapping[str, str]) -> Any:
+    """Redact credential-shaped fields recursively before a result is retained."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): "[REDACTED]"
+            if _payload_key_is_sensitive(key)
+            else _redact_payload(item, environ)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_payload(item, environ) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_payload(item, environ) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value, environ)
+    return value
+
+
+def _signed_payload_summary(value: Any, environ: Mapping[str, str]) -> dict[str, Any]:
+    """Keep only bounded, non-sensitive evidence from a signed account call.
+
+    Signed account responses can contain balances, order IDs, positions, and
+    other account-sensitive values.  The CLI is only a cross-check, so callers
+    receive shape/count metadata and a tiny allowlist of safe status fields,
+    never the original account payload.
+    """
+
+    if isinstance(value, Mapping):
+        payload_kind = "object"
+        top_level_keys = sorted(str(key) for key in value)
+        item_count = len(value)
+        candidates = value.items()
+    elif isinstance(value, list):
+        payload_kind = "array"
+        top_level_keys = []
+        item_count = len(value)
+        candidates = ()
+    elif value is None:
+        payload_kind = "empty"
+        top_level_keys = []
+        item_count = 0
+        candidates = ()
+    else:
+        payload_kind = type(value).__name__
+        top_level_keys = []
+        item_count = 1
+        candidates = ()
+
+    safe_fields: dict[str, bool | int | str] = {}
+    for key, item in candidates:
+        key_text = str(key)
+        if key_text not in _SAFE_SIGNED_FIELDS or _payload_key_is_sensitive(key):
+            continue
+        if isinstance(item, (bool, int, str)) and not isinstance(item, float):
+            safe_fields[key_text] = _redact_text(str(item), environ) if isinstance(item, str) else item
+
+    return {
+        "payload_kind": payload_kind,
+        "top_level_keys": top_level_keys[:100],
+        "item_count": item_count,
+        "safe_fields": safe_fields,
+        "redacted_fields": ["signed_account_payload", "[REDACTED]"],
+    }
+
+
+def _signed_stderr(value: str, environ: Mapping[str, str]) -> str | None:
+    """Never retain account-sensitive stderr from a credentialed CLI call."""
+
+    if not value.strip():
+        return None
+    return "binance-cli emitted stderr for a signed check (content suppressed)"
+
+
 def _decode_output(value: str) -> Any:
     text = value.strip()
     if not text:
@@ -370,7 +467,7 @@ class BinanceCliResult:
             "command": list(self.command) if self.command is not None else None,
             "credential_source": self.credential_source,
             "returncode": self.returncode,
-            "payload": self.payload,
+            "payload": _redact_payload(self.payload, {}),
             "error": self.error,
             "verified": False,
             "evidence_status": "RESEARCH_OR_CONTRACT_CROSS_CHECK_ONLY",
@@ -530,7 +627,20 @@ class BinanceCliResearchRunner:
                 error=f"could not start binance-cli: {type(exc).__name__}",
             )
 
-        stderr = _redact_text(completed.stderr or "", self.environ)
+        stderr = (
+            _signed_stderr(completed.stderr or "", self.environ)
+            if spec.requires_credentials
+            else _redact_text(completed.stderr or "", self.environ)
+        )
+        decoded_output = _decode_output(completed.stdout or "")
+        payload = (
+            _signed_payload_summary(decoded_output, self.environ)
+            if spec.requires_credentials
+            else _redact_payload(
+                _decode_output(_redact_text(completed.stdout or "", self.environ)),
+                self.environ,
+            )
+        )
         return BinanceCliResult(
             check=normalized_check.value,
             status="PASS" if completed.returncode == 0 else "FAIL",
@@ -539,7 +649,7 @@ class BinanceCliResearchRunner:
             command=command,
             credential_source=credential_source,
             returncode=completed.returncode,
-            payload=_decode_output(_redact_text(completed.stdout or "", self.environ)),
+            payload=payload,
             error=stderr
             or (None if completed.returncode == 0 else "binance-cli returned a non-zero exit code"),
         )

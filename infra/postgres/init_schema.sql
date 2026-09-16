@@ -240,6 +240,7 @@ CREATE TABLE IF NOT EXISTS fills (
     exchange_trade_id VARCHAR(64) NOT NULL,
     basket_id VARCHAR(64) REFERENCES baskets(basket_id),
     symbol VARCHAR(32) REFERENCES instruments(symbol),
+    venue VARCHAR(32) NOT NULL DEFAULT 'binance_global',
     side VARCHAR(8) NOT NULL,
     position_side VARCHAR(8) NOT NULL DEFAULT 'BOTH', -- BOTH, LONG, SHORT
     price NUMERIC(28, 10) NOT NULL,
@@ -252,6 +253,8 @@ CREATE TABLE IF NOT EXISTS fills (
 
 CREATE INDEX IF NOT EXISTS idx_fills_basket ON fills(basket_id);
 CREATE INDEX IF NOT EXISTS idx_fills_executed_at ON fills(executed_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_venue_trade
+    ON fills(venue, exchange_trade_id);
 
 -- 15. Active Positions
 CREATE TABLE IF NOT EXISTS positions (
@@ -412,3 +415,35 @@ CREATE TABLE IF NOT EXISTS execution_leases (
 );
 CREATE INDEX IF NOT EXISTS idx_execution_leases_expiry
     ON execution_leases(lease_until);
+
+-- 25. Durable staged Mainnet launch session.  This is deliberately separate
+-- from the release candidate in Firestore so the Worker can enforce the
+-- one-risk-increasing-order limit across restarts.
+CREATE TABLE IF NOT EXISTS mainnet_launch_sessions (
+    launch_id VARCHAR(128) PRIMARY KEY,
+    approval_id VARCHAR(128) NOT NULL UNIQUE,
+    image_digest VARCHAR(256) NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    policy VARCHAR(32) NOT NULL,
+    max_risk_increasing_orders INTEGER NOT NULL DEFAULT 1,
+    reserved_orders INTEGER NOT NULL DEFAULT 0,
+    submitted_orders INTEGER NOT NULL DEFAULT 0,
+    state VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT mainnet_launch_policy_check
+        CHECK (policy = 'STAGED_FIRST_ORDER'),
+    CONSTRAINT mainnet_launch_limit_check
+        CHECK (max_risk_increasing_orders = 1),
+    CONSTRAINT mainnet_launch_reserved_check
+        CHECK (reserved_orders >= 0 AND reserved_orders <= max_risk_increasing_orders),
+    CONSTRAINT mainnet_launch_submitted_check
+        CHECK (submitted_orders >= 0 AND submitted_orders <= max_risk_increasing_orders),
+    CONSTRAINT mainnet_launch_state_check
+        CHECK (state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED', 'CLOSED'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mainnet_launch_one_active
+    ON mainnet_launch_sessions(symbol)
+    WHERE state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED');
+CREATE INDEX IF NOT EXISTS idx_mainnet_launch_updated
+    ON mainnet_launch_sessions(updated_at);

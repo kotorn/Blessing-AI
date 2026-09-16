@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Protocol, List, Optional, Union
 from domain.enums import EconomicRiskClass
 from domain.models import (
@@ -145,7 +145,21 @@ class InMemoryLedger:
             self.on_order_update(order)
 
     def _get_fill_key(self, fill: ExchangeFill) -> str:
-        return f"{str(fill.symbol).upper()}:{fill.exchange_trade_id}"
+        # Binance trade ids are only unique within an exchange account. Keep
+        # the venue/environment in the in-memory key so a Testnet fill can
+        # never suppress or masquerade as a Mainnet fill after a restart. The
+        # reconciliation phase (BOOTSTRAP vs RECOVERY) is not part of the
+        # exchange identity: the same trade may be observed in both phases.
+        source = str(getattr(fill, "source", "UNKNOWN")).strip().upper() or "UNKNOWN"
+        venue = next(
+            (
+                label
+                for label in ("BINANCE_TESTNET", "BINANCE_MAINNET")
+                if source == label or source.startswith(label + "_")
+            ),
+            source,
+        )
+        return f"{venue}:{str(fill.symbol).upper()}:{fill.exchange_trade_id}"
 
     async def append_fill(self, fill: ExchangeFill) -> None:
         key = self._get_fill_key(fill)
@@ -158,8 +172,18 @@ class InMemoryLedger:
             self.on_fill_update(fill)
         
     async def has_fill(self, deduplication_key: str) -> bool:
-        if ":" in deduplication_key:
-            symbol, trade_id = deduplication_key.split(":", 1)
+        parts = deduplication_key.split(":", 2)
+        if len(parts) == 3:
+            source, symbol, trade_id = parts
+            normalized_source = source.upper()
+            return any(
+                self._get_fill_key(f).split(":", 1)[0] == normalized_source
+                and str(f.symbol).upper() == symbol.upper()
+                and str(f.exchange_trade_id) == trade_id
+                for f in self.fills
+            )
+        if len(parts) == 2:
+            symbol, trade_id = parts
             return any(
                 str(f.symbol).upper() == symbol.upper()
                 and str(f.exchange_trade_id) == trade_id
@@ -336,4 +360,3 @@ class InMemoryLedger:
             position for position in self.positions
             if str(position.symbol).upper() != normalized
         ]
-

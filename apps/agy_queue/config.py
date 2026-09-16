@@ -11,7 +11,7 @@ from .storage import QueuePaths, default_queue_root
 
 DEFAULT_MODEL = "gemini-3.8-flash-medium"
 DEFAULT_EFFORT = "medium"
-DEFAULT_AGY_VERSION = "1.2.3"
+DEFAULT_AGY_VERSION = "1.2.4"
 DEFAULT_PRINT_TIMEOUT = "5m"
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_JOB_TIMEOUT_SEC = 300
@@ -50,6 +50,7 @@ class QueueConfig:
     root: Path
     backend: str = "sqlite"
     agy_exe: Path = Path(r"C:\Users\Kan\AppData\Local\agy\bin\agy.exe")
+    control_plane_url: str = ""
     expected_agy_version: str | None = DEFAULT_AGY_VERSION
     default_model: str = DEFAULT_MODEL
     default_effort: str = DEFAULT_EFFORT
@@ -89,6 +90,7 @@ class QueueConfig:
             root=root,
             backend=backend,
             agy_exe=agy_exe,
+            control_plane_url=os.environ.get("AGY_CONTROL_PLANE_URL", "").strip().rstrip("/"),
             expected_agy_version=expected,
             default_model=_non_empty("AGY_DEFAULT_MODEL", DEFAULT_MODEL),
             default_effort=_non_empty("AGY_DEFAULT_EFFORT", DEFAULT_EFFORT),

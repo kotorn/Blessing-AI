@@ -24,6 +24,7 @@ from apps.trading_worker.persistence.postgres.repositories import (
     InstrumentRulesProvider,
     PersistenceRepository,
 )
+from apps.trading_worker.persistence.postgres.ledger import PostgresExecutionLedger
 from domain.models import ExchangeFill, ExchangePosition, ExecutionOrder, Instrument, RiskSnapshot
 
 logger = logging.getLogger("blessing.persistence.manager")
@@ -192,6 +193,7 @@ class PersistenceManager:
         self._retry_count = 0
         self._unflushed_writes = 0
         self._pending_outbox: Optional[int] = None
+        self._mainnet_launch_session: Optional[dict[str, Any]] = None
 
     @property
     def mode(self) -> PersistenceMode:
@@ -230,6 +232,98 @@ class PersistenceManager:
             raise RuntimeError(
                 "Small Live/Live execution requires PERSISTENCE_MODE=REQUIRED"
             )
+
+    def _require_durable_launch_repository(self) -> PersistenceRepository:
+        if (
+            self.mode is not PersistenceMode.REQUIRED
+            or not self.is_connected
+            or not self.repository
+            or not self.readiness().get("durable")
+        ):
+            raise RuntimeError("Mainnet staged launch requires durable REQUIRED persistence")
+        return self.repository
+
+    async def create_mainnet_launch_session(
+        self,
+        *,
+        approval_id: str,
+        image_digest: str,
+        symbol: str = "ETHUSDC",
+    ) -> dict[str, Any]:
+        repository = self._require_durable_launch_repository()
+        launch_id = f"launch-{approval_id}"
+        session = await repository.create_mainnet_launch_session(
+            launch_id=launch_id,
+            approval_id=approval_id,
+            image_digest=image_digest,
+            symbol=symbol,
+        )
+        self._mainnet_launch_session = dict(session)
+        return dict(session)
+
+    async def reserve_mainnet_risk_order(self, launch_id: str) -> bool:
+        repository = self._require_durable_launch_repository()
+        reserved = await repository.reserve_mainnet_risk_order(launch_id)
+        if reserved:
+            self._mainnet_launch_session = dict(
+                await repository.get_active_mainnet_launch("ETHUSDC") or {}
+            )
+        else:
+            self._record_error("staged Mainnet risk-order reservation was unavailable")
+        return reserved
+
+    async def release_mainnet_risk_order_reservation(self, launch_id: str) -> bool:
+        repository = self._require_durable_launch_repository()
+        released = await repository.release_mainnet_risk_order_reservation(launch_id)
+        self._mainnet_launch_session = dict(
+            await repository.get_active_mainnet_launch("ETHUSDC") or {}
+        )
+        return released
+
+    async def mark_mainnet_risk_order_submitted(self, launch_id: str) -> bool:
+        repository = self._require_durable_launch_repository()
+        marked = await repository.mark_mainnet_risk_order_submitted(launch_id)
+        if not marked:
+            self._record_error("staged Mainnet submission could not be durably marked")
+            return False
+        self._mainnet_launch_session = dict(
+            await repository.get_active_mainnet_launch("ETHUSDC") or {}
+        )
+        return True
+
+    async def mark_mainnet_launch_reconciliation_required(self, launch_id: str) -> bool:
+        repository = self._require_durable_launch_repository()
+        marked = await repository.mark_mainnet_launch_reconciliation_required(launch_id)
+        self._mainnet_launch_session = dict(
+            await repository.get_active_mainnet_launch("ETHUSDC") or {}
+        )
+        return marked
+
+    async def create_execution_ledger(
+        self,
+        *,
+        symbol: str,
+        venue: str,
+    ) -> PostgresExecutionLedger:
+        """Load one fixed exchange scope from the durable SQL ledger.
+
+        Mainnet preflight and the live adapter must not compare Binance state
+        against an empty process-local ledger. Loading is read-only; later
+        observations are persisted through the normal outbox callbacks.
+        """
+
+        if (
+            self.mode is not PersistenceMode.REQUIRED
+            or not self.is_connected
+            or not self.repository
+            or not self.readiness().get("durable")
+        ):
+            raise RuntimeError("durable execution ledger requires REQUIRED persistence")
+        return await PostgresExecutionLedger.load(
+            self.db,
+            symbol=symbol,
+            venue=venue,
+        )
 
     async def start(self) -> bool:
         if self.mode is PersistenceMode.DISABLED:
@@ -340,6 +434,7 @@ class PersistenceManager:
             "retry_count": self._retry_count,
             "unflushed_writes": self._unflushed_writes,
             "last_error": self._last_error,
+            "mainnet_launch_session": self._mainnet_launch_session,
         }
 
     status = readiness
@@ -503,12 +598,18 @@ class PersistenceManager:
         timestamp = (
             fill.event_time if fill.event_time is not None else fill.transaction_time
         )
+        # Exchange trade ids are scoped to a venue/environment. Include the
+        # exchange-derived venue in the outbox identity so Testnet and Mainnet
+        # observations cannot collide in one Cloud SQL account.
+        fill_identity = (
+            f"{instrument.venue}:{str(fill.symbol).upper()}:{fill.exchange_trade_id}"
+        )
         return self._enqueue(
             fill,
             "FILL",
-            idempotency_key=fill.exchange_trade_id,
+            idempotency_key=fill_identity,
             aggregate_type="FILL",
-            aggregate_id=fill.exchange_trade_id,
+            aggregate_id=fill_identity,
             created_at=timestamp,
             instrument=instrument,
         )
@@ -519,15 +620,16 @@ class PersistenceManager:
             return False
         timestamp = _utc(position.event_time)
         position_side = str(_enum_value(position.position_side))
+        venue = str(getattr(position, "source", "")).strip().upper() or "UNKNOWN"
         return self._enqueue(
             position,
             "POSITION",
             idempotency_key=(
-                f"binance_global:{position.symbol.upper()}:{position_side}:"
+                f"{venue}:{position.symbol.upper()}:{position_side}:"
                 f"{timestamp.isoformat()}"
             ),
             aggregate_type="POSITION",
-            aggregate_id=f"binance_global:{position.symbol.upper()}:{position_side}",
+            aggregate_id=f"{venue}:{position.symbol.upper()}:{position_side}",
             created_at=timestamp,
             instrument=instrument,
         )

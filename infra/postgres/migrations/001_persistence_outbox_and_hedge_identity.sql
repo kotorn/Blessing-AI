@@ -10,6 +10,14 @@ ALTER TABLE IF EXISTS fills
 ALTER TABLE IF EXISTS fills
     ADD COLUMN IF NOT EXISTS exchange_order_id VARCHAR(64);
 
+-- Fills need the same fixed environment identity as orders and positions so
+-- a Testnet observation can never be used as Mainnet reconciliation evidence.
+ALTER TABLE IF EXISTS fills
+    ADD COLUMN IF NOT EXISTS venue VARCHAR(32) NOT NULL DEFAULT 'binance_global';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_venue_trade
+    ON fills(venue, exchange_trade_id);
+
 ALTER TABLE IF EXISTS positions
     ADD COLUMN IF NOT EXISTS position_side VARCHAR(8) NOT NULL DEFAULT 'BOTH';
 

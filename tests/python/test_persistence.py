@@ -514,7 +514,7 @@ def test_repositories_use_exchange_rules_and_hedge_position_identity():
         args for query, args in connection.calls if "INSERT INTO positions" in query
     ]
     assert "ON CONFLICT (client_order_id)" in order_query
-    assert "ON CONFLICT (fill_id)" in fill_query
+    assert "ON CONFLICT (venue, exchange_trade_id)" in fill_query
     assert "exchange_trade_id" in fill_query
     assert all("ON CONFLICT (venue, symbol, position_side)" in query for query in position_queries)
     assert [args[2] for args in position_args] == ["LONG", "SHORT"]

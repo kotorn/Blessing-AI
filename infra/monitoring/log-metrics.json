@@ -33,5 +33,45 @@
     "name": "blessing_kill_switch_active",
     "description": "Blessing AI kill switch activation event.",
     "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=kill_switch_active\""
+  },
+  {
+    "name": "blessing_control_plane_auth_failure",
+    "description": "Blessing AI Control Plane rejected an invalid or unauthorized Firebase identity.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-control-plane\" AND textPayload:\"monitor_event=control_plane_auth_failure\""
+  },
+  {
+    "name": "blessing_control_plane_oidc_failure",
+    "description": "Blessing AI Control Plane could not authenticate or reach the Worker with Google OIDC.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-control-plane\" AND textPayload:\"monitor_event=control_plane_oidc_failure\""
+  },
+  {
+    "name": "blessing_agy_queue_depth_high",
+    "description": "Blessing AI AGY durable queue depth exceeded its operational threshold.",
+    "filter": "textPayload:\"monitor_event=agy_queue_depth_high\""
+  },
+  {
+    "name": "blessing_agy_lease_expired",
+    "description": "Blessing AI AGY queue lease expired and required recovery.",
+    "filter": "textPayload:\"monitor_event=agy_lease_expired\""
+  },
+  {
+    "name": "blessing_agy_protocol_failure",
+    "description": "Blessing AI AGY stream protocol or result validation failed.",
+    "filter": "textPayload:\"monitor_event=agy_protocol_failure\""
+  },
+  {
+    "name": "blessing_agy_timeout",
+    "description": "Blessing AI AGY job exceeded its bounded timeout.",
+    "filter": "textPayload:\"monitor_event=agy_timeout\""
+  },
+  {
+    "name": "blessing_ambiguous_order",
+    "description": "Blessing AI Binance order response was ambiguous and requires reconciliation.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=ambiguous_order\""
+  },
+  {
+    "name": "blessing_staged_session_violation",
+    "description": "Blessing AI staged first-order session was missing, exceeded, or not durably marked.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=staged_session_violation\""
   }
 ]

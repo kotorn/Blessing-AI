@@ -86,10 +86,12 @@ describe('control-plane authentication contract', () => {
 
   it('requires verified control-plane authorization for system and quant routes', () => {
     expect(server).toContain('authorizeOperatorRequest');
-    expect(server).toContain("app.use(['/api/system', '/api/quant', '/api/binance']");
+    expect(server).toContain("app.use(['/api/system', '/api/quant', '/api/binance', '/api/release']");
     expect(server).toContain('CONTROL_PLANE_AUTH_REQUIRED');
     expect(server).toContain('CONTROL_PLANE_AUTH_FORBIDDEN');
     expect(server).toContain("requiredRole: ControlPlaneRole");
+    expect(server).toContain('req.baseUrl ||');
+    expect(server).toContain('/api/release/mainnet/approve');
     expect(server.indexOf("app.use(['/api/system', '/api/quant', '/api/binance']")).toBeLessThan(
       server.indexOf("app.get('/api/binance/verify-key'")
     );
@@ -104,6 +106,15 @@ describe('control-plane authentication contract', () => {
     expect(server).toContain('Firebase user tokens never cross this service boundary');
     expect(envExample).toContain('CONTROL_PLANE_SERVICE_ACCOUNT=blessing-control-plane@');
     expect(envExample).toContain('CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL=false');
+  });
+
+  it('keeps Control Plane readiness behind the internal OIDC boundary', () => {
+    expect(server).toContain("app.use('/internal/release'");
+    expect(server).toContain("app.post('/internal/release/readiness'");
+    expect(server).toContain('FIREBASE_ADMIN');
+    expect(server).toContain('RELEASE_STORE');
+    expect(server).toContain('WORKER_OIDC');
+    expect(server).toContain("forwardWorkerRequest('/ready')");
   });
 
   it('maps only verified claims to hierarchical roles', () => {
@@ -136,6 +147,8 @@ describe('control-plane authentication contract', () => {
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/arm', body: { executionMode: 'LIVE' } })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/kill-switch' })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/preflight/read-only' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/quant/backtest/run' })).toBe('viewer');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/quant/ai/research' })).toBe('viewer');
   });
 
   it('does not accept Mainnet credentials through the browser profile store', () => {

@@ -187,6 +187,92 @@ def test_cloud_write_waits_for_authorization_and_verification(tmp_path: Path) ->
     service.close()
 
 
+def test_mainnet_preflight_queue_uses_fixed_control_plane_without_agy(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    job = service.submit(
+        JobRequest(
+            prompt="Run the fixed read-only Mainnet preflight.",
+            repo=str(REPOSITORY_ROOT),
+            kind=JobKind.MAINNET_PREFLIGHT,
+            authorization_ref="release-preflight://candidate-1",
+        )
+    )
+    calls: list[str] = []
+
+    def runner(received: Any) -> dict[str, Any]:
+        calls.append(received.job_id)
+        return {
+            "executionMode": "LIVE",
+            "preflightOnly": True,
+            "preflightPassed": True,
+            "orderSubmissionAttempts": 0,
+            "orderEndpointAttempts": 0,
+            "observedAt": utc_iso(),
+            "checks": [
+                {
+                    "id": "PREFLIGHT",
+                    "name": "fixed",
+                    "required": True,
+                    "status": "PASS",
+                    "message": "OK",
+                }
+            ],
+        }
+
+    worker = QueueWorker(service, worker_id="preflight-worker", preflight_runner=runner)
+    result = worker.run_once()
+    assert result is not None and result.status == JobStatus.SUCCEEDED
+    assert calls == [job.job_id]
+    assert result.result_json is not None
+    assert result.result_json["verification"]["execution_authority"] == "PYTHON_TRADING_WORKER"
+    worker.close()
+    service.close()
+
+
+def test_mainnet_preflight_queue_rejects_non_verified_runner_result(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.submit(
+        JobRequest(
+            prompt="Run the fixed read-only Mainnet preflight.",
+            repo=str(REPOSITORY_ROOT),
+            kind=JobKind.MAINNET_PREFLIGHT,
+            authorization_ref="release-preflight://candidate-2",
+        )
+    )
+    worker = QueueWorker(
+        service,
+        worker_id="preflight-worker",
+        preflight_runner=lambda _job: {
+            "preflightOnly": True,
+            "preflightPassed": False,
+            "orderSubmissionAttempts": 0,
+            "orderEndpointAttempts": 0,
+        },
+    )
+    result = worker.run_once()
+    assert result is not None and result.status == JobStatus.FAILED
+    assert result.error_code == "mainnet_preflight_failed"
+    worker.close()
+    service.close()
+
+
+def test_mainnet_preflight_client_rejects_empty_sanitized_checks() -> None:
+    from apps.agy_queue.preflight import _sanitize_response
+
+    evidence = _sanitize_response(
+        {
+            "preflightOnly": True,
+            "preflightPassed": True,
+            "orderSubmissionAttempts": 0,
+            "orderEndpointAttempts": 0,
+            "checks": [{"id": "", "name": "", "status": "PASS", "message": "ok"}],
+        }
+    )
+    assert evidence["checks"] == []
+
+
 def _fake_inspection() -> AgyCliInspection:
     return AgyCliInspection(
         version="test",
@@ -201,7 +287,7 @@ def test_model_effort_suffix_and_flag_support() -> None:
     assert model_effort_suffix("gemini-3.8-flash-high") == "high"
     assert model_effort_suffix("claude-sonnet-4-6") is None
     assert model_effort_suffix("gpt-oss-120b-medium") == "medium"
-    # Verified against the installed AGY 1.2.3 release: claude-* rejects
+    # Verified against the installed AGY 1.2.4 release: claude-* rejects
     # --effort outright, and suffixed models reject a disagreeing value.
     assert model_accepts_effort_flag("claude-sonnet-4-6") is False
     assert model_accepts_effort_flag("gemini-3.8-flash-high") is False
@@ -854,7 +940,7 @@ def test_stream_session_invalid_cwd_fails_permission(monkeypatch: pytest.MonkeyP
 def test_stream_session_accepts_always_proceed_permission_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # AGY 1.2.3 reports permission_mode="always-proceed" for every real
+    # AGY 1.2.4 reports permission_mode="always-proceed" for every real
     # launch we drive (--sandbox, --mode accept-edits, --mode plan alike);
     # the queue must not reject real jobs on this unverifiable self-report.
     script = tmp_path / "fake_agy_always_proceed.py"

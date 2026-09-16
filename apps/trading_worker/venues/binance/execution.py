@@ -139,6 +139,12 @@ class BinanceExecutionAdapter:
         self.before_order_submission: Optional[
             Callable[[ExecutionOrder], Awaitable[bool]]
         ] = None
+        # The Worker uses this callback to persist the staged first-order
+        # transition. A result other than CONFIRMED is kept in reconciliation
+        # quarantine and never retried blindly.
+        self.on_order_submission_result: Optional[
+            Callable[[ExecutionOrder, str], Awaitable[None]]
+        ] = None
         # Cloud Run and Mainnet always require a distributed lease. Local
         # Testnet tests can opt into the same requirement with an env flag.
         self.execution_lease_required = bool(
@@ -274,6 +280,31 @@ class BinanceExecutionAdapter:
 
     def _worker_authorized(self, authority: object) -> bool:
         return self._worker_authority is not None and authority is self._worker_authority
+
+    async def _notify_order_submission_result(
+        self, order: ExecutionOrder, outcome: str
+    ) -> None:
+        callback = self.on_order_submission_result
+        if callback is None:
+            return
+        try:
+            await callback(order, outcome)
+        except Exception as exc:
+            # A callback failure cannot turn an exchange mutation into a
+            # verified success. Keep the adapter degraded and require the
+            # Worker to reconcile before any further risk increase.
+            self.state = ConnectionState.DEGRADED
+            self.reconciliation.last_status = "UNKNOWN"
+            logger.error(
+                "monitor_event=staged_session_violation order_submission_outcome_persist_failed symbol=%s error_class=%s",
+                order.symbol,
+                type(exc).__name__,
+            )
+            logger.error(
+                "Order submission outcome persistence failed for %s: %s",
+                order.client_order_id,
+                type(exc).__name__,
+            )
 
     def set_execution_lease(
         self, lease: Optional[ExecutionLease], *, required: Optional[bool] = None
@@ -1296,6 +1327,8 @@ class BinanceExecutionAdapter:
             if intent.reduce_only and not self.capabilities.hedge_mode:
                 params["reduceOnly"] = "true"
 
+            planned_order: Optional[ExecutionOrder] = None
+            submission_attempted = False
             try:
                 planned_order = ExecutionOrder(
                     symbol=prepared.symbol,
@@ -1355,6 +1388,7 @@ class BinanceExecutionAdapter:
                 # have been fenced while this order was being prepared.
                 await self._assert_execution_lease(decision.risk_class)
                 self.order_submission_attempts += 1
+                submission_attempted = True
                 response = await self.rest_client.request(
                     "POST", "/fapi/v1/order", signed=True, params=params
                 )
@@ -1365,54 +1399,82 @@ class BinanceExecutionAdapter:
                 )
                 await self.ledger.upsert_order(order)
                 if not await self._post_mutation_reconcile(order, response):
+                    await self._notify_order_submission_result(order, "AMBIGUOUS")
+                    logger.error(
+                        "monitor_event=ambiguous_order environment=%s symbol=%s",
+                        environment_label(self.env),
+                        order.symbol,
+                    )
                     logger.error(
                         "%s order %s acknowledged but not fully verified; keeping execution degraded",
                         environment_label(self.env),
                         client_order_id,
                     )
                     continue
+                await self._notify_order_submission_result(order, "CONFIRMED")
                 executed_orders.append(order)
                 if order.status in ("NEW", "PARTIALLY_FILLED"):
                     reserved_open_orders += 1
                     reserved_notional += prepared.notional
             except BinanceAuthenticationError as exc:
                 self.invalidate_authentication()
+                if planned_order is not None:
+                    await self._notify_order_submission_result(
+                        planned_order, "AMBIGUOUS" if submission_attempted else "REJECTED"
+                    )
                 logger.error("%s authentication failed while submitting %s: %s", environment_label(self.env), client_order_id, exc)
             except (BinanceRateLimitError, BinanceTimestampError) as exc:
+                if planned_order is not None:
+                    await self._notify_order_submission_result(
+                        planned_order, "AMBIGUOUS" if submission_attempted else "REJECTED"
+                    )
                 logger.error("%s mutable request was not submitted: %s", environment_label(self.env), exc)
                 self.state = ConnectionState.DEGRADED
             except BinanceDefinitiveRejection as exc:
                 logger.warning("%s order rejected definitively: %s", environment_label(self.env), exc)
-                await self.ledger.upsert_order(
-                    ExecutionOrder(
-                        symbol=prepared.symbol,
-                        side=intent.side,
-                        quantity=prepared.quantity,
-                        price=prepared.price or prepared.estimated_price,
-                        order_type=prepared.order_type,
-                        client_order_id=client_order_id,
-                        status="REJECTED",
-                        timestamp=utc_now(),
-                        strategy_id=intent.strategy_id,
-                        decision_id=decision.decision_id,
-                        target_exposure_id=decision.target_exposure_id,
-                        source_intent_ids=list(
-                            decision.source_intent_ids or intent.source_intent_ids
-                        ),
-                        risk_class=decision.risk_class,
-                    )
+                rejected_order = ExecutionOrder(
+                    symbol=prepared.symbol,
+                    side=intent.side,
+                    quantity=prepared.quantity,
+                    price=prepared.price or prepared.estimated_price,
+                    order_type=prepared.order_type,
+                    client_order_id=client_order_id,
+                    status="REJECTED",
+                    timestamp=utc_now(),
+                    strategy_id=intent.strategy_id,
+                    decision_id=decision.decision_id,
+                    target_exposure_id=decision.target_exposure_id,
+                    source_intent_ids=list(
+                        decision.source_intent_ids or intent.source_intent_ids
+                    ),
+                    risk_class=decision.risk_class,
                 )
+                await self.ledger.upsert_order(rejected_order)
+                await self._notify_order_submission_result(rejected_order, "REJECTED")
             except LeaseLostError as exc:
+                if planned_order is not None:
+                    await self._notify_order_submission_result(planned_order, "REJECTED")
                 self.state = ConnectionState.DEGRADED
                 logger.error("Order submission fenced before request: %s", exc)
             except (BinanceTransportAmbiguity, BinanceAPIError) as exc:
                 logger.error("%s order response is ambiguous: %s", environment_label(self.env), exc)
+                logger.error(
+                    "monitor_event=ambiguous_order environment=%s symbol=%s",
+                    environment_label(self.env),
+                    prepared.symbol,
+                )
+                if planned_order is not None:
+                    await self._notify_order_submission_result(planned_order, "AMBIGUOUS")
                 recovered = await self._resolve_ambiguous_order(
                     intent, prepared, client_order_id, decision
                 )
                 if recovered is not None:
                     executed_orders.append(recovered)
             except Exception as exc:
+                if planned_order is not None:
+                    await self._notify_order_submission_result(
+                        planned_order, "AMBIGUOUS" if submission_attempted else "REJECTED"
+                    )
                 logger.error("Unexpected %s order execution failure: %s", environment_label(self.env), exc)
                 self.state = ConnectionState.DEGRADED
 

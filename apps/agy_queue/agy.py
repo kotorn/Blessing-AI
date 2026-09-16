@@ -167,7 +167,7 @@ def model_effort_suffix(model: str) -> str | None:
 def model_accepts_effort_flag(model: str) -> bool:
     """Whether AGY accepts a separate --effort flag for this model.
 
-    Verified empirically against the installed AGY 1.2.3 release: every
+    Verified empirically against the installed AGY 1.2.4 release: every
     claude-* model rejects --effort outright, and every Gemini/gpt-oss model
     in the current roster already bakes its tier into the model name
     (-low/-medium/-high) and rejects a --effort value that disagrees with it.
@@ -405,7 +405,7 @@ class AgySession:
         if observed_effort is not None and str(observed_effort) != job.effort:
             raise AgyPermissionError("AGY init effort does not match the queued job")
         permission_mode = str(init.get("permission_mode") or "").strip().lower()
-        # AGY 1.2.3 reports permission_mode="always-proceed" in the init event
+        # AGY 1.2.4 reports permission_mode="always-proceed" in the init event
         # for every launch we drive (--sandbox, --mode accept-edits, --mode
         # plan alike), confirmed empirically against the installed release --
         # it does not reflect the effective restriction in this version. The
@@ -454,6 +454,10 @@ class AgySession:
             self._job = job
         if self._process is None or self._process.stdin is None:
             raise AgyStartupError("AGY stdin is unavailable")
+        # Stderr belongs to one turn.  Keeping an old warning/error marker in a
+        # persistent session would make a later, otherwise valid related job
+        # fail because of an unrelated earlier turn.
+        self._stderr_lines = []
         message = {"event": "user", "message": {"content": job.prompt}}
         try:
             self._process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")

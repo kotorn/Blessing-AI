@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 import uuid
@@ -71,6 +72,10 @@ class ArmRequest(BaseModel):
     strategies: StrategyEnablement = Field(default_factory=StrategyEnablement)
     riskProfile: Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"] = "CONSERVATIVE"
     enforcePreflight: bool = False
+    # LIVE ARM is accepted only with a release-controller approval that has
+    # already been consumed. This is an identifier, never a token or secret.
+    releaseApprovalId: Optional[str] = None
+    launchPolicy: Literal["STAGED_FIRST_ORDER"] = "STAGED_FIRST_ORDER"
 
     @field_validator("instruments")
     @classmethod
@@ -171,6 +176,11 @@ class WorkerRuntimeState(BaseModel):
     provenance: str = "SIMULATED"
     data_source: str = "SIMULATED"
     exchange_environment: str = "NONE"
+    # Non-secret release bindings. Cloud Run's K_REVISION is used until a
+    # release promotion pins WORKER_REVISION to the preflighted source
+    # revision; neither value contains credentials.
+    worker_image_digest: str = ""
+    worker_revision: str = ""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -191,6 +201,9 @@ class WorkerRuntimeState(BaseModel):
     kill_switch_active: bool = False
     pause_new_risk: bool = False
     recovery_only: bool = False
+    # Observable counter used by release approval and staged-launch evidence.
+    # It is incremented only at the Binance REST order boundary.
+    order_submission_attempts: int = 0
 
     # Readiness
     launch_readiness: Optional[LaunchReadiness] = None
@@ -290,6 +303,15 @@ def update_default_heartbeat() -> datetime:
     _DEFAULT_HEARTBEAT_AT = utc_now()
     return _DEFAULT_HEARTBEAT_AT
 
+
+def configured_worker_revision() -> str:
+    """Return the release-bound revision without trusting browser input."""
+
+    return (
+        os.getenv("WORKER_REVISION", "").strip()
+        or os.getenv("K_REVISION", "").strip()
+    )
+
 async def _global_heartbeat_loop(interval_sec: float = 1.0):
     """Background task periodically refreshing heartbeat_at in the worker state for Control Plane liveness."""
     while True:
@@ -348,6 +370,8 @@ def get_default_state() -> WorkerRuntimeState:
         provenance="SIMULATED",
         data_source="SIMULATED",
         exchange_environment="NONE",
+        worker_image_digest=os.getenv("WORKER_IMAGE_DIGEST", "").strip(),
+        worker_revision=configured_worker_revision(),
         engine_state=WorkerEngineState.DISARMED,
         connection_state="DISCONNECTED",
         market_data_healthy=False,
@@ -554,6 +578,7 @@ class TradingWorkerApp:
         self._execution_lease_owner_id = uuid.uuid4().hex
         self._execution_lease_ttl_seconds = 10.0
         self._execution_lease_last_renewed_at = 0.0
+        self._mainnet_launch_id: Optional[str] = None
 
     def _persistence_instrument_rules(self, symbol: str) -> Optional[Instrument]:
         """Expose only exchange-discovered Binance rules to persistence."""
@@ -566,7 +591,7 @@ class TradingWorkerApp:
             return None
         try:
             return rules.to_instrument(
-                venue="binance_global",
+                venue=environment_label(self._current_exchange_environment()),
                 market_type=MarketType.USDM_FUTURES,
             )
         except (TypeError, ValueError, AttributeError) as exc:
@@ -618,6 +643,88 @@ class TradingWorkerApp:
             os.getenv("BINANCE_MAINNET_API_KEY", "").strip()
             and os.getenv("BINANCE_MAINNET_API_SECRET", "").strip()
         )
+
+    async def _before_order_submission(self, order: Any) -> bool:
+        """Apply the durable outbox barrier and staged-launch reservation."""
+
+        risk_class = getattr(order, "risk_class", None)
+        risk_value = getattr(risk_class, "value", risk_class)
+        is_risk_increasing = str(risk_value).upper() in {"NEW_RISK", "INCREASE_RISK"}
+        durable = await self.persistence.ensure_order_durable(order)
+        if not is_risk_increasing or self.execution_mode != WorkerExecutionMode.LIVE:
+            return durable or not is_risk_increasing
+        if not durable:
+            self.pause_new_risk = True
+            self._refresh_engine_state()
+            return False
+        if not self._mainnet_launch_id:
+            self.pause_new_risk = True
+            self._refresh_engine_state()
+            logger.error(
+                "monitor_event=staged_session_violation reason=launch_session_missing"
+            )
+            logger.error("LIVE risk-increasing order blocked: staged launch session is missing")
+            return False
+        try:
+            reserved = await self.persistence.reserve_mainnet_risk_order(self._mainnet_launch_id)
+        except Exception as exc:
+            self.pause_new_risk = True
+            self._refresh_engine_state()
+            logger.error(
+                "monitor_event=staged_session_violation reason=reservation_failed error_class=%s",
+                type(exc).__name__,
+            )
+            logger.error("LIVE staged order reservation failed: %s", type(exc).__name__)
+            return False
+        if not reserved:
+            self.pause_new_risk = True
+            self._refresh_engine_state()
+            logger.warning(
+                "monitor_event=staged_session_violation reason=order_slot_unavailable"
+            )
+            logger.warning("LIVE staged launch has no available risk-increasing order slot")
+            return False
+        return True
+
+    async def _on_order_submission_result(self, order: Any, outcome: str) -> None:
+        """Persist staged outcome and fail closed after the first risk increase."""
+
+        if self.execution_mode != WorkerExecutionMode.LIVE or not self._mainnet_launch_id:
+            return
+        risk_class = getattr(order, "risk_class", None)
+        risk_value = getattr(risk_class, "value", risk_class)
+        if str(risk_value).upper() not in {"NEW_RISK", "INCREASE_RISK"}:
+            return
+        normalized = str(outcome).upper()
+        if normalized == "REJECTED":
+            await self.persistence.release_mainnet_risk_order_reservation(self._mainnet_launch_id)
+            return
+        if normalized == "CONFIRMED":
+            marked = await self.persistence.mark_mainnet_risk_order_submitted(self._mainnet_launch_id)
+            if not marked:
+                self.kill_switch_active = True
+                self.connection_state = ConnectionState.DEGRADED.value
+                self.reconciliation_status = "UNKNOWN"
+                logger.error(
+                    "monitor_event=staged_session_violation reason=submission_mark_failed"
+                )
+                logger.error("LIVE staged order was not durably marked; local kill switch is active")
+                return
+            self.pause_new_risk = True
+            self._refresh_engine_state()
+            logger.warning(
+                "monitor_event=staged_first_order_confirmed pause_new_risk=true"
+            )
+            logger.warning("LIVE staged first risk-increasing order confirmed; new risk is paused")
+            return
+        await self.persistence.mark_mainnet_launch_reconciliation_required(self._mainnet_launch_id)
+        self.pause_new_risk = True
+        self.connection_state = ConnectionState.DEGRADED.value
+        self.reconciliation_status = "UNKNOWN"
+        logger.error(
+            "monitor_event=staged_session_violation reason=ambiguous_outcome"
+        )
+        logger.error("LIVE staged order outcome is ambiguous; reconciliation is required")
 
     def _current_exchange_environment(self) -> BinanceEnvironment:
         return (
@@ -1213,6 +1320,8 @@ class TradingWorkerApp:
             provenance=provenance,
             data_source=data_source,
             exchange_environment=exchange_env,
+            worker_image_digest=os.getenv("WORKER_IMAGE_DIGEST", "").strip(),
+            worker_revision=configured_worker_revision(),
             engine_state=self.engine_state,
             connection_state=self.connection_state,
             market_data_healthy=self.market_data_healthy,
@@ -1224,6 +1333,9 @@ class TradingWorkerApp:
             kill_switch_active=self.kill_switch_active,
             pause_new_risk=self.pause_new_risk,
             recovery_only=self.recovery_only,
+            order_submission_attempts=int(
+                getattr(self.execution_adapter, "order_submission_attempts", 0) or 0
+            ),
             mainnet_credentials_verified=bool(
                 launch_readiness.get("mainnet_credentials_verified", False)
             ),
@@ -1807,6 +1919,7 @@ class TradingWorkerApp:
                 self.recovery_only,
                 tuple(self.symbols),
                 id(self.execution_adapter),
+                int(getattr(self.execution_adapter, "order_submission_attempts", 0) or 0),
                 repr(self.active_configuration),
             )
             adapter: Optional[BinanceExecutionAdapter] = None
@@ -1826,12 +1939,18 @@ class TradingWorkerApp:
             market_fresh = False
             persistence_ready = False
             persistence_error = False
+            durable_ledger = None
+            durable_ledger_error = False
             try:
                 try:
                     persistence = self.persistence.readiness()
+                    pending_outbox = persistence.get("pending_outbox")
+                    failed_writes = persistence.get("failed_writes")
                     persistence_ready = bool(
                         persistence.get("mode") == "REQUIRED"
                         and persistence.get("durable") is True
+                        and (pending_outbox in (None, 0))
+                        and (failed_writes in (None, 0))
                     )
                 except Exception:
                     persistence_error = True
@@ -1843,6 +1962,27 @@ class TradingWorkerApp:
                     if persistence_ready and not persistence_error
                     else "Required persistence is unavailable; preflight evidence is not durable",
                 )
+                ledger_factory = getattr(self.persistence, "create_execution_ledger", None)
+                if credentials_configured and callable(ledger_factory):
+                    try:
+                        durable_ledger = await ledger_factory(
+                            symbol="ETHUSDC",
+                            venue=environment_label(BinanceEnvironment.MAINNET),
+                        )
+                    except Exception as exc:
+                        durable_ledger_error = True
+                        logger.error(
+                            "Mainnet durable ledger snapshot failed: %s",
+                            type(exc).__name__,
+                        )
+                    add_check(
+                        "CHK-PREFLIGHT-DURABLE-LEDGER",
+                        "Durable Mainnet Ledger Snapshot",
+                        durable_ledger is not None and not durable_ledger_error,
+                        "Cloud SQL Mainnet ledger scope was loaded before reconciliation"
+                        if durable_ledger is not None and not durable_ledger_error
+                        else "Cloud SQL Mainnet ledger scope could not be loaded safely",
+                    )
                 add_check(
                     "CHK-PREFLIGHT-KILL-SWITCH",
                     "Kill Switch",
@@ -1852,11 +1992,12 @@ class TradingWorkerApp:
                     else "Kill switch is active",
                 )
 
-                if credentials_configured:
+                if credentials_configured and not durable_ledger_error:
                     adapter = BinanceExecutionAdapter(
                         api_key=os.getenv("BINANCE_MAINNET_API_KEY", ""),
                         api_secret=os.getenv("BINANCE_MAINNET_API_SECRET", ""),
                         env=BinanceEnvironment.MAINNET,
+                        ledger=durable_ledger,
                         preflight_only=True,
                     )
                     connected = await adapter.connect()
@@ -2055,6 +2196,7 @@ class TradingWorkerApp:
                 self.recovery_only,
                 tuple(self.symbols),
                 id(self.execution_adapter),
+                int(getattr(self.execution_adapter, "order_submission_attempts", 0) or 0),
                 repr(self.active_configuration),
             )
             state_unchanged = before_signature == after_signature
@@ -2300,6 +2442,7 @@ class TradingWorkerApp:
         self.authenticated = False
         self.reconciliation_status = "UNKNOWN"
         self.active_configuration = None
+        self._mainnet_launch_id = None
         self.pause_new_risk = False
         self.recovery_only = False
         self.risk_governor.hedge_mode = False
@@ -2323,6 +2466,17 @@ class TradingWorkerApp:
                 return False, "Configuration Preflight Failed: Mainnet credentials are missing from Secret Manager injection."
             if not self._env_flag("MAINNET_LIVE_APPROVED", False):
                 return False, "Mainnet remains disarmed until MAINNET_LIVE_APPROVED=true is set by the release gate."
+            if not req.enforcePreflight:
+                return False, "LIVE ARM requires enforcePreflight=true and a fresh read-only Mainnet preflight."
+            if req.launchPolicy != "STAGED_FIRST_ORDER":
+                return False, "LIVE ARM requires the STAGED_FIRST_ORDER launch policy."
+            release_approval_id = (
+                (req.releaseApprovalId or os.getenv("MAINNET_RELEASE_APPROVAL_ID", "")).strip()
+            )
+            if not re.fullmatch(r"approval-[A-Za-z0-9-]{16,120}", release_approval_id):
+                return False, "LIVE ARM requires a consumed release approval identifier."
+        else:
+            release_approval_id = ""
 
         validation_error = self._validate_arm_request(req)
         if validation_error:
@@ -2340,6 +2494,26 @@ class TradingWorkerApp:
                 "Required persistence is not ready; execution is blocked "
                 "until the transactional outbox is durable."
             )
+
+        # This observation is intentionally performed before the Worker
+        # changes mode, starts its persistent adapter, or acquires an
+        # execution lease. It must pass without changing the lifecycle.
+        if mode == "LIVE":
+            try:
+                preflight = await self.run_mainnet_read_only_preflight()
+            except Exception as exc:
+                return False, f"Mainnet read-only preflight failed: {type(exc).__name__}"
+            if not (
+                preflight.get("preflightPassed") is True
+                and int(preflight.get("orderSubmissionAttempts", -1)) == 0
+                and int(preflight.get("orderEndpointAttempts", -1)) == 0
+            ):
+                failures = [
+                    str(check.get("message", "unknown failure"))
+                    for check in preflight.get("checks", [])
+                    if check.get("status") == "FAIL"
+                ]
+                return False, "LIVE read-only preflight failed: " + "; ".join(failures[:8])
 
         self.symbols = list(req.instruments)
         self.execution_mode = WorkerExecutionMode(mode)
@@ -2377,11 +2551,32 @@ class TradingWorkerApp:
                 ):
                     await self.execution_adapter.close()
                     self.execution_adapter = None
+                # LIVE must always start from the scoped Cloud SQL ledger
+                # loaded for BINANCE_MAINNET. Reusing a process-local or
+                # Testnet ledger would make restart/reconciliation evidence
+                # non-authoritative.
+                if mode == "LIVE" and self.execution_adapter is not None:
+                    await self.execution_adapter.close()
+                    self.execution_adapter = None
                 if self.execution_adapter is None:
+                    durable_ledger = None
+                    if mode == "LIVE":
+                        ledger_factory = getattr(
+                            self.persistence, "create_execution_ledger", None
+                        )
+                        if not callable(ledger_factory):
+                            raise RuntimeError(
+                                "LIVE execution requires a durable Mainnet ledger loader"
+                            )
+                        durable_ledger = await ledger_factory(
+                            symbol="ETHUSDC",
+                            venue=environment_label(exchange_environment),
+                        )
                     self.execution_adapter = BinanceExecutionAdapter(
                         api_key=api_key,
                         api_secret=api_secret,
                         env=exchange_environment,
+                        ledger=durable_ledger,
                     )
 
                 # Bind persistence callbacks on every arm. This also repairs
@@ -2394,7 +2589,10 @@ class TradingWorkerApp:
                 # Risk-increasing exchange mutations must have a durable
                 # transactional-outbox acknowledgement before REST POST.
                 self.execution_adapter.before_order_submission = (
-                    self.persistence.ensure_order_durable
+                    self._before_order_submission
+                )
+                self.execution_adapter.on_order_submission_result = (
+                    self._on_order_submission_result
                 )
                 
                 self.execution_adapter.bind_worker_authority(self)
@@ -2443,6 +2641,30 @@ class TradingWorkerApp:
                 await self._reset_after_failed_exchange_arm()
                 return False, f"{mode} runtime preflight failed: {'; '.join(failures)}"
 
+            if mode == "LIVE":
+                image_digest = os.getenv("WORKER_IMAGE_DIGEST", "").strip()
+                if not re.fullmatch(r".+@sha256:[0-9a-fA-F]{64}", image_digest):
+                    await self._reset_after_failed_exchange_arm()
+                    return False, "LIVE ARM requires the immutable WORKER_IMAGE_DIGEST release input."
+                try:
+                    session = await self.persistence.create_mainnet_launch_session(
+                        approval_id=release_approval_id,
+                        image_digest=image_digest,
+                        symbol="ETHUSDC",
+                    )
+                except Exception as exc:
+                    logger.error("Mainnet staged launch session unavailable: %s", type(exc).__name__)
+                    await self._reset_after_failed_exchange_arm()
+                    return False, "LIVE staged launch session is unavailable; execution remains disarmed."
+                if (
+                    str(session.get("state", "")) != "ACTIVE"
+                    or int(session.get("reserved_orders", 0) or 0) != 0
+                    or int(session.get("submitted_orders", 0) or 0) != 0
+                ):
+                    await self._reset_after_failed_exchange_arm()
+                    return False, "LIVE staged launch session is already used or requires reconciliation."
+                self._mainnet_launch_id = str(session["launch_id"])
+
             self.engine_state = WorkerEngineState.ARMED
             self.active_configuration = req.model_dump()
             logger.info("Worker ARMED in %s mode", mode)
@@ -2485,6 +2707,7 @@ class TradingWorkerApp:
         self.authenticated = False
         self.reconciliation_status = "DISCONNECTED"
         self.active_configuration = None
+        self._mainnet_launch_id = None
         self.pause_new_risk = False
         self.recovery_only = False
         self.risk_governor.hedge_mode = False

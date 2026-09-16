@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Mapping, Optional, Protocol
@@ -18,6 +20,8 @@ from domain.models import (
 )
 
 logger = logging.getLogger("blessing.persistence.repositories")
+
+_IMMUTABLE_IMAGE_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$", re.IGNORECASE)
 
 
 class InstrumentRulesProvider(Protocol):
@@ -77,6 +81,17 @@ def _instrument_payload(instrument: Optional[Instrument]) -> Optional[dict[str, 
     payload = _model_payload(instrument)
     payload["market_type"] = str(_enum_value(instrument.market_type))
     return payload
+
+
+def _fill_storage_id(fill: ExchangeFill, instrument: Instrument) -> str:
+    """Return a bounded id for a venue-scoped exchange trade identity."""
+
+    identity = (
+        f"{instrument.venue}:{str(fill.symbol).upper()}:{fill.exchange_trade_id}"
+    )
+    # fills.fill_id is VARCHAR(64); a digest preserves the complete identity
+    # without truncating an exchange-provided trade id.
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 class PersistenceEvent(Protocol):
@@ -149,16 +164,22 @@ class FillRepository:
         connection: Any,
     ) -> None:
         await _ensure_instrument(connection, instrument)
+        # The exchange trade id is not globally unique across Binance
+        # environments. Store a bounded digest of the canonical venue-scoped
+        # identity while preserving exchange_trade_id as the provider's
+        # original identifier.
+        fill_id = _fill_storage_id(fill, instrument)
         await connection.execute(
             """
             INSERT INTO fills (
                 fill_id, client_order_id, exchange_order_id, exchange_trade_id, symbol, side,
-                position_side, price, quantity, fee, fee_asset, is_maker, executed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-            ON CONFLICT (fill_id) DO UPDATE SET
+                venue, position_side, price, quantity, fee, fee_asset, is_maker, executed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (venue, exchange_trade_id) DO UPDATE SET
                 client_order_id = EXCLUDED.client_order_id,
                 exchange_order_id = EXCLUDED.exchange_order_id,
                 exchange_trade_id = EXCLUDED.exchange_trade_id,
+                venue = EXCLUDED.venue,
                 position_side = EXCLUDED.position_side,
                 price = EXCLUDED.price,
                 quantity = EXCLUDED.quantity,
@@ -167,12 +188,13 @@ class FillRepository:
                 is_maker = EXCLUDED.is_maker,
                 executed_at = EXCLUDED.executed_at
             """,
-            fill.exchange_trade_id,
+            fill_id,
             fill.client_order_id,
             fill.exchange_order_id,
             fill.exchange_trade_id,
             fill.symbol,
             str(_enum_value(fill.side)),
+            instrument.venue,
             str(_enum_value(fill.position_side)),
             fill.price,
             fill.quantity,
@@ -337,6 +359,148 @@ class PersistenceRepository:
         self.positions = PositionRepository(db)
         self.risk = RiskSnapshotRepository(db)
         self.instrument_rules_provider = instrument_rules_provider
+
+    async def create_mainnet_launch_session(
+        self,
+        *,
+        launch_id: str,
+        approval_id: str,
+        image_digest: str,
+        symbol: str = "ETHUSDC",
+        policy: str = "STAGED_FIRST_ORDER",
+        max_risk_increasing_orders: int = 1,
+    ) -> Mapping[str, Any]:
+        """Create or verify the durable staged-launch session.
+
+        Repeating ARM after a process restart is idempotent for the same
+        approval, but it can never reset reserved/submitted order counters.
+        """
+
+        if not launch_id or not approval_id or not image_digest:
+            raise ValueError("launch session identity is incomplete")
+        if not _IMMUTABLE_IMAGE_RE.fullmatch(image_digest):
+            raise ValueError("launch session requires an immutable image digest")
+        if symbol.upper() != "ETHUSDC" or policy != "STAGED_FIRST_ORDER":
+            raise ValueError("Mainnet launch session is bounded to ETHUSDC staged launch")
+        if max_risk_increasing_orders != 1:
+            raise ValueError("Mainnet staged launch permits exactly one risk-increasing order")
+        await self.db.execute(
+            """
+            INSERT INTO mainnet_launch_sessions (
+                launch_id, approval_id, image_digest, symbol, policy,
+                max_risk_increasing_orders, reserved_orders, submitted_orders,
+                state, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (approval_id) DO NOTHING
+            """,
+            launch_id,
+            approval_id,
+            image_digest,
+            symbol.upper(),
+            policy,
+            max_risk_increasing_orders,
+        )
+        row = await self.db.fetchrow(
+            """
+            SELECT launch_id, approval_id, image_digest, symbol, policy,
+                   max_risk_increasing_orders, reserved_orders, submitted_orders,
+                   state, created_at, updated_at
+            FROM mainnet_launch_sessions
+            WHERE approval_id = $1
+            """,
+            approval_id,
+        )
+        if row is None:
+            raise RuntimeError("mainnet launch session could not be read after creation")
+        if (
+            str(row["launch_id"]) != launch_id
+            or str(row["image_digest"]) != image_digest
+            or str(row["symbol"]).upper() != symbol.upper()
+            or str(row["policy"]) != policy
+        ):
+            raise RuntimeError("existing launch session does not match release approval")
+        return dict(row)
+
+    async def reserve_mainnet_risk_order(self, launch_id: str) -> bool:
+        """Atomically reserve the only staged risk-increasing order slot."""
+
+        row = await self.db.fetchrow(
+            """
+            UPDATE mainnet_launch_sessions
+            SET reserved_orders = reserved_orders + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE launch_id = $1
+              AND state = 'ACTIVE'
+              AND submitted_orders = 0
+              AND reserved_orders < max_risk_increasing_orders
+            RETURNING launch_id
+            """,
+            launch_id,
+        )
+        return row is not None
+
+    async def release_mainnet_risk_order_reservation(self, launch_id: str) -> bool:
+        """Release a slot only after a definitive exchange rejection."""
+
+        result = await self.db.execute(
+            """
+            UPDATE mainnet_launch_sessions
+            SET reserved_orders = reserved_orders - 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE launch_id = $1
+              AND state = 'ACTIVE'
+              AND reserved_orders > submitted_orders
+            """,
+            launch_id,
+        )
+        return str(result).upper().startswith("UPDATE 1")
+
+    async def mark_mainnet_risk_order_submitted(self, launch_id: str) -> bool:
+        """Persist first-order submission and pause new risk atomically."""
+
+        row = await self.db.fetchrow(
+            """
+            UPDATE mainnet_launch_sessions
+            SET submitted_orders = submitted_orders + 1,
+                state = 'PAUSED_NEW_RISK',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE launch_id = $1
+              AND state = 'ACTIVE'
+              AND reserved_orders > submitted_orders
+              AND submitted_orders < max_risk_increasing_orders
+            RETURNING launch_id, submitted_orders, state
+            """,
+            launch_id,
+        )
+        return row is not None
+
+    async def mark_mainnet_launch_reconciliation_required(self, launch_id: str) -> bool:
+        result = await self.db.execute(
+            """
+            UPDATE mainnet_launch_sessions
+            SET state = 'RECONCILIATION_REQUIRED', updated_at = CURRENT_TIMESTAMP
+            WHERE launch_id = $1
+              AND state IN ('ACTIVE', 'PAUSED_NEW_RISK')
+            """,
+            launch_id,
+        )
+        return str(result).upper().startswith("UPDATE 1")
+
+    async def get_active_mainnet_launch(self, symbol: str = "ETHUSDC") -> Optional[Mapping[str, Any]]:
+        row = await self.db.fetchrow(
+            """
+            SELECT launch_id, approval_id, image_digest, symbol, policy,
+                   max_risk_increasing_orders, reserved_orders, submitted_orders,
+                   state, created_at, updated_at
+            FROM mainnet_launch_sessions
+            WHERE symbol = $1
+              AND state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED')
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            symbol.upper(),
+        )
+        return dict(row) if row is not None else None
 
     async def append_outbox(self, event: PersistenceEvent) -> bool:
         payload = json.dumps(dict(event.payload), default=_json_default, separators=(",", ":"))
