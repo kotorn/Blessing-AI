@@ -416,34 +416,44 @@ CREATE TABLE IF NOT EXISTS execution_leases (
 CREATE INDEX IF NOT EXISTS idx_execution_leases_expiry
     ON execution_leases(lease_until);
 
--- 25. Durable staged Mainnet launch session.  This is deliberately separate
--- from the release candidate in Firestore so the Worker can enforce the
--- one-risk-increasing-order limit across restarts.
+-- 25. Durable Mainnet launch session.  This is deliberately separate from the
+-- release candidate in Firestore so the Worker can enforce staged and
+-- autonomous lifecycle state across restarts.
 CREATE TABLE IF NOT EXISTS mainnet_launch_sessions (
     launch_id VARCHAR(128) PRIMARY KEY,
     approval_id VARCHAR(128) NOT NULL UNIQUE,
     image_digest VARCHAR(256) NOT NULL,
     symbol VARCHAR(32) NOT NULL,
     policy VARCHAR(32) NOT NULL,
-    max_risk_increasing_orders INTEGER NOT NULL DEFAULT 1,
+    max_risk_increasing_orders INTEGER DEFAULT 1,
     reserved_orders INTEGER NOT NULL DEFAULT 0,
     submitted_orders INTEGER NOT NULL DEFAULT 0,
     state VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+    continuation_approval_id VARCHAR(128),
+    first_order_verified_at TIMESTAMPTZ,
+    autonomous_approved_at TIMESTAMPTZ,
+    last_restart_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT mainnet_launch_policy_check
-        CHECK (policy = 'STAGED_FIRST_ORDER'),
+        CHECK (policy IN ('STAGED_FIRST_ORDER', 'AUTONOMOUS_AFTER_REVIEW')),
     CONSTRAINT mainnet_launch_limit_check
-        CHECK (max_risk_increasing_orders = 1),
+        CHECK (
+            (policy = 'STAGED_FIRST_ORDER' AND max_risk_increasing_orders = 1)
+            OR (policy = 'AUTONOMOUS_AFTER_REVIEW' AND max_risk_increasing_orders IS NULL)
+        ),
     CONSTRAINT mainnet_launch_reserved_check
-        CHECK (reserved_orders >= 0 AND reserved_orders <= max_risk_increasing_orders),
+        CHECK (reserved_orders >= 0 AND (max_risk_increasing_orders IS NULL OR reserved_orders <= max_risk_increasing_orders)),
     CONSTRAINT mainnet_launch_submitted_check
-        CHECK (submitted_orders >= 0 AND submitted_orders <= max_risk_increasing_orders),
+        CHECK (submitted_orders >= 0 AND (max_risk_increasing_orders IS NULL OR submitted_orders <= max_risk_increasing_orders)),
     CONSTRAINT mainnet_launch_state_check
-        CHECK (state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED', 'CLOSED'))
+        CHECK (state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED', 'AUTONOMOUS_ACTIVE', 'REAUTH_REQUIRED', 'CLOSED'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mainnet_launch_one_active
     ON mainnet_launch_sessions(symbol)
-    WHERE state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED');
+    WHERE state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED', 'AUTONOMOUS_ACTIVE', 'REAUTH_REQUIRED');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mainnet_launch_continuation_approval
+    ON mainnet_launch_sessions(continuation_approval_id)
+    WHERE continuation_approval_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_mainnet_launch_updated
     ON mainnet_launch_sessions(updated_at);

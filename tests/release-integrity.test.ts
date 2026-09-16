@@ -9,6 +9,11 @@ const cloudBuild = readFileSync(resolve(process.cwd(), 'cloudbuild.yaml'), 'utf8
 const controlPlaneDockerfile = readFileSync(resolve(process.cwd(), 'Dockerfile.control-plane'), 'utf8');
 const controlPlaneCloudBuild = readFileSync(resolve(process.cwd(), 'cloudbuild-control-plane.yaml'), 'utf8');
 const controlPlaneDeploy = readFileSync(resolve(process.cwd(), 'infra/cloudrun/deploy-control-plane.ps1'), 'utf8');
+const controlPlaneBootstrap = readFileSync(resolve(process.cwd(), 'infra/cloudrun/deploy-control-plane-bootstrap.ps1'), 'utf8');
+const controlPlaneTransport = readFileSync(resolve(process.cwd(), 'infra/cloudrun/configure-control-plane-transport.ps1'), 'utf8');
+const continuationVerification = readFileSync(resolve(process.cwd(), 'infra/cloudrun/verify-continuation.ps1'), 'utf8');
+const identityProvisioning = readFileSync(resolve(process.cwd(), 'infra/cloudrun/provision-release-identities.ps1'), 'utf8');
+const releaseModule = readFileSync(resolve(process.cwd(), 'src/backend/release.ts'), 'utf8');
 const releaseControllerCloudBuild = readFileSync(resolve(process.cwd(), 'cloudbuild-release-controller.yaml'), 'utf8');
 const releaseController = readFileSync(resolve(process.cwd(), 'infra/cloudrun/release_controller.py'), 'utf8');
 const candidateCreator = readFileSync(resolve(process.cwd(), 'infra/cloudrun/create-release-candidate.ps1'), 'utf8');
@@ -57,6 +62,7 @@ describe('release integrity contract', () => {
     expect(liveDisarmedVerification).toContain('ExpectedMainnetLiveApproved $ExpectedMainnetLiveApproved');
     expect(liveDisarmedVerification).toContain('engineState -ne "DISARMED"');
     expect(liveDisarmedVerification).toContain('orderSubmissionAttempts');
+    expect(liveDisarmedVerification).toContain('$runtime.state.secretVersions');
     expect(liveDisarmedVerification).not.toContain('/arm');
   });
 
@@ -71,6 +77,29 @@ describe('release integrity contract', () => {
     expect(controlPlaneDeploy).toContain('@sha256:[0-9a-fA-F]{64}$');
     expect(controlPlaneDeploy).toContain('CONTROL_PLANE_ALLOWED_SERVICE_ACCOUNTS');
     expect(controlPlaneDeploy).not.toContain('BINANCE_MAINNET_API_SECRET');
+    expect(controlPlaneDeploy).not.toContain('--allow-unauthenticated');
+    expect(controlPlaneBootstrap).toContain('--no-traffic');
+    expect(controlPlaneBootstrap).toContain('status.url');
+    expect(controlPlaneBootstrap).toContain('deploy-control-plane.ps1');
+    expect(controlPlaneBootstrap).toContain('@sha256:[0-9a-fA-F]{64}$');
+    expect(identityProvisioning).toContain('gcp-sa-cloudbuild.iam.gserviceaccount.com');
+    expect(identityProvisioning).not.toContain('run.services.setIamPolicy');
+    expect(controlPlaneTransport).toContain('allUsers');
+    expect(controlPlaneTransport).toContain('Control Plane');
+    expect(controlPlaneTransport).not.toContain('blessing-trading-worker');
+  });
+
+  it('provides read-only continuation evidence through the fixed OIDC boundary', () => {
+    expect(continuationVerification).toContain('auth print-identity-token');
+    expect(continuationVerification).toContain('/internal/release/continuation-readiness');
+    expect(continuationVerification).toContain('evidence_status');
+    expect(continuationVerification).toContain('preflightOrderEndpointAttempts');
+    expect(continuationVerification).toContain('preflightOrderSubmissionAttempts');
+    expect(continuationVerification).toContain('mainnetLiveApproved');
+    expect(continuationVerification).toContain('$result.secretVersions');
+    expect(continuationVerification).not.toContain('/arm');
+    expect(continuationVerification).not.toContain('/continue');
+    expect(continuationVerification).not.toContain('place-order');
   });
 
   it('runs the release controller only from an immutable attached-identity build', () => {
@@ -95,6 +124,7 @@ describe('release integrity contract', () => {
     expect(releaseController).toContain('promoted Worker revision');
     expect(releaseController).toContain('MAINNET_LAUNCH_POLICY=STAGED_FIRST_ORDER');
     expect(releaseController).toContain('--no-allow-unauthenticated');
+    expect(releaseController).toContain('/internal/release/verify');
     expect(releaseController).toContain('/internal/release/readiness');
     expect(releaseController).toContain('engineState');
     expect(releaseController).toContain('DISARMED');
@@ -124,5 +154,21 @@ describe('release integrity contract', () => {
     expect(server).toContain("workerState.worker_image_digest");
     expect(server).toContain("workerState.worker_revision");
     expect(server).toContain('RELEASE_CANDIDATE_RUNTIME_MISMATCH');
+    expect(server).toContain('secretVersionsMatch(candidate.secretVersions');
+  });
+
+  it('keeps autonomous continuation behind a second one-time approval', () => {
+    expect(server).toContain("/api/release/mainnet/continuation/approve");
+    expect(server).toContain("/api/system/continue");
+    expect(server).toContain("/internal/release/continuation-readiness");
+    expect(server).toContain('claimContinuationApproval');
+    expect(server).toContain('consumeContinuationApproval');
+    expect(server).toContain('AUTONOMOUS_CONTINUATION_ACTIVATED');
+    expect(server).toContain('rollbackAutonomousContinuation');
+    expect(server).toContain('CONTINUATION_APPROVAL_CONSUME_FAILED');
+    expect(server).toContain('rollbackVerified');
+    expect(releaseModule).toContain('AUTONOMOUS_AFTER_REVIEW');
+    expect(server).toContain('MAINNET_LIVE_APPROVED');
+    expect(server).toContain('DISARMED');
   });
 });

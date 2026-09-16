@@ -10,7 +10,8 @@ and must leave the Worker `DISARMED` when evidence is missing or stale.
 - Region: `asia-southeast1`
 - Symbol: `ETHUSDC` USDⓈ-M perpetual
 - SQL: `blessing-sql-primary` / `blessing_trading`
-- Release policy: `STAGED_FIRST_ORDER`
+- Initial release policy: `STAGED_FIRST_ORDER`
+- Continuation policy: `AUTONOMOUS_AFTER_REVIEW`
 - Collateral: at most 100 USDC
 - Gross exposure: at most 1,000 USDC
 - First order: at most 50 USDC notional
@@ -55,6 +56,17 @@ this repository. Secret Manager values are injected only into the Worker.
 Deploy the Control Plane with an immutable image digest and no Binance or SQL
 secret injection. It may have public transport for the SPA, but protected
 routes must require server-verified Firebase claims. Run:
+
+If browser access to the SPA is required, configure public transport as a
+separate administrator IAM operation after deployment. This does not grant any
+public access to the Trading Worker:
+
+```powershell
+.\infra\cloudrun\configure-control-plane-transport.ps1 `
+  -ProjectId gen-lang-client-0730128480 `
+  -Region asia-southeast1 `
+  -Apply
+```
 
 ```powershell
 .\infra\cloudrun\verify-control-plane-auth.ps1 `
@@ -186,9 +198,49 @@ Before any additional risk-increasing order, independently verify:
 5. monitoring events and alert delivery are visible.
 
 Continuing beyond the first order requires a second explicit `trading_admin`
-approval. A kill switch always uses the direct Control Plane route and does not
-wait for AGY. Rollback is: kill switch, reconcile, pause/disarm, route to a
-known disarmed digest, set approval false, and read back the final state.
+approval. The continuation approval is one-time, expires, and is bound to the
+candidate, launch session, initial approval, image digest, Worker revision,
+secret versions, first-order evidence hash, fresh preflight, reconciliation
+status, requester UID, and nonce. It never stores a token or secret.
+
+Create and inspect continuation evidence through the Control Plane. The
+Release Controller identity can run the read-only verification helper:
+
+```powershell
+.\infra\cloudrun\verify-continuation.ps1 `
+  -ControlPlaneUrl 'https://<control-plane-host>' `
+  -LaunchId '<durable-launch-id>'
+```
+
+The helper must report `VERIFIED`, `PAUSED_NEW_RISK` or `REAUTH_REQUIRED`, a
+durable first-order count of at least one, `IN_SYNC` reconciliation, and zero
+preflight order endpoint/submission attempts. It never calls `/arm`,
+`/continue`, or any Binance mutation endpoint.
+
+Only after that evidence is independently checked may the verified Firebase
+`trading_admin` approve `POST /api/release/mainnet/continuation/approve`.
+The Control Plane then verifies the one-time approval and forwards
+`POST /continue` to the Worker through Google-signed OIDC. The Worker performs
+an atomic SQL transition to `AUTONOMOUS_ACTIVE`; the Control Plane verifies the
+returned digest, revision, `LIVE`, `ARMED`, and continuation ID before marking
+the approval consumed.
+
+An autonomous process restart or Cloud Run revision change always fences the
+durable session as `REAUTH_REQUIRED` and starts the Worker `DISARMED`. It must
+obtain fresh preflight evidence and a new continuation approval; it never
+resumes from process memory or an old conversation automatically.
+
+Once `AUTONOMOUS_ACTIVE`, each risk-increasing decision still checks fresh
+private stream, account snapshot, reconciliation, durable persistence, the
+execution lease, kill switch, market data, and all hard caps. Carry remains
+fail-closed until live fee/funding/spread/slippage/holding-horizon economics
+are evidenced.
+
+A kill switch always uses the direct Control Plane route and does not wait for
+AGY. Rollback is: kill switch, reconcile, pause/disarm, route to a known
+disarmed digest, set approval false, and read back the final state. The first
+order and continuation are separate release actions; repository implementation
+and read-only preflight never send an order.
 
 ## Stop conditions
 

@@ -199,6 +199,10 @@ export function requiredControlPlaneRole(req: ControlPlaneRequestLike): ControlP
 
   if (route.endsWith('/release/mainnet/approve')) return 'trading_admin';
 
+  if (route.endsWith('/release/mainnet/continuation/approve')) return 'trading_admin';
+
+  if (route.endsWith('/system/continue')) return 'trading_admin';
+
   if (route.endsWith('/preflight/read-only')) return 'trading_admin';
 
   // These POST routes execute deterministic research/read operations. They

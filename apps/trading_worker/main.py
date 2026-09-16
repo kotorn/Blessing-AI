@@ -83,6 +83,38 @@ class ArmRequest(BaseModel):
         return [str(symbol).strip().upper() for symbol in instruments if str(symbol).strip()]
 
 
+class ContinuationRequest(BaseModel):
+    """One-time, server-authorized transition from staged to autonomous LIVE."""
+
+    model_config = ConfigDict(extra="forbid")
+    executionMode: Literal["LIVE"] = "LIVE"
+    instruments: List[str] = Field(default_factory=lambda: ["ETHUSDC"])
+    strategies: StrategyEnablement = Field(default_factory=StrategyEnablement)
+    riskProfile: Literal["CONSERVATIVE", "BALANCED", "AGGRESSIVE"] = "CONSERVATIVE"
+    enforcePreflight: bool = True
+    continuationApprovalId: str
+    launchId: str
+    # The Control Plane normally resolves this from the durable staged row.
+    # Supplying it lets the Worker bind the continuation to the original
+    # release approval without accepting any token or secret.
+    initialApprovalId: Optional[str] = None
+
+    @field_validator("instruments")
+    @classmethod
+    def normalize_instruments(cls, instruments: List[str]) -> List[str]:
+        return [str(symbol).strip().upper() for symbol in instruments if str(symbol).strip()]
+
+    @field_validator("continuationApprovalId", "launchId", "initialApprovalId")
+    @classmethod
+    def validate_identifiers(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{7,127}", normalized):
+            raise ValueError("launch identifiers must be opaque bounded identifiers")
+        return normalized
+
+
 class ToggleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     active: bool = True
@@ -111,6 +143,10 @@ class WorkerEngineState(str, Enum):
     RECOVERY_ONLY = "RECOVERY_ONLY"
     DEGRADED = "DEGRADED"
     EMERGENCY = "EMERGENCY"
+
+
+MAINNET_LAUNCH_STAGED = "STAGED_FIRST_ORDER"
+MAINNET_LAUNCH_AUTONOMOUS = "AUTONOMOUS_AFTER_REVIEW"
 
 
 # These states may process an already-approved decision.  The decision gate
@@ -160,6 +196,10 @@ class LaunchReadiness(BaseModel):
     mainnet_account_risk_ready: bool = False
     mainnet_preflight_ready: bool = False
     mainnet_autonomous_ready: bool = False
+    mainnet_launch_policy: Optional[str] = None
+    mainnet_launch_id: Optional[str] = None
+    mainnet_launch_state: Optional[str] = None
+    mainnet_continuation_approval_id: Optional[str] = None
     persistence: Dict[str, Any] = Field(default_factory=dict)
 
 class WorkerRuntimeState(BaseModel):
@@ -181,6 +221,9 @@ class WorkerRuntimeState(BaseModel):
     # revision; neither value contains credentials.
     worker_image_digest: str = ""
     worker_revision: str = ""
+    # Numeric Secret Manager version metadata only.  Values are never exposed
+    # and the secret payloads remain injected directly by Cloud Run.
+    secret_versions: Dict[str, str] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="ignore")
 
@@ -212,6 +255,10 @@ class WorkerRuntimeState(BaseModel):
     mainnet_credentials_verified: bool = False
     mainnet_live_approved: bool = False
     mainnet_preflight_ready: bool = False
+    mainnet_launch_policy: Optional[str] = None
+    mainnet_launch_id: Optional[str] = None
+    mainnet_launch_state: Optional[str] = None
+    mainnet_continuation_approval_id: Optional[str] = None
 
     # Configuration Details & Versioning
     config_version: str = "v0.2.0-beta"
@@ -312,6 +359,20 @@ def configured_worker_revision() -> str:
         or os.getenv("K_REVISION", "").strip()
     )
 
+
+def configured_secret_versions() -> Dict[str, str]:
+    """Return only numeric Secret Manager version metadata, never values."""
+
+    values = {
+        "sql": os.getenv("CLOUD_SQL_PASSWORD_VERSION", "").strip(),
+        "apiKey": os.getenv("BINANCE_MAINNET_API_KEY_VERSION", "").strip(),
+        "apiSecret": os.getenv("BINANCE_MAINNET_API_SECRET_VERSION", "").strip(),
+    }
+    return {
+        key: value if re.fullmatch(r"[1-9][0-9]*", value) else ""
+        for key, value in values.items()
+    }
+
 async def _global_heartbeat_loop(interval_sec: float = 1.0):
     """Background task periodically refreshing heartbeat_at in the worker state for Control Plane liveness."""
     while True:
@@ -372,6 +433,7 @@ def get_default_state() -> WorkerRuntimeState:
         exchange_environment="NONE",
         worker_image_digest=os.getenv("WORKER_IMAGE_DIGEST", "").strip(),
         worker_revision=configured_worker_revision(),
+        secret_versions=configured_secret_versions(),
         engine_state=WorkerEngineState.DISARMED,
         connection_state="DISCONNECTED",
         market_data_healthy=False,
@@ -383,6 +445,10 @@ def get_default_state() -> WorkerRuntimeState:
         kill_switch_active=False,
         pause_new_risk=False,
         recovery_only=False,
+        mainnet_launch_policy=None,
+        mainnet_launch_id=None,
+        mainnet_launch_state=None,
+        mainnet_continuation_approval_id=None,
         heartbeat_at=now,
         health_indicators=health,
         config_version="v0.2.0-beta",
@@ -461,6 +527,33 @@ def get_readiness_endpoint():
         raise HTTPException(status_code=503, detail="Worker not initialized")
     return WORKER_ENGINE.get_launch_readiness()
 
+@app.post("/continuation/readiness")
+async def continuation_readiness_endpoint(launch_id: Optional[str] = None):
+    """Verify first-order evidence without activating autonomous execution."""
+
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    runner = getattr(WORKER_ENGINE, "run_mainnet_continuation_readiness", None)
+    if not callable(runner):
+        raise HTTPException(status_code=503, detail="Autonomous continuation is unavailable")
+    return await runner(launch_id=launch_id)
+
+@app.post("/continue")
+async def continue_endpoint(config: ContinuationRequest):
+    """Activate autonomous continuation only after a verified approval."""
+
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    runner = getattr(WORKER_ENGINE, "continue_autonomous", None)
+    if not callable(runner):
+        raise HTTPException(status_code=503, detail="Autonomous continuation is unavailable")
+    success, message = await runner(config)
+    if not success:
+        raise HTTPException(status_code=409, detail=message)
+    state = WORKER_ENGINE.get_state().model_dump()
+    state["status"] = "AUTONOMOUS_ACTIVE"
+    return state
+
 @app.post("/disarm")
 async def disarm():
     if not WORKER_ENGINE:
@@ -488,7 +581,12 @@ async def read_only_preflight_endpoint():
 async def pause_new_risk_endpoint(req: ToggleRequest):
     if not WORKER_ENGINE:
         raise HTTPException(status_code=503, detail="Worker not initialized")
-    await WORKER_ENGINE.set_pause_new_risk(req.active)
+    accepted = await WORKER_ENGINE.set_pause_new_risk(req.active)
+    if accepted is False:
+        raise HTTPException(
+            status_code=409,
+            detail="LIVE new-risk pause can only be cleared by an approved autonomous continuation",
+        )
     return {
         "status": "ok",
         "active": req.active,
@@ -579,6 +677,60 @@ class TradingWorkerApp:
         self._execution_lease_ttl_seconds = 10.0
         self._execution_lease_last_renewed_at = 0.0
         self._mainnet_launch_id: Optional[str] = None
+        self._mainnet_launch_session: Optional[dict[str, Any]] = None
+
+    def _set_mainnet_launch_session(self, session: Optional[dict[str, Any]]) -> None:
+        """Project durable launch identity into the process-local API state."""
+
+        self._mainnet_launch_session = dict(session) if session else None
+        if session:
+            launch_id = session.get("launch_id")
+            self._mainnet_launch_id = str(launch_id) if launch_id else None
+        else:
+            self._mainnet_launch_id = None
+
+    def _launch_session_value(self, key: str, default: Any = None) -> Any:
+        if self._mainnet_launch_session is None:
+            return default
+        return self._mainnet_launch_session.get(key, default)
+
+    async def _fence_autonomous_launch(self, reason: str) -> bool:
+        """Move an active autonomous launch behind fresh authorization.
+
+        This is used by restart, DISARM, kill-switch, and failed continuation
+        paths. It never resumes trading; failure to persist the fence clears
+        the process-local identity and leaves the Worker blocked.
+        """
+
+        if not (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and self._launch_session_value("policy") == MAINNET_LAUNCH_AUTONOMOUS
+            and self._launch_session_value("state") == "AUTONOMOUS_ACTIVE"
+        ):
+            return True
+
+        launch_id = self._mainnet_launch_id
+        try:
+            fenced = await self.persistence.mark_mainnet_launches_reauth_required()
+            session = await self.persistence.get_mainnet_launch_session(launch_id)
+            if not session or session.get("state") != "REAUTH_REQUIRED":
+                raise RuntimeError("durable launch fence was not read back as REAUTH_REQUIRED")
+            self._set_mainnet_launch_session(session)
+            logger.warning(
+                "monitor_event=autonomous_launch_fenced reason=%s launch_id=%s changed=%s",
+                reason,
+                launch_id or "unknown",
+                fenced,
+            )
+            return True
+        except Exception as exc:
+            logger.error(
+                "Unable to durably fence autonomous launch reason=%s: %s",
+                reason,
+                type(exc).__name__,
+            )
+            self._set_mainnet_launch_session(None)
+            return False
 
     def _persistence_instrument_rules(self, symbol: str) -> Optional[Instrument]:
         """Expose only exchange-discovered Binance rules to persistence."""
@@ -645,7 +797,7 @@ class TradingWorkerApp:
         )
 
     async def _before_order_submission(self, order: Any) -> bool:
-        """Apply the durable outbox barrier and staged-launch reservation."""
+        """Apply the durable outbox barrier and launch-session reservation."""
 
         risk_class = getattr(order, "risk_class", None)
         risk_value = getattr(risk_class, "value", risk_class)
@@ -661,9 +813,28 @@ class TradingWorkerApp:
             self.pause_new_risk = True
             self._refresh_engine_state()
             logger.error(
-                "monitor_event=staged_session_violation reason=launch_session_missing"
+                "monitor_event=launch_session_violation reason=launch_session_missing"
             )
-            logger.error("LIVE risk-increasing order blocked: staged launch session is missing")
+            logger.error("LIVE risk-increasing order blocked: durable launch session is missing")
+            return False
+        launch_policy = str(
+            self._launch_session_value("policy", MAINNET_LAUNCH_STAGED)
+        )
+        launch_state = str(self._launch_session_value("state", ""))
+        if launch_policy == MAINNET_LAUNCH_AUTONOMOUS and launch_state != "AUTONOMOUS_ACTIVE":
+            self.pause_new_risk = True
+            self._refresh_engine_state()
+            logger.error(
+                "monitor_event=autonomous_resume_denied reason=launch_state_%s",
+                launch_state or "unknown",
+            )
+            return False
+        if launch_policy not in {MAINNET_LAUNCH_STAGED, MAINNET_LAUNCH_AUTONOMOUS}:
+            self.pause_new_risk = True
+            self._refresh_engine_state()
+            logger.error(
+                "monitor_event=launch_session_violation reason=unknown_launch_policy"
+            )
             return False
         try:
             reserved = await self.persistence.reserve_mainnet_risk_order(self._mainnet_launch_id)
@@ -671,23 +842,23 @@ class TradingWorkerApp:
             self.pause_new_risk = True
             self._refresh_engine_state()
             logger.error(
-                "monitor_event=staged_session_violation reason=reservation_failed error_class=%s",
+                "monitor_event=launch_session_violation reason=reservation_failed error_class=%s",
                 type(exc).__name__,
             )
-            logger.error("LIVE staged order reservation failed: %s", type(exc).__name__)
+            logger.error("LIVE order reservation failed: %s", type(exc).__name__)
             return False
         if not reserved:
             self.pause_new_risk = True
             self._refresh_engine_state()
             logger.warning(
-                "monitor_event=staged_session_violation reason=order_slot_unavailable"
+                "monitor_event=launch_session_violation reason=order_slot_unavailable"
             )
-            logger.warning("LIVE staged launch has no available risk-increasing order slot")
+            logger.warning("LIVE launch has no available risk-increasing order slot")
             return False
         return True
 
     async def _on_order_submission_result(self, order: Any, outcome: str) -> None:
-        """Persist staged outcome and fail closed after the first risk increase."""
+        """Persist order outcome and preserve the autonomous lifecycle."""
 
         if self.execution_mode != WorkerExecutionMode.LIVE or not self._mainnet_launch_id:
             return
@@ -706,25 +877,32 @@ class TradingWorkerApp:
                 self.connection_state = ConnectionState.DEGRADED.value
                 self.reconciliation_status = "UNKNOWN"
                 logger.error(
-                    "monitor_event=staged_session_violation reason=submission_mark_failed"
+                    "monitor_event=launch_session_violation reason=submission_mark_failed"
                 )
-                logger.error("LIVE staged order was not durably marked; local kill switch is active")
+                logger.error("LIVE order was not durably marked; local kill switch is active")
                 return
-            self.pause_new_risk = True
-            self._refresh_engine_state()
-            logger.warning(
-                "monitor_event=staged_first_order_confirmed pause_new_risk=true"
-            )
-            logger.warning("LIVE staged first risk-increasing order confirmed; new risk is paused")
+            if self._launch_session_value("policy", MAINNET_LAUNCH_STAGED) == MAINNET_LAUNCH_STAGED:
+                self.pause_new_risk = True
+                self._refresh_engine_state()
+                logger.warning(
+                    "monitor_event=staged_first_order_confirmed pause_new_risk=true"
+                )
+                logger.warning("LIVE staged first risk-increasing order confirmed; new risk is paused")
+            else:
+                self.pause_new_risk = False
+                self._refresh_engine_state()
+                logger.info(
+                    "monitor_event=autonomous_order_confirmed launch_state=AUTONOMOUS_ACTIVE"
+                )
             return
         await self.persistence.mark_mainnet_launch_reconciliation_required(self._mainnet_launch_id)
         self.pause_new_risk = True
         self.connection_state = ConnectionState.DEGRADED.value
         self.reconciliation_status = "UNKNOWN"
         logger.error(
-            "monitor_event=staged_session_violation reason=ambiguous_outcome"
+            "monitor_event=launch_session_violation reason=ambiguous_outcome"
         )
-        logger.error("LIVE staged order outcome is ambiguous; reconciliation is required")
+        logger.error("LIVE order outcome is ambiguous; reconciliation is required")
 
     def _current_exchange_environment(self) -> BinanceEnvironment:
         return (
@@ -1322,6 +1500,7 @@ class TradingWorkerApp:
             exchange_environment=exchange_env,
             worker_image_digest=os.getenv("WORKER_IMAGE_DIGEST", "").strip(),
             worker_revision=configured_worker_revision(),
+            secret_versions=configured_secret_versions(),
             engine_state=self.engine_state,
             connection_state=self.connection_state,
             market_data_healthy=self.market_data_healthy,
@@ -1344,6 +1523,22 @@ class TradingWorkerApp:
             ),
             mainnet_preflight_ready=bool(
                 launch_readiness.get("mainnet_preflight_ready", False)
+            ),
+            mainnet_launch_policy=(
+                str(self._launch_session_value("policy"))
+                if self._launch_session_value("policy") is not None
+                else None
+            ),
+            mainnet_launch_id=self._mainnet_launch_id,
+            mainnet_launch_state=(
+                str(self._launch_session_value("state"))
+                if self._launch_session_value("state") is not None
+                else None
+            ),
+            mainnet_continuation_approval_id=(
+                str(self._launch_session_value("continuation_approval_id"))
+                if self._launch_session_value("continuation_approval_id") is not None
+                else None
             ),
             heartbeat_at=self.heartbeat_at,
             health_indicators=health,
@@ -1379,7 +1574,7 @@ class TradingWorkerApp:
             and market_data_fresh
             and not self.kill_switch_active
         )
-        mainnet_ready = (
+        mainnet_preflight_ready = (
             self.execution_mode == WorkerExecutionMode.LIVE
             and mainnet_configured
             and self._env_flag("MAINNET_LIVE_APPROVED", False)
@@ -1394,6 +1589,15 @@ class TradingWorkerApp:
             and market_data_fresh
             and self.persistence.readiness()["durable"]
             and not self.kill_switch_active
+        )
+        launch_session = self.persistence.readiness().get("mainnet_launch_session") or self._mainnet_launch_session
+        mainnet_ready = bool(
+            mainnet_preflight_ready
+            and isinstance(launch_session, dict)
+            and launch_session.get("policy") == MAINNET_LAUNCH_AUTONOMOUS
+            and launch_session.get("state") == "AUTONOMOUS_ACTIVE"
+            and self.engine_state == WorkerEngineState.ARMED
+            and not self.pause_new_risk
         )
         return {
             "paper": True,
@@ -1417,7 +1621,7 @@ class TradingWorkerApp:
             "mainnetCredentialsVerified": bool(mainnet_configured and self.authenticated),
             "mainnetLiveApproved": self._env_flag("MAINNET_LIVE_APPROVED", False),
             "mainnetAccountRiskReady": mainnet_account_risk_ready,
-            "mainnetPreflightReady": mainnet_ready,
+            "mainnetPreflightReady": mainnet_preflight_ready,
             "spotSupported": False,
             "usdmFuturesSupported": True,
             "hedgeModeSupported": bool(
@@ -1505,6 +1709,7 @@ class TradingWorkerApp:
         mainnet_account_risk_ready = self.is_mainnet_account_risk_ready()
         market_data_fresh = self.is_market_data_fresh()
         persistence = self.persistence.readiness()
+        launch_session = persistence.get("mainnet_launch_session") or self._mainnet_launch_session
         persistence_required_ready = (
             self.persistence.mode.value != "REQUIRED" or persistence["durable"]
         )
@@ -1535,6 +1740,26 @@ class TradingWorkerApp:
             mainnet_account_risk_ready=mainnet_account_risk_ready,
             mainnet_preflight_ready=False,
             mainnet_autonomous_ready=False,
+            mainnet_launch_policy=(
+                str(launch_session.get("policy"))
+                if isinstance(launch_session, dict) and launch_session.get("policy")
+                else None
+            ),
+            mainnet_launch_id=(
+                str(launch_session.get("launch_id"))
+                if isinstance(launch_session, dict) and launch_session.get("launch_id")
+                else None
+            ),
+            mainnet_launch_state=(
+                str(launch_session.get("state"))
+                if isinstance(launch_session, dict) and launch_session.get("state")
+                else None
+            ),
+            mainnet_continuation_approval_id=(
+                str(launch_session.get("continuation_approval_id"))
+                if isinstance(launch_session, dict) and launch_session.get("continuation_approval_id")
+                else None
+            ),
             persistence=persistence,
         )
         
@@ -1580,9 +1805,16 @@ class TradingWorkerApp:
             and persistence_required_ready
             and not self.kill_switch_active
         )
-        # Mainnet intentionally has no second per-order confirmation flag. The
-        # deployment approval and the full preflight are the launch gate.
-        readiness.mainnet_autonomous_ready = readiness.mainnet_preflight_ready
+        # A successful read-only preflight is not autonomous authorization.
+        # The durable session must have consumed a separate continuation
+        # approval and be in AUTONOMOUS_ACTIVE state.
+        readiness.mainnet_autonomous_ready = bool(
+            readiness.mainnet_preflight_ready
+            and readiness.mainnet_launch_policy == MAINNET_LAUNCH_AUTONOMOUS
+            and readiness.mainnet_launch_state == "AUTONOMOUS_ACTIVE"
+            and self.engine_state == WorkerEngineState.ARMED
+            and not self.pause_new_risk
+        )
         
         return readiness.model_dump()
 
@@ -2254,9 +2486,24 @@ class TradingWorkerApp:
                 "observedAt": observed_at.isoformat(),
             }
 
-    async def set_pause_new_risk(self, active: bool):
+    async def set_pause_new_risk(self, active: bool) -> bool:
+        """Toggle the deterministic risk pause without bypassing launch gates."""
+
+        if not active and self.execution_mode == WorkerExecutionMode.LIVE:
+            autonomous = (
+                self._launch_session_value("policy") == MAINNET_LAUNCH_AUTONOMOUS
+                and self._launch_session_value("state") == "AUTONOMOUS_ACTIVE"
+            )
+            if not autonomous:
+                self.pause_new_risk = True
+                self._refresh_engine_state()
+                logger.warning(
+                    "monitor_event=autonomous_resume_denied reason=continuation_approval_required"
+                )
+                return False
         self.pause_new_risk = bool(active)
         self._refresh_engine_state()
+        return True
 
     async def set_recovery_only(self, active: bool):
         self.recovery_only = bool(active)
@@ -2325,11 +2572,16 @@ class TradingWorkerApp:
 
         # The local block is the first operation and survives every exchange failure.
         self.kill_switch_active = True
+        # Releasing the kill switch must never silently resume autonomous
+        # Mainnet risk. Keep new risk paused; an active autonomous launch is
+        # additionally fenced below and will require fresh continuation auth.
+        self.pause_new_risk = True
         self.engine_state = WorkerEngineState.EMERGENCY
         logger.error(
             "monitor_event=kill_switch_active environment=%s",
             self._current_exchange_label(),
         )
+        await self._fence_autonomous_launch("kill_switch")
         adapter = self.execution_adapter
         if self.execution_mode == WorkerExecutionMode.PAPER and adapter is None:
             return {"status": "CONFIRMED", "environment": "PAPER"}
@@ -2386,6 +2638,24 @@ class TradingWorkerApp:
             res = await self.execution_adapter.reconciliation.reconcile()
             self.reconciliation_status = res
             self._sync_adapter_state()
+            if res == "IN_SYNC" and self._mainnet_launch_id:
+                restore = getattr(self.persistence, "mark_mainnet_launch_reconciled", None)
+                if callable(restore):
+                    try:
+                        await restore(self._mainnet_launch_id)
+                        getter = getattr(self.persistence, "get_mainnet_launch_session", None)
+                        if callable(getter):
+                            self._set_mainnet_launch_session(
+                                await getter(self._mainnet_launch_id)
+                            )
+                    except Exception as exc:
+                        # A failed durable state transition must not clear a
+                        # launch fence or claim autonomous authorization was
+                        # restored.
+                        logger.error(
+                            "Launch reconciliation state update failed: %s",
+                            type(exc).__name__,
+                        )
             return res
             
         if self.execution_mode in {
@@ -2442,12 +2712,485 @@ class TradingWorkerApp:
         self.authenticated = False
         self.reconciliation_status = "UNKNOWN"
         self.active_configuration = None
-        self._mainnet_launch_id = None
+        self._set_mainnet_launch_session(None)
         self.pause_new_risk = False
         self.recovery_only = False
         self.risk_governor.hedge_mode = False
         self.risk_governor.max_leverage = Decimal("2.0")
         self.engine_state = WorkerEngineState.DISARMED
+
+    async def _reset_after_failed_continuation(self) -> None:
+        """Leave a LIVE worker disarmed after a failed continuation attempt."""
+
+        logger.warning(
+            "monitor_event=autonomous_continuation_failure launch_id=%s",
+            self._mainnet_launch_id or "unknown",
+        )
+        await self._fence_autonomous_launch("failed_continuation")
+        await self._stop_public_market_stream()
+        if self.execution_adapter is not None:
+            try:
+                await self.execution_adapter.close()
+            except Exception as exc:
+                logger.warning(
+                    "Error closing failed continuation adapter: %s",
+                    type(exc).__name__,
+                )
+            self.execution_adapter = None
+        self.execution_mode = WorkerExecutionMode.LIVE
+        self.symbols = ["ETHUSDC"]
+        self.connection_state = "DISCONNECTED"
+        self.market_data_healthy = False
+        self.private_stream_healthy = False
+        self.authenticated = False
+        self.reconciliation_status = "UNKNOWN"
+        self.active_configuration = None
+        self.pause_new_risk = False
+        self.recovery_only = False
+        self.risk_governor.hedge_mode = False
+        self.engine_state = WorkerEngineState.DISARMED
+
+    async def _ensure_live_runtime_for_continuation(self) -> tuple[bool, str]:
+        """Bootstrap a fresh Mainnet adapter after restart, without arming it.
+
+        Cloud Run starts a new process without retaining the signed private
+        stream, adapter, or execution lease.  Continuation therefore rebuilds
+        those observations from fixed Mainnet configuration before the durable
+        SQL transition can authorize risk-increasing decisions.
+        """
+
+        if not self._mainnet_configured():
+            return False, "Mainnet credentials are missing from Secret Manager injection."
+        if self.execution_mode != WorkerExecutionMode.LIVE:
+            self.execution_mode = WorkerExecutionMode.LIVE
+        self.symbols = ["ETHUSDC"]
+        if not await self._restart_public_market_stream():
+            await self._reset_after_failed_continuation()
+            return False, "Runtime continuation preflight failed: public market data stream unavailable."
+
+        self.engine_state = WorkerEngineState.ARMING
+        exchange_environment = BinanceEnvironment.MAINNET
+        api_key = os.getenv("BINANCE_MAINNET_API_KEY", "")
+        api_secret = os.getenv("BINANCE_MAINNET_API_SECRET", "")
+        self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
+            exchange_environment
+        ).max_leverage
+        try:
+            if self.execution_adapter is not None:
+                await self.execution_adapter.close()
+                self.execution_adapter = None
+            ledger_factory = getattr(self.persistence, "create_execution_ledger", None)
+            if not callable(ledger_factory):
+                raise RuntimeError("LIVE continuation requires a durable Mainnet ledger loader")
+            durable_ledger = await ledger_factory(
+                symbol="ETHUSDC",
+                venue=environment_label(exchange_environment),
+            )
+            self.execution_adapter = BinanceExecutionAdapter(
+                api_key=api_key,
+                api_secret=api_secret,
+                env=exchange_environment,
+                ledger=durable_ledger,
+            )
+            if self.execution_adapter.ledger:
+                self.execution_adapter.ledger.on_order_update = self.persistence.enqueue_order
+                self.execution_adapter.ledger.on_fill_update = self.persistence.enqueue_fill
+                self.execution_adapter.ledger.on_position_update = self.persistence.enqueue_position
+            self.execution_adapter.before_order_submission = self._before_order_submission
+            self.execution_adapter.on_order_submission_result = self._on_order_submission_result
+            self.execution_adapter.bind_worker_authority(self)
+            connected = await self.execution_adapter.connect()
+            self._sync_adapter_state()
+            if not connected or self.execution_adapter.connection_state != ConnectionState.READY:
+                await self._reset_after_failed_continuation()
+                return False, "Mainnet execution adapter did not reach READY."
+
+            if getattr(self.execution_adapter, "execution_lease_required", False):
+                raw_ttl = os.getenv("EXECUTION_LEASE_TTL_SECONDS", "10").strip()
+                self._execution_lease_ttl_seconds = float(raw_ttl)
+                if (
+                    not math.isfinite(self._execution_lease_ttl_seconds)
+                    or self._execution_lease_ttl_seconds <= 0
+                ):
+                    raise ValueError("invalid execution lease TTL")
+                account_scope = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:24]
+                scope_key = f"binance:{environment_label(exchange_environment)}:{account_scope}"
+                lease = self.persistence.create_execution_lease(
+                    scope_key,
+                    owner_id=self._execution_lease_owner_id,
+                    ttl_seconds=self._execution_lease_ttl_seconds,
+                )
+                self.execution_adapter.set_execution_lease(lease, required=True)
+                if not await lease.acquire():
+                    raise RuntimeError("another worker owns the account/environment execution lease")
+                self._execution_lease_last_renewed_at = time.monotonic()
+
+            self.risk_governor.hedge_mode = self.execution_adapter.capabilities.hedge_mode
+            if not await self.execution_adapter.refresh_market_data(self.symbols):
+                raise RuntimeError("fresh Mainnet market data is unavailable")
+            self.last_market_event_at.update(self.execution_adapter.last_market_event_at)
+            self.market_data_healthy = True
+            preflight = self.get_preflight("LIVE")
+            if not preflight.get("canArm"):
+                failures = [
+                    str(check.get("message", "unknown failure"))
+                    for check in preflight.get("checks", [])
+                    if check.get("status") == "FAIL"
+                ]
+                raise RuntimeError(
+                    "Mainnet runtime preflight failed: " + "; ".join(failures[:8])
+                )
+            return True, ""
+        except Exception as exc:
+            logger.error(
+                "Mainnet continuation runtime bootstrap failed: %s",
+                type(exc).__name__,
+            )
+            await self._reset_after_failed_continuation()
+            return False, "Mainnet continuation runtime is unavailable; execution remains disarmed."
+
+    @staticmethod
+    def _session_timestamp(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, str) and value.strip():
+            normalized = value.strip()
+            if normalized.endswith("Z"):
+                normalized = normalized[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        return None
+
+    async def run_mainnet_continuation_readiness(
+        self,
+        *,
+        require_active_runtime: bool = False,
+        launch_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Return sanitized evidence for continuation, never activate execution."""
+
+        observed_at = utc_now()
+        checks: list[dict[str, Any]] = []
+
+        def add_check(check_id: str, name: str, passed: bool, message: str) -> None:
+            checks.append(
+                {
+                    "id": check_id,
+                    "name": name,
+                    "required": True,
+                    "status": "PASS" if passed else "FAIL",
+                    "message": message,
+                }
+            )
+
+        session: Optional[dict[str, Any]] = None
+        try:
+            getter = getattr(self.persistence, "get_mainnet_launch_session", None)
+            if not callable(getter):
+                raise RuntimeError("durable launch-session reader is unavailable")
+            session = await getter(launch_id or self._mainnet_launch_id)
+        except Exception as exc:
+            logger.error("Continuation launch-session read failed: %s", type(exc).__name__)
+
+        if session:
+            self._set_mainnet_launch_session(session)
+
+        policy = str(session.get("policy", "")) if session else ""
+        state = str(session.get("state", "")) if session else ""
+        submitted_orders = int(session.get("submitted_orders", 0) or 0) if session else 0
+        reserved_orders = int(session.get("reserved_orders", 0) or 0) if session else 0
+        expected_state = (
+            policy == MAINNET_LAUNCH_STAGED and state == "PAUSED_NEW_RISK"
+        ) or (
+            policy == MAINNET_LAUNCH_AUTONOMOUS and state == "REAUTH_REQUIRED"
+        )
+        add_check(
+            "CHK-CONTINUATION-SESSION",
+            "Durable Paused Launch Session",
+            bool(session and expected_state and submitted_orders >= 1 and reserved_orders >= submitted_orders),
+            "Durable launch session contains the verified first-order pause"
+            if session and expected_state and submitted_orders >= 1 and reserved_orders >= submitted_orders
+            else "Launch session is missing, not paused, or has no durable first-order evidence",
+        )
+        lifecycle_safe = self.engine_state in {
+            WorkerEngineState.PAUSED_NEW_RISK,
+            WorkerEngineState.DISARMED,
+        }
+        add_check(
+            "CHK-CONTINUATION-ENGINE",
+            "Paused Worker Lifecycle",
+            lifecycle_safe,
+            "Worker is paused or disarmed before continuation"
+            if lifecycle_safe
+            else "Worker must be paused or disarmed before continuation",
+        )
+        add_check(
+            "CHK-CONTINUATION-SYMBOL",
+            "ETHUSDC Launch Scope",
+            bool(session and str(session.get("symbol", "")).upper() == "ETHUSDC"),
+            "Continuation is bounded to ETHUSDC"
+            if session and str(session.get("symbol", "")).upper() == "ETHUSDC"
+            else "Continuation scope is not ETHUSDC",
+        )
+        image_digest = os.getenv("WORKER_IMAGE_DIGEST", "").strip()
+        add_check(
+            "CHK-CONTINUATION-DIGEST",
+            "Immutable Worker Digest",
+            bool(
+                session
+                and re.fullmatch(r".+@sha256:[0-9a-fA-F]{64}", image_digest)
+                and session.get("image_digest") == image_digest
+            ),
+            "Durable session is bound to this immutable Worker image"
+            if session and session.get("image_digest") == image_digest
+            else "Worker image digest is missing or differs from the launch session",
+        )
+        initial_approval = os.getenv("MAINNET_RELEASE_APPROVAL_ID", "").strip()
+        approval_bound = bool(session and session.get("approval_id"))
+        if initial_approval:
+            approval_bound = approval_bound and session.get("approval_id") == initial_approval
+        add_check(
+            "CHK-CONTINUATION-INITIAL-APPROVAL",
+            "Initial Release Approval Binding",
+            approval_bound,
+            "Continuation remains bound to the consumed initial release approval"
+            if approval_bound
+            else "Initial release approval binding is missing or mismatched",
+        )
+        add_check(
+            "CHK-CONTINUATION-ENVIRONMENT",
+            "LIVE Mainnet Environment",
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and self._env_flag("MAINNET_LIVE_APPROVED", False),
+            "Worker is configured for approved LIVE Mainnet continuation"
+            if self.execution_mode == WorkerExecutionMode.LIVE
+            and self._env_flag("MAINNET_LIVE_APPROVED", False)
+            else "LIVE Mainnet approval is not active for this revision",
+        )
+        persistence = self.persistence.readiness()
+        persistence_ready = (
+            persistence.get("mode") == "REQUIRED"
+            and persistence.get("durable") is True
+        )
+        add_check(
+            "CHK-CONTINUATION-PERSISTENCE",
+            "Required Durable Persistence",
+            persistence_ready,
+            "Required Cloud SQL persistence is durable"
+            if persistence_ready
+            else "Continuation requires durable REQUIRED persistence",
+        )
+        secret_versions = configured_secret_versions()
+        secret_versions_ready = all(
+            re.fullmatch(r"[1-9][0-9]*", value or "")
+            for value in secret_versions.values()
+        )
+        add_check(
+            "CHK-CONTINUATION-SECRET-VERSIONS",
+            "Numeric Secret Manager Versions",
+            secret_versions_ready,
+            "Worker secret bindings expose only the approved numeric versions"
+            if secret_versions_ready
+            else "Worker secret version metadata is missing or not numeric",
+        )
+
+        try:
+            preflight = await self.run_mainnet_read_only_preflight()
+        except Exception as exc:
+            logger.error("Continuation preflight failed: %s", type(exc).__name__)
+            preflight = {
+                "preflightPassed": False,
+                "orderSubmissionAttempts": -1,
+                "orderEndpointAttempts": -1,
+                "checks": [],
+                "observedAt": observed_at.isoformat(),
+            }
+        preflight_passed = bool(
+            preflight.get("preflightPassed") is True
+            and int(preflight.get("orderSubmissionAttempts", -1)) == 0
+            and int(preflight.get("orderEndpointAttempts", -1)) == 0
+        )
+        add_check(
+            "CHK-CONTINUATION-PREFLIGHT",
+            "Fresh Read-only Mainnet Preflight",
+            preflight_passed,
+            "Read-only Mainnet preflight passed with zero order attempts"
+            if preflight_passed
+            else "Mainnet preflight failed, is stale, or reported an order attempt",
+        )
+        preflight_reconciliation = any(
+            check.get("id") == "CHK-PREFLIGHT-RECONCILIATION"
+            and check.get("status") == "PASS"
+            for check in preflight.get("checks", [])
+        )
+        add_check(
+            "CHK-CONTINUATION-RECONCILIATION",
+            "First-order Reconciliation",
+            preflight_reconciliation and self.reconciliation_status == "IN_SYNC",
+            "Durable ledger and Mainnet account are IN_SYNC"
+            if preflight_reconciliation and self.reconciliation_status == "IN_SYNC"
+            else "First-order reconciliation is not verified as IN_SYNC",
+        )
+
+        if require_active_runtime:
+            self._sync_adapter_state()
+            active_runtime = bool(
+                self.execution_adapter is not None
+                and self.execution_adapter.env == BinanceEnvironment.MAINNET
+                and self.execution_adapter.connection_state == ConnectionState.READY
+                and self.authenticated
+                and self.private_stream_healthy
+                and self.reconciliation_status == "IN_SYNC"
+                and self.is_market_data_fresh(["ETHUSDC"])
+                and not self.kill_switch_active
+            )
+            add_check(
+                "CHK-CONTINUATION-RUNTIME",
+                "Fresh Private Runtime",
+                active_runtime,
+                "Mainnet adapter, private stream, market data, and kill switch are verified"
+                if active_runtime
+                else "Active Mainnet runtime is missing, stale, or unsafe",
+            )
+
+        continuation_ready = all(check["status"] == "PASS" for check in checks)
+        return {
+            "executionMode": "LIVE",
+            "continuationOnly": True,
+            "continuationReady": continuation_ready,
+            "launchId": session.get("launch_id") if session else None,
+            "launchPolicy": policy or None,
+            "launchState": state or None,
+            "mainnetLiveApproved": self._env_flag("MAINNET_LIVE_APPROVED", False),
+            "engineState": self.engine_state.value,
+            "workerImageDigest": os.getenv("WORKER_IMAGE_DIGEST", "").strip(),
+            "workerRevision": configured_worker_revision(),
+            "secretVersions": secret_versions,
+            "submittedOrders": submitted_orders,
+            "reservedOrders": reserved_orders,
+            "persistenceDurable": persistence_ready,
+            "preflightPassed": preflight.get("preflightPassed") is True,
+            "preflightOrderSubmissionAttempts": int(preflight.get("orderSubmissionAttempts", -1)),
+            "preflightOrderEndpointAttempts": int(preflight.get("orderEndpointAttempts", -1)),
+            "orderSubmissionAttempts": int(preflight.get("orderSubmissionAttempts", -1)),
+            "orderEndpointAttempts": int(preflight.get("orderEndpointAttempts", -1)),
+            "preflight": preflight,
+            "checks": checks,
+            "observedAt": observed_at.isoformat(),
+        }
+
+    async def continue_autonomous(self, config: ContinuationRequest | dict) -> tuple[bool, str]:
+        """Consume a continuation approval and activate autonomous Mainnet."""
+
+        if self.kill_switch_active:
+            return False, "Cannot continue: Kill switch is active"
+        try:
+            req = config if isinstance(config, ContinuationRequest) else ContinuationRequest.model_validate(config)
+        except ValidationError as exc:
+            return False, f"Invalid continuation request: {exc.errors()[0].get('msg', str(exc))}"
+        if req.instruments != ["ETHUSDC"]:
+            return False, "Autonomous continuation is bounded to exactly ETHUSDC"
+        if not req.enforcePreflight:
+            return False, "Autonomous continuation requires enforcePreflight=true"
+        if not self._env_flag("MAINNET_LIVE_APPROVED", False):
+            return False, "Mainnet remains disarmed until MAINNET_LIVE_APPROVED=true is set by the release gate."
+        try:
+            self.persistence.validate_execution_mode("LIVE")
+            if not self.persistence.readiness().get("durable"):
+                return False, "Required persistence is not ready; autonomous continuation is blocked."
+        except Exception as exc:
+            return False, f"Autonomous continuation persistence gate failed: {type(exc).__name__}"
+
+        getter = getattr(self.persistence, "get_mainnet_launch_session", None)
+        if not callable(getter):
+            return False, "Durable launch-session reader is unavailable"
+        try:
+            session = await getter(req.launchId)
+        except Exception as exc:
+            return False, f"Durable launch-session read failed: {type(exc).__name__}"
+        if not session:
+            return False, "Continuation launch session was not found"
+        self._set_mainnet_launch_session(session)
+        policy = str(session.get("policy", ""))
+        state = str(session.get("state", ""))
+        if not (
+            (policy == MAINNET_LAUNCH_STAGED and state == "PAUSED_NEW_RISK")
+            or (policy == MAINNET_LAUNCH_AUTONOMOUS and state == "REAUTH_REQUIRED")
+        ):
+            return False, "Launch session is not awaiting a verified continuation"
+        if int(session.get("submitted_orders", 0) or 0) < 1:
+            return False, "Continuation requires durable first-order evidence"
+        image_digest = os.getenv("WORKER_IMAGE_DIGEST", "").strip()
+        if not re.fullmatch(r".+@sha256:[0-9a-fA-F]{64}", image_digest):
+            return False, "Autonomous continuation requires an immutable WORKER_IMAGE_DIGEST"
+        if session.get("image_digest") != image_digest:
+            return False, "Continuation approval does not match the current Worker image"
+        initial_approval = os.getenv("MAINNET_RELEASE_APPROVAL_ID", "").strip()
+        if initial_approval and session.get("approval_id") != initial_approval:
+            return False, "Continuation is not bound to the current initial release approval"
+        if req.initialApprovalId and req.initialApprovalId != session.get("approval_id"):
+            return False, "Continuation initial approval does not match the durable launch session"
+
+        if not (
+            self.execution_adapter is not None
+            and self.execution_adapter.env == BinanceEnvironment.MAINNET
+            and self.execution_adapter.connection_state == ConnectionState.READY
+            and self.authenticated
+            and self.private_stream_healthy
+        ):
+            prepared, message = await self._ensure_live_runtime_for_continuation()
+            if not prepared:
+                return False, message
+
+        evidence = await self.run_mainnet_continuation_readiness(require_active_runtime=True)
+        if not evidence.get("continuationReady"):
+            await self._reset_after_failed_continuation()
+            failures = [
+                str(check.get("message", "unknown failure"))
+                for check in evidence.get("checks", [])
+                if check.get("status") == "FAIL"
+            ]
+            return False, "Autonomous continuation readiness failed: " + "; ".join(failures[:8])
+
+        activator = getattr(self.persistence, "activate_mainnet_autonomous", None)
+        if not callable(activator):
+            await self._reset_after_failed_continuation()
+            return False, "Durable autonomous continuation transition is unavailable"
+        verified_at = self._session_timestamp(session.get("first_order_verified_at")) or utc_now()
+        try:
+            activated = await activator(
+                launch_id=req.launchId,
+                continuation_approval_id=req.continuationApprovalId,
+                first_order_verified_at=verified_at,
+                image_digest=image_digest,
+            )
+        except Exception as exc:
+            logger.error("Autonomous continuation transaction failed: %s", type(exc).__name__)
+            activated = None
+        if not activated:
+            await self._reset_after_failed_continuation()
+            return False, "Autonomous continuation transaction was rejected; execution remains disarmed"
+
+        self._set_mainnet_launch_session(activated)
+        self.active_configuration = {
+            **req.model_dump(),
+            "launchPolicy": MAINNET_LAUNCH_AUTONOMOUS,
+            "initialApprovalId": session.get("approval_id"),
+        }
+        self.pause_new_risk = False
+        self.recovery_only = False
+        self._refresh_engine_state()
+        if self.engine_state != WorkerEngineState.ARMED:
+            await self._reset_after_failed_continuation()
+            return False, "Autonomous continuation did not reach the ARMED runtime state"
+        logger.warning(
+            "monitor_event=autonomous_continuation_activated launch_id=%s",
+            req.launchId,
+        )
+        return True, ""
 
     async def arm(self, config: ArmRequest | dict):
         if self.kill_switch_active:
@@ -2468,7 +3211,7 @@ class TradingWorkerApp:
                 return False, "Mainnet remains disarmed until MAINNET_LIVE_APPROVED=true is set by the release gate."
             if not req.enforcePreflight:
                 return False, "LIVE ARM requires enforcePreflight=true and a fresh read-only Mainnet preflight."
-            if req.launchPolicy != "STAGED_FIRST_ORDER":
+            if req.launchPolicy != MAINNET_LAUNCH_STAGED:
                 return False, "LIVE ARM requires the STAGED_FIRST_ORDER launch policy."
             release_approval_id = (
                 (req.releaseApprovalId or os.getenv("MAINNET_RELEASE_APPROVAL_ID", "")).strip()
@@ -2663,7 +3406,7 @@ class TradingWorkerApp:
                 ):
                     await self._reset_after_failed_exchange_arm()
                     return False, "LIVE staged launch session is already used or requires reconciliation."
-                self._mainnet_launch_id = str(session["launch_id"])
+                self._set_mainnet_launch_session(dict(session))
 
             self.engine_state = WorkerEngineState.ARMED
             self.active_configuration = req.model_dump()
@@ -2695,6 +3438,13 @@ class TradingWorkerApp:
             return True, ""
 
     async def disarm(self):
+        # A manual DISARM is also an authorization boundary.  If autonomous
+        # Mainnet was active, fence its durable launch session before tearing
+        # down the local adapter so the same process cannot resume risk without
+        # a fresh continuation approval.  The local DISARM remains fail-closed
+        # even if the database is temporarily unavailable.
+        await self._fence_autonomous_launch("disarm")
+
         if self.execution_adapter is not None:
             try:
                 await self.execution_adapter.close()
@@ -3118,6 +3868,20 @@ class TradingWorkerApp:
             logger.warning(
                 "Persistence is unavailable; worker remains explicitly degraded and risk-increasing execution stays blocked until the configured mode is ready."
             )
+        elif self.persistence.mode.value == "REQUIRED":
+            # A new process must fence any previous autonomous session before
+            # it can expose a LIVE runtime. Counters remain in SQL; only the
+            # authorization state is moved to REAUTH_REQUIRED.
+            try:
+                await self.persistence.mark_mainnet_launches_reauth_required()
+                session = await self.persistence.get_mainnet_launch_session()
+                self._set_mainnet_launch_session(session)
+            except Exception as exc:
+                logger.error(
+                    "Mainnet launch restart fencing failed: %s",
+                    type(exc).__name__,
+                )
+                self._set_mainnet_launch_session(None)
         
         configured_mode = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper()
         if configured_mode not in {"PAPER", "TESTNET", "LIVE"}:

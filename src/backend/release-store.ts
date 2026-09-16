@@ -4,7 +4,9 @@ import crypto from 'node:crypto';
 import {
   type ReleaseCandidate,
   type ReleaseVerificationSnapshot,
+  type ContinuationApproval,
   sanitizePreflightEvidence,
+  validateContinuationApproval,
   validateApprovalPrerequisites,
   validateReleaseCandidate,
   type SanitizedPreflightEvidence,
@@ -12,7 +14,7 @@ import {
 
 export interface ReleaseEvidenceRecord {
   candidateId: string;
-  kind: 'PREFLIGHT' | 'VERIFY' | 'APPROVAL';
+  kind: 'PREFLIGHT' | 'VERIFY' | 'APPROVAL' | 'CONTINUATION_APPROVAL';
   generatedAt: string;
   evidenceHash: string;
   payload: Record<string, unknown>;
@@ -45,6 +47,10 @@ export interface ReleaseStore {
   ): Promise<ReleaseCandidate>;
   consumeApproval(candidateId: string): Promise<ConsumedApproval>;
   getConsumedApproval(approvalId: string): Promise<ConsumedApproval | null>;
+  getContinuationApproval(continuationId: string): Promise<ContinuationApproval | null>;
+  createContinuationApproval(approval: ContinuationApproval): Promise<void>;
+  claimContinuationApproval(continuationId: string): Promise<ContinuationApproval>;
+  consumeContinuationApproval(continuationId: string): Promise<ContinuationApproval>;
 }
 
 function clone<T>(value: T): T {
@@ -59,6 +65,14 @@ function candidateIdOrThrow(candidateId: string): string {
 function approvalIdOrThrow(approvalId: unknown): string {
   const normalized = typeof approvalId === 'string' ? approvalId.trim() : '';
   if (!/^approval-[0-9a-f-]{36}$/i.test(normalized)) throw new Error('Invalid release approval id');
+  return normalized;
+}
+
+function continuationIdOrThrow(continuationId: unknown): string {
+  const normalized = typeof continuationId === 'string' ? continuationId.trim() : '';
+  if (!/^continuation-[0-9a-f-]{36}$/i.test(normalized)) {
+    throw new Error('Invalid continuation approval id');
+  }
   return normalized;
 }
 
@@ -265,12 +279,78 @@ export class FirestoreReleaseStore implements ReleaseStore {
     const candidate = snapshot.docs[0].data() as ReleaseCandidate;
     return consumedApprovalFromCandidate(candidate, normalized);
   }
+
+  async getContinuationApproval(continuationId: string): Promise<ContinuationApproval | null> {
+    const snapshot = await this.db()
+      .collection('release_continuations')
+      .doc(continuationIdOrThrow(continuationId))
+      .get();
+    if (!snapshot.exists) return null;
+    const approval = snapshot.data() as ContinuationApproval;
+    const failures = validateContinuationApproval(approval);
+    if (failures.length) throw new Error(`Invalid continuation approval record: ${failures.join('; ')}`);
+    return approval;
+  }
+
+  async createContinuationApproval(approval: ContinuationApproval): Promise<void> {
+    const failures = validateContinuationApproval(approval);
+    if (failures.length) throw new Error(failures.join('; '));
+    await this.db()
+      .collection('release_continuations')
+      .doc(continuationIdOrThrow(approval.continuationId))
+      .create(approval);
+  }
+
+  async claimContinuationApproval(continuationId: string): Promise<ContinuationApproval> {
+    const ref = this.db().collection('release_continuations').doc(continuationIdOrThrow(continuationId));
+    const now = new Date();
+    return this.db().runTransaction(async (transaction) => {
+      const document = await transaction.get(ref);
+      if (!document.exists) throw new Error('Continuation approval not found');
+      const approval = document.data() as ContinuationApproval;
+      const failures = validateContinuationApproval(approval, now);
+      if (failures.length) throw new Error(failures.join('; '));
+      if (approval.status === 'CONSUMED') throw new Error('Continuation approval has already been consumed');
+      if (approval.status === 'EXPIRED') throw new Error('Continuation approval has expired');
+      if (approval.status === 'PENDING') {
+        transaction.update(ref, { status: 'ACTIVATING' });
+        return { ...approval, status: 'ACTIVATING' as const };
+      }
+      throw new Error('Continuation approval is already being activated');
+    });
+  }
+
+  async consumeContinuationApproval(continuationId: string): Promise<ContinuationApproval> {
+    const ref = this.db().collection('release_continuations').doc(continuationIdOrThrow(continuationId));
+    const now = new Date();
+    return this.db().runTransaction(async (transaction) => {
+      const document = await transaction.get(ref);
+      if (!document.exists) throw new Error('Continuation approval not found');
+      const approval = document.data() as ContinuationApproval;
+      const failures = validateContinuationApproval(approval, now);
+      if (failures.length) throw new Error(failures.join('; '));
+      if (approval.status === 'CONSUMED') {
+        throw new Error('Continuation approval has already been consumed');
+      }
+      if (approval.status === 'EXPIRED') {
+        throw new Error('Continuation approval has expired');
+      }
+      if (approval.status !== 'ACTIVATING') {
+        throw new Error('Continuation approval must be claimed before it can be consumed');
+      }
+      const consumedAt = now.toISOString();
+      const next = { ...approval, status: 'CONSUMED' as const, consumedAt };
+      transaction.update(ref, { status: next.status, consumedAt });
+      return next;
+    });
+  }
 }
 
 /** Deterministic store used by unit tests; it has the same one-time semantics. */
 export class InMemoryReleaseStore implements ReleaseStore {
   private candidates = new Map<string, ReleaseCandidate>();
   private evidence = new Map<string, ReleaseEvidenceRecord>();
+  private continuations = new Map<string, ContinuationApproval>();
 
   async getCandidate(candidateId: string): Promise<ReleaseCandidate | null> {
     return this.candidates.has(candidateId) ? clone(this.candidates.get(candidateId) as ReleaseCandidate) : null;
@@ -348,6 +428,61 @@ export class InMemoryReleaseStore implements ReleaseStore {
     if (matches.length > 1) throw new Error('Release approval id is not unique');
     if (!matches.length) return null;
     return consumedApprovalFromCandidate(matches[0], normalized);
+  }
+
+  async getContinuationApproval(continuationId: string): Promise<ContinuationApproval | null> {
+    const normalized = continuationIdOrThrow(continuationId);
+    const approval = this.continuations.get(normalized);
+    if (!approval) return null;
+    const failures = validateContinuationApproval(approval);
+    if (failures.length) throw new Error(`Invalid continuation approval record: ${failures.join('; ')}`);
+    return clone(approval);
+  }
+
+  async createContinuationApproval(approval: ContinuationApproval): Promise<void> {
+    const failures = validateContinuationApproval(approval);
+    if (failures.length) throw new Error(failures.join('; '));
+    continuationIdOrThrow(approval.continuationId);
+    if (this.continuations.has(approval.continuationId)) throw new Error('Continuation approval already exists');
+    this.continuations.set(approval.continuationId, clone(approval));
+  }
+
+  async claimContinuationApproval(continuationId: string): Promise<ContinuationApproval> {
+    const normalized = continuationIdOrThrow(continuationId);
+    const approval = this.continuations.get(normalized);
+    if (!approval) throw new Error('Continuation approval not found');
+    const failures = validateContinuationApproval(approval);
+    if (failures.length) throw new Error(failures.join('; '));
+    if (approval.status === 'CONSUMED') throw new Error('Continuation approval has already been consumed');
+    if (approval.status === 'EXPIRED') throw new Error('Continuation approval has expired');
+    if (approval.status === 'PENDING') approval.status = 'ACTIVATING';
+    else throw new Error('Continuation approval is already being activated');
+    this.continuations.set(normalized, clone(approval));
+    return clone(approval);
+  }
+
+  async consumeContinuationApproval(continuationId: string): Promise<ContinuationApproval> {
+    const normalized = continuationIdOrThrow(continuationId);
+    const approval = this.continuations.get(normalized);
+    if (!approval) throw new Error('Continuation approval not found');
+    const failures = validateContinuationApproval(approval);
+    if (failures.length) throw new Error(failures.join('; '));
+    if (approval.status === 'CONSUMED') {
+      throw new Error('Continuation approval has already been consumed');
+    }
+    if (approval.status === 'EXPIRED') {
+      throw new Error('Continuation approval has expired');
+    }
+    if (approval.status !== 'ACTIVATING') {
+      throw new Error('Continuation approval must be claimed before it can be consumed');
+    }
+    const next: ContinuationApproval = {
+      ...approval,
+      status: 'CONSUMED',
+      consumedAt: new Date().toISOString(),
+    };
+    this.continuations.set(normalized, clone(next));
+    return clone(next);
   }
 }
 

@@ -1,12 +1,14 @@
 <#
 .SYNOPSIS
-  Deploy the dedicated Blessing AI Control Plane from an immutable image.
+  Bootstrap the Control Plane URL, then deploy the same immutable image again.
 
 .DESCRIPTION
-  The Control Plane may expose public HTTPS transport for the SPA, but its
-  protected APIs enforce Firebase RBAC and its internal release APIs enforce a
-  Google-signed OIDC identity. This deployment never receives Binance or SQL
-  credentials and never arms the Worker.
+  Cloud Run assigns a service URL only after the service exists. This helper
+  performs a no-traffic bootstrap revision with a non-secret placeholder,
+  reads the canonical URL back, and invokes the normal immutable deployment
+  helper for the final revision. IAM transport policy is intentionally not
+  changed here; public SPA transport, if desired, is configured by the
+  separately reviewed identity-provisioning step.
 #>
 param(
   [string]$ProjectId = "gen-lang-client-0730128480",
@@ -14,8 +16,6 @@ param(
   [string]$ServiceName = "blessing-control-plane",
   [Parameter(Mandatory = $true)]
   [string]$ImageUri,
-  [Parameter(Mandatory = $true)]
-  [string]$ControlPlaneUrl,
   [Parameter(Mandatory = $true)]
   [string]$WorkerUrl,
   [string]$ControlPlaneServiceAccount = "blessing-control-plane@gen-lang-client-0730128480.iam.gserviceaccount.com",
@@ -34,8 +34,8 @@ if ($ImageUri -notmatch '@sha256:[0-9a-fA-F]{64}$') {
 if ($WorkerImageDigest -notmatch '@sha256:[0-9a-fA-F]{64}$') {
   throw "WorkerImageDigest must use an immutable registry digest"
 }
-if ($ControlPlaneUrl -notmatch '^https://[^/]+$' -or $WorkerUrl -notmatch '^https://[^/]+$') {
-  throw "ControlPlaneUrl and WorkerUrl must be canonical HTTPS service URLs"
+if ($WorkerUrl -notmatch '^https://[^/]+$') {
+  throw "WorkerUrl must be a canonical HTTPS service URL"
 }
 if ($ControlPlaneServiceAccount -notmatch '^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$') {
   throw "ControlPlaneServiceAccount must be a service-account email"
@@ -52,11 +52,13 @@ function Invoke-GCloud {
   }
 }
 
-$envVars = @(
+# This first revision is deliberately not routed traffic and contains no
+# credential. Its only purpose is to make the service URL discoverable.
+$bootstrapEnv = @(
   "NODE_ENV=production",
   "CONTROL_PLANE_ONLY=true",
   "CONTROL_PLANE_AUTH_REQUIRED=true",
-  "CONTROL_PLANE_URL=$ControlPlaneUrl",
+  "CONTROL_PLANE_URL=https://bootstrap.invalid",
   "CONTROL_PLANE_ALLOWED_SERVICE_ACCOUNTS=$ReleaseControllerServiceAccount",
   "RELEASE_CONTROLLER_SERVICE_ACCOUNT=$ReleaseControllerServiceAccount",
   "WORKER_URL=$WorkerUrl",
@@ -65,10 +67,6 @@ $envVars = @(
   "VITE_DATA_CONNECT_CUTOVER=false"
 ) -join ","
 
-# IAM policy changes are performed by the separately reviewed identity
-# provisioning step. The Release Controller must not hold
-# run.services.setIamPolicy, so deployment itself leaves transport policy
-# unchanged; protected routes still require server-side Firebase claims.
 Invoke-GCloud @(
   "run", "deploy", $ServiceName,
   "--project=$ProjectId",
@@ -82,20 +80,36 @@ Invoke-GCloud @(
   "--cpu=1",
   "--memory=1Gi",
   "--no-cpu-throttling",
-  "--set-env-vars=$envVars"
+  "--set-env-vars=$bootstrapEnv",
+  "--no-traffic"
 )
 
-$serviceJson = & gcloud run services describe $ServiceName --project=$ProjectId --region=$Region --format=json
-if ($LASTEXITCODE -ne 0) { throw "Control Plane read-back failed" }
+$serviceJson = & gcloud run services describe $ServiceName `
+  --project=$ProjectId `
+  --region=$Region `
+  --format=json
+if ($LASTEXITCODE -ne 0) { throw "Control Plane bootstrap read-back failed" }
 $service = $serviceJson | ConvertFrom-Json
-$container = @($service.spec.template.spec.containers) | Select-Object -First 1
-$actualImage = [string]$container.image
-$actualServiceAccount = [string]$service.spec.template.spec.serviceAccountName
-$ready = @($service.status.conditions) | Where-Object { $_.type -eq "Ready" -and $_.status -eq "True" }
-if ($actualImage -ne $ImageUri) { throw "Control Plane image digest read-back does not match requested digest" }
-if ($actualServiceAccount -ne $ControlPlaneServiceAccount) { throw "Control Plane service account read-back does not match" }
-if ($ready.Count -eq 0) { throw "Control Plane latest revision is not Ready" }
+$controlPlaneUrl = [string]$service.status.url
+if ($controlPlaneUrl -notmatch '^https://[^/]+$') {
+  throw "Cloud Run did not return a canonical Control Plane URL"
+}
 
-Write-Output "Control Plane deployed and verified: $ServiceName"
-Write-Output "Immutable image verified: $actualImage"
-Write-Output "No Binance or SQL secrets were supplied to the Control Plane deployment"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+& (Join-Path $scriptDir "deploy-control-plane.ps1") `
+  -ProjectId $ProjectId `
+  -Region $Region `
+  -ServiceName $ServiceName `
+  -ImageUri $ImageUri `
+  -ControlPlaneUrl $controlPlaneUrl `
+  -WorkerUrl $WorkerUrl `
+  -ControlPlaneServiceAccount $ControlPlaneServiceAccount `
+  -ReleaseControllerServiceAccount $ReleaseControllerServiceAccount `
+  -WorkerImageDigest $WorkerImageDigest `
+  -WorkerRevision $WorkerRevision
+if ($LASTEXITCODE -ne 0) {
+  throw "Final Control Plane deployment failed"
+}
+
+Write-Output "Control Plane two-pass deployment verified: $controlPlaneUrl"
+Write-Output "Bootstrap used no secrets and routed no traffic"

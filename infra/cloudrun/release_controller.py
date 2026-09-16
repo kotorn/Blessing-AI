@@ -180,6 +180,14 @@ def _post_json(
 
 
 def _consume_approval(values: dict[str, str], token: str) -> dict[str, Any]:
+    verification = _post_json(
+        values["CONTROL_PLANE_URL"],
+        token,
+        "/internal/release/verify",
+        {"candidateId": values["CANDIDATE_ID"]},
+    )
+    if verification.get("verified") is not True or verification.get("evidence_status") != "VERIFIED":
+        raise ControllerError("release candidate verification was not independently verified")
     approval = _post_json(
         values["CONTROL_PLANE_URL"],
         token,
@@ -233,6 +241,9 @@ def _deploy_worker(values: dict[str, str], approval: dict[str, Any]) -> None:
             f"MAINNET_RELEASE_APPROVAL_ID={approval_id}",
             f"WORKER_IMAGE_DIGEST={values['IMAGE_URI']}",
             f"WORKER_REVISION={worker_revision}",
+            f"CLOUD_SQL_PASSWORD_VERSION={values['CLOUD_SQL_PASSWORD_VERSION']}",
+            f"BINANCE_MAINNET_API_KEY_VERSION={values['BINANCE_API_KEY_VERSION']}",
+            f"BINANCE_MAINNET_API_SECRET_VERSION={values['BINANCE_API_SECRET_VERSION']}",
             f"POSTGRES_HOST=/cloudsql/{values['PROJECT_ID']}:{values['REGION']}:blessing-sql-primary",
             "POSTGRES_PORT=5432",
             "POSTGRES_DB=blessing_trading",
@@ -327,6 +338,9 @@ def _read_worker_service(
         "WORKER_IMAGE_DIGEST": values["IMAGE_URI"],
         "WORKER_REVISION": expected_source_revision,
         "MAINNET_RELEASE_APPROVAL_ID": expected_approval_id,
+        "CLOUD_SQL_PASSWORD_VERSION": values["CLOUD_SQL_PASSWORD_VERSION"],
+        "BINANCE_MAINNET_API_KEY_VERSION": values["BINANCE_API_KEY_VERSION"],
+        "BINANCE_MAINNET_API_SECRET_VERSION": values["BINANCE_API_SECRET_VERSION"],
     }
     env = {
         str(item.get("name")): str(item.get("value"))
@@ -413,6 +427,11 @@ def _verify_disarmed_runtime(
         "engineState": "DISARMED",
         "workerImageDigest": values["IMAGE_URI"],
         "workerRevision": str(approval["workerRevision"]),
+        "secretVersions": {
+            "sql": values["CLOUD_SQL_PASSWORD_VERSION"],
+            "apiKey": values["BINANCE_API_KEY_VERSION"],
+            "apiSecret": values["BINANCE_API_SECRET_VERSION"],
+        },
         "orderSubmissionAttempts": 0,
         "privateStreamHealthy": False,
         "killSwitchActive": False,

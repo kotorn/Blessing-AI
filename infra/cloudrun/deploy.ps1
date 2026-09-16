@@ -48,7 +48,7 @@ Invoke-GCloud @(
   "--memory", "1Gi",
   "--no-cpu-throttling",
   "--add-cloudsql-instances", "${ProjectId}:${Region}:blessing-sql-primary",
-  "--set-env-vars", "EXECUTION_MODE=PAPER,PERSISTENCE_MODE=REQUIRED,EXECUTION_LEASE_REQUIRED=true,MAINNET_LIVE_APPROVED=false,POSTGRES_HOST=/cloudsql/${ProjectId}:${Region}:blessing-sql-primary,POSTGRES_PORT=5432,POSTGRES_DB=blessing_trading,POSTGRES_USER=blessing_worker",
+  "--set-env-vars", "EXECUTION_MODE=PAPER,PERSISTENCE_MODE=REQUIRED,EXECUTION_LEASE_REQUIRED=true,MAINNET_LIVE_APPROVED=false,CLOUD_SQL_PASSWORD_VERSION=$CloudSqlPasswordVersion,BINANCE_MAINNET_API_KEY_VERSION=$BinanceMainnetApiKeyVersion,BINANCE_MAINNET_API_SECRET_VERSION=$BinanceMainnetApiSecretVersion,POSTGRES_HOST=/cloudsql/${ProjectId}:${Region}:blessing-sql-primary,POSTGRES_PORT=5432,POSTGRES_DB=blessing_trading,POSTGRES_USER=blessing_worker",
   "--set-secrets", "POSTGRES_PASSWORD=blessing-cloud-sql-password:${CloudSqlPasswordVersion},BINANCE_MAINNET_API_KEY=blessing-binance-mainnet-api-key:${BinanceMainnetApiKeyVersion},BINANCE_MAINNET_API_SECRET=blessing-binance-mainnet-api-secret:${BinanceMainnetApiSecretVersion}",
   "--no-allow-unauthenticated"
 )

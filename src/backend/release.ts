@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 
 export const RELEASE_POLICY = 'STAGED_FIRST_ORDER' as const;
+export const AUTONOMOUS_CONTINUATION_POLICY = 'AUTONOMOUS_AFTER_REVIEW' as const;
 export const RELEASE_SYMBOL = 'ETHUSDC' as const;
 export const RELEASE_EXECUTION_MODE = 'LIVE' as const;
 
@@ -54,8 +55,66 @@ export interface ReleaseVerificationSnapshot {
   currentMainnetLiveApproved: boolean;
   currentEngineState: string;
   currentOrderSubmissionAttempts: number;
+  currentSecretVersions: SecretVersionSet;
   preflightPassed: boolean;
   preflightObservedAt: string;
+  reconciliationStatus: string;
+  persistenceDurable: boolean;
+  dataConnectCutover: boolean;
+  killSwitchActive: boolean;
+}
+
+export type ContinuationApprovalStatus = 'PENDING' | 'ACTIVATING' | 'CONSUMED' | 'EXPIRED';
+
+export interface ContinuationApproval {
+  continuationId: string;
+  candidateId: string;
+  launchId: string;
+  initialApprovalId: string;
+  imageDigest: string;
+  workerRevision: string;
+  secretVersions: SecretVersionSet;
+  firstOrderEvidenceHash: string;
+  reconciliationStatus: 'IN_SYNC';
+  preflightObservedAt: string;
+  nonce: string;
+  requesterUid: string;
+  createdAt: string;
+  expiresAt: string;
+  status: ContinuationApprovalStatus;
+  consumedAt?: string;
+}
+
+export interface ContinuationApprovalInput {
+  candidateId: string;
+  launchId: string;
+  initialApprovalId: string;
+  imageDigest: string;
+  workerRevision: string;
+  secretVersions: SecretVersionSet;
+  firstOrderEvidenceHash: string;
+  preflightObservedAt: string;
+  nonce: string;
+  requesterUid: string;
+  expiresAt: string;
+}
+
+export interface ContinuationVerificationSnapshot {
+  currentImageDigest: string;
+  currentWorkerRevision: string;
+  currentExecutionMode: string;
+  currentMainnetLiveApproved: boolean;
+  currentEngineState: string;
+  currentLaunchId: string;
+  currentLaunchPolicy: string;
+  currentLaunchState: string;
+  currentContinuationApprovalId?: string;
+  currentSubmittedOrders: number;
+  currentSecretVersions: SecretVersionSet;
+  preflightPassed: boolean;
+  preflightObservedAt: string;
+  preflightOrderEndpointAttempts: number;
+  preflightOrderSubmissionAttempts: number;
   reconciliationStatus: string;
   persistenceDurable: boolean;
   dataConnectCutover: boolean;
@@ -66,6 +125,9 @@ const SHA256_RE = /^[0-9a-f]{64}$/i;
 const IMAGE_DIGEST_RE = /^.+@sha256:[0-9a-f]{64}$/i;
 const REVISION_RE = /^[a-z0-9][a-z0-9-]{0,62}$/i;
 const NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/;
+const CONTINUATION_ID_RE = /^continuation-[0-9a-f-]{36}$/i;
+const LAUNCH_ID_RE = /^launch-[A-Za-z0-9-]{8,127}$/;
+const UID_RE = /^[A-Za-z0-9:_-]{1,256}$/;
 
 function asString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -198,6 +260,7 @@ export function validateApprovalPrerequisites(
   if (snapshot.currentMainnetLiveApproved) failures.push('worker is already Mainnet-approved; approval cannot be replayed');
   if (snapshot.currentEngineState !== 'DISARMED') failures.push('worker must remain DISARMED before approval');
   if (snapshot.currentOrderSubmissionAttempts !== 0) failures.push('worker has already attempted an order');
+  failures.push(...validateSecretVersionMatch(candidate.secretVersions, snapshot.currentSecretVersions));
   if (!snapshot.preflightPassed || !recentEnough(snapshot.preflightObservedAt, now, maxPreflightAgeSeconds)) {
     failures.push('Mainnet preflight evidence is missing, failed, or stale');
   }
@@ -206,6 +269,105 @@ export function validateApprovalPrerequisites(
   if (snapshot.dataConnectCutover) failures.push('Data Connect cutover must remain disabled');
   if (snapshot.killSwitchActive) failures.push('kill switch state requires explicit explanation');
   return failures;
+}
+
+function validateSecretVersionMatch(
+  expected: SecretVersionSet,
+  actual: SecretVersionSet,
+): string[] {
+  const failures = [
+    ...validateSecretVersions(actual),
+  ];
+  if (stableJson(expected) !== stableJson(actual)) {
+    failures.push('Worker Secret Manager versions do not match the approved release');
+  }
+  return failures;
+}
+
+export function validateContinuationApproval(
+  approval: Partial<ContinuationApproval> | undefined,
+  now = new Date(),
+): string[] {
+  if (!approval) return ['continuation approval is missing'];
+  const failures: string[] = [];
+  if (!CONTINUATION_ID_RE.test(asString(approval.continuationId))) failures.push('continuationId is invalid');
+  if (!/^rc-[0-9a-f-]{36}$/i.test(asString(approval.candidateId))) failures.push('candidateId is invalid');
+  if (!LAUNCH_ID_RE.test(asString(approval.launchId))) failures.push('launchId is invalid');
+  if (!/^approval-[0-9a-f-]{36}$/i.test(asString(approval.initialApprovalId))) failures.push('initialApprovalId is invalid');
+  if (!IMAGE_DIGEST_RE.test(asString(approval.imageDigest))) failures.push('imageDigest must be immutable');
+  if (!REVISION_RE.test(asString(approval.workerRevision))) failures.push('workerRevision is invalid');
+  failures.push(...validateSecretVersions(approval.secretVersions));
+  if (!SHA256_RE.test(asString(approval.firstOrderEvidenceHash))) failures.push('firstOrderEvidenceHash must be a SHA-256 hash');
+  if (approval.reconciliationStatus !== 'IN_SYNC') failures.push('reconciliationStatus must be IN_SYNC');
+  const preflightObservedAt = Date.parse(asString(approval.preflightObservedAt));
+  if (!Number.isFinite(preflightObservedAt) || preflightObservedAt > now.getTime()) failures.push('preflight evidence is missing or from the future');
+  if (!NONCE_RE.test(asString(approval.nonce))) failures.push('nonce is invalid');
+  if (!UID_RE.test(asString(approval.requesterUid))) failures.push('requesterUid is invalid');
+  const createdAt = Date.parse(asString(approval.createdAt));
+  const expiresAt = Date.parse(asString(approval.expiresAt));
+  if (!Number.isFinite(createdAt)) failures.push('createdAt is invalid');
+  if (!Number.isFinite(expiresAt) || expiresAt <= now.getTime()) failures.push('continuation approval is expired or has an invalid expiry');
+  if (Number.isFinite(expiresAt) && expiresAt > now.getTime() + 24 * 60 * 60 * 1000) failures.push('continuation approval expiry cannot exceed 24 hours');
+  if (!['PENDING', 'ACTIVATING', 'CONSUMED', 'EXPIRED'].includes(String(approval.status))) failures.push('continuation approval status is invalid');
+  return failures;
+}
+
+export function validateContinuationPrerequisites(
+  approval: ContinuationApproval,
+  snapshot: ContinuationVerificationSnapshot,
+  now = new Date(),
+  maxPreflightAgeSeconds = 60,
+): string[] {
+  const failures = validateContinuationApproval(approval, now);
+  if (approval.status !== 'PENDING' && approval.status !== 'ACTIVATING') failures.push(`continuation approval status is ${approval.status}`);
+  if (snapshot.currentImageDigest !== approval.imageDigest) failures.push('worker image digest does not match continuation approval');
+  if (snapshot.currentWorkerRevision !== approval.workerRevision) failures.push('worker revision does not match continuation approval');
+  if (snapshot.currentExecutionMode !== RELEASE_EXECUTION_MODE) failures.push('worker execution mode is not LIVE');
+  if (!snapshot.currentMainnetLiveApproved) failures.push('worker is not Mainnet-approved');
+  if (!['PAUSED_NEW_RISK', 'DISARMED'].includes(snapshot.currentEngineState)) failures.push('worker must be paused or disarmed before continuation');
+  if (snapshot.currentLaunchId !== approval.launchId) failures.push('launch id does not match continuation approval');
+  if (![RELEASE_POLICY, AUTONOMOUS_CONTINUATION_POLICY].includes(snapshot.currentLaunchPolicy as typeof RELEASE_POLICY | typeof AUTONOMOUS_CONTINUATION_POLICY)) failures.push('launch policy is not a supported continuation policy');
+  if (!['PAUSED_NEW_RISK', 'REAUTH_REQUIRED'].includes(snapshot.currentLaunchState)) failures.push('durable launch session is not awaiting continuation');
+  if (snapshot.currentSubmittedOrders < 1) failures.push('durable first-order evidence is missing');
+  failures.push(...validateSecretVersionMatch(approval.secretVersions, snapshot.currentSecretVersions));
+  if (!snapshot.preflightPassed || !recentEnough(snapshot.preflightObservedAt, now, maxPreflightAgeSeconds)) failures.push('continuation preflight evidence is missing, failed, or stale');
+  if (snapshot.preflightOrderEndpointAttempts !== 0) failures.push('continuation preflight called an order endpoint');
+  if (snapshot.preflightOrderSubmissionAttempts !== 0) failures.push('continuation preflight attempted an order');
+  if (snapshot.reconciliationStatus !== 'IN_SYNC') failures.push('reconciliation is not IN_SYNC');
+  if (!snapshot.persistenceDurable) failures.push('required persistence is not durable');
+  if (snapshot.dataConnectCutover) failures.push('Data Connect cutover must remain disabled');
+  if (snapshot.killSwitchActive) failures.push('kill switch is active');
+  return failures;
+}
+
+export function newContinuationApproval(
+  input: ContinuationApprovalInput,
+  now = new Date(),
+): ContinuationApproval {
+  const approval: ContinuationApproval = {
+    continuationId: `continuation-${crypto.randomUUID()}`,
+    candidateId: asString(input.candidateId),
+    launchId: asString(input.launchId),
+    initialApprovalId: asString(input.initialApprovalId),
+    imageDigest: asString(input.imageDigest),
+    workerRevision: asString(input.workerRevision),
+    secretVersions: {
+      sql: asString(input.secretVersions?.sql),
+      apiKey: asString(input.secretVersions?.apiKey),
+      apiSecret: asString(input.secretVersions?.apiSecret),
+    },
+    firstOrderEvidenceHash: asString(input.firstOrderEvidenceHash),
+    reconciliationStatus: 'IN_SYNC',
+    preflightObservedAt: asString(input.preflightObservedAt),
+    nonce: asString(input.nonce),
+    requesterUid: asString(input.requesterUid),
+    createdAt: now.toISOString(),
+    expiresAt: asString(input.expiresAt),
+    status: 'PENDING',
+  };
+  const failures = validateContinuationApproval(approval, now);
+  if (failures.length) throw new Error(failures.join('; '));
+  return approval;
 }
 
 function redactEvidenceText(value: unknown): string {

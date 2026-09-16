@@ -47,5 +47,12 @@ if ($runtime.state.engineState -ne "DISARMED") { throw "LIVE-approved Worker did
 if ([int]$runtime.state.orderSubmissionAttempts -ne 0) { throw "Worker reports an order submission during disarmed verification" }
 if ($runtime.state.privateStreamHealthy -eq $true) { throw "Private stream must remain stopped before ARM" }
 if ($runtime.persistence.mode -ne "REQUIRED" -or $runtime.persistence.durable -ne $true) { throw "Worker persistence is not durable REQUIRED" }
+$secretVersions = $runtime.state.secretVersions
+if ($null -eq $secretVersions -or
+    $secretVersions.sql -notmatch '^[1-9][0-9]*$' -or
+    $secretVersions.apiKey -notmatch '^[1-9][0-9]*$' -or
+    $secretVersions.apiSecret -notmatch '^[1-9][0-9]*$') {
+  throw "Worker secret version metadata is missing or not numeric"
+}
 
 Write-Output "LIVE revision verified: approval=$ExpectedMainnetLiveApproved, DISARMED, durable, no order submission"

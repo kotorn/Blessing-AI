@@ -40,6 +40,7 @@ function passingSnapshot(): ReleaseVerificationSnapshot {
     currentMainnetLiveApproved: false,
     currentEngineState: 'DISARMED',
     currentOrderSubmissionAttempts: 0,
+    currentSecretVersions: { sql: '1', apiKey: '1', apiSecret: '1' },
     preflightPassed: true,
     preflightObservedAt: PREFLIGHT_AT.toISOString(),
     reconciliationStatus: 'IN_SYNC',
@@ -104,6 +105,8 @@ describe('mainnet release control boundary', () => {
 
   it('keeps release approval at trading_admin and never changes approval itself', () => {
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/release/mainnet/approve' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/release/mainnet/continuation/approve' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/continue' })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'GET', path: '/api/release/mainnet/rc-id' })).toBe('viewer');
   });
 
@@ -119,6 +122,11 @@ describe('mainnet release control boundary', () => {
     expect(validateApprovalPrerequisites(release, { ...passingSnapshot(), currentEngineState: 'ARMED' }, NOW)).toContain(
       'worker must remain DISARMED before approval',
     );
+    expect(validateApprovalPrerequisites(
+      release,
+      { ...passingSnapshot(), currentSecretVersions: { sql: '2', apiKey: '1', apiSecret: '1' } },
+      NOW,
+    )).toContain('Worker Secret Manager versions do not match the approved release');
   });
 
   it('provides one-time approval consumption with no execution activation', async () => {

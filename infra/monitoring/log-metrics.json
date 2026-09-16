@@ -72,6 +72,21 @@
   {
     "name": "blessing_staged_session_violation",
     "description": "Blessing AI staged first-order session was missing, exceeded, or not durably marked.",
-    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=staged_session_violation\""
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND (textPayload:\"monitor_event=staged_session_violation\" OR textPayload:\"monitor_event=launch_session_violation\")"
+  },
+  {
+    "name": "blessing_autonomous_continuation_failure",
+    "description": "Blessing AI autonomous continuation failed or was reset to a disarmed state.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=autonomous_continuation_failure\""
+  },
+  {
+    "name": "blessing_autonomous_resume_denied",
+    "description": "Blessing AI refused an autonomous resume because fresh continuation authorization was missing.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=autonomous_resume_denied\""
+  },
+  {
+    "name": "blessing_release_approval_replay",
+    "description": "Blessing AI rejected a replay or expired release/continuation approval.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-control-plane\" AND textPayload:\"monitor_event=release_approval_replay\""
   }
 ]

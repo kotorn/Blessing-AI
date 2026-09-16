@@ -328,5 +328,55 @@
     "documentation": { "mimeType": "text/markdown", "content": "The staged first-order invariant was violated or could not be durably marked. Keep the Worker disarmed and reconcile before release." },
     "enabled": true,
     "userLabels": { "blessing_signal": "staged_session", "environment": "mainnet" }
+  },
+  {
+    "displayName": "Blessing AI - Autonomous continuation failure",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Continuation activation failed",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_autonomous_continuation_failure\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "1s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      },
+      {
+        "displayName": "Autonomous resume denied",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_autonomous_resume_denied\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "1s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "Autonomous continuation failed or resume was denied. Keep the Worker DISARMED and require fresh preflight and continuation approval." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "autonomous_continuation", "environment": "mainnet" }
+  },
+  {
+    "displayName": "Blessing AI - Release approval replay",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Expired or replayed continuation approval",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_release_approval_replay\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "1s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "A release or continuation approval was expired or replayed. Keep Mainnet disarmed and inspect the release evidence trail." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "release_approval_replay", "environment": "mainnet" }
   }
 ]

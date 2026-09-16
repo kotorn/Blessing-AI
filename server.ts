@@ -34,10 +34,15 @@ import {
 import {
   hashEvidence,
   newReleaseCandidate,
+  newContinuationApproval,
   sanitizePreflightEvidence,
   validateApprovalPrerequisites,
+  validateContinuationPrerequisites,
+  type ContinuationApproval,
+  type ContinuationVerificationSnapshot,
   type ReleaseCandidate,
   type ReleaseVerificationSnapshot,
+  type SecretVersionSet,
 } from './src/backend/release.js';
 import {
   getReleaseStore,
@@ -1643,6 +1648,47 @@ async function forwardWorkerRequest(
   return { response, data };
 }
 
+async function rollbackAutonomousContinuation(): Promise<{
+  verified: boolean;
+  workerState: any;
+  error?: string;
+}> {
+  // A successful Worker transition followed by a lost/failed release-store
+  // write is an uncertain external-effect boundary. Reconcile it by asking
+  // the Worker to DISARM, then verify the resulting state independently. Do
+  // not report the continuation as safely stopped unless both calls and the
+  // state read-back prove it.
+  try {
+    const disarm = await forwardWorkerRequest('/disarm', { method: 'POST' });
+    if (!disarm.response.ok) {
+      return {
+        verified: false,
+        workerState: disarm.data,
+        error: `Worker DISARM rejected with HTTP ${disarm.response.status}`,
+      };
+    }
+    const readback = await forwardWorkerRequest('/state');
+    const workerState = releaseRequestObject(readback.data) || {};
+    const verified = (
+      readback.response.ok
+      && ['DISARMED', 'EMERGENCY'].includes(String(workerState.engine_state || ''))
+      && workerState.mainnet_launch_state !== 'AUTONOMOUS_ACTIVE'
+    );
+    projectWorkerState(workerState);
+    return {
+      verified,
+      workerState,
+      ...(verified ? {} : { error: 'Worker DISARM read-back did not prove a safe state' }),
+    };
+  } catch (error) {
+    return {
+      verified: false,
+      workerState: {},
+      error: error instanceof Error ? error.message : 'Worker rollback failed',
+    };
+  }
+}
+
 function projectWorkerState(workerState: any): void {
   if (!workerState || typeof workerState !== 'object') return;
   if (typeof workerState.execution_mode === 'string') {
@@ -1671,6 +1717,10 @@ function projectWorkerState(workerState: any): void {
   if (typeof workerState.mainnet_credentials_verified === 'boolean') tradingSystemState.mainnetCredentialsVerified = workerState.mainnet_credentials_verified;
   if (typeof workerState.mainnet_live_approved === 'boolean') tradingSystemState.mainnetLiveApproved = workerState.mainnet_live_approved;
   if (typeof workerState.mainnet_preflight_ready === 'boolean') tradingSystemState.mainnetPreflightReady = workerState.mainnet_preflight_ready;
+  if (typeof workerState.mainnet_launch_policy === 'string') tradingSystemState.mainnetLaunchPolicy = workerState.mainnet_launch_policy;
+  if (typeof workerState.mainnet_launch_id === 'string') tradingSystemState.mainnetLaunchId = workerState.mainnet_launch_id;
+  if (typeof workerState.mainnet_launch_state === 'string') tradingSystemState.mainnetLaunchState = workerState.mainnet_launch_state;
+  if (typeof workerState.mainnet_continuation_approval_id === 'string') tradingSystemState.mainnetContinuationApprovalId = workerState.mainnet_continuation_approval_id;
   if (typeof workerState.updated_at === 'string') tradingSystemState.updatedAt = workerState.updated_at;
 }
 
@@ -1731,20 +1781,43 @@ function releaseRequestObject(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function hasCredentialLikeKey(value: unknown): boolean {
+function secretVersionsFromState(value: unknown): SecretVersionSet {
+  const versions = releaseRequestObject(value) || {};
+  return {
+    sql: String(versions.sql || ''),
+    apiKey: String(versions.apiKey || ''),
+    apiSecret: String(versions.apiSecret || ''),
+  };
+}
+
+function secretVersionsMatch(expected: SecretVersionSet, actual: SecretVersionSet): boolean {
+  return expected.sql === actual.sql
+    && expected.apiKey === actual.apiKey
+    && expected.apiSecret === actual.apiSecret;
+}
+
+function hasCredentialLikeKey(value: unknown, allowSecretVersionMetadata = false): boolean {
   if (!value || typeof value !== 'object') return false;
-  if (Array.isArray(value)) return value.some(hasCredentialLikeKey);
-  return Object.entries(value as Record<string, unknown>).some(([key, child]) =>
-    key === 'secretVersions'
-      ? false
-      : /api[-_ ]?(key|secret)|password|token|dsn|private[-_ ]?key/i.test(key) || hasCredentialLikeKey(child),
-  );
+  if (Array.isArray(value)) return value.some((child) => hasCredentialLikeKey(child, allowSecretVersionMetadata));
+  return Object.entries(value as Record<string, unknown>).some(([key, child]) => {
+    if (allowSecretVersionMetadata && key === 'secretVersions') {
+      const versions = releaseRequestObject(child);
+      if (!versions) return true;
+      return Object.entries(versions).some(([versionKey, version]) =>
+        !['sql', 'apiKey', 'apiSecret'].includes(versionKey)
+        || typeof version !== 'string'
+        || !/^[1-9][0-9]*$/.test(version),
+      );
+    }
+    return /api[-_ ]?(key|secret)|password|token|dsn|private[-_ ]?key/i.test(key)
+      || hasCredentialLikeKey(child, allowSecretVersionMetadata);
+  });
 }
 
 function releaseCandidateInputFromRequest(value: unknown): Parameters<typeof newReleaseCandidate>[0] {
   const body = releaseRequestObject(value);
   if (!body) throw new Error('Release candidate request must be an object');
-  if (hasCredentialLikeKey(body)) {
+  if (hasCredentialLikeKey(body, true)) {
     throw new Error('Release candidate payload must not contain credentials or tokens');
   }
   const versions = releaseRequestObject(body.secretVersions);
@@ -1828,6 +1901,7 @@ async function currentReleaseVerification(
     currentOrderSubmissionAttempts: Number.isInteger(Number(state.order_submission_attempts))
       ? Number(state.order_submission_attempts)
       : -1,
+    currentSecretVersions: secretVersionsFromState(state.secret_versions),
     preflightPassed: preflight.preflightPassed
       && preflightHasRequiredEvidence
       && preflight.orderSubmissionAttempts === 0
@@ -1868,6 +1942,121 @@ async function verifyReleaseCandidate(candidateId: string): Promise<{
     evidenceHash: preflightResult.evidenceHash,
     snapshot,
     failures,
+  };
+}
+
+function sanitizeContinuationReadiness(value: unknown): {
+  executionMode: 'LIVE';
+  continuationOnly: true;
+  continuationReady: boolean;
+  launchId: string;
+  launchPolicy: string;
+  launchState: string;
+  submittedOrders: number;
+  reservedOrders: number;
+  preflightPassed: boolean;
+  preflightOrderSubmissionAttempts: number;
+  preflightOrderEndpointAttempts: number;
+  secretVersions: SecretVersionSet;
+  persistenceDurable: boolean;
+  preflight: ReturnType<typeof sanitizePreflightEvidence>;
+  checks: Array<{ id: string; name: string; required: boolean; status: 'PASS' | 'FAIL'; message: string }>;
+  observedAt: string;
+} {
+  const raw = releaseRequestObject(value) || {};
+  const rawChecks = Array.isArray(raw.checks) ? raw.checks : [];
+  const checks = rawChecks.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const check = item as Record<string, unknown>;
+    if (check.status !== 'PASS' && check.status !== 'FAIL') return [];
+    const id = String(check.id || '').trim().slice(0, 80);
+    const name = String(check.name || '').trim().slice(0, 160);
+    if (!id || !name) return [];
+    const message = String(check.message || '')
+      .replace(/(authorization|api[-_ ]?key|api[-_ ]?secret|password|token|dsn)\s*[:=]\s*[^,;\s]+/gi, '$1=<redacted>')
+      .slice(0, 500);
+    return [{
+      id,
+      name,
+      required: check.required !== false,
+      status: check.status as 'PASS' | 'FAIL',
+      message,
+    }];
+  });
+  const preflight = sanitizePreflightEvidence(raw.preflight);
+  const intOr = (valueToParse: unknown, fallback = -1) => {
+    const number = Number(valueToParse);
+    return Number.isInteger(number) && number >= 0 ? number : fallback;
+  };
+  return {
+    executionMode: 'LIVE',
+    continuationOnly: true,
+    continuationReady: raw.continuationReady === true,
+    launchId: String(raw.launchId || '').trim(),
+    launchPolicy: String(raw.launchPolicy || '').trim(),
+    launchState: String(raw.launchState || '').trim(),
+    submittedOrders: intOr(raw.submittedOrders, 0),
+    reservedOrders: intOr(raw.reservedOrders, 0),
+    preflightPassed: raw.preflightPassed === true,
+    preflightOrderSubmissionAttempts: intOr(raw.preflightOrderSubmissionAttempts),
+    preflightOrderEndpointAttempts: intOr(raw.preflightOrderEndpointAttempts),
+    secretVersions: secretVersionsFromState(raw.secretVersions),
+    persistenceDurable: raw.persistenceDurable === true,
+    preflight,
+    checks,
+    observedAt: String(raw.observedAt || '').trim(),
+  };
+}
+
+async function runContinuationReadiness(launchId: string): Promise<{
+  evidence: ReturnType<typeof sanitizeContinuationReadiness>;
+  evidenceHash: string;
+}> {
+  const normalized = String(launchId || '').trim();
+  if (!/^launch-[A-Za-z0-9-]{8,127}$/.test(normalized)) {
+    throw new Error('Invalid continuation launch id');
+  }
+  const forwarded = await forwardWorkerRequest(
+    `/continuation/readiness?launch_id=${encodeURIComponent(normalized)}`,
+    { method: 'POST' },
+  );
+  if (!forwarded.response.ok) throw new Error('Worker rejected continuation readiness');
+  const evidence = sanitizeContinuationReadiness(forwarded.data);
+  return { evidence, evidenceHash: hashEvidence(evidence) };
+}
+
+function continuationVerificationSnapshot(
+  evidence: ReturnType<typeof sanitizeContinuationReadiness>,
+  workerState: Record<string, unknown>,
+): ContinuationVerificationSnapshot {
+  const workerImageDigest = String(workerState.worker_image_digest || '').trim();
+  const workerRevision = String(workerState.worker_revision || '').trim();
+  return {
+    currentImageDigest: workerImageDigest,
+    currentWorkerRevision: workerRevision,
+    currentExecutionMode: String(workerState.execution_mode || ''),
+    currentMainnetLiveApproved: workerState.mainnet_live_approved === true,
+    currentEngineState: String(workerState.engine_state || ''),
+    currentLaunchId: String(workerState.mainnet_launch_id || ''),
+    currentLaunchPolicy: String(workerState.mainnet_launch_policy || ''),
+    currentLaunchState: String(workerState.mainnet_launch_state || ''),
+    currentContinuationApprovalId: typeof workerState.mainnet_continuation_approval_id === 'string'
+      ? workerState.mainnet_continuation_approval_id
+      : undefined,
+    currentSubmittedOrders: evidence.submittedOrders,
+    currentSecretVersions: secretVersionsFromState(workerState.secret_versions),
+    preflightPassed: evidence.preflightPassed,
+    preflightObservedAt: evidence.observedAt,
+    preflightOrderEndpointAttempts: evidence.preflightOrderEndpointAttempts,
+    preflightOrderSubmissionAttempts: evidence.preflightOrderSubmissionAttempts,
+    reconciliationStatus: evidence.preflight.checks.find(
+      (check) => check.id === 'CHK-PREFLIGHT-RECONCILIATION',
+    )?.status === 'PASS' ? 'IN_SYNC' : String(workerState.reconciliation_status || ''),
+    persistenceDurable: evidence.persistenceDurable,
+    dataConnectCutover: ['1', 'true', 'yes', 'on'].includes(
+      (process.env.VITE_DATA_CONNECT_CUTOVER || 'false').trim().toLowerCase(),
+    ),
+    killSwitchActive: workerState.kill_switch_active === true,
   };
 }
 
@@ -2121,6 +2310,140 @@ app.post('/api/release/mainnet/approve', async (req: Request, res: Response) => 
   }
 });
 
+// The second approval is deliberately separate from the initial release
+// approval. It records evidence for the staged first order but never changes
+// Worker state or the MAINNET_LIVE_APPROVED deployment flag.
+app.post('/api/release/mainnet/continuation/approve', async (req: Request, res: Response) => {
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body)) {
+    return res.status(400).json({ error: 'CONTINUATION_PAYLOAD_CONTAINS_CREDENTIALS' });
+  }
+  const candidateId = typeof body.candidateId === 'string' ? body.candidateId.trim() : '';
+  const launchId = typeof body.launchId === 'string' ? body.launchId.trim() : '';
+  if (!/^rc-[0-9a-f-]{36}$/i.test(candidateId)) {
+    return res.status(400).json({ error: 'RELEASE_CANDIDATE_ID_REQUIRED' });
+  }
+  if (!/^launch-[A-Za-z0-9-]{8,127}$/.test(launchId)) {
+    return res.status(400).json({ error: 'LAUNCH_ID_REQUIRED' });
+  }
+  const requesterUid = res.locals.firebaseUid;
+  if (typeof requesterUid !== 'string' || !requesterUid) {
+    return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  }
+  try {
+    const store = getServerReleaseStore();
+    const candidate = await store.getCandidate(candidateId);
+    if (!candidate) return res.status(404).json({ error: 'RELEASE_CANDIDATE_NOT_FOUND' });
+    if (candidate.status !== 'CONSUMED' || !candidate.approvalId) {
+      return res.status(409).json({
+        error: 'INITIAL_RELEASE_APPROVAL_NOT_CONSUMED',
+        message: 'Continuation requires the consumed staged-release approval',
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const consumed = await store.getConsumedApproval(candidate.approvalId);
+    if (!consumed || consumed.launchPolicy !== 'STAGED_FIRST_ORDER') {
+      return res.status(409).json({ error: 'INITIAL_RELEASE_APPROVAL_INVALID', evidence_status: 'UNVERIFIED' });
+    }
+
+    const readinessResult = await runContinuationReadiness(launchId);
+    const stateResponse = await forwardWorkerRequest('/state');
+    if (!stateResponse.response.ok) throw new Error('Worker state read-back is unavailable');
+    const workerState = releaseRequestObject(stateResponse.data) || {};
+    const snapshot = continuationVerificationSnapshot(readinessResult.evidence, workerState);
+    const now = new Date();
+    const approval = newContinuationApproval({
+      candidateId,
+      launchId,
+      initialApprovalId: consumed.approvalId,
+      imageDigest: consumed.imageDigest,
+      workerRevision: consumed.workerRevision,
+      secretVersions: consumed.secretVersions,
+      firstOrderEvidenceHash: readinessResult.evidenceHash,
+      preflightObservedAt: readinessResult.evidence.observedAt,
+      nonce: crypto.randomBytes(16).toString('hex'),
+      requesterUid,
+      expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+    }, now);
+    const failures = validateContinuationPrerequisites(approval, snapshot, now);
+    if (failures.length) {
+      return res.status(409).json({
+        error: 'CONTINUATION_GATE_NOT_PASSED',
+        candidateId,
+        launchId,
+        failures,
+        evidence_status: 'UNVERIFIED',
+        approved: false,
+      });
+    }
+    await store.createContinuationApproval(approval);
+    await store.putEvidence({
+      candidateId,
+      kind: 'CONTINUATION_APPROVAL',
+      generatedAt: now.toISOString(),
+      evidenceHash: hashEvidence({ approval, snapshot }),
+      payload: {
+        continuationId: approval.continuationId,
+        candidateId,
+        launchId,
+        firstOrderEvidenceHash: approval.firstOrderEvidenceHash,
+        reconciliationStatus: approval.reconciliationStatus,
+        requesterUid,
+        expiresAt: approval.expiresAt,
+      },
+    });
+    return res.status(201).json({
+      approved: true,
+      continuationId: approval.continuationId,
+      candidateId: approval.candidateId,
+      launchId: approval.launchId,
+      initialApprovalId: approval.initialApprovalId,
+      imageDigest: approval.imageDigest,
+      workerRevision: approval.workerRevision,
+      status: approval.status,
+      expiresAt: approval.expiresAt,
+      firstOrderEvidenceHash: approval.firstOrderEvidenceHash,
+      reconciliationStatus: approval.reconciliationStatus,
+      evidence_status: 'VERIFIED',
+      executionActivated: false,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Continuation approval failed';
+    return res.status(message.includes('not found') ? 404 : 503).json({
+      error: 'CONTINUATION_APPROVAL_FAILED',
+      message,
+      approved: false,
+      executionActivated: false,
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
+app.get('/api/release/mainnet/continuation/:continuationId', async (req: Request, res: Response) => {
+  try {
+    const approval = await getServerReleaseStore().getContinuationApproval(String(req.params.continuationId));
+    if (!approval) return res.status(404).json({ error: 'CONTINUATION_APPROVAL_NOT_FOUND' });
+    return res.json({
+      continuationId: approval.continuationId,
+      candidateId: approval.candidateId,
+      launchId: approval.launchId,
+      initialApprovalId: approval.initialApprovalId,
+      imageDigest: approval.imageDigest,
+      workerRevision: approval.workerRevision,
+      secretVersions: approval.secretVersions,
+      firstOrderEvidenceHash: approval.firstOrderEvidenceHash,
+      reconciliationStatus: approval.reconciliationStatus,
+      preflightObservedAt: approval.preflightObservedAt,
+      status: approval.status,
+      createdAt: approval.createdAt,
+      expiresAt: approval.expiresAt,
+      evidence_status: 'VERIFIED',
+    });
+  } catch {
+    return res.status(503).json({ error: 'RELEASE_STORE_UNAVAILABLE', evidence_status: 'UNVERIFIED' });
+  }
+});
+
 app.get('/api/release/mainnet/:candidateId', async (req: Request, res: Response) => {
   try {
     const candidate = await getServerReleaseStore().getCandidate(String(req.params.candidateId));
@@ -2320,6 +2643,211 @@ app.post('/api/system/arm', async (req, res) => {
   }
 });
 
+// Continuation is a distinct trading_admin action. The browser supplies only
+// opaque identifiers and strategy configuration; the Control Plane resolves
+// the server-side approval and forwards a Google-authenticated request to the
+// Worker. No endpoint here can set MAINNET_LIVE_APPROVED itself.
+app.post('/api/system/continue', async (req: Request, res: Response) => {
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body)) {
+    return res.status(400).json({ error: 'CONTINUATION_PAYLOAD_CONTAINS_CREDENTIALS' });
+  }
+  const continuationApprovalId = typeof body.continuationApprovalId === 'string'
+    ? body.continuationApprovalId.trim()
+    : '';
+  const launchId = typeof body.launchId === 'string' ? body.launchId.trim() : '';
+  if (!/^continuation-[0-9a-f-]{36}$/i.test(continuationApprovalId)) {
+    return res.status(400).json({ error: 'CONTINUATION_APPROVAL_ID_REQUIRED' });
+  }
+  if (!/^launch-[A-Za-z0-9-]{8,127}$/.test(launchId)) {
+    return res.status(400).json({ error: 'LAUNCH_ID_REQUIRED' });
+  }
+
+  const rawStrategies = releaseRequestObject(body.strategies);
+  const strategies = {
+    grid: rawStrategies?.grid === true,
+    trend: rawStrategies?.trend === true,
+    shock: rawStrategies?.shock === true,
+    carry: rawStrategies?.carry === true,
+  };
+  if (!Object.values(strategies).some(Boolean)) {
+    return res.status(400).json({ error: 'CONTINUATION_STRATEGY_REQUIRED' });
+  }
+  const riskProfile = String(body.riskProfile || 'CONSERVATIVE').trim().toUpperCase();
+  if (!['CONSERVATIVE', 'BALANCED', 'AGGRESSIVE'].includes(riskProfile)) {
+    return res.status(400).json({ error: 'INVALID_RISK_PROFILE' });
+  }
+  if (body.executionMode !== 'LIVE' || body.enforcePreflight !== true) {
+    return res.status(400).json({
+      error: 'INVALID_CONTINUATION_CONFIGURATION',
+      message: 'Autonomous continuation requires executionMode=LIVE and enforcePreflight=true',
+    });
+  }
+  const instruments = Array.isArray(body.instruments)
+    ? body.instruments.map((symbol) => String(symbol).trim().toUpperCase()).filter(Boolean)
+    : ['ETHUSDC'];
+  if (instruments.length !== 1 || instruments[0] !== 'ETHUSDC') {
+    return res.status(400).json({ error: 'CONTINUATION_SYMBOL_MUST_BE_ETHUSDC' });
+  }
+
+  try {
+    const store = getServerReleaseStore();
+    let approval = await store.getContinuationApproval(continuationApprovalId);
+    if (!approval) return res.status(404).json({ error: 'CONTINUATION_APPROVAL_NOT_FOUND' });
+
+    const candidate = await store.getCandidate(approval.candidateId);
+    if (!candidate || candidate.status !== 'CONSUMED' || candidate.approvalId !== approval.initialApprovalId) {
+      return res.status(409).json({ error: 'INITIAL_RELEASE_APPROVAL_INVALID', evidence_status: 'UNVERIFIED' });
+    }
+    const consumed = await store.getConsumedApproval(approval.initialApprovalId);
+    if (!consumed || consumed.imageDigest !== approval.imageDigest || consumed.workerRevision !== approval.workerRevision) {
+      return res.status(409).json({ error: 'CONTINUATION_SCOPE_MISMATCH', evidence_status: 'UNVERIFIED' });
+    }
+
+    const stateForIdempotency = await forwardWorkerRequest('/state');
+    const existingWorkerState = releaseRequestObject(stateForIdempotency.data) || {};
+    const alreadyActive = stateForIdempotency.response.ok
+      && existingWorkerState.execution_mode === 'LIVE'
+      && existingWorkerState.engine_state === 'ARMED'
+      && existingWorkerState.mainnet_launch_state === 'AUTONOMOUS_ACTIVE'
+      && existingWorkerState.mainnet_continuation_approval_id === continuationApprovalId
+      && existingWorkerState.mainnet_live_approved === true
+      && String(existingWorkerState.worker_image_digest || '').trim() === approval.imageDigest
+      && String(existingWorkerState.worker_revision || '').trim() === approval.workerRevision;
+    if (alreadyActive) {
+      if (approval.status !== 'CONSUMED') {
+        approval = await store.consumeContinuationApproval(continuationApprovalId);
+      }
+      projectWorkerState(existingWorkerState);
+      return res.json({
+        ...existingWorkerState,
+        continuationApprovalId,
+        launchId,
+        status: 'AUTONOMOUS_ACTIVE',
+        idempotent: true,
+        evidence_status: 'VERIFIED',
+      });
+    }
+    if (approval.status === 'CONSUMED' || approval.status === 'EXPIRED') {
+      console.warn(
+        `monitor_event=release_approval_replay approval_kind=continuation status=${approval.status}`,
+      );
+      return res.status(409).json({ error: 'CONTINUATION_APPROVAL_REPLAYED', evidence_status: 'UNVERIFIED' });
+    }
+    approval = await store.claimContinuationApproval(continuationApprovalId);
+
+    const readinessResult = await runContinuationReadiness(launchId);
+    const latestStateResponse = await forwardWorkerRequest('/state');
+    if (!latestStateResponse.response.ok) throw new Error('Worker state read-back is unavailable');
+    const latestState = releaseRequestObject(latestStateResponse.data) || {};
+    const snapshot = continuationVerificationSnapshot(readinessResult.evidence, latestState);
+    const failures = validateContinuationPrerequisites(approval, snapshot);
+    if (approval.launchId !== launchId) failures.push('launch id does not match continuation approval');
+    if (failures.length) {
+      return res.status(409).json({
+        error: 'CONTINUATION_GATE_NOT_PASSED',
+        failures,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+
+    const forwarded = await forwardWorkerRequest('/continue', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        executionMode: 'LIVE',
+        instruments: ['ETHUSDC'],
+        strategies,
+        riskProfile,
+        enforcePreflight: true,
+        continuationApprovalId: approval.continuationId,
+        launchId: approval.launchId,
+        initialApprovalId: approval.initialApprovalId,
+      }),
+    });
+    if (!forwarded.response.ok) {
+      const rollback = await rollbackAutonomousContinuation();
+      return res.status(forwarded.response.status).json({
+        error: 'WORKER_REJECTED_CONTINUATION',
+        detail: forwarded.data,
+        executionActivated: !rollback.verified,
+        rollbackVerified: rollback.verified,
+        rollbackError: rollback.error,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const workerState = releaseRequestObject(forwarded.data) || {};
+    if (
+      workerState.execution_mode !== 'LIVE'
+      || workerState.engine_state !== 'ARMED'
+      || workerState.mainnet_live_approved !== true
+      || workerState.mainnet_launch_state !== 'AUTONOMOUS_ACTIVE'
+      || workerState.mainnet_continuation_approval_id !== approval.continuationId
+      || String(workerState.worker_image_digest || '').trim() !== approval.imageDigest
+      || String(workerState.worker_revision || '').trim() !== approval.workerRevision
+    ) {
+      const rollback = await rollbackAutonomousContinuation();
+      return res.status(409).json({
+        error: 'WORKER_AUTONOMOUS_READBACK_FAILED',
+        message: 'Worker did not prove the approved autonomous continuation state',
+        executionActivated: !rollback.verified,
+        rollbackVerified: rollback.verified,
+        rollbackError: rollback.error,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    let consumedContinuation: ContinuationApproval;
+    try {
+      consumedContinuation = await store.consumeContinuationApproval(approval.continuationId);
+    } catch (error) {
+      const rollback = await rollbackAutonomousContinuation();
+      console.warn(
+        `monitor_event=autonomous_continuation_failure phase=consume rollback_verified=${rollback.verified}`,
+      );
+      return res.status(503).json({
+        error: 'CONTINUATION_APPROVAL_CONSUME_FAILED',
+        message: 'Worker activation was not independently committed; rollback verification is required.',
+        executionActivated: !rollback.verified,
+        rollbackVerified: rollback.verified,
+        rollbackError: rollback.error,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    projectWorkerState(workerState);
+    auditRepository.logEvent({
+      eventType: 'AUTONOMOUS_CONTINUATION_ACTIVATED',
+      previousState: tradingSystemState.engineState,
+      newState: 'ARMED',
+      executionMode: 'LIVE',
+      reason: 'Independent continuation approval and Worker read-back passed',
+      metadata: {
+        launchId: approval.launchId,
+        continuationId: approval.continuationId,
+        imageDigest: approval.imageDigest,
+        workerRevision: approval.workerRevision,
+      },
+    });
+    return res.json({
+      ...workerState,
+      continuationId: consumedContinuation.continuationId,
+      launchId: consumedContinuation.launchId,
+      status: 'AUTONOMOUS_ACTIVE',
+      evidence_status: 'VERIFIED',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Autonomous continuation failed';
+    console.warn(
+      `monitor_event=autonomous_continuation_failure error_class=${error instanceof Error ? error.name : 'unknown'}`,
+    );
+    return res.status(message.includes('not found') ? 404 : 503).json({
+      error: 'AUTONOMOUS_CONTINUATION_FAILED',
+      message,
+      executionActivated: false,
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
 app.post('/api/system/disarm', async (req, res) => {
   try {
     const previousState = tradingSystemState.engineState;
@@ -2450,6 +2978,7 @@ app.post('/internal/release/candidate', async (req: Request, res: Response) => {
       || Number(workerState.order_submission_attempts) !== 0
       || String(workerState.worker_image_digest || '').trim() !== candidate.imageDigest
       || String(workerState.worker_revision || '').trim() !== candidate.workerRevision
+      || !secretVersionsMatch(candidate.secretVersions, secretVersionsFromState(workerState.secret_versions))
     ) {
       return res.status(409).json({
         error: 'RELEASE_CANDIDATE_RUNTIME_MISMATCH',
@@ -2513,6 +3042,31 @@ app.post('/internal/release/preflight', async (req: Request, res: Response) => {
   }
 });
 
+app.post('/internal/release/continuation-readiness', async (req: Request, res: Response) => {
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body)) {
+    return res.status(400).json({ error: 'CONTINUATION_PAYLOAD_CONTAINS_CREDENTIALS', evidence_status: 'UNVERIFIED' });
+  }
+  const launchId = typeof body.launchId === 'string' ? body.launchId.trim() : '';
+  if (!launchId) return res.status(400).json({ error: 'LAUNCH_ID_REQUIRED', evidence_status: 'UNVERIFIED' });
+  try {
+    const result = await runContinuationReadiness(launchId);
+    return res.status(result.evidence.continuationReady ? 200 : 409).json({
+      ...result.evidence,
+      evidenceHash: result.evidenceHash,
+      evidence_status: result.evidence.continuationReady ? 'VERIFIED' : 'UNVERIFIED',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Continuation readiness failed';
+    return res.status(503).json({
+      error: 'CONTINUATION_READINESS_FAILED',
+      message,
+      continuationReady: false,
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
 app.post('/internal/release/verify', async (req: Request, res: Response) => {
   const candidateId = typeof req.body?.candidateId === 'string' ? req.body.candidateId.trim() : '';
   if (!candidateId) return res.status(400).json({ error: 'RELEASE_CANDIDATE_ID_REQUIRED' });
@@ -2556,7 +3110,12 @@ app.post('/internal/release/runtime', async (_req: Request, res: Response) => {
         engineState: state.engine_state,
         workerImageDigest: state.worker_image_digest,
         workerRevision: state.worker_revision,
+        secretVersions: secretVersionsFromState(state.secret_versions),
         mainnetLiveApproved: state.mainnet_live_approved === true,
+        mainnetLaunchId: state.mainnet_launch_id,
+        mainnetLaunchPolicy: state.mainnet_launch_policy,
+        mainnetLaunchState: state.mainnet_launch_state,
+        mainnetContinuationApprovalId: state.mainnet_continuation_approval_id,
         orderSubmissionAttempts: Number(state.order_submission_attempts || 0),
         privateStreamHealthy: state.private_stream_healthy === true,
         killSwitchActive: state.kill_switch_active === true,
@@ -2591,7 +3150,31 @@ app.post('/internal/release/consume', async (req: Request, res: Response) => {
   const candidateId = typeof req.body?.candidateId === 'string' ? req.body.candidateId.trim() : '';
   if (!candidateId) return res.status(400).json({ error: 'RELEASE_CANDIDATE_ID_REQUIRED' });
   try {
-    const approval = await getServerReleaseStore().consumeApproval(candidateId);
+    const store = getServerReleaseStore();
+    const candidate = await store.getCandidate(candidateId);
+    if (!candidate) return res.status(404).json({ error: 'RELEASE_CANDIDATE_NOT_FOUND' });
+    const workerStateResponse = await forwardWorkerRequest('/state');
+    const workerState = releaseRequestObject(workerStateResponse.data) || {};
+    if (
+      !workerStateResponse.response.ok
+      || workerState.execution_mode !== 'LIVE'
+      || workerState.mainnet_live_approved !== false
+      || workerState.engine_state !== 'DISARMED'
+      || Number(workerState.order_submission_attempts) !== 0
+      || String(workerState.worker_image_digest || '').trim() !== candidate.imageDigest
+      || String(workerState.worker_revision || '').trim() !== candidate.workerRevision
+      || !secretVersionsMatch(candidate.secretVersions, secretVersionsFromState(workerState.secret_versions))
+      || ['1', 'true', 'yes', 'on'].includes((process.env.VITE_DATA_CONNECT_CUTOVER || 'false').trim().toLowerCase())
+    ) {
+      console.warn('monitor_event=release_approval_replay reason=runtime_mismatch');
+      return res.status(409).json({
+        error: 'RELEASE_APPROVAL_RUNTIME_MISMATCH',
+        consumed: false,
+        executionActivated: false,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const approval = await store.consumeApproval(candidateId);
     return res.json({ ...approval, consumed: true, executionActivated: false, evidence_status: 'VERIFIED' });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Approval consumption failed';

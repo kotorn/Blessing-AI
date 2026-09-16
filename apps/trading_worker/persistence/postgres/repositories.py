@@ -404,7 +404,8 @@ class PersistenceRepository:
             """
             SELECT launch_id, approval_id, image_digest, symbol, policy,
                    max_risk_increasing_orders, reserved_orders, submitted_orders,
-                   state, created_at, updated_at
+                   state, continuation_approval_id, first_order_verified_at,
+                   autonomous_approved_at, last_restart_at, created_at, updated_at
             FROM mainnet_launch_sessions
             WHERE approval_id = $1
             """,
@@ -422,7 +423,12 @@ class PersistenceRepository:
         return dict(row)
 
     async def reserve_mainnet_risk_order(self, launch_id: str) -> bool:
-        """Atomically reserve the only staged risk-increasing order slot."""
+        """Atomically reserve a risk-increasing order slot.
+
+        Staged sessions have one slot.  Autonomous sessions deliberately have
+        no session-wide count limit; the deterministic risk governor and
+        exchange-derived order caps remain the limits for each order.
+        """
 
         row = await self.db.fetchrow(
             """
@@ -430,9 +436,15 @@ class PersistenceRepository:
             SET reserved_orders = reserved_orders + 1,
                 updated_at = CURRENT_TIMESTAMP
             WHERE launch_id = $1
-              AND state = 'ACTIVE'
-              AND submitted_orders = 0
-              AND reserved_orders < max_risk_increasing_orders
+              AND (
+                (policy = 'STAGED_FIRST_ORDER'
+                 AND state = 'ACTIVE'
+                 AND submitted_orders = 0
+                 AND reserved_orders < max_risk_increasing_orders)
+                OR
+                (policy = 'AUTONOMOUS_AFTER_REVIEW'
+                 AND state = 'AUTONOMOUS_ACTIVE')
+              )
             RETURNING launch_id
             """,
             launch_id,
@@ -448,7 +460,7 @@ class PersistenceRepository:
             SET reserved_orders = reserved_orders - 1,
                 updated_at = CURRENT_TIMESTAMP
             WHERE launch_id = $1
-              AND state = 'ACTIVE'
+              AND state IN ('ACTIVE', 'AUTONOMOUS_ACTIVE')
               AND reserved_orders > submitted_orders
             """,
             launch_id,
@@ -456,18 +468,24 @@ class PersistenceRepository:
         return str(result).upper().startswith("UPDATE 1")
 
     async def mark_mainnet_risk_order_submitted(self, launch_id: str) -> bool:
-        """Persist first-order submission and pause new risk atomically."""
+        """Persist an order outcome atomically with the launch lifecycle."""
 
         row = await self.db.fetchrow(
             """
             UPDATE mainnet_launch_sessions
             SET submitted_orders = submitted_orders + 1,
-                state = 'PAUSED_NEW_RISK',
+                state = CASE
+                    WHEN policy = 'STAGED_FIRST_ORDER' THEN 'PAUSED_NEW_RISK'
+                    ELSE 'AUTONOMOUS_ACTIVE'
+                END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE launch_id = $1
-              AND state = 'ACTIVE'
+              AND state IN ('ACTIVE', 'AUTONOMOUS_ACTIVE')
               AND reserved_orders > submitted_orders
-              AND submitted_orders < max_risk_increasing_orders
+              AND (
+                max_risk_increasing_orders IS NULL
+                OR submitted_orders < max_risk_increasing_orders
+              )
             RETURNING launch_id, submitted_orders, state
             """,
             launch_id,
@@ -480,21 +498,146 @@ class PersistenceRepository:
             UPDATE mainnet_launch_sessions
             SET state = 'RECONCILIATION_REQUIRED', updated_at = CURRENT_TIMESTAMP
             WHERE launch_id = $1
-              AND state IN ('ACTIVE', 'PAUSED_NEW_RISK')
+              AND state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'AUTONOMOUS_ACTIVE')
             """,
             launch_id,
         )
         return str(result).upper().startswith("UPDATE 1")
+
+    async def mark_mainnet_launch_reconciled(self, launch_id: str) -> bool:
+        """Clear an exchange-ambiguity fence without resuming risk locally.
+
+        A later authoritative reconciliation may clear the fence, but it must
+        never resume autonomous risk by itself: staged sessions return to the
+        paused review state, while autonomous sessions require a fresh
+        continuation approval.
+        """
+        result = await self.db.execute(
+            """
+            UPDATE mainnet_launch_sessions
+            SET state = CASE
+                    WHEN policy = 'STAGED_FIRST_ORDER' THEN 'PAUSED_NEW_RISK'
+                    ELSE 'REAUTH_REQUIRED'
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE launch_id = $1
+              AND state = 'RECONCILIATION_REQUIRED'
+              AND submitted_orders >= 1
+              AND reserved_orders >= submitted_orders
+            """,
+            launch_id,
+        )
+        return str(result).upper().startswith("UPDATE 1")
+
+    async def activate_mainnet_autonomous(
+        self,
+        *,
+        launch_id: str,
+        continuation_approval_id: str,
+        first_order_verified_at: Optional[datetime] = None,
+        image_digest: str,
+    ) -> Optional[Mapping[str, Any]]:
+        """Atomically convert a verified staged launch into autonomous mode.
+
+        The WHERE clause is the durable authorization boundary: exactly one
+        submitted staged order, paused state, matching image, and a unique
+        continuation approval are all required.  A retry after success returns
+        no row and therefore cannot silently re-authorize a different session.
+        """
+
+        if not launch_id or not continuation_approval_id:
+            raise ValueError("autonomous continuation identity is incomplete")
+        if not _IMMUTABLE_IMAGE_RE.fullmatch(image_digest):
+            raise ValueError("autonomous continuation requires an immutable image digest")
+        verified_at = _utc_datetime(first_order_verified_at)
+        row = await self.db.fetchrow(
+            """
+            UPDATE mainnet_launch_sessions
+            SET policy = 'AUTONOMOUS_AFTER_REVIEW',
+                max_risk_increasing_orders = NULL,
+                continuation_approval_id = $2,
+                first_order_verified_at = $3,
+                autonomous_approved_at = CURRENT_TIMESTAMP,
+                state = 'AUTONOMOUS_ACTIVE',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE launch_id = $1
+              AND image_digest = $4
+              AND symbol = 'ETHUSDC'
+              AND (
+                (
+                    policy = 'STAGED_FIRST_ORDER'
+                    AND state = 'PAUSED_NEW_RISK'
+                    AND submitted_orders = 1
+                    AND reserved_orders >= submitted_orders
+                    AND continuation_approval_id IS NULL
+                )
+                OR
+                (
+                    policy = 'AUTONOMOUS_AFTER_REVIEW'
+                    AND state = 'REAUTH_REQUIRED'
+                    AND submitted_orders >= 1
+                )
+              )
+            RETURNING launch_id, approval_id, image_digest, symbol, policy,
+                      max_risk_increasing_orders, reserved_orders,
+                      submitted_orders, state, continuation_approval_id,
+                      first_order_verified_at, autonomous_approved_at,
+                      last_restart_at, created_at, updated_at
+            """,
+            launch_id,
+            continuation_approval_id,
+            verified_at,
+            image_digest,
+        )
+        return dict(row) if row is not None else None
+
+    async def mark_mainnet_launches_reauth_required(
+        self, symbol: str = "ETHUSDC"
+    ) -> int:
+        """Fence autonomous state after a process/revision restart."""
+
+        result = await self.db.execute(
+            """
+            UPDATE mainnet_launch_sessions
+            SET state = 'REAUTH_REQUIRED',
+                last_restart_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE symbol = $1
+              AND policy = 'AUTONOMOUS_AFTER_REVIEW'
+              AND state = 'AUTONOMOUS_ACTIVE'
+            """,
+            symbol.upper(),
+        )
+        match = re.search(r"UPDATE\s+(\d+)", str(result).upper())
+        return int(match.group(1)) if match else 0
+
+    async def get_mainnet_launch(self, launch_id: str) -> Optional[Mapping[str, Any]]:
+        row = await self.db.fetchrow(
+            """
+            SELECT launch_id, approval_id, image_digest, symbol, policy,
+                   max_risk_increasing_orders, reserved_orders, submitted_orders,
+                   state, continuation_approval_id, first_order_verified_at,
+                   autonomous_approved_at, last_restart_at, created_at, updated_at
+            FROM mainnet_launch_sessions
+            WHERE launch_id = $1
+            """,
+            launch_id,
+        )
+        return dict(row) if row is not None else None
 
     async def get_active_mainnet_launch(self, symbol: str = "ETHUSDC") -> Optional[Mapping[str, Any]]:
         row = await self.db.fetchrow(
             """
             SELECT launch_id, approval_id, image_digest, symbol, policy,
                    max_risk_increasing_orders, reserved_orders, submitted_orders,
-                   state, created_at, updated_at
+                   state, continuation_approval_id, first_order_verified_at,
+                   autonomous_approved_at, last_restart_at, created_at, updated_at
             FROM mainnet_launch_sessions
             WHERE symbol = $1
-              AND state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED')
+              AND state IN (
+                'ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED',
+                'AUTONOMOUS_ACTIVE', 'REAUTH_REQUIRED'
+              )
             ORDER BY updated_at DESC
             LIMIT 1
             """,

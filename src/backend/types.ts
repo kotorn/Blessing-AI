@@ -63,6 +63,10 @@ export interface TradingSystemState {
   mainnetCredentialsVerified?: boolean;
   mainnetLiveApproved?: boolean;
   mainnetPreflightReady?: boolean;
+  mainnetLaunchPolicy?: string;
+  mainnetLaunchId?: string;
+  mainnetLaunchState?: string;
+  mainnetContinuationApprovalId?: string;
   activeConfiguration?: ActiveTradingConfiguration;
 }
 
@@ -77,4 +81,3 @@ export interface PreflightResult {
     message: string;
   }>;
 }
-

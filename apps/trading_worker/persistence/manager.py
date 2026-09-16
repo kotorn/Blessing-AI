@@ -240,7 +240,7 @@ class PersistenceManager:
             or not self.repository
             or not self.readiness().get("durable")
         ):
-            raise RuntimeError("Mainnet staged launch requires durable REQUIRED persistence")
+            raise RuntimeError("Mainnet launch requires durable REQUIRED persistence")
         return self.repository
 
     async def create_mainnet_launch_session(
@@ -298,6 +298,62 @@ class PersistenceManager:
             await repository.get_active_mainnet_launch("ETHUSDC") or {}
         )
         return marked
+
+    async def mark_mainnet_launch_reconciled(self, launch_id: str) -> bool:
+        """Clear an exchange-ambiguity fence without resuming local risk."""
+        repository = self._require_durable_launch_repository()
+        marked = await repository.mark_mainnet_launch_reconciled(launch_id)
+        self._mainnet_launch_session = dict(
+            await repository.get_active_mainnet_launch("ETHUSDC") or {}
+        ) or None
+        return marked
+
+    async def get_mainnet_launch_session(
+        self, launch_id: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """Read the durable launch row without creating or resetting state."""
+
+        repository = self._require_durable_launch_repository()
+        session = (
+            await repository.get_mainnet_launch(launch_id)
+            if launch_id
+            else await repository.get_active_mainnet_launch("ETHUSDC")
+        )
+        self._mainnet_launch_session = dict(session) if session else None
+        return dict(session) if session else None
+
+    async def activate_mainnet_autonomous(
+        self,
+        *,
+        launch_id: str,
+        continuation_approval_id: str,
+        first_order_verified_at: Optional[datetime] = None,
+        image_digest: str,
+    ) -> Optional[dict[str, Any]]:
+        """Atomically consume the staged session for autonomous continuation."""
+
+        repository = self._require_durable_launch_repository()
+        session = await repository.activate_mainnet_autonomous(
+            launch_id=launch_id,
+            continuation_approval_id=continuation_approval_id,
+            first_order_verified_at=first_order_verified_at,
+            image_digest=image_digest,
+        )
+        self._mainnet_launch_session = dict(session) if session else None
+        if session is None:
+            self._record_error("autonomous continuation transition was not accepted")
+            return None
+        return dict(session)
+
+    async def mark_mainnet_launches_reauth_required(self) -> int:
+        """Fence any autonomous session on every worker start/revision."""
+
+        repository = self._require_durable_launch_repository()
+        changed = await repository.mark_mainnet_launches_reauth_required("ETHUSDC")
+        self._mainnet_launch_session = dict(
+            await repository.get_active_mainnet_launch("ETHUSDC") or {}
+        ) or None
+        return changed
 
     async def create_execution_ledger(
         self,

@@ -171,6 +171,17 @@ $releaseMember = "serviceAccount:$ReleaseControllerServiceAccount"
 Ensure-ServiceAccount "blessing-control-plane" $ControlPlaneServiceAccount "Blessing AI Control Plane"
 Ensure-ServiceAccount "blessing-release-controller" $ReleaseControllerServiceAccount "Blessing AI Release Controller"
 
+# Cloud Build submits the reviewed release job as the dedicated Release
+# Controller. Grant only the service-agent delegation needed to attach that
+# identity to the job; do not create a user-managed key or allow local
+# impersonation to become the production path.
+$projectNumber = (& gcloud projects describe $ProjectId --format="value(projectNumber)" 2>$null).Trim()
+if ([string]::IsNullOrWhiteSpace($projectNumber)) {
+  throw "Unable to resolve the project number for Cloud Build delegation"
+}
+$cloudBuildServiceAgent = "serviceAccount:service-${projectNumber}@gcp-sa-cloudbuild.iam.gserviceaccount.com"
+Grant-ServiceAccountRole $ReleaseControllerServiceAccount $cloudBuildServiceAgent "roles/iam.serviceAccountUser"
+
 # Control Plane needs only server-side Firestore access and BigQuery jobs/readers.
 Grant-ProjectRole $controlMember "roles/datastore.user"
 Grant-ProjectRole $controlMember "roles/bigquery.jobUser"
@@ -184,35 +195,58 @@ Grant-RepositoryRole $releaseMember "roles/artifactregistry.reader"
 Grant-ServiceAccountRole "blessing-runtime@${ProjectId}.iam.gserviceaccount.com" $releaseMember "roles/iam.serviceAccountUser"
 Grant-ServiceAccountRole $ControlPlaneServiceAccount $releaseMember "roles/iam.serviceAccountUser"
 
+$roleName = "projects/$ProjectId/roles/blessingReleaseDeployer"
+$roleDefinition = [ordered]@{
+  title = "Blessing AI Release Deployer"
+  description = "Deploy only reviewed Blessing AI Cloud Run release revisions"
+  stage = "GA"
+  includedPermissions = @(
+    "resourcemanager.projects.get",
+    "run.locations.get",
+    "run.services.create",
+    "run.services.get",
+    "run.services.getIamPolicy",
+    "run.services.update",
+    "run.revisions.get",
+    "run.operations.get"
+  )
+}
+
 if ($Apply) {
-  $roleName = "projects/$ProjectId/roles/blessingReleaseDeployer"
   $roleJson = & gcloud iam roles describe blessingReleaseDeployer --project=$ProjectId --format=json 2>$null
-  if ($LASTEXITCODE -ne 0) {
+  $roleExists = $LASTEXITCODE -eq 0
+  $currentPermissions = @()
+  if ($roleExists) {
+    try {
+      $currentRole = $roleJson | ConvertFrom-Json
+      $currentPermissions = @($currentRole.includedPermissions | ForEach-Object { [string]$_ })
+    } catch {
+      throw "Release Controller custom role read-back was not valid JSON"
+    }
+  }
+
+  $permissionSetChanged = -not $roleExists -or @(
+    Compare-Object -ReferenceObject $currentPermissions -DifferenceObject @($roleDefinition.includedPermissions)
+  ).Count -gt 0
+  if ($permissionSetChanged) {
     $tempRole = Join-Path ([System.IO.Path]::GetTempPath()) "blessing-release-role-$([Guid]::NewGuid().ToString('N')).json"
     try {
-      $roleDefinition = [ordered]@{
-        title = "Blessing AI Release Deployer"
-        description = "Deploy only reviewed Blessing AI Cloud Run release revisions"
-        stage = "GA"
-        includedPermissions = @(
-          "resourcemanager.projects.get",
-          "run.locations.get",
-           "run.services.create",
-           "run.services.get",
-           "run.services.getIamPolicy",
-           "run.services.setIamPolicy",
-           "run.services.update",
-           "run.revisions.get",
-           "run.operations.get"
+      $roleDefinition | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $tempRole -Encoding utf8
+      if ($roleExists) {
+        Invoke-GCloud @(
+          "iam", "roles", "update", "blessingReleaseDeployer",
+          "--project=$ProjectId",
+          "--file=$tempRole",
+          "--quiet"
+        )
+      } else {
+        Invoke-GCloud @(
+          "iam", "roles", "create", "blessingReleaseDeployer",
+          "--project=$ProjectId",
+          "--file=$tempRole",
+          "--quiet"
         )
       }
-      $roleDefinition | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $tempRole -Encoding utf8
-      Invoke-GCloud @(
-        "iam", "roles", "create", "blessingReleaseDeployer",
-        "--project=$ProjectId",
-        "--file=$tempRole",
-        "--quiet"
-      )
     }
     finally {
       if (Test-Path -LiteralPath $tempRole) { Remove-Item -LiteralPath $tempRole -Force }
@@ -221,6 +255,7 @@ if ($Apply) {
   Grant-ProjectRole $releaseMember $roleName
 } else {
   Write-Output "DRY_RUN would grant projects/$ProjectId/roles/blessingReleaseDeployer to $releaseMember"
+  Write-Output "DRY_RUN would reconcile the custom role to deployment/read-back permissions only"
 }
 
 # Remove the dangerous/public Worker bindings if present, then add exactly the
