@@ -13,6 +13,8 @@ is not evidence that Live execution is operationally approved.
 - [x] Fixed-environment native adapter implementation (`aiohttp`, `websockets`)
 - [x] Testnet signature / timestamp synchronization and stream recovery
 - [ ] CI Contract tests implemented and passing
+- [ ] Supervised Testnet soak contract executed (opt-in via `allow_soak` and `confirm_soak` workflow_dispatch inputs)
+- [ ] Unified release gate evaluated via `python -m apps.release_gate.gate` (combining offline `python -m apps.release_gate.repo_gate` and live-cloud `infra/release_gate/cloud_gate.ps1` requiring gcloud auth; fails closed on missing/stale cloud evidence)
 - [ ] Mainnet execution separately approved, implemented, audited, and enabled
 
 The `/api/system/preflight` and `/api/system/arm` endpoints keep `LIVE`

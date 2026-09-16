@@ -16,6 +16,19 @@ on:
         required: false
         default: ''
         type: string
+      allow_soak:
+        description: 'Allow soak contract tests'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+        - 'false'
+        - 'true'
+      confirm_soak:
+        description: 'Type I_UNDERSTAND_TESTNET_SOAK to authorize supervised soak tests'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: testnet-contract-${{ github.ref }}
@@ -117,6 +130,7 @@ jobs:
             "manual_trial_verified": False,
             "manual_trial_sha": None,
             "testnet_soak_verified": False,
+            "testnet_soak_sha": None,
         }
         path = Path("artifacts") / "build-evidence.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +175,45 @@ jobs:
         path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         PY
 
+    - name: Require explicit soak confirmation
+      if: github.event.inputs.allow_soak == 'true'
+      env:
+        CONFIRM_SOAK: ${{ github.event.inputs.confirm_soak }}
+      run: |
+        if [ "$CONFIRM_SOAK" != "I_UNDERSTAND_TESTNET_SOAK" ]; then
+          echo "::error::Soak tests require the exact confirmation phrase"
+          exit 1
+        fi
+
+    - name: Run Soak Contract Tests
+      if: github.event.inputs.allow_soak == 'true' && github.event.inputs.confirm_soak == 'I_UNDERSTAND_TESTNET_SOAK'
+      env:
+        PYTHONPATH: .
+        BINANCE_TESTNET: 'true'
+        AUTONOMOUS_TESTNET_SOAK_APPROVED: 'true'
+        TESTNET_LAUNCH_APPROVED: 'true'
+        BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
+        BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
+      run: |
+        pytest -m "contract_soak" tests/python/contract/
+
+    - name: Record Successful Current-SHA Soak Evidence
+      if: success() && github.event.inputs.allow_soak == 'true' && github.event.inputs.confirm_soak == 'I_UNDERSTAND_TESTNET_SOAK'
+      env:
+        BUILD_SHA: ${{ github.sha }}
+      run: |
+        python - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        path = Path("artifacts") / "build-evidence.json"
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+        evidence["testnet_soak_verified"] = True
+        evidence["testnet_soak_sha"] = os.environ["BUILD_SHA"]
+        path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        PY
+
     - name: Upload Sanitized Testnet Evidence
       if: always()
       uses: actions/upload-artifact@v4
@@ -169,4 +222,5 @@ jobs:
         path: |
           artifacts/build-evidence.json
           artifacts/testnet-trial-*.json
+          artifacts/testnet-soak-*.json
         if-no-files-found: ignore
