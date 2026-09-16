@@ -55,3 +55,11 @@ contracts are independently correct.
 - [ ] No synthetic market price or inferred liquidation distance.
 - [ ] Kill switch cancellation is verified before reporting success.
 - [ ] Secrets remain outside logs, artifacts, screenshots, and Git.
+
+## Unified release gate
+
+Release readiness is evaluated using the unified release gate entrypoints:
+- `python -m apps.release_gate.repo_gate`: runs offline, CI-safe verification checks.
+- `infra/release_gate/cloud_gate.ps1`: runs live-cloud verification checks (requires gcloud auth).
+- `python -m apps.release_gate.gate`: the combined pass/fail entrypoint that evaluates release readiness across repo and cloud tiers, failing closed on missing or stale cloud evidence.
+- Soak contract path: opt-in via the `allow_soak` and `confirm_soak` workflow_dispatch inputs.
