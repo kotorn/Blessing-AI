@@ -47,6 +47,9 @@ dependencies = [
     "mlflow>=2.18.0",
 ]
 
+[project.scripts]
+agy-queue = "apps.agy_queue.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.3",
@@ -79,6 +82,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests/python"]
+addopts = "--basetemp=.pytest_temp"
 markers = [
     "contract_readonly: Read-only contract tests against Binance Testnet API",
     "contract_mutating: Mutating contract tests against Binance Testnet API",
