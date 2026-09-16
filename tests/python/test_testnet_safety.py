@@ -896,6 +896,23 @@ async def test_failed_exchange_arm_detaches_partially_started_public_stream():
 
 
 @pytest.mark.asyncio
+async def test_failed_continuation_resets_leverage_cap_to_paper_default():
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    stream = FakePublicStream()
+    worker.ws_client = stream
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    worker.engine_state = WorkerEngineState.ARMING
+    # Simulate the Mainnet leverage cap _ensure_live_runtime_for_continuation
+    # applies before a later step in the continuation attempt can fail.
+    worker.risk_governor.max_leverage = Decimal("10")
+
+    await worker._reset_after_failed_continuation()
+
+    assert worker.engine_state == WorkerEngineState.DISARMED
+    assert worker.risk_governor.max_leverage == Decimal("2.0")
+
+
+@pytest.mark.asyncio
 async def test_paper_arm_detaches_exchange_stream_without_restarting_testnet():
     worker = TradingWorkerApp(symbols=["ETHUSDC"])
     stream = FakePublicStream()

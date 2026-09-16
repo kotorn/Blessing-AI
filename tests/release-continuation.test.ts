@@ -2,10 +2,46 @@ import { describe, expect, it } from 'vitest';
 import {
   AUTONOMOUS_CONTINUATION_POLICY,
   newContinuationApproval,
+  resolveReconciliationStatus,
   validateContinuationPrerequisites,
   type ContinuationVerificationSnapshot,
 } from '../src/backend/release.js';
 import { InMemoryReleaseStore } from '../src/backend/release-store.js';
+
+describe('resolveReconciliationStatus', () => {
+  it('returns IN_SYNC when the dedicated check explicitly passes', () => {
+    expect(
+      resolveReconciliationStatus(
+        [{ id: 'CHK-PREFLIGHT-RECONCILIATION', status: 'PASS' }],
+        'IN_SYNC',
+      ),
+    ).toBe('IN_SYNC');
+  });
+
+  it('returns DRIFT_DETECTED when the dedicated check explicitly fails, even if the cached worker field still says IN_SYNC', () => {
+    expect(
+      resolveReconciliationStatus(
+        [{ id: 'CHK-PREFLIGHT-RECONCILIATION', status: 'FAIL' }],
+        'IN_SYNC',
+      ),
+    ).toBe('DRIFT_DETECTED');
+  });
+
+  it('falls back to the cached worker field only when the dedicated check is absent', () => {
+    expect(resolveReconciliationStatus([], 'IN_SYNC')).toBe('IN_SYNC');
+    expect(resolveReconciliationStatus([], 'DRIFT')).toBe('DRIFT');
+    expect(resolveReconciliationStatus([], undefined)).toBe('');
+  });
+
+  it('ignores unrelated check ids and still falls back to the cache', () => {
+    expect(
+      resolveReconciliationStatus(
+        [{ id: 'CHK-SOME-OTHER-CHECK', status: 'FAIL' }],
+        'IN_SYNC',
+      ),
+    ).toBe('IN_SYNC');
+  });
+});
 
 const NOW = new Date('2026-09-16T12:00:00.000Z');
 const IMAGE = 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/trading-worker@sha256:'
@@ -91,6 +127,47 @@ describe('autonomous continuation release boundary', () => {
     expect(consumed.status).toBe('CONSUMED');
     await expect(store.claimContinuationApproval(record.continuationId)).rejects.toThrow('already been consumed');
     await expect(store.consumeContinuationApproval(record.continuationId)).rejects.toThrow('already been consumed');
+  });
+
+  it('releases a claimed continuation back to PENDING so a retry is not stranded in ACTIVATING', async () => {
+    const store = new InMemoryReleaseStore();
+    const record = approval();
+    await store.createContinuationApproval(record);
+    await store.claimContinuationApproval(record.continuationId);
+    expect((await store.getContinuationApproval(record.continuationId))?.status).toBe('ACTIVATING');
+
+    await store.releaseContinuationApproval(record.continuationId);
+    expect((await store.getContinuationApproval(record.continuationId))?.status).toBe('PENDING');
+
+    // The same approval can now be claimed again instead of requiring a
+    // brand new one.
+    const reclaimed = await store.claimContinuationApproval(record.continuationId);
+    expect(reclaimed.status).toBe('ACTIVATING');
+  });
+
+  it('leaves a CONSUMED continuation alone when release is called after a concurrent consume', async () => {
+    const store = new InMemoryReleaseStore();
+    const record = approval();
+    await store.createContinuationApproval(record);
+    await store.claimContinuationApproval(record.continuationId);
+    await store.consumeContinuationApproval(record.continuationId);
+
+    // Simulates the losing side of a race: its own consume attempt failed,
+    // but a concurrent request already legitimately consumed it -- release
+    // must be a no-op here, not revert a real success back to PENDING.
+    await store.releaseContinuationApproval(record.continuationId);
+    expect((await store.getContinuationApproval(record.continuationId))?.status).toBe('CONSUMED');
+  });
+
+  it('releasing an unclaimed (PENDING) or unknown continuation is a safe no-op', async () => {
+    const store = new InMemoryReleaseStore();
+    const record = approval();
+    await store.createContinuationApproval(record);
+
+    await store.releaseContinuationApproval(record.continuationId);
+    expect((await store.getContinuationApproval(record.continuationId))?.status).toBe('PENDING');
+
+    await expect(store.releaseContinuationApproval('continuation-00000000-0000-0000-0000-000000000000')).resolves.toBeUndefined();
   });
 
   it('keeps the policy distinct from the initial staged release policy', () => {

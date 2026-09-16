@@ -676,7 +676,18 @@ class PersistenceManager:
             return False
         timestamp = _utc(position.event_time)
         position_side = str(_enum_value(position.position_side))
-        venue = str(getattr(position, "source", "")).strip().upper() or "UNKNOWN"
+        # REST-refreshed positions (emergency flatten, reconciliation) never
+        # carry a real source -- venues/binance/ledger.py's
+        # _to_exchange_position explicitly writes the literal "UNKNOWN"
+        # sentinel for them, unlike WS ACCOUNT_UPDATE-derived positions,
+        # which tag it with the live environment label. Treat that sentinel
+        # (and a genuinely empty value) the same: fall back to the same live
+        # instrument.venue identity enqueue_fill/order already use, so the
+        # same logical position never splits into two outbox identities
+        # depending on which subsystem last touched it.
+        venue = str(getattr(position, "source", "")).strip().upper()
+        if not venue or venue == "UNKNOWN":
+            venue = instrument.venue
         return self._enqueue(
             position,
             "POSITION",

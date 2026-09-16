@@ -35,6 +35,7 @@ import {
   hashEvidence,
   newReleaseCandidate,
   newContinuationApproval,
+  resolveReconciliationStatus,
   sanitizePreflightEvidence,
   validateApprovalPrerequisites,
   validateContinuationPrerequisites,
@@ -1689,6 +1690,22 @@ async function rollbackAutonomousContinuation(): Promise<{
   }
 }
 
+async function releaseContinuationApprovalBestEffort(continuationId: string): Promise<void> {
+  // A claimed (PENDING -> ACTIVATING) continuation approval must not be
+  // stranded by a failure that happens after the claim -- otherwise every
+  // retry with the same continuationApprovalId fails immediately until its
+  // fixed expiry, forcing a brand new approval for what may be a purely
+  // transient failure. This is best-effort: a failure here must never mask
+  // the original error response.
+  try {
+    await getServerReleaseStore().releaseContinuationApproval(continuationId);
+  } catch (error) {
+    console.warn(
+      `monitor_event=continuation_approval_release_failed error=${error instanceof Error ? error.message : 'unknown'}`,
+    );
+  }
+}
+
 function projectWorkerState(workerState: any): void {
   if (!workerState || typeof workerState !== 'object') return;
   if (typeof workerState.execution_mode === 'string') {
@@ -1952,6 +1969,8 @@ function sanitizeContinuationReadiness(value: unknown): {
   launchId: string;
   launchPolicy: string;
   launchState: string;
+  mainnetLiveApproved: boolean;
+  engineState: string;
   submittedOrders: number;
   reservedOrders: number;
   preflightPassed: boolean;
@@ -1995,6 +2014,8 @@ function sanitizeContinuationReadiness(value: unknown): {
     launchId: String(raw.launchId || '').trim(),
     launchPolicy: String(raw.launchPolicy || '').trim(),
     launchState: String(raw.launchState || '').trim(),
+    mainnetLiveApproved: raw.mainnetLiveApproved === true,
+    engineState: String(raw.engineState || '').trim(),
     submittedOrders: intOr(raw.submittedOrders, 0),
     reservedOrders: intOr(raw.reservedOrders, 0),
     preflightPassed: raw.preflightPassed === true,
@@ -2049,9 +2070,10 @@ function continuationVerificationSnapshot(
     preflightObservedAt: evidence.observedAt,
     preflightOrderEndpointAttempts: evidence.preflightOrderEndpointAttempts,
     preflightOrderSubmissionAttempts: evidence.preflightOrderSubmissionAttempts,
-    reconciliationStatus: evidence.preflight.checks.find(
-      (check) => check.id === 'CHK-PREFLIGHT-RECONCILIATION',
-    )?.status === 'PASS' ? 'IN_SYNC' : String(workerState.reconciliation_status || ''),
+    reconciliationStatus: resolveReconciliationStatus(
+      evidence.preflight.checks,
+      workerState.reconciliation_status,
+    ),
     persistenceDurable: evidence.persistenceDurable,
     dataConnectCutover: ['1', 'true', 'yes', 'on'].includes(
       (process.env.VITE_DATA_CONNECT_CUTOVER || 'false').trim().toLowerCase(),
@@ -2744,6 +2766,7 @@ app.post('/api/system/continue', async (req: Request, res: Response) => {
     const failures = validateContinuationPrerequisites(approval, snapshot);
     if (approval.launchId !== launchId) failures.push('launch id does not match continuation approval');
     if (failures.length) {
+      await releaseContinuationApprovalBestEffort(approval.continuationId);
       return res.status(409).json({
         error: 'CONTINUATION_GATE_NOT_PASSED',
         failures,
@@ -2767,6 +2790,7 @@ app.post('/api/system/continue', async (req: Request, res: Response) => {
     });
     if (!forwarded.response.ok) {
       const rollback = await rollbackAutonomousContinuation();
+      await releaseContinuationApprovalBestEffort(approval.continuationId);
       return res.status(forwarded.response.status).json({
         error: 'WORKER_REJECTED_CONTINUATION',
         detail: forwarded.data,
@@ -2787,6 +2811,7 @@ app.post('/api/system/continue', async (req: Request, res: Response) => {
       || String(workerState.worker_revision || '').trim() !== approval.workerRevision
     ) {
       const rollback = await rollbackAutonomousContinuation();
+      await releaseContinuationApprovalBestEffort(approval.continuationId);
       return res.status(409).json({
         error: 'WORKER_AUTONOMOUS_READBACK_FAILED',
         message: 'Worker did not prove the approved autonomous continuation state',
@@ -2801,6 +2826,10 @@ app.post('/api/system/continue', async (req: Request, res: Response) => {
       consumedContinuation = await store.consumeContinuationApproval(approval.continuationId);
     } catch (error) {
       const rollback = await rollbackAutonomousContinuation();
+      // Safe even if consumeContinuationApproval failed because a
+      // concurrent request already legitimately consumed it -- release is a
+      // no-op for any status other than ACTIVATING.
+      await releaseContinuationApprovalBestEffort(approval.continuationId);
       console.warn(
         `monitor_event=autonomous_continuation_failure phase=consume rollback_verified=${rollback.verified}`,
       );
@@ -2990,6 +3019,8 @@ app.post('/internal/release/candidate', async (req: Request, res: Response) => {
     return res.status(201).json({
       candidateId: candidate.candidateId,
       status: candidate.status,
+      executionMode: candidate.executionMode,
+      symbol: candidate.symbol,
       imageDigest: candidate.imageDigest,
       workerRevision: candidate.workerRevision,
       secretVersions: candidate.secretVersions,

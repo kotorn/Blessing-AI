@@ -578,6 +578,31 @@ def test_incomplete_exchange_rules_are_rejected_before_durable_write():
         asyncio.run(PositionRepository(None).save_position(position, instrument, connection))  # type: ignore[arg-type]
 
 
+def test_rest_refreshed_position_reuses_instrument_venue_not_unknown():
+    """A REST-refreshed position (no .source) must not fragment outbox identity."""
+    manager = PersistenceManager(
+        db=FailingDatabase(),
+        config=PersistenceConfig(mode=PersistenceMode.REQUIRED),
+        instrument_rules_provider=lambda symbol: _instrument()
+        if symbol == "BTCUSDT"
+        else None,
+    )
+    manager.is_connected = True
+    manager._accepting = True
+
+    # apps/trading_worker/venues/binance/ledger.py's _to_exchange_position
+    # explicitly writes source="UNKNOWN" when parsing a raw REST position
+    # dict (emergency flatten, reconciliation) that never carried a "source"
+    # key -- unlike WebSocket ACCOUNT_UPDATE-derived positions, which tag it
+    # with the live environment label.
+    position = ExchangePosition(symbol="BTCUSDT", quantity=Decimal("1"), source="UNKNOWN")
+
+    assert manager.enqueue_position(position) is True
+    event = manager._write_queue.get_nowait()
+    assert event.aggregate_id == f"{_instrument().venue}:BTCUSDT:BOTH"
+    assert "UNKNOWN" not in event.aggregate_id
+
+
 def test_persistence_schema_matches_outbox_and_hedge_identity_contract():
     schema = Path("infra/postgres/init_schema.sql").read_text(encoding="utf-8")
     migration = Path(

@@ -205,13 +205,6 @@ export function requiredControlPlaneRole(req: ControlPlaneRequestLike): ControlP
 
   if (route.endsWith('/preflight/read-only')) return 'trading_admin';
 
-  // These POST routes execute deterministic research/read operations. They
-  // are protected API calls, but must remain available to the viewer role;
-  // only state-changing control routes require operator privileges.
-  if (route.endsWith('/quant/backtest/run') || route.endsWith('/quant/ai/research')) {
-    return 'viewer';
-  }
-
   if (route.endsWith('/arm')) {
     const mode = String((req.body as { executionMode?: unknown } | undefined)?.executionMode || '')
       .trim()

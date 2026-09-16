@@ -1469,6 +1469,11 @@ class BinanceExecutionAdapter:
                     intent, prepared, client_order_id, decision
                 )
                 if recovered is not None:
+                    # _resolve_ambiguous_order only returns non-None once the
+                    # order has been read back and reconciliation verified it
+                    # -- the same bar the normal success path uses before its
+                    # own "CONFIRMED" notification below.
+                    await self._notify_order_submission_result(recovered, "CONFIRMED")
                     executed_orders.append(recovered)
             except Exception as exc:
                 if planned_order is not None:

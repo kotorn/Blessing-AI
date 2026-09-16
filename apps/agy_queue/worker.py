@@ -272,14 +272,20 @@ class QueueWorker:
                 pass
             envelope = self._failure_envelope(job, error)
             result_path = self.service.artifacts.write_result(job.job_id, envelope)
-            self.service.store.mark_failure(
+            owned = self.service.store.mark_failure(
                 job.job_id,
+                worker_id=self.worker_id,
                 error_code=str(getattr(error, "code", "worker_error")),
                 stderr=redact_text(str(error)),
                 result=envelope,
                 head_sha=head_sha,
                 gate_state=GateState.BLOCKED,
             )
+            if not owned:
+                logger.warning(
+                    "monitor_event=agy_lease_lost_after_completion job_id=%s outcome=failure",
+                    job.job_id,
+                )
             if current.status == JobStatus.CANCELLED:
                 return
             _ = result_path
@@ -332,14 +338,20 @@ class QueueWorker:
             "error": None,
         }
         result_path = self.service.artifacts.write_result(job.job_id, envelope)
-        self.service.store.mark_success(
+        owned = self.service.store.mark_success(
             job.job_id,
+            worker_id=self.worker_id,
             result=envelope,
             result_path=result_path,
             conversation_id=None,
             head_sha=None,
             gate_state=GateState.VERIFIED,
         )
+        if not owned:
+            logger.warning(
+                "monitor_event=agy_lease_lost_after_completion job_id=%s outcome=success",
+                job.job_id,
+            )
         return self.service.get(job.job_id)
 
     def run_once(self) -> JobRecord | None:
@@ -396,14 +408,20 @@ class QueueWorker:
                 evidence = self._repo_verifier(job, terminal)
             envelope = self._result_envelope(job, terminal, evidence)
             result_path = self.service.artifacts.write_result(job.job_id, envelope)
-            self.service.store.mark_success(
+            owned = self.service.store.mark_success(
                 job.job_id,
+                worker_id=self.worker_id,
                 result=envelope,
                 result_path=result_path,
                 conversation_id=terminal.conversation_id,
                 head_sha=evidence.get("head_sha") if evidence else None,
                 gate_state=GateState.VERIFIED,
             )
+            if not owned:
+                logger.warning(
+                    "monitor_event=agy_lease_lost_after_completion job_id=%s outcome=success",
+                    job.job_id,
+                )
             return self.service.get(job.job_id)
         except (AgyError, WorkerError, MainnetPreflightError, RepositoryError, VerificationError) as error:
             if getattr(error, "code", "") == "agy_timeout_uncertain":

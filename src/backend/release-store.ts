@@ -51,6 +51,7 @@ export interface ReleaseStore {
   createContinuationApproval(approval: ContinuationApproval): Promise<void>;
   claimContinuationApproval(continuationId: string): Promise<ContinuationApproval>;
   consumeContinuationApproval(continuationId: string): Promise<ContinuationApproval>;
+  releaseContinuationApproval(continuationId: string): Promise<void>;
 }
 
 function clone<T>(value: T): T {
@@ -320,6 +321,22 @@ export class FirestoreReleaseStore implements ReleaseStore {
     });
   }
 
+  async releaseContinuationApproval(continuationId: string): Promise<void> {
+    const ref = this.db().collection('release_continuations').doc(continuationIdOrThrow(continuationId));
+    await this.db().runTransaction(async (transaction) => {
+      const document = await transaction.get(ref);
+      if (!document.exists) return;
+      const approval = document.data() as ContinuationApproval;
+      // Only an in-flight claim can be released -- a terminal status
+      // (CONSUMED/EXPIRED) or an already-PENDING approval is left alone,
+      // so this is always safe to call best-effort after any failure that
+      // follows a successful claim.
+      if (approval.status === 'ACTIVATING') {
+        transaction.update(ref, { status: 'PENDING' });
+      }
+    });
+  }
+
   async consumeContinuationApproval(continuationId: string): Promise<ContinuationApproval> {
     const ref = this.db().collection('release_continuations').doc(continuationIdOrThrow(continuationId));
     const now = new Date();
@@ -459,6 +476,16 @@ export class InMemoryReleaseStore implements ReleaseStore {
     else throw new Error('Continuation approval is already being activated');
     this.continuations.set(normalized, clone(approval));
     return clone(approval);
+  }
+
+  async releaseContinuationApproval(continuationId: string): Promise<void> {
+    const normalized = continuationIdOrThrow(continuationId);
+    const approval = this.continuations.get(normalized);
+    if (!approval) return;
+    if (approval.status === 'ACTIVATING') {
+      approval.status = 'PENDING';
+      this.continuations.set(normalized, clone(approval));
+    }
   }
 
   async consumeContinuationApproval(continuationId: string): Promise<ContinuationApproval> {

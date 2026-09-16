@@ -147,8 +147,8 @@ describe('control-plane authentication contract', () => {
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/arm', body: { executionMode: 'LIVE' } })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/kill-switch' })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/preflight/read-only' })).toBe('trading_admin');
-    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/quant/backtest/run' })).toBe('viewer');
-    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/quant/ai/research' })).toBe('viewer');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/quant/backtest/run' })).toBe('operator');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/quant/ai/research' })).toBe('operator');
   });
 
   it('does not accept Mainnet credentials through the browser profile store', () => {

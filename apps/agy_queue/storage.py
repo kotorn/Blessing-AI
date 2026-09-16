@@ -193,23 +193,25 @@ class QueueStore(Protocol):
         self,
         job_id: str,
         *,
+        worker_id: str,
         result: dict[str, Any],
         result_path: str,
         conversation_id: str | None,
         head_sha: str | None,
         gate_state: GateState = GateState.VERIFIED,
-    ) -> None: ...
+    ) -> bool: ...
 
     def mark_failure(
         self,
         job_id: str,
         *,
+        worker_id: str,
         error_code: str,
         stderr: str | None,
         result: dict[str, Any] | None = None,
         head_sha: str | None = None,
         gate_state: GateState = GateState.BLOCKED,
-    ) -> None: ...
+    ) -> bool: ...
 
     def schedule_retry(
         self,
@@ -728,17 +730,34 @@ class SQLiteQueueStore:
         self,
         job_id: str,
         *,
+        worker_id: str,
         result: dict[str, Any],
         result_path: str,
         conversation_id: str | None,
         head_sha: str | None,
         gate_state: GateState = GateState.VERIFIED,
-    ) -> None:
+    ) -> bool:
         connection = self._connect()
         serialized = _json_dumps(result) or "{}"
         now = utc_iso()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            # A job already 'succeeded' is an idempotent re-confirmation (the
+            # result-conflict check below still fences that); a 'running'
+            # job must still be owned by the caller -- otherwise its lease
+            # expired and another worker may already be claiming or has
+            # already claimed it. Check ownership before writing anything so
+            # a stale call cannot leak its result into job_results even when
+            # the jobs-row update it depends on is correctly fenced out.
+            row = connection.execute(
+                "SELECT status, worker_id FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if row is None or (
+                row["status"] not in ("running", "succeeded")
+                or (row["status"] == "running" and row["worker_id"] != worker_id)
+            ):
+                connection.rollback()
+                return False
             existing = connection.execute(
                 "SELECT result_json FROM job_results WHERE job_id=?",
                 (job_id,),
@@ -753,13 +772,13 @@ class SQLiteQueueStore:
                 """,
                 (job_id, serialized, now),
             )
-            connection.execute(
+            updated = connection.execute(
                 """
                 UPDATE jobs SET status='succeeded', gate_state=?, result_path=?,
                   result_json=?, conversation_id=COALESCE(?, conversation_id),
                   head_sha=COALESCE(?, head_sha), finished_at=?, updated_at=?,
                   lease_until=NULL, worker_id=NULL, error_code=NULL, stderr=NULL
-                WHERE job_id=? AND status IN ('running','succeeded')
+                WHERE job_id=? AND (status='succeeded' OR (status='running' AND worker_id=?))
                 """,
                 (
                     gate_state.value,
@@ -770,9 +789,11 @@ class SQLiteQueueStore:
                     now,
                     now,
                     job_id,
+                    worker_id,
                 ),
-            )
+            ).rowcount
             connection.commit()
+            return updated > 0
         except Exception:
             connection.rollback()
             raise
@@ -783,17 +804,27 @@ class SQLiteQueueStore:
         self,
         job_id: str,
         *,
+        worker_id: str,
         error_code: str,
         stderr: str | None,
         result: dict[str, Any] | None = None,
         head_sha: str | None = None,
         gate_state: GateState = GateState.BLOCKED,
-    ) -> None:
+    ) -> bool:
         connection = self._connect()
         now = utc_iso()
         serialized = _json_dumps(result)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status, worker_id FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if row is None or (
+                row["status"] not in ("running", "failed")
+                or (row["status"] == "running" and row["worker_id"] != worker_id)
+            ):
+                connection.rollback()
+                return False
             if serialized is not None:
                 connection.execute(
                     """
@@ -803,16 +834,20 @@ class SQLiteQueueStore:
                     """,
                     (job_id, serialized, now),
                 )
-            connection.execute(
+            updated = connection.execute(
                 """
                 UPDATE jobs SET status='failed', gate_state=?, error_code=?, stderr=?,
                   result_json=COALESCE(?, result_json), head_sha=COALESCE(?, head_sha),
                   finished_at=?, updated_at=?, lease_until=NULL, worker_id=NULL
-                WHERE job_id=? AND status IN ('running','failed')
+                WHERE job_id=? AND (status='failed' OR (status='running' AND worker_id=?))
                 """,
-                (gate_state.value, error_code, stderr, serialized, head_sha, now, now, job_id),
-            )
+                (gate_state.value, error_code, stderr, serialized, head_sha, now, now, job_id, worker_id),
+            ).rowcount
             connection.commit()
+            return updated > 0
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -1129,13 +1164,27 @@ class JsonlQueueStore:
         self,
         job_id: str,
         *,
+        worker_id: str,
         result: dict[str, Any],
         result_path: str,
         conversation_id: str | None,
         head_sha: str | None,
         gate_state: GateState = GateState.VERIFIED,
-    ) -> None:
+    ) -> bool:
+        changed = False
+
         def update(job: JobRecord) -> None:
+            nonlocal changed
+            # An already-'succeeded' job is an idempotent re-confirmation
+            # (the result-conflict check below still fences that); a
+            # 'running' job must still be owned by the caller, otherwise its
+            # lease expired and another worker may already be claiming or
+            # has already claimed it -- this stale call must not silently
+            # overwrite that worker's in-flight or completed attempt.
+            if job.status == JobStatus.RUNNING and job.worker_id != worker_id:
+                return
+            if job.status not in {JobStatus.RUNNING, JobStatus.SUCCEEDED}:
+                return
             if job.result_json is not None and _json_dumps(job.result_json) != _json_dumps(result):
                 raise QueueConflictError(f"Result for {job_id} already differs")
             job.status = JobStatus.SUCCEEDED
@@ -1149,20 +1198,31 @@ class JsonlQueueStore:
             job.worker_id = None
             job.error_code = None
             job.stderr = None
+            changed = True
 
         self._mutate(job_id, update)
+        return changed
 
     def mark_failure(
         self,
         job_id: str,
         *,
+        worker_id: str,
         error_code: str,
         stderr: str | None,
         result: dict[str, Any] | None = None,
         head_sha: str | None = None,
         gate_state: GateState = GateState.BLOCKED,
-    ) -> None:
+    ) -> bool:
+        changed = False
+
         def update(job: JobRecord) -> None:
+            nonlocal changed
+            if job.status == JobStatus.RUNNING and job.worker_id != worker_id:
+                return
+            if job.status not in {JobStatus.RUNNING, JobStatus.FAILED}:
+                return
+            changed = True
             job.status = JobStatus.FAILED
             job.gate_state = gate_state
             job.error_code = error_code
@@ -1174,6 +1234,7 @@ class JsonlQueueStore:
             job.worker_id = None
 
         self._mutate(job_id, update)
+        return changed
 
     def schedule_retry(
         self,

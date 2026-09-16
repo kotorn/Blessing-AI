@@ -2748,6 +2748,7 @@ class TradingWorkerApp:
         self.pause_new_risk = False
         self.recovery_only = False
         self.risk_governor.hedge_mode = False
+        self.risk_governor.max_leverage = Decimal("2.0")
         self.engine_state = WorkerEngineState.DISARMED
 
     async def _ensure_live_runtime_for_continuation(self) -> tuple[bool, str]:

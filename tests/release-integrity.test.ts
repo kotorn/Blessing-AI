@@ -100,6 +100,19 @@ describe('release integrity contract', () => {
     expect(continuationVerification).not.toContain('/arm');
     expect(continuationVerification).not.toContain('/continue');
     expect(continuationVerification).not.toContain('place-order');
+
+    // Cross-check: every field verify-continuation.ps1 reads off the
+    // response (via $result.<field>) must actually be emitted by
+    // sanitizeContinuationReadiness in server.ts, not just mentioned
+    // somewhere in the .ps1 script's own text.
+    const requiredFields = [...continuationVerification.matchAll(/\$result\.(\w+)/g)].map(
+      (match) => match[1],
+    );
+    expect(requiredFields).toContain('mainnetLiveApproved');
+    expect(requiredFields).toContain('engineState');
+    for (const field of new Set(requiredFields)) {
+      expect(server).toContain(`${field}:`);
+    }
   });
 
   it('runs the release controller only from an immutable attached-identity build', () => {
@@ -141,6 +154,18 @@ describe('release integrity contract', () => {
     expect(candidateCreator).not.toContain('--impersonate-service-account');
     expect(candidateCreator).not.toContain('place-order');
     expect(candidateCreator).not.toContain('BINANCE_MAINNET_API_SECRET=');
+
+    // Cross-check: every field this script reads off the response (via
+    // $response.<field>) must actually be emitted by the candidate-creation
+    // handler in server.ts, not just referenced in the .ps1 script's text.
+    const requiredFields = [...candidateCreator.matchAll(/\$response\.(\w+)/g)].map(
+      (match) => match[1],
+    );
+    expect(requiredFields).toContain('executionMode');
+    expect(requiredFields).toContain('symbol');
+    for (const field of new Set(requiredFields)) {
+      expect(server).toContain(`${field}:`);
+    }
   });
 
   it('requires a server-consumed approval before forwarding a LIVE ARM', () => {
@@ -167,6 +192,13 @@ describe('release integrity contract', () => {
     expect(server).toContain('rollbackAutonomousContinuation');
     expect(server).toContain('CONTINUATION_APPROVAL_CONSUME_FAILED');
     expect(server).toContain('rollbackVerified');
+    // A claim (PENDING -> ACTIVATING) must not be strandable: every failure
+    // path after claimContinuationApproval releases it back to PENDING so a
+    // retry with the same continuationApprovalId is possible.
+    expect(server).toContain('releaseContinuationApprovalBestEffort');
+    expect(
+      [...server.matchAll(/releaseContinuationApprovalBestEffort/g)].length,
+    ).toBeGreaterThanOrEqual(4);
     expect(releaseModule).toContain('AUTONOMOUS_AFTER_REVIEW');
     expect(server).toContain('MAINNET_LIVE_APPROVED');
     expect(server).toContain('DISARMED');

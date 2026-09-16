@@ -121,6 +121,29 @@ export interface ContinuationVerificationSnapshot {
   killSwitchActive: boolean;
 }
 
+export interface PreflightCheckLike {
+  id: string;
+  status: 'PASS' | 'FAIL';
+}
+
+/**
+ * Resolve the reconciliation status for a continuation snapshot from a
+ * fresh preflight's dedicated check plus a fallback cached worker field.
+ *
+ * A fresh, explicit FAIL must never be masked by falling back to the
+ * separately-cached (and possibly stale) worker field -- only the absence
+ * of the dedicated check should defer to that cache.
+ */
+export function resolveReconciliationStatus(
+  checks: readonly PreflightCheckLike[],
+  cachedReconciliationStatus: unknown,
+): string {
+  const check = checks.find((item) => item.id === 'CHK-PREFLIGHT-RECONCILIATION');
+  if (check?.status === 'PASS') return 'IN_SYNC';
+  if (check?.status === 'FAIL') return 'DRIFT_DETECTED';
+  return String(cachedReconciliationStatus || '');
+}
+
 const SHA256_RE = /^[0-9a-f]{64}$/i;
 const IMAGE_DIGEST_RE = /^.+@sha256:[0-9a-f]{64}$/i;
 const REVISION_RE = /^[a-z0-9][a-z0-9-]{0,62}$/i;

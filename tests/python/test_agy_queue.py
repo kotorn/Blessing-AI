@@ -471,6 +471,90 @@ def test_lease_expiry_requeues_local_job_but_blocks_external_effect(tmp_path: Pa
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+def test_stale_worker_cannot_complete_a_job_reclaimed_by_another_worker(
+    backend: str, tmp_path: Path
+) -> None:
+    """A worker whose lease expired and was reclaimed must not silently
+    overwrite the new owner's in-flight job on late completion (mark_success/
+    mark_failure previously had no worker_id ownership check, unlike
+    heartbeat)."""
+    service = make_service(tmp_path, backend=backend)
+    job = submit_read_only(service)
+    stale_claim = service.store.claim_next(
+        "worker-a", now="2026-09-16T00:00:00.000Z", lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
+    )
+    assert stale_claim is not None
+    recovered = service.store.recover_expired(now="2026-09-16T00:01:00.000Z")
+    assert job.job_id in recovered
+
+    fresh_claim = service.store.claim_next(
+        "worker-b", now="2026-09-16T00:01:00.000Z", lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
+    )
+    assert fresh_claim is not None
+    assert fresh_claim.worker_id == "worker-b"
+
+    # worker-a's stale call (from before its lease expired) must not succeed.
+    stale_result = {"job_id": job.job_id, "status": "succeeded", "error": None}
+    owned = service.store.mark_success(
+        job.job_id,
+        worker_id="worker-a",
+        result=stale_result,
+        result_path="/tmp/stale.json",
+        conversation_id=None,
+        head_sha=None,
+    )
+    assert owned is False
+    still_running = service.get(job.job_id)
+    assert still_running.status == JobStatus.RUNNING
+    assert still_running.worker_id == "worker-b"
+    assert still_running.result_json is None
+
+    # worker-b (the rightful current owner) can still complete it normally.
+    owned_by_rightful_worker = service.store.mark_success(
+        job.job_id,
+        worker_id="worker-b",
+        result={"job_id": job.job_id, "status": "succeeded", "error": None},
+        result_path="/tmp/real.json",
+        conversation_id=None,
+        head_sha=None,
+    )
+    assert owned_by_rightful_worker is True
+    assert service.get(job.job_id).status == JobStatus.SUCCEEDED
+    service.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
+def test_stale_worker_mark_failure_cannot_overwrite_reclaimed_job(
+    backend: str, tmp_path: Path
+) -> None:
+    service = make_service(tmp_path, backend=backend)
+    job = submit_read_only(service)
+    stale_claim = service.store.claim_next(
+        "worker-a", now="2026-09-16T00:00:00.000Z", lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
+    )
+    assert stale_claim is not None
+    service.store.recover_expired(now="2026-09-16T00:01:00.000Z")
+    fresh_claim = service.store.claim_next(
+        "worker-b", now="2026-09-16T00:01:00.000Z", lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
+    )
+    assert fresh_claim is not None
+
+    owned = service.store.mark_failure(
+        job.job_id,
+        worker_id="worker-a",
+        error_code="stale_timeout",
+        stderr="stale worker's late failure report",
+        result=None,
+    )
+    assert owned is False
+    still_running = service.get(job.job_id)
+    assert still_running.status == JobStatus.RUNNING
+    assert still_running.worker_id == "worker-b"
+    assert still_running.error_code is None
+    service.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "jsonl"])
 def test_expired_job_at_attempt_limit_becomes_terminal(backend: str, tmp_path: Path) -> None:
     service = make_service(tmp_path, backend=backend)
     job = service.submit(
@@ -729,7 +813,9 @@ def test_watch_yields_pending_then_terminal(tmp_path: Path) -> None:
         "watch-worker", now=utc_iso(), lease_ttl_sec=30, eligible_kinds={JobKind.READ_ONLY}
     )
     assert claimed is not None
-    service.store.mark_failure(job.job_id, error_code="test", stderr="no", result=None)
+    service.store.mark_failure(
+        job.job_id, worker_id="watch-worker", error_code="test", stderr="no", result=None
+    )
     states = [item.status for item in service.watch(job.job_id, poll_interval_sec=0.01)]
     assert states == [JobStatus.FAILED]
     service.close()
