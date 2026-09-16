@@ -8,6 +8,7 @@ import re
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -2176,13 +2177,32 @@ class TradingWorkerApp:
             try:
                 try:
                     persistence = self.persistence.readiness()
-                    pending_outbox = persistence.get("pending_outbox")
-                    failed_writes = persistence.get("failed_writes")
+                    has_pending = (
+                        isinstance(persistence, Mapping)
+                        and "pending_outbox" in persistence
+                    )
+                    has_failed = (
+                        isinstance(persistence, Mapping)
+                        and "failed_writes" in persistence
+                    )
+                    pending_outbox = persistence.get("pending_outbox") if has_pending else None
+                    failed_writes = persistence.get("failed_writes") if has_failed else None
+
+                    def _is_explicit_zero_counter(val: Any) -> bool:
+                        if val is None or isinstance(val, bool):
+                            return False
+                        if isinstance(val, (int, float, Decimal)):
+                            return val == 0
+                        return False
+
                     persistence_ready = bool(
-                        persistence.get("mode") == "REQUIRED"
+                        isinstance(persistence, Mapping)
+                        and persistence.get("mode") == "REQUIRED"
                         and persistence.get("durable") is True
-                        and (pending_outbox in (None, 0))
-                        and (failed_writes in (None, 0))
+                        and has_pending
+                        and _is_explicit_zero_counter(pending_outbox)
+                        and has_failed
+                        and _is_explicit_zero_counter(failed_writes)
                     )
                 except Exception:
                     persistence_error = True
