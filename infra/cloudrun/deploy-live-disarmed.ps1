@@ -13,9 +13,9 @@ param(
   [ValidatePattern('^[1-9][0-9]*$')]
   [string]$CloudSqlPasswordVersion = "1",
   [ValidatePattern('^[1-9][0-9]*$')]
-  [string]$BinanceMainnetApiKeyVersion = "1",
+  [string]$BinanceMainnetApiKeyVersion = "2",
   [ValidatePattern('^[1-9][0-9]*$')]
-  [string]$BinanceMainnetApiSecretVersion = "1",
+  [string]$BinanceMainnetApiSecretVersion = "2",
   [string]$WorkerImageDigest = "",
   [string]$WorkerRevision = ""
 )
@@ -41,6 +41,7 @@ $envVars = @(
   "MAINNET_MAX_RISK_INCREASING_ORDERS=1",
   "MAINNET_PREFLIGHT_MAX_AGE_SEC=60",
   "MAINNET_RELEASE_APPROVAL_ID=",
+  "BINANCE_PORTFOLIO_MARGIN=true",
   "WORKER_IMAGE_DIGEST=$effectiveWorkerImageDigest",
   "WORKER_REVISION=$WorkerRevision",
   "CLOUD_SQL_PASSWORD_VERSION=$CloudSqlPasswordVersion",

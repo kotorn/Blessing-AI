@@ -400,3 +400,39 @@ def test_cli_mutation_commands_rejected():
     for mutation in ("place_order", "new_order", "cancel_order", "cancel_all", "transfer", "set_leverage", "set_margin_type"):
         with pytest.raises(BinanceCliPolicyError):
             build_read_only_command(mutation)
+
+
+@pytest.mark.asyncio
+async def test_disarmed_worker_ignores_market_event_without_pausing_risk():
+    """Verify that incoming market events while DISARMED in LIVE mode do not trigger risk pause."""
+    from apps.trading_worker.main import (
+        TradingWorkerApp,
+        WorkerExecutionMode,
+        WorkerEngineState,
+    )
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    worker.engine_state = WorkerEngineState.DISARMED
+    worker.active_configuration = None
+    worker.execution_adapter = None
+    worker.pause_new_risk = False
+
+    event = MarketEvent(
+        event_id="ev-live-disarmed",
+        event_time=utc_now(),
+        venue="BINANCE_MAINNET",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("2500.0"),
+        best_bid=Decimal("2499.0"),
+        best_ask=Decimal("2501.0"),
+        funding_rate=Decimal("0.0001"),
+    )
+
+    await worker.handle_market_event(event)
+
+    assert worker.engine_state == WorkerEngineState.DISARMED
+    assert worker.pause_new_risk is False
+    assert worker.get_state().engine_state == WorkerEngineState.DISARMED
+

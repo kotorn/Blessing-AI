@@ -67,7 +67,18 @@ $bootstrapEnv = @(
   "VITE_DATA_CONNECT_CUTOVER=false"
 ) -join ","
 
-Invoke-GCloud @(
+# Cloud Run rejects --no-traffic when a service does not exist yet, so the
+# very first deploy of a brand-new service unavoidably takes 100% traffic
+# for this bootstrap revision. That revision holds no secret and its
+# CONTROL_PLANE_URL is a non-resolving placeholder, so this is safe; every
+# subsequent bootstrap run (service already exists) keeps --no-traffic.
+# --no-allow-unauthenticated is explicit so a first-time creation does not
+# stall on gcloud's interactive IAM prompt; IAM is otherwise left to the
+# separately reviewed identity-provisioning step.
+& gcloud run services describe $ServiceName --project=$ProjectId --region=$Region --format="value(metadata.name)" 2>$null | Out-Null
+$serviceAlreadyExists = $LASTEXITCODE -eq 0
+
+$bootstrapDeployArgs = @(
   "run", "deploy", $ServiceName,
   "--project=$ProjectId",
   "--region=$Region",
@@ -81,8 +92,12 @@ Invoke-GCloud @(
   "--memory=1Gi",
   "--no-cpu-throttling",
   "--set-env-vars=$bootstrapEnv",
-  "--no-traffic"
+  "--no-allow-unauthenticated"
 )
+if ($serviceAlreadyExists) {
+  $bootstrapDeployArgs += "--no-traffic"
+}
+Invoke-GCloud $bootstrapDeployArgs
 
 $serviceJson = & gcloud run services describe $ServiceName `
   --project=$ProjectId `

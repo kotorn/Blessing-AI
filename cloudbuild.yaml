@@ -4,14 +4,22 @@ substitutions:
   # BUILD_ID is populated for both trigger and manual Cloud Build runs.
   _IMAGE_TAG: 'disarmed-$BUILD_ID'
 steps:
+  # Cloud Build resolves ${_IMAGE_TAG} in a single textual pass, so the
+  # nested built-in $BUILD_ID reference is left literal if this step hands
+  # it straight to `docker` (which does no shell expansion of its argv), and
+  # $BUILD_ID is not otherwise exported into the step's environment. Running
+  # it through bash with BUILD_ID explicitly passed via env: lets the shell
+  # complete that substitution at runtime; the explicit push replaces the
+  # top-level images: field, which is validated before $BUILD_ID exists.
   - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    env:
+      - 'BUILD_ID=$BUILD_ID'
     args:
-      - 'build'
-      - '-f'
-      - 'Dockerfile.worker'
-      - '-t'
-      - 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/trading-worker:${_IMAGE_TAG}'
-      - '.'
-images:
-  - 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/trading-worker:${_IMAGE_TAG}'
+      - '-c'
+      - |
+        set -euo pipefail
+        IMAGE="asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/trading-worker:${_IMAGE_TAG}"
+        docker build -f Dockerfile.worker -t "$$IMAGE" .
+        docker push "$$IMAGE"
 timeout: '1200s'

@@ -299,7 +299,7 @@
           "filter": "metric.type=\"logging.googleapis.com/user/blessing_ambiguous_order\" resource.type=\"cloud_run_revision\"",
           "comparison": "COMPARISON_GT",
           "thresholdValue": 0,
-          "duration": "1s",
+          "duration": "60s",
           "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
         }
       }
@@ -319,7 +319,7 @@
           "filter": "metric.type=\"logging.googleapis.com/user/blessing_staged_session_violation\" resource.type=\"cloud_run_revision\"",
           "comparison": "COMPARISON_GT",
           "thresholdValue": 0,
-          "duration": "1s",
+          "duration": "60s",
           "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
         }
       }
@@ -339,7 +339,7 @@
           "filter": "metric.type=\"logging.googleapis.com/user/blessing_autonomous_continuation_failure\" resource.type=\"cloud_run_revision\"",
           "comparison": "COMPARISON_GT",
           "thresholdValue": 0,
-          "duration": "1s",
+          "duration": "60s",
           "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
         }
       },
@@ -349,7 +349,7 @@
           "filter": "metric.type=\"logging.googleapis.com/user/blessing_autonomous_resume_denied\" resource.type=\"cloud_run_revision\"",
           "comparison": "COMPARISON_GT",
           "thresholdValue": 0,
-          "duration": "1s",
+          "duration": "60s",
           "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
         }
       }
@@ -369,7 +369,7 @@
           "filter": "metric.type=\"logging.googleapis.com/user/blessing_release_approval_replay\" resource.type=\"cloud_run_revision\"",
           "comparison": "COMPARISON_GT",
           "thresholdValue": 0,
-          "duration": "1s",
+          "duration": "60s",
           "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
         }
       }

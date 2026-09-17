@@ -43,7 +43,7 @@ describe('resolveReconciliationStatus', () => {
   });
 });
 
-const NOW = new Date('2026-09-16T12:00:00.000Z');
+const NOW = new Date();
 const IMAGE = 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/trading-worker@sha256:'
   + 'b'.repeat(64);
 

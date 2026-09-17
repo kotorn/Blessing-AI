@@ -131,12 +131,34 @@ function Grant-DatasetReader {
     Write-Output "DRY_RUN would grant dataset-scoped BigQuery reader on $DatasetId to $Member"
     return
   }
-  & bq add-iam-policy-binding "${ProjectId}:${DatasetId}" `
-    --member=$Member `
-    --role=roles/bigquery.dataViewer `
-    --quiet | Out-Null
+  # bq's add-iam-policy-binding only fully supports table/view resources and
+  # requires allowlisting for dataset-level bindings, so dataset ACLs are
+  # granted the traditional way: read-modify-write the dataset's legacy
+  # access list via `bq update --source`.
+  $resource = "${ProjectId}:${DatasetId}"
+  $email = $Member -replace '^serviceAccount:', ''
+  $currentJson = & bq show --format=prettyjson $resource
   if ($LASTEXITCODE -ne 0) {
-    throw "Unable to grant dataset-scoped BigQuery reader on $DatasetId"
+    throw "Unable to read dataset metadata for $DatasetId"
+  }
+  $dataset = $currentJson | ConvertFrom-Json
+  $access = @($dataset.access)
+  $alreadyGranted = $access | Where-Object { $_.role -eq "READER" -and $_.userByEmail -eq $email }
+  if ($alreadyGranted) {
+    Write-Output "Dataset reader already granted on ${DatasetId} to ${email}"
+    return
+  }
+  $updatedAccess = $access + [PSCustomObject]@{ role = "READER"; userByEmail = $email }
+  $payload = ([PSCustomObject]@{ access = $updatedAccess }) | ConvertTo-Json -Depth 6
+  $tempFile = [System.IO.Path]::GetTempFileName()
+  Set-Content -Path $tempFile -Value $payload -Encoding utf8
+  try {
+    & bq update --source=$tempFile $resource | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "Unable to grant dataset-scoped BigQuery reader on $DatasetId"
+    }
+  } finally {
+    Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
   }
 }
 

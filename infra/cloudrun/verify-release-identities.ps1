@@ -86,9 +86,9 @@ if ($workerInvokerMembers -contains "serviceAccount:$ReleaseControllerServiceAcc
   throw "Release Controller must not invoke the Worker directly"
 }
 
-$controlKeys = @(& gcloud iam service-accounts keys list $ControlPlaneServiceAccount --project=$ProjectId --managed-by=user --format="value(name)" 2>$null)
+$controlKeys = @(& gcloud iam service-accounts keys list "--iam-account=$ControlPlaneServiceAccount" --project=$ProjectId --managed-by=user --format="value(name)" 2>$null)
 if ($LASTEXITCODE -ne 0 -or $controlKeys.Count -gt 0) { throw "Control Plane must not use user-managed service-account keys" }
-$releaseKeys = @(& gcloud iam service-accounts keys list $ReleaseControllerServiceAccount --project=$ProjectId --managed-by=user --format="value(name)" 2>$null)
+$releaseKeys = @(& gcloud iam service-accounts keys list "--iam-account=$ReleaseControllerServiceAccount" --project=$ProjectId --managed-by=user --format="value(name)" 2>$null)
 if ($LASTEXITCODE -ne 0 -or $releaseKeys.Count -gt 0) { throw "Release Controller must not use user-managed service-account keys" }
 
 foreach ($datasetId in $DatasetIds) {

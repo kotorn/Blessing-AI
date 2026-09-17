@@ -42,23 +42,36 @@ class BinanceCapabilities:
             return False
 
         try:
-            # Authentication truth starts with a successful signed account call.
-            account = await rest_client.request("GET", "/fapi/v2/account", signed=True)
-            if (
-                not isinstance(account, dict)
-                or not isinstance(account.get("assets"), list)
-                or "canTrade" not in account
-            ):
-                raise ValueError("Signed account response is missing explicit assets or canTrade")
-            self.account_request_succeeded = True
-            self.trade_authorized = _exchange_bool(account["canTrade"])
-            
-            # Check position mode
-            pos_mode = await rest_client.request("GET", "/fapi/v1/positionSide/dual", signed=True)
-            if not isinstance(pos_mode, dict) or "dualSidePosition" not in pos_mode:
-                raise ValueError("Position mode response is invalid")
-            self.hedge_mode = _exchange_bool(pos_mode["dualSidePosition"])
-            self.position_mode_known = True
+            if getattr(rest_client, "portfolio_margin", False):
+                papi_acc = await rest_client.request("GET", "/papi/v1/account", signed=True)
+                if not isinstance(papi_acc, dict) or papi_acc.get("accountStatus") != "NORMAL":
+                    raise ValueError("Portfolio Margin account is not NORMAL or valid")
+
+                pos_mode = await rest_client.request("GET", "/papi/v1/um/positionSide/dual", signed=True)
+                if not isinstance(pos_mode, dict) or "dualSidePosition" not in pos_mode:
+                    raise ValueError("Position mode response is invalid")
+                self.account_request_succeeded = True
+                self.trade_authorized = True
+                self.hedge_mode = _exchange_bool(pos_mode["dualSidePosition"])
+                self.position_mode_known = True
+            else:
+                # Authentication truth starts with a successful signed account call.
+                account = await rest_client.request("GET", "/fapi/v2/account", signed=True)
+                if (
+                    not isinstance(account, dict)
+                    or not isinstance(account.get("assets"), list)
+                    or "canTrade" not in account
+                ):
+                    raise ValueError("Signed account response is missing explicit assets or canTrade")
+                self.account_request_succeeded = True
+                self.trade_authorized = _exchange_bool(account["canTrade"])
+                
+                # Check position mode
+                pos_mode = await rest_client.request("GET", "/fapi/v1/positionSide/dual", signed=True)
+                if not isinstance(pos_mode, dict) or "dualSidePosition" not in pos_mode:
+                    raise ValueError("Position mode response is invalid")
+                self.hedge_mode = _exchange_bool(pos_mode["dualSidePosition"])
+                self.position_mode_known = True
             
             # Fetch Exchange Info
             exchange_info = await rest_client.request("GET", "/fapi/v1/exchangeInfo")

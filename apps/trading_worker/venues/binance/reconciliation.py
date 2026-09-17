@@ -98,6 +98,9 @@ def _margin_mode_observation(
     # ``marginType``. Binance can report individual positions as CROSS while
     # the account is in multi-assets mode; that mode must not be interpreted
     # as single-asset USDC collateral by the Mainnet gate.
+    if account.get("portfolioMargin"):
+        return "CROSS", True
+
     if "multiAssetsMargin" in account and _exchange_bool(account.get("multiAssetsMargin")):
         return "MULTI_ASSET_CROSS", True
 
@@ -483,6 +486,114 @@ class BinanceReconciliation:
         self.daily_loss_window_start: datetime | None = None
         self.daily_loss_window_end: datetime | None = None
 
+    @property
+    def portfolio_margin(self) -> bool:
+        return getattr(self.rest_client, "portfolio_margin", False)
+
+    @property
+    def _order_path(self) -> str:
+        return "/papi/v1/um/order" if self.portfolio_margin else "/fapi/v1/order"
+
+    @property
+    def _open_orders_path(self) -> str:
+        return "/papi/v1/um/openOrders" if self.portfolio_margin else "/fapi/v1/openOrders"
+
+    @property
+    def _position_risk_path(self) -> str:
+        return "/papi/v1/um/positionRisk" if self.portfolio_margin else "/fapi/v2/positionRisk"
+
+    @property
+    def _user_trades_path(self) -> str:
+        return "/papi/v1/um/userTrades" if self.portfolio_margin else "/fapi/v1/userTrades"
+
+    @property
+    def _income_path(self) -> str:
+        return "/papi/v1/um/income" if self.portfolio_margin else "/fapi/v1/income"
+
+    async def _fetch_reconciliation_snapshot_inputs(
+        self,
+    ) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Fetch account, positions, and open orders truthfully for classic or portfolio margin."""
+        if self.portfolio_margin:
+            positions = await self.rest_client.request(
+                "GET", "/papi/v1/um/positionRisk", signed=True
+            )
+            open_orders = await self.rest_client.request(
+                "GET", "/papi/v1/um/openOrders", signed=True
+            )
+            balances = await self.rest_client.request(
+                "GET", "/papi/v1/balance", signed=True
+            )
+            um_account = await self.rest_client.request(
+                "GET", "/papi/v1/um/account", signed=True
+            )
+            if (
+                not isinstance(positions, list)
+                or not isinstance(open_orders, list)
+                or not isinstance(balances, list)
+                or not isinstance(um_account, dict)
+            ):
+                raise ValueError("Binance Portfolio Margin reconciliation response is invalid")
+
+            usdc_bal = next(
+                (b for b in balances if isinstance(b, dict) and b.get("asset") == "USDC"),
+                {},
+            )
+            cross_asset = usdc_bal.get("crossMarginAsset", "0")
+            cross_free = usdc_bal.get("crossMarginFree", "0")
+            unrealized_pnl = usdc_bal.get("umUnrealizedPNL", "0")
+
+            um_usdc = next(
+                (
+                    a
+                    for a in um_account.get("assets", [])
+                    if isinstance(a, dict) and a.get("asset") == "USDC"
+                ),
+                {},
+            )
+
+            papi_usdc_asset = {
+                "asset": "USDC",
+                "walletBalance": str(cross_asset),
+                "marginBalance": str(cross_asset),
+                "availableBalance": str(cross_free),
+                "unrealizedProfit": str(unrealized_pnl),
+                "initialMargin": str(um_usdc.get("initialMargin", "0")),
+                "maintMargin": str(um_usdc.get("maintMargin", "0")),
+                "positionInitialMargin": str(um_usdc.get("positionInitialMargin", "0")),
+            }
+            account = {
+                "assets": [papi_usdc_asset],
+                "multiAssetsMargin": False,
+                "portfolioMargin": True,
+            }
+
+            existing_symbols = {
+                str(p.get("symbol", "")).upper()
+                for p in positions
+                if isinstance(p, dict)
+            }
+            merged_positions = list(positions)
+            for p in um_account.get("positions", []):
+                if isinstance(p, dict):
+                    sym = str(p.get("symbol", "")).upper()
+                    if sym and sym not in existing_symbols:
+                        merged_positions.append(p)
+                        existing_symbols.add(sym)
+
+            return account, merged_positions, open_orders
+
+        positions = await self.rest_client.request(
+            "GET", "/fapi/v2/positionRisk", signed=True
+        )
+        open_orders = await self.rest_client.request(
+            "GET", "/fapi/v1/openOrders", signed=True
+        )
+        account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
+        if not isinstance(positions, list) or not isinstance(open_orders, list):
+            raise ValueError("Binance bootstrap response is invalid")
+        return account, positions, open_orders
+
     def _validate_mainnet_scope(
         self,
         positions: List[Dict[str, Any]],
@@ -533,7 +644,7 @@ class BinanceReconciliation:
             while page <= max_pages:
                 payload = await self.rest_client.request(
                     "GET",
-                    "/fapi/v1/income",
+                    self._income_path,
                     signed=True,
                     params={
                         "symbol": "ETHUSDC",
@@ -601,7 +712,7 @@ class BinanceReconciliation:
         for symbol in sorted({str(item).upper() for item in symbols if item}):
             trades = await self.rest_client.request(
                 "GET",
-                "/fapi/v1/userTrades",
+                self._user_trades_path,
                 signed=True,
                 params={"symbol": symbol, "limit": 1000},
             )
@@ -641,7 +752,7 @@ class BinanceReconciliation:
             raise FillRecoveryError("Filled order has no exchange order ID")
         trades = await self.rest_client.request(
             "GET",
-            "/fapi/v1/userTrades",
+            self._user_trades_path,
             signed=True,
             params={"symbol": local_order.symbol, "orderId": order_id, "limit": 1000},
         )
@@ -913,7 +1024,7 @@ class BinanceReconciliation:
                 query_params["orderId"] = local_order.exchange_order_id
             try:
                 order_status = await self.rest_client.request(
-                    "GET", "/fapi/v1/order", signed=True, params=query_params
+                    "GET", self._order_path, signed=True, params=query_params
                 )
             except BinanceAuthenticationError:
                 raise
@@ -1141,15 +1252,9 @@ class BinanceReconciliation:
         self._unattributed_fill_diffs = []
         self._set_status("RECONCILING", [])
         try:
-            positions = await self.rest_client.request(
-                "GET", "/fapi/v2/positionRisk", signed=True
+            account, positions, open_orders = (
+                await self._fetch_reconciliation_snapshot_inputs()
             )
-            open_orders = await self.rest_client.request(
-                "GET", "/fapi/v1/openOrders", signed=True
-            )
-            account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
-            if not isinstance(positions, list) or not isinstance(open_orders, list):
-                raise ValueError("Binance bootstrap response is invalid")
             self._validate_mainnet_scope(positions, open_orders)
             # Validate account math and every active position before any
             # recovery/ledger mutation. A malformed mark/notional row must not
@@ -1266,15 +1371,9 @@ class BinanceReconciliation:
         self._unattributed_fill_diffs = []
         self._set_status("RECONCILING", [])
         try:
-            exchange_positions = await self.rest_client.request(
-                "GET", "/fapi/v2/positionRisk", signed=True
+            account, exchange_positions, exchange_open_orders = (
+                await self._fetch_reconciliation_snapshot_inputs()
             )
-            exchange_open_orders = await self.rest_client.request(
-                "GET", "/fapi/v1/openOrders", signed=True
-            )
-            account = await self.rest_client.request("GET", "/fapi/v2/account", signed=True)
-            if not isinstance(exchange_positions, list) or not isinstance(exchange_open_orders, list):
-                raise ValueError("Binance reconciliation response is invalid")
             self._validate_mainnet_scope(exchange_positions, exchange_open_orders)
             # Validate the authoritative account/position snapshot before
             # _collect_diffs can seed any recovered position into the ledger.

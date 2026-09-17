@@ -48,6 +48,7 @@ from apps.trading_worker.venues.binance.config import (
     BinanceEnvironment,
     environment_label,
     get_ws_url,
+    is_portfolio_margin_enabled,
 )
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.gates import DecisionExecutionGate
@@ -1423,12 +1424,13 @@ class TradingWorkerApp:
         """Derive the single operational state from canonical control flags."""
         if self.kill_switch_active:
             self.engine_state = WorkerEngineState.EMERGENCY
+        elif self.active_configuration is None:
+            self.engine_state = WorkerEngineState.DISARMED
         elif (
             self.execution_mode in {
                 WorkerExecutionMode.TESTNET,
                 WorkerExecutionMode.LIVE,
             }
-            and self.active_configuration is not None
             and (
                 self.connection_state != ConnectionState.READY.value
                 or not self.authenticated
@@ -1447,11 +1449,7 @@ class TradingWorkerApp:
         elif self.pause_new_risk:
             self.engine_state = WorkerEngineState.PAUSED_NEW_RISK
         else:
-            self.engine_state = (
-                WorkerEngineState.ARMED
-                if self.active_configuration
-                else WorkerEngineState.DISARMED
-            )
+            self.engine_state = WorkerEngineState.ARMED
 
     def get_state(self) -> WorkerRuntimeState:
         self._sync_adapter_state()
@@ -2246,11 +2244,12 @@ class TradingWorkerApp:
 
                 if credentials_configured and not durable_ledger_error:
                     adapter = BinanceExecutionAdapter(
-                        api_key=os.getenv("BINANCE_MAINNET_API_KEY", ""),
-                        api_secret=os.getenv("BINANCE_MAINNET_API_SECRET", ""),
+                        api_key="".join(str(os.getenv("BINANCE_MAINNET_API_KEY", "")).split()),
+                        api_secret="".join(str(os.getenv("BINANCE_MAINNET_API_SECRET", "")).split()),
                         env=BinanceEnvironment.MAINNET,
                         ledger=durable_ledger,
                         preflight_only=True,
+                        portfolio_margin=is_portfolio_margin_enabled(),
                     )
                     connected = await adapter.connect()
                     try:
@@ -2791,8 +2790,8 @@ class TradingWorkerApp:
 
         self.engine_state = WorkerEngineState.ARMING
         exchange_environment = BinanceEnvironment.MAINNET
-        api_key = os.getenv("BINANCE_MAINNET_API_KEY", "")
-        api_secret = os.getenv("BINANCE_MAINNET_API_SECRET", "")
+        api_key = "".join(str(os.getenv("BINANCE_MAINNET_API_KEY", "")).split())
+        api_secret = "".join(str(os.getenv("BINANCE_MAINNET_API_SECRET", "")).split())
         self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
             exchange_environment
         ).max_leverage
@@ -2812,6 +2811,7 @@ class TradingWorkerApp:
                 api_secret=api_secret,
                 env=exchange_environment,
                 ledger=durable_ledger,
+                portfolio_margin=is_portfolio_margin_enabled(),
             )
             if self.execution_adapter.ledger:
                 self.execution_adapter.ledger.on_order_update = self.persistence.enqueue_order
@@ -3296,14 +3296,14 @@ class TradingWorkerApp:
                 else BinanceEnvironment.TESTNET
             )
             if mode == "LIVE":
-                api_key = os.getenv("BINANCE_MAINNET_API_KEY", "")
-                api_secret = os.getenv("BINANCE_MAINNET_API_SECRET", "")
+                api_key = "".join(str(os.getenv("BINANCE_MAINNET_API_KEY", "")).split())
+                api_secret = "".join(str(os.getenv("BINANCE_MAINNET_API_SECRET", "")).split())
                 self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
                     exchange_environment
                 ).max_leverage
             else:
-                api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
-                api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+                api_key = "".join(str(os.getenv("BINANCE_TESTNET_API_KEY", "")).split())
+                api_secret = "".join(str(os.getenv("BINANCE_TESTNET_API_SECRET", "")).split())
                 self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
                     exchange_environment
                 ).max_leverage
@@ -3341,6 +3341,7 @@ class TradingWorkerApp:
                         api_secret=api_secret,
                         env=exchange_environment,
                         ledger=durable_ledger,
+                        portfolio_margin=is_portfolio_margin_enabled(),
                     )
 
                 # Bind persistence callbacks on every arm. This also repairs
@@ -3645,6 +3646,8 @@ class TradingWorkerApp:
             return
             
         market_state = self.market_state_engine.classify(pa_state)
+        if not self.active_configuration:
+            return
 
         enabled_strategies = self._enabled_strategies()
         grid_depth = (

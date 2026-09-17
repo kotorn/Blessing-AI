@@ -9,7 +9,7 @@ import logging
 from typing import Dict, Any, Optional
 from urllib.parse import urlencode
 
-from .config import BinanceEnvironment, get_rest_url
+from .config import BinanceEnvironment, get_rest_url, PAPI_REST_URL, is_portfolio_margin_enabled
 from .clock import BinanceClock
 from .models import (
     BinanceAuthenticationError,
@@ -77,6 +77,19 @@ _ALLOWED_REQUEST_METHODS: dict[str, frozenset[str]] = {
     "/fapi/v1/ticker/bookTicker": frozenset({"GET"}),
     "/fapi/v1/order": frozenset({"GET", "POST", "PUT", "DELETE"}),
     "/fapi/v1/listenKey": frozenset({"POST", "PUT", "DELETE"}),
+    # Portfolio Margin (PAPI) endpoints
+    "/papi/v1/account": frozenset({"GET"}),
+    "/papi/v1/balance": frozenset({"GET"}),
+    "/papi/v1/um/account": frozenset({"GET"}),
+    "/papi/v1/um/positionSide/dual": frozenset({"GET"}),
+    "/papi/v1/um/positionRisk": frozenset({"GET"}),
+    "/papi/v1/um/openOrders": frozenset({"GET"}),
+    "/papi/v1/um/userTrades": frozenset({"GET"}),
+    "/papi/v1/um/income": frozenset({"GET"}),
+    "/papi/v1/um/order": frozenset({"GET", "POST", "PUT", "DELETE"}),
+    "/papi/v1/um/leverage": frozenset({"POST"}),
+    "/papi/v1/um/leverageBracket": frozenset({"GET"}),
+    "/papi/v1/listenKey": frozenset({"POST", "PUT", "DELETE"}),
 }
 
 
@@ -112,12 +125,16 @@ class BinanceRestClient:
         env: BinanceEnvironment,
         *,
         read_only: bool = False,
+        portfolio_margin: Optional[bool] = None,
     ):
         if not isinstance(env, BinanceEnvironment):
             raise ValueError("Binance REST execution client requires TESTNET or MAINNET")
-        self.api_key = api_key
-        self.api_secret = api_secret
+        self.api_key = "".join(str(api_key or "").split())
+        self.api_secret = "".join(str(api_secret or "").split())
         self.env = env
+        if portfolio_margin is None:
+            portfolio_margin = is_portfolio_margin_enabled()
+        self.portfolio_margin = bool(portfolio_margin)
         # A preflight adapter gets a transport-level read-only boundary in
         # addition to the adapter method guards.  This prevents a future
         # preflight code path from reaching the order endpoint accidentally.
@@ -163,8 +180,11 @@ class BinanceRestClient:
 
     async def init_session(self):
         if not self.session:
+            headers = {}
+            if self.api_key:
+                headers["X-MBX-APIKEY"] = self.api_key
             self.session = aiohttp.ClientSession(
-                headers={"X-MBX-APIKEY": self.api_key},
+                headers=headers,
                 timeout=self.timeout,
             )
         if not await self.clock.synchronize(self.session):
@@ -197,7 +217,7 @@ class BinanceRestClient:
                 "Binance request is outside the fixed USDⓈ-M endpoint allowlist: "
                 f"{method_upper} {path}"
             )
-        if path == "/fapi/v1/order":
+        if path in ("/fapi/v1/order", "/papi/v1/um/order"):
             self.order_endpoint_attempts += 1
             if self.read_only:
                 raise PermissionError(
@@ -211,7 +231,10 @@ class BinanceRestClient:
         # intentionally receive the error after clock resynchronization so a
         # caller never blindly submits an order twice.
         timestamp_retry_used = False
-        url = f"{self.base_url}{path}"
+        if path.startswith("/papi/"):
+            url = f"{PAPI_REST_URL}{path}"
+        else:
+            url = f"{self.base_url}{path}"
 
         while True:
             await self._respect_rate_limit()
