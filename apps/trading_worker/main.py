@@ -2513,7 +2513,12 @@ class TradingWorkerApp:
                 self._launch_session_value("policy") == MAINNET_LAUNCH_AUTONOMOUS
                 and self._launch_session_value("state") == "AUTONOMOUS_ACTIVE"
             )
-            if not autonomous:
+            staged_pending = (
+                self._launch_session_value("policy") == MAINNET_LAUNCH_STAGED
+                and self._launch_session_value("state") == "ACTIVE"
+                and int(self._launch_session_value("submitted_orders", 0) or 0) == 0
+            )
+            if not autonomous and not staged_pending:
                 self.pause_new_risk = True
                 self._refresh_engine_state()
                 logger.warning(
@@ -3701,8 +3706,29 @@ class TradingWorkerApp:
                     != self._current_exchange_label()
                     or not self.is_account_snapshot_ready()
                 ):
+                    reconciler = getattr(getattr(self.execution_adapter, "reconciliation", None), "reconcile", None)
+                    if callable(reconciler):
+                        try:
+                            sync_result = await reconciler()
+                            if sync_result == "IN_SYNC":
+                                self.reconciliation_status = "IN_SYNC"
+                                snapshot = await self.execution_adapter.ledger.get_account_snapshot()
+                        except Exception as exc:
+                            logger.warning("Auto-reconcile on missing snapshot failed: %s", exc)
+
+                if (
+                    snapshot is None
+                    or not getattr(snapshot, "valid", False)
+                    or getattr(snapshot, "exchange_environment", None)
+                    != self._current_exchange_label()
+                    or not self.is_account_snapshot_ready()
+                ):
                     logger.error("No account snapshot available from execution adapter")
                     self.connection_state = "DEGRADED"
+                    # A staged launch still requires an authoritative account
+                    # snapshot before the first risk-increasing decision.  The
+                    # staged order limit is an order-count guard, not a
+                    # substitute for account truth.
                     self.pause_new_risk = True
                     self._refresh_engine_state()
                     return # Block execution if no account truth
