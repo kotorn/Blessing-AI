@@ -759,6 +759,25 @@ app.get('/api/health', (req: Request, res: Response) => {
   });
 });
 
+// Cloud Run probes this path directly.  Keep it separate from the SPA
+// fallback and from the lightweight process health endpoint so a rendered
+// HTML document can never be mistaken for a ready Control Plane.  The
+// readiness helper performs the server-side Firebase, release-store, and
+// Worker OIDC checks and returns 503 when any required dependency is not
+// verified.
+app.get('/ready', async (_req: Request, res: Response) => {
+  try {
+    const readiness = await controlPlaneReadiness();
+    return res.status(readiness.status === 'ready' ? 200 : 503).json(readiness);
+  } catch {
+    return res.status(503).json({
+      status: 'degraded',
+      controlPlaneHealthy: false,
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
 interface ApiKeyProfile {
   id: string;
   name: string;
