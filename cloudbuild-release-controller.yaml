@@ -20,6 +20,8 @@ substitutions:
 
 serviceAccount: 'projects/${_PROJECT_ID}/serviceAccounts/${_RELEASE_CONTROLLER_SERVICE_ACCOUNT}'
 
+logsBucket: 'gs://gen-lang-client-0730128480_cloudbuild/logs'
+
 steps:
   - name: '${_CLOUD_SDK_IMAGE}'
     entrypoint: bash
@@ -38,7 +40,7 @@ steps:
     args:
       - '-ceu'
       - |
-        test -n "$CONTROLLER_IMAGE"
-        [[ "$CONTROLLER_IMAGE" =~ @sha256:[0-9a-fA-F]{64}$ ]]
+        test -n "$$CONTROLLER_IMAGE"
+        [[ "$$CONTROLLER_IMAGE" =~ @sha256:[0-9a-fA-F]{64}$$ ]]
         python3 infra/cloudrun/release_controller.py
 timeout: '1200s'

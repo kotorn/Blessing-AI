@@ -3224,7 +3224,13 @@ app.post('/internal/release/consume', async (req: Request, res: Response) => {
         evidence_status: 'UNVERIFIED',
       });
     }
-    const approval = await store.consumeApproval(candidateId);
+    let approval;
+    if (candidate.status === 'CONSUMED' && candidate.approvalId) {
+      approval = await store.getConsumedApproval(candidate.approvalId);
+      if (!approval) throw new Error('Release candidate approval cannot be resolved');
+    } else {
+      approval = await store.consumeApproval(candidateId);
+    }
     return res.json({ ...approval, consumed: true, executionActivated: false, evidence_status: 'VERIFIED' });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Approval consumption failed';

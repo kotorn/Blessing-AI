@@ -152,6 +152,46 @@ describe('mainnet release control boundary', () => {
     await expect(store.getConsumedApproval('approval-not-a-uuid')).rejects.toThrow('Invalid release approval id');
   });
 
+  it('allows approved candidate to update preflight and verify before consumption', async () => {
+    const store = new InMemoryReleaseStore();
+    const release = candidate();
+    await store.createCandidate(release);
+    const approved = await store.approveCandidate(release.candidateId, 'firebase-admin-uid', passingSnapshot());
+    expect(approved.status).toBe('APPROVED');
+
+    // Verification prerequisites pass for APPROVED candidate
+    expect(validateApprovalPrerequisites(approved, passingSnapshot(), NOW)).toEqual([]);
+
+    // Preflight can be refreshed while candidate is APPROVED
+    const updated = await store.updatePreflight(
+      release.candidateId,
+      sanitizePreflightEvidence({ preflightPassed: true, checks: [] }),
+      'f'.repeat(64),
+    );
+    expect(updated.status).toBe('APPROVED');
+    expect(updated.preflightEvidenceHash).toBe('f'.repeat(64));
+
+    // Re-approval of an already APPROVED candidate is rejected
+    await expect(store.approveCandidate(release.candidateId, 'uid', passingSnapshot())).rejects.toThrow(
+      'Release candidate is not pending approval',
+    );
+
+    // Consumed candidate can also pass verification before promotion
+    const consumed = { ...approved, status: 'CONSUMED' as const };
+    expect(validateApprovalPrerequisites(consumed, passingSnapshot(), NOW)).toEqual([]);
+
+    // But once worker is already Mainnet approved, replay is blocked
+    expect(validateApprovalPrerequisites(consumed, { ...passingSnapshot(), currentMainnetLiveApproved: true }, NOW)).toContain(
+      'worker is already Mainnet-approved; approval cannot be replayed',
+    );
+
+    // Expired candidate rejects prerequisites
+    const expired = { ...approved, status: 'EXPIRED' as const };
+    expect(validateApprovalPrerequisites(expired, passingSnapshot(), NOW)).toContain(
+      'candidate status is EXPIRED',
+    );
+  });
+
   it('redacts and hashes only sanitized preflight evidence', () => {
     const evidence = sanitizePreflightEvidence({
       preflightPassed: true,

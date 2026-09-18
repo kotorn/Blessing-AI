@@ -3,6 +3,8 @@ substitutions:
   # it to the immutable digest and pass that digest to deploy-control-plane.ps1.
   _IMAGE_TAG: 'control-plane-$BUILD_ID'
 
+logsBucket: 'gs://gen-lang-client-0730128480_cloudbuild/logs'
+
 steps:
   # See cloudbuild.yaml for why this runs through bash instead of handing
   # ${_IMAGE_TAG} straight to `docker` / the top-level images: field.

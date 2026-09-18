@@ -276,7 +276,9 @@ export function validateApprovalPrerequisites(
   maxPreflightAgeSeconds = 60,
 ): string[] {
   const failures = validateReleaseCandidate(candidate, now);
-  if (candidate.status !== 'PENDING_APPROVAL') failures.push(`candidate status is ${candidate.status}`);
+  if (candidate.status !== 'PENDING_APPROVAL' && candidate.status !== 'APPROVED' && candidate.status !== 'CONSUMED') {
+    failures.push(`candidate status is ${candidate.status}`);
+  }
   if (snapshot.currentImageDigest !== candidate.imageDigest) failures.push('worker image digest does not match candidate');
   if (snapshot.currentWorkerRevision !== candidate.workerRevision) failures.push('worker revision does not match candidate');
   if (snapshot.currentExecutionMode !== RELEASE_EXECUTION_MODE) failures.push('worker execution mode is not LIVE');

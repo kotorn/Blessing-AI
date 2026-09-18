@@ -171,7 +171,9 @@ export class FirestoreReleaseStore implements ReleaseStore {
       const snapshot = await transaction.get(ref);
       if (!snapshot.exists) throw new Error('Release candidate not found');
       const candidate = snapshot.data() as ReleaseCandidate;
-      if (candidate.status !== 'PENDING_APPROVAL') throw new Error('Release candidate is no longer pending approval');
+      if (candidate.status !== 'PENDING_APPROVAL' && candidate.status !== 'APPROVED' && candidate.status !== 'CONSUMED') {
+        throw new Error('Release candidate is no longer pending approval');
+      }
       const next = { ...candidate, preflightEvidenceHash: evidenceHash };
       ensureCandidate(next);
       transaction.update(ref, { preflightEvidenceHash: evidenceHash });
@@ -195,6 +197,9 @@ export class FirestoreReleaseStore implements ReleaseStore {
       const document = await transaction.get(ref);
       if (!document.exists) throw new Error('Release candidate not found');
       const candidate = document.data() as ReleaseCandidate;
+      if (candidate.status !== 'PENDING_APPROVAL') {
+        throw new Error('Release candidate is no longer pending approval');
+      }
       const failures = validateApprovalPrerequisites(candidate, snapshot, now);
       if (failures.length) throw new Error(failures.join('; '));
       const approvalId = `approval-${crypto.randomUUID()}`;
@@ -385,7 +390,7 @@ export class InMemoryReleaseStore implements ReleaseStore {
 
   async updatePreflight(candidateId: string, evidence: SanitizedPreflightEvidence, evidenceHash: string): Promise<ReleaseCandidate> {
     const candidate = await this.getCandidate(candidateId);
-    if (!candidate || candidate.status !== 'PENDING_APPROVAL') throw new Error('Release candidate is not pending approval');
+    if (!candidate || (candidate.status !== 'PENDING_APPROVAL' && candidate.status !== 'APPROVED' && candidate.status !== 'CONSUMED')) throw new Error('Release candidate is not pending approval');
     const next = { ...candidate, preflightEvidenceHash: evidenceHash };
     ensureCandidate(next);
     this.candidates.set(candidateId, clone(next));
@@ -396,6 +401,7 @@ export class InMemoryReleaseStore implements ReleaseStore {
   async approveCandidate(candidateId: string, uid: string, snapshot: ReleaseVerificationSnapshot): Promise<ReleaseCandidate> {
     const candidate = await this.getCandidate(candidateId);
     if (!candidate) throw new Error('Release candidate not found');
+    if (candidate.status !== 'PENDING_APPROVAL') throw new Error('Release candidate is not pending approval');
     const failures = validateApprovalPrerequisites(candidate, snapshot);
     if (failures.length) throw new Error(failures.join('; '));
     const next = { ...candidate, status: 'APPROVED' as const, approvalId: `approval-${crypto.randomUUID()}`, approvedByUid: uid, approvedAt: new Date().toISOString() };

@@ -680,6 +680,7 @@ class TradingWorkerApp:
         self._execution_lease_last_renewed_at = 0.0
         self._mainnet_launch_id: Optional[str] = None
         self._mainnet_launch_session: Optional[dict[str, Any]] = None
+        self._last_risk_snapshot_enqueued_at: float = 0.0
 
     def _set_mainnet_launch_session(self, session: Optional[dict[str, Any]]) -> None:
         """Project durable launch identity into the process-local API state."""
@@ -3768,7 +3769,10 @@ class TradingWorkerApp:
                     ),
                     realized_pnl_24h_known=bool(snapshot.daily_loss_known),
                 )
-                self.persistence.enqueue_risk_snapshot(risk_snapshot)
+                now_monotonic = time.monotonic()
+                if now_monotonic - self._last_risk_snapshot_enqueued_at >= 10.0:
+                    self.persistence.enqueue_risk_snapshot(risk_snapshot)
+                    self._last_risk_snapshot_enqueued_at = now_monotonic
                 
                 positions = await self.execution_adapter.ledger.get_positions()
                 normalized_event_symbol = str(event.symbol).upper()
@@ -3852,8 +3856,18 @@ class TradingWorkerApp:
                     launch_readiness = self.get_launch_readiness()
                     if self.execution_mode == WorkerExecutionMode.LIVE:
                         autonomous_enabled = self._env_flag("MAINNET_LIVE_APPROVED", False)
-                        readiness_key = "mainnet_autonomous_ready"
+                        policy = str(self._launch_session_value("policy", MAINNET_LAUNCH_STAGED))
+                        if policy == MAINNET_LAUNCH_STAGED:
+                            live_ready = bool(
+                                launch_readiness.get("mainnet_preflight_ready")
+                                and launch_readiness.get("mainnet_launch_state") == "ACTIVE"
+                                and self.engine_state == WorkerEngineState.ARMED
+                                and not self.pause_new_risk
+                            )
+                        else:
+                            live_ready = bool(launch_readiness.get("mainnet_autonomous_ready"))
                         environment_name = "MAINNET"
+                        is_ready = autonomous_enabled and live_ready
                     else:
                         autonomous_enabled = self._env_flag(
                             "AUTONOMOUS_TESTNET_EXECUTION", False
@@ -3864,7 +3878,8 @@ class TradingWorkerApp:
                             else "testnet_autonomous_ready"
                         )
                         environment_name = "TESTNET"
-                    if autonomous_enabled and launch_readiness[readiness_key]:
+                        is_ready = autonomous_enabled and bool(launch_readiness.get(readiness_key, False))
+                    if is_ready:
                         is_safe, reason = self._evaluate_execution_gate(decision)
                         if is_safe:
                             logger.info(
