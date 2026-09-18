@@ -28,7 +28,7 @@ from pydantic import (
 )
 
 from domain.enums import RiskState
-from domain.models import Instrument, MarketEvent, MarketType, RiskSnapshot, utc_now
+from domain.models import Instrument, MarketEvent, MarketType, OrderSide, OrderType, RiskSnapshot, utc_now
 
 from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
 from apps.trading_worker.engines.funding_carry import (
@@ -3496,6 +3496,70 @@ class TradingWorkerApp:
         )
         logger.info("Worker DISARMED")
 
+    def _clamp_order_notional_if_needed(
+        self,
+        decision,
+        reference_price: Optional[Decimal] = None,
+    ):
+        """Clamp risk-increasing orders to safely satisfy venue single-order notional caps."""
+        if self.execution_adapter is None:
+            return decision
+        limits = getattr(self.execution_adapter, "safety_limits", None)
+        rules = (
+            getattr(self.execution_adapter, "symbol_rules", {}).get(decision.symbol)
+            if self.execution_adapter
+            else None
+        )
+        price = reference_price
+        if limits and rules and price and price > 0:
+            max_order_notional = getattr(limits, "max_single_order_notional", None)
+            if max_order_notional and max_order_notional > 0:
+                new_orders = []
+                clamped_any = False
+                for order in getattr(decision, "orders", []):
+                    if not getattr(order, "reduce_only", False):
+                        est_notional = order.quantity * price
+                        if est_notional > max_order_notional:
+                            # Target 90% of max notional, capped at 45 USDC for the 50 USDC pilot limit
+                            target_notional = min(max_order_notional * Decimal("0.90"), Decimal("45.0"))
+                            target_qty = target_notional / price
+                            order_type_val = getattr(order.order_type, "value", order.order_type)
+                            is_market = order_type_val == OrderType.MARKET.value
+                            clamped_qty = rules.normalize_quantity(target_qty, is_market=is_market)
+                            min_qty = rules.market_min_qty if is_market and rules.market_min_qty else rules.min_qty
+                            min_notional = rules.min_notional_for(order_type_val)
+                            if (
+                                clamped_qty >= min_qty
+                                and (clamped_qty * price) >= min_notional
+                                and (clamped_qty * price) <= max_order_notional
+                            ):
+                                logger.info(
+                                    "Clamping order %s quantity from %s to %s to satisfy single-order cap %s",
+                                    order.client_order_id,
+                                    order.quantity,
+                                    clamped_qty,
+                                    max_order_notional,
+                                )
+                                new_orders.append(order.model_copy(update={"quantity": clamped_qty}))
+                                clamped_any = True
+                                continue
+                    new_orders.append(order)
+                if clamped_any:
+                    new_delta = sum(
+                        (
+                            o.quantity if o.side == OrderSide.BUY else -o.quantity
+                            for o in new_orders
+                        ),
+                        Decimal("0.0"),
+                    )
+                    return decision.model_copy(
+                        update={
+                            "orders": new_orders,
+                            "net_exposure_delta": new_delta,
+                        }
+                    )
+        return decision
+
     def _evaluate_execution_gate(self, decision) -> tuple[bool, str]:
         result = self.decision_execution_gate.check(decision)
         return result.allowed, result.reason
@@ -3880,6 +3944,7 @@ class TradingWorkerApp:
                         environment_name = "TESTNET"
                         is_ready = autonomous_enabled and bool(launch_readiness.get(readiness_key, False))
                     if is_ready:
+                        decision = self._clamp_order_notional_if_needed(decision, event.last_price)
                         is_safe, reason = self._evaluate_execution_gate(decision)
                         if is_safe:
                             logger.info(
