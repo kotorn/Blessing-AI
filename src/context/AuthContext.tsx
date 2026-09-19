@@ -27,6 +27,9 @@ import {
 interface AuthContextType {
   user: User | null;
   loading: boolean;
+  isSigningIn: boolean;
+  authError: string | null;
+  clearAuthError: () => void;
   firestoreConnected: boolean;
   accessToken: string | null;
   signIn: () => Promise<void>;
@@ -50,8 +53,12 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [isSigningIn, setIsSigningIn] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [firestoreConnected, setFirestoreConnected] = useState<boolean>(false);
   const [tokenState, setTokenState] = useState<string | null>(getGoogleAccessToken());
+
+  const clearAuthError = () => setAuthError(null);
 
   useEffect(() => {
     // 1. Verify Firestore connectivity on boot
@@ -67,17 +74,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(currentUser);
       setTokenState(getGoogleAccessToken());
       setLoading(false);
+      if (currentUser) {
+        setAuthError(null);
+      }
     });
 
     return () => unsubscribe();
   }, []);
 
   const signIn = async () => {
+    if (isSigningIn) {
+      return;
+    }
+    setIsSigningIn(true);
+    setAuthError(null);
     try {
-      await fbSignIn();
+      const loggedUser = await fbSignIn();
       setTokenState(getGoogleAccessToken());
-    } catch (err) {
-      console.error('Sign in failed:', err);
+      if (loggedUser) {
+        setUser(loggedUser);
+      }
+    } catch (err: any) {
+      const code = err?.code || '';
+      if (code === 'auth/cancelled-popup-request' || code === 'auth/popup-closed-by-user') {
+        console.info('Google Sign-in popup was closed or cancelled.');
+        return;
+      }
+      if (code === 'auth/popup-blocked') {
+        setAuthError('Authentication popup was blocked by browser. Please enable popups for this site and retry.');
+      } else if (code === 'auth/unauthorized-domain') {
+        setAuthError('Application domain is not in Firebase authorized domains list.');
+      } else {
+        setAuthError(err?.message || 'Google Sign-in encountered an issue.');
+      }
+      console.warn('Google Sign-in not completed:', err?.message || err);
+    } finally {
+      setIsSigningIn(false);
     }
   };
 
@@ -85,8 +117,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       await fbSignOut();
       setTokenState(null);
+      setUser(null);
+      setAuthError(null);
     } catch (err) {
-      console.error('Sign out failed:', err);
+      console.warn('Sign out encountered an issue:', err);
     }
   };
 
@@ -203,6 +237,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         user,
         loading,
+        isSigningIn,
+        authError,
+        clearAuthError,
         firestoreConnected,
         accessToken: tokenState,
         signIn,

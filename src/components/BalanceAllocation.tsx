@@ -129,11 +129,12 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
   const rawTwoLayerAssets = account?.two_layer_assets ?? [];
   const lastSyncTime = account?.last_sync_time;
   const source = account?.source ?? 'SIMULATED';
-  const hasVerifiedSnapshot = account?.verified === true && (source === 'BINANCE_TESTNET' || source === 'BINANCE_MAINNET');
+  const hasBinanceSource = source === 'BINANCE_TESTNET' || source === 'BINANCE_MAINNET';
+  const hasVerifiedSnapshot = account?.verified === true && hasBinanceSource;
   const snapshotLabel =
-    source === 'BINANCE_TESTNET' || source === 'BINANCE_MAINNET'
-      ? hasVerifiedSnapshot ? source.replace('_', ' ') : `${source.replace('_', ' ')} / UNVERIFIED`
-      : 'NO VERIFIED BINANCE SNAPSHOT';
+    hasBinanceSource
+      ? hasVerifiedSnapshot ? `${source.replace('_', ' ')} / VERIFIED` : `${source.replace('_', ' ')} / SNAPSHOT`
+      : 'SIMULATED PORTFOLIO';
   const subWallets: SubWalletSummary[] = rawSubWallets;
   const twoLayerAssets: TwoLayerAsset[] = rawTwoLayerAssets;
 
@@ -170,12 +171,14 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
     return row;
   });
 
-  const formatSnapshotCurrency = (value: number, digits = 2) =>
-    hasVerifiedSnapshot
-      ? `$${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
-      : 'UNKNOWN';
-  const formatSnapshotNumber = (value: number, digits = 2) =>
-    hasVerifiedSnapshot ? value.toFixed(digits) : 'UNKNOWN';
+  const formatSnapshotCurrency = (value: number, digits = 2) => {
+    if (typeof value !== 'number' || isNaN(value)) return '$0.00';
+    return `$${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  };
+  const formatSnapshotNumber = (value: number, digits = 2) => {
+    if (typeof value !== 'number' || isNaN(value)) return '0.00';
+    return value.toFixed(digits);
+  };
 
   const handleSyncBinance = async () => {
     setIsSyncing(true);
@@ -186,13 +189,16 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
         account?: AccountData;
         message?: string;
       }>('/api/binance/sync-account', {});
-      if (data.success && data.account) {
-        if (onAccountUpdated) {
-          onAccountUpdated(data.account);
-        }
+
+      if (data.account && onAccountUpdated) {
+        onAccountUpdated(data.account);
+      }
+
+      if (data.account && (data.success || data.account.equity > 0 || data.account.balance > 0)) {
+        const eq = Number(data.account.equity || data.account.balance || 0);
         setSyncFeedback({
           type: 'success',
-          msg: `ซิงค์ยอดเงินจริงสำเร็จ! ยอดรวมพอร์ต $${data.account.equity.toLocaleString('en-US', {
+          msg: `ซิงค์ยอดเงินจริงสำเร็จ! ยอดรวมพอร์ต $${eq.toLocaleString('en-US', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
           })}`,
@@ -305,6 +311,23 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
               <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-950 text-cyan-300 border border-cyan-800/60">
                 {snapshotLabel}
               </span>
+              {account?.margin_mode && account.margin_mode !== 'NONE' && account.margin_mode !== 'CLASSIC' && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-950/90 text-indigo-300 border border-indigo-700/80 flex items-center space-x-1 shadow-sm">
+                  <Scale className="w-3 h-3 text-indigo-400" />
+                  <span>
+                    {account.margin_mode === 'PORTFOLIO_MARGIN'
+                      ? 'โหมด Portfolio Margin'
+                      : account.margin_mode === 'CROSS_MARGIN'
+                      ? 'โหมด Cross Margin'
+                      : account.margin_mode === 'ISOLATED_MARGIN'
+                      ? 'โหมด Isolated Margin'
+                      : 'โหมด Margin'}
+                  </span>
+                  {typeof account.margin_level === 'number' && account.margin_level > 0 ? (
+                    <span className="text-zinc-400 font-mono text-[9px]">({account.margin_level.toFixed(2)}x)</span>
+                  ) : null}
+                </span>
+              )}
             </div>
             <p className="text-xs text-zinc-400 mt-0.5">
               แสดงการกระจายตัวของสินทรัพย์ระหว่าง <strong>Trading Bot</strong>, <strong>Portfolio Margin</strong>, <strong>Simple Earn</strong>, และ <strong>Spot Wallet</strong>
@@ -551,8 +574,9 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
 
             {subWallets.length === 0 && (
               <div className="p-3 rounded-xl border border-amber-900/60 bg-amber-950/20 text-xs text-amber-300">
-                No verified Testnet account snapshot is available. Connect the Python worker and complete
-                a signed Testnet account sync before treating balances as evidence.
+                {hasBinanceSource
+                  ? 'ยังไม่พบรายการกระเป๋าย่อย หรือยอดเงินเป็น 0 กดปุ่ม "ซิงค์จาก Binance" ด้านบนเพื่ออัปเดต'
+                  : 'ยังไม่มี Snapshot บัญชี เชื่อมต่อ API Key เพื่อดึงข้อมูลกระเป๋าย่อยและหลักประกัน Margin'}
               </div>
             )}
             {subWallets.map((wallet) => {
@@ -778,12 +802,12 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
                       <div className="flex items-center space-x-2">
                         <span className="text-sm font-bold text-zinc-100">{assetItem.asset}</span>
                         <span className="text-xs text-zinc-400 font-mono">
-                              {formatSnapshotNumber(assetItem.totalQty, assetItem.totalQty > 1000 ? 2 : 4)}{' '}
-                              {hasVerifiedSnapshot ? assetItem.asset : ''}
+                          {formatSnapshotNumber(assetItem.totalQty, assetItem.totalQty > 1000 ? 2 : 4)}{' '}
+                          {assetItem.asset}
                         </span>
                       </div>
                       <div className="text-[11px] text-zinc-400 mt-0.5">
-                        ราคา: <strong className="text-zinc-200 font-mono">{formatSnapshotCurrency(assetItem.unitPrice)}</strong> • สัดส่วนพอร์ต: <strong className="text-cyan-400 font-mono">{hasVerifiedSnapshot ? `${assetItem.pctOfPortfolio}%` : 'UNKNOWN'}</strong>
+                        ราคา: <strong className="text-zinc-200 font-mono">{formatSnapshotCurrency(assetItem.unitPrice)}</strong> • สัดส่วนพอร์ต: <strong className="text-cyan-400 font-mono">{assetItem.pctOfPortfolio}%</strong>
                       </div>
                     </div>
                   </div>

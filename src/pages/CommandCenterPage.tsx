@@ -24,6 +24,7 @@ interface CommandCenterPageProps {
   onEnterRecovery: (basketId: string) => Promise<void>;
   onCloseBasket: (basketId: string) => Promise<void>;
   onOpenBalanceModal: () => void;
+  onOpenKeyModal?: () => void;
   onNavigate: (route: AppRoute) => void;
 }
 
@@ -42,6 +43,7 @@ export const CommandCenterPage: React.FC<CommandCenterPageProps> = ({
   onEnterRecovery,
   onCloseBasket,
   onOpenBalanceModal,
+  onOpenKeyModal,
   onNavigate,
 }) => {
   // Operational triage: check if any basket requires fast intervention
@@ -55,6 +57,7 @@ export const CommandCenterPage: React.FC<CommandCenterPageProps> = ({
         account={account}
         onAccountUpdated={onAccountUpdated}
         onOpenBalanceModal={onOpenBalanceModal}
+        onOpenKeyModal={onOpenKeyModal}
         onNavigateTab={(tab) => {
           if (tab === 'wallet') onNavigate('/portfolio');
           else if (tab === 'cockpit') onNavigate('/command');

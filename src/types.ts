@@ -196,6 +196,9 @@ export interface AccountData {
   spot_balance?: number;
   futures_wallet_balance?: number;
   futures_unrealized_pnl?: number;
+  margin_balance?: number;
+  margin_mode?: 'CROSS_MARGIN' | 'ISOLATED_MARGIN' | 'PORTFOLIO_MARGIN' | 'CLASSIC' | 'NONE';
+  margin_level?: number;
   last_sync_time?: string;
   account_alias?: string;
   holdings?: AccountHolding[];

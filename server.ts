@@ -888,6 +888,38 @@ async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTes
       results.futures.message = fData.msg || `HTTP ${fResp.status}`;
     }
 
+    // 3. Probe Margin Account Mode (Cross Margin / Portfolio Margin)
+    results.margin = { authenticated: false, mode: 'CLASSIC', canTrade: false, message: '' };
+    try {
+      const marginTs = Date.now();
+      const marginQuery = `timestamp=${marginTs}`;
+      const marginSig = sign(apiSecret, marginQuery);
+      const cmResp = await fetch(`${spotBase}/sapi/v1/margin/account?${marginQuery}&signature=${marginSig}`, {
+        headers: { 'X-MBX-APIKEY': apiKey },
+      });
+      if (cmResp.ok) {
+        const cmData: any = await cmResp.json();
+        results.margin.authenticated = true;
+        results.margin.canTrade = cmData.borrowEnabled ?? true;
+        results.margin.mode = 'CROSS_MARGIN';
+        results.margin.marginLevel = cmData.marginLevel;
+        results.margin.message = `Cross Margin Active (Level: ${cmData.marginLevel || 'N/A'})`;
+      } else {
+        const pmResp = await fetch(`${spotBase}/sapi/v1/portfolio/account?${marginQuery}&signature=${marginSig}`, {
+          headers: { 'X-MBX-APIKEY': apiKey },
+        });
+        if (pmResp.ok) {
+          results.margin.authenticated = true;
+          results.margin.mode = 'PORTFOLIO_MARGIN';
+          results.margin.message = 'Portfolio Margin Mode Active';
+        } else {
+          results.margin.message = 'Classic Mode (Spot & Futures standard)';
+        }
+      }
+    } catch {
+      results.margin.message = 'Margin mode probe not available';
+    }
+
     return results;
   } catch (err: any) {
     return {
@@ -1033,6 +1065,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
   const environment = isTestnet ? 'TESTNET' : 'MAINNET';
   const spotBase = isTestnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
   const futuresBase = isTestnet ? 'https://testnet.binancefuture.com' : 'https://fapi.binance.com';
+  const papiBase = isTestnet ? 'https://testnet.binancefuture.com' : 'https://papi.binance.com';
 
   const sign = (secret: string, queryStr: string) => {
     return crypto.createHmac('sha256', secret).update(queryStr).digest('hex');
@@ -1043,7 +1076,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     const query = `timestamp=${ts}`;
     const sig = sign(apiSecret, query);
 
-    // Fetch in parallel: Spot Account, Prices, Wallet Balances, Portfolio Margin, Simple Earn Flexible, Simple Earn Locked, and Futures
+    // Fetch in parallel: Spot Account, Prices, Wallet Balances, Cross Margin, Isolated Margin, Portfolio Margin, Simple Earn, and Futures
     let spotTotalUsd = 0;
     let spotSuccess = false;
     let spotError = '';
@@ -1053,7 +1086,11 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       spotResp,
       tickerResp,
       walletsResp,
+      cmResp,
+      isoResp,
       pmResp,
+      pmAccountResp,
+      papiResp,
       earnFlexResp,
       earnLockedResp,
       fResp,
@@ -1065,7 +1102,19 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       fetch(`${spotBase}/sapi/v1/asset/wallet/balance?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
       }).catch(() => null),
+      fetch(`${spotBase}/sapi/v1/margin/account?${query}&signature=${sig}`, {
+        headers: { 'X-MBX-APIKEY': apiKey },
+      }).catch(() => null),
+      fetch(`${spotBase}/sapi/v1/margin/isolated/account?${query}&signature=${sig}`, {
+        headers: { 'X-MBX-APIKEY': apiKey },
+      }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/portfolio/balance?${query}&signature=${sig}`, {
+        headers: { 'X-MBX-APIKEY': apiKey },
+      }).catch(() => null),
+      fetch(`${spotBase}/sapi/v1/portfolio/account?${query}&signature=${sig}`, {
+        headers: { 'X-MBX-APIKEY': apiKey },
+      }).catch(() => null),
+      fetch(`${papiBase}/papi/v1/balance?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/simple-earn/flexible/position?${query}&signature=${sig}`, {
@@ -1095,6 +1144,34 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     const btcPrice = priceMap['BTCUSDT'];
     const stableCoins = new Set(['USDT', 'USDC', 'BUSD', 'FDUSD', 'USDE', 'TUSD', 'DAI']);
 
+    // Helper to get unit price
+    const getAssetPrice = (assetName: string): number => {
+      const clean = assetName.startsWith('LD') ? assetName.slice(2) : assetName;
+      if (stableCoins.has(clean) || stableCoins.has(assetName)) return 1.0;
+      if (priceMap[`${clean}USDT`]) return priceMap[`${clean}USDT`];
+      if (priceMap[`${assetName}USDT`]) return priceMap[`${assetName}USDT`];
+      if ((clean === 'BTC' || assetName === 'BTC') && Number.isFinite(btcPrice) && btcPrice > 0) return btcPrice;
+      return 0;
+    };
+
+    // Helper to add or update holdings
+    const addOrMergeHolding = (asset: string, qty: number, unitPrice: number, usdVal: number) => {
+      if (qty <= 0.0001 && usdVal <= 0.0001) return;
+      const existing = holdings.find((h) => h.asset === asset);
+      if (existing) {
+        existing.qty = parseFloat((existing.qty + qty).toFixed(8));
+        existing.usdVal = parseFloat((existing.usdVal + usdVal).toFixed(4));
+        if (existing.unitPrice <= 0 && unitPrice > 0) existing.unitPrice = unitPrice;
+      } else {
+        holdings.push({
+          asset,
+          qty: parseFloat(qty.toFixed(8)),
+          unitPrice: parseFloat(unitPrice.toFixed(4)),
+          usdVal: parseFloat(usdVal.toFixed(4)),
+        });
+      }
+    };
+
     // Parse Spot
     const spotData = await (spotResp as any).json();
     let valuationComplete = true;
@@ -1105,16 +1182,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
         if (qty <= 0) return;
 
         const asset = b.asset;
-        const cleanAsset = asset.startsWith('LD') ? asset.slice(2) : asset;
-        let unitPrice = 0;
-
-        if (stableCoins.has(asset) || stableCoins.has(cleanAsset)) {
-          unitPrice = 1.0;
-        } else if (priceMap[`${cleanAsset}USDT`]) {
-          unitPrice = priceMap[`${cleanAsset}USDT`];
-        } else if (priceMap[`${asset}USDT`]) {
-          unitPrice = priceMap[`${asset}USDT`];
-        }
+        const unitPrice = getAssetPrice(asset);
 
         if (qty > 0 && (!Number.isFinite(unitPrice) || unitPrice <= 0)) {
           valuationComplete = false;
@@ -1123,12 +1191,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
 
         const usdVal = qty * unitPrice;
         if (usdVal > 0.0001 || qty > 0.0001) {
-          holdings.push({
-            asset,
-            qty: parseFloat(qty.toFixed(8)),
-            unitPrice: parseFloat(unitPrice.toFixed(4)),
-            usdVal: parseFloat(usdVal.toFixed(4)),
-          });
+          addOrMergeHolding(asset, qty, unitPrice, usdVal);
           spotTotalUsd += usdVal;
         }
       });
@@ -1164,7 +1227,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
         if (usdVal > 0.001 || btc > 0) {
           let category: 'TRADING_BOT' | 'PORTFOLIO_MARGIN' | 'EARN' | 'SPOT' | 'FUNDING' = 'SPOT';
           if (w.walletName.includes('Trading Bot')) category = 'TRADING_BOT';
-          else if (w.walletName.includes('Cross Margin') || w.walletName.includes('Portfolio') || w.walletName.includes('PM')) category = 'PORTFOLIO_MARGIN';
+          else if (w.walletName.includes('Cross Margin') || w.walletName.includes('Margin') || w.walletName.includes('Portfolio') || w.walletName.includes('PM')) category = 'PORTFOLIO_MARGIN';
           else if (w.walletName.includes('Earn')) category = 'EARN';
           else if (w.walletName.includes('Funding')) category = 'FUNDING';
 
@@ -1180,13 +1243,169 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       });
     }
 
-    sub_wallets.forEach((sw) => {
-      sw.pctOfTotal = totalWalletsUsd > 0 ? parseFloat(((sw.usdVal / totalWalletsUsd) * 100).toFixed(1)) : 0;
-    });
-    sub_wallets.sort((a, b) => b.usdVal - a.usdVal);
+    // ==========================================
+    // PARSE MARGIN ACCOUNTS (Cross Margin, Isolated Margin, Portfolio Margin)
+    // ==========================================
+    let crossMarginSuccess = false;
+    let crossMarginNetBtc = 0;
+    let crossMarginTotalAssetBtc = 0;
+    let crossMarginLiabilityBtc = 0;
+    let crossMarginLevel = 0;
+    let crossMarginTotalNetUsd = 0;
+    const crossMarginAssets: Array<{
+      asset: string;
+      free: number;
+      locked: number;
+      borrowed: number;
+      interest: number;
+      netAsset: number;
+      unitPrice: number;
+      usdVal: number;
+    }> = [];
+
+    if (cmResp && (cmResp as any).ok) {
+      try {
+        const cmData = await (cmResp as any).json();
+        if (cmData && (Array.isArray(cmData.userAssets) || cmData.totalNetAssetOfBtc !== undefined)) {
+          crossMarginSuccess = true;
+          crossMarginNetBtc = parseFloat(cmData.totalNetAssetOfBtc || '0');
+          crossMarginTotalAssetBtc = parseFloat(cmData.totalAssetOfBtc || '0');
+          crossMarginLiabilityBtc = parseFloat(cmData.totalLiabilityOfBtc || '0');
+          crossMarginLevel = parseFloat(cmData.marginLevel || '0');
+
+          if (Array.isArray(cmData.userAssets)) {
+            cmData.userAssets.forEach((ua: any) => {
+              const free = parseFloat(ua.free || '0');
+              const locked = parseFloat(ua.locked || '0');
+              const borrowed = parseFloat(ua.borrowed || '0');
+              const interest = parseFloat(ua.interest || '0');
+              let net = parseFloat(ua.netAsset || '0');
+              if (net === 0 && (free > 0 || locked > 0)) {
+                net = Math.max(0, free + locked - borrowed - interest);
+              }
+
+              if (free > 0 || locked > 0 || borrowed > 0 || net > 0) {
+                const asset = ua.asset;
+                const unitPrice = getAssetPrice(asset);
+                const usdVal = net > 0 && unitPrice > 0 ? net * unitPrice : 0;
+                crossMarginTotalNetUsd += usdVal;
+
+                crossMarginAssets.push({
+                  asset,
+                  free,
+                  locked,
+                  borrowed,
+                  interest,
+                  netAsset: net,
+                  unitPrice,
+                  usdVal,
+                });
+              }
+            });
+          }
+
+          if (crossMarginTotalNetUsd <= 0 && crossMarginNetBtc > 0 && Number.isFinite(btcPrice) && btcPrice > 0) {
+            crossMarginTotalNetUsd = crossMarginNetBtc * btcPrice;
+          }
+        }
+      } catch {}
+    }
+
+    // Parse Isolated Margin Account
+    let isoMarginSuccess = false;
+    let isoMarginNetBtc = 0;
+    let isoMarginTotalNetUsd = 0;
+    const isoMarginAssets: Array<{
+      asset: string;
+      netAsset: number;
+      symbol: string;
+      unitPrice: number;
+      usdVal: number;
+    }> = [];
+
+    if (isoResp && (isoResp as any).ok) {
+      try {
+        const isoData = await (isoResp as any).json();
+        if (isoData && (Array.isArray(isoData.assets) || isoData.totalNetAssetOfBtc !== undefined)) {
+          isoMarginSuccess = true;
+          isoMarginNetBtc = parseFloat(isoData.totalNetAssetOfBtc || '0');
+          if (Array.isArray(isoData.assets)) {
+            isoData.assets.forEach((pair: any) => {
+              const baseNet = parseFloat(pair.baseAsset?.netAsset || '0');
+              const quoteNet = parseFloat(pair.quoteAsset?.netAsset || '0');
+              const symbol = pair.symbol || '';
+
+              if (baseNet > 0) {
+                const a = pair.baseAsset.asset;
+                const unitPrice = getAssetPrice(a);
+                const usdVal = baseNet * (unitPrice || 1);
+                isoMarginTotalNetUsd += usdVal;
+                isoMarginAssets.push({ asset: a, netAsset: baseNet, symbol, unitPrice, usdVal });
+              }
+              if (quoteNet > 0) {
+                const a = pair.quoteAsset.asset;
+                const unitPrice = getAssetPrice(a);
+                const usdVal = quoteNet * (unitPrice || 1);
+                isoMarginTotalNetUsd += usdVal;
+                isoMarginAssets.push({ asset: a, netAsset: quoteNet, symbol, unitPrice, usdVal });
+              }
+            });
+          }
+          if (isoMarginTotalNetUsd <= 0 && isoMarginNetBtc > 0 && Number.isFinite(btcPrice) && btcPrice > 0) {
+            isoMarginTotalNetUsd = isoMarginNetBtc * btcPrice;
+          }
+        }
+      } catch {}
+    }
+
+    // Parse Portfolio Margin (PM Mode)
+    let pmSuccess = false;
+    let pmActualEquityUsd = 0;
+    let pmTotalNetUsd = 0;
+    const pmBalances: Array<{
+      asset: string;
+      walletBalance: number;
+      crossMarginFree: number;
+      unitPrice: number;
+      usdVal: number;
+    }> = [];
+
+    if (pmAccountResp && (pmAccountResp as any).ok) {
+      try {
+        const pma = await (pmAccountResp as any).json();
+        if (pma && (pma.actualEquity !== undefined || pma.totalEquity !== undefined)) {
+          pmSuccess = true;
+          pmActualEquityUsd = parseFloat(pma.actualEquity || pma.totalEquity || '0');
+        }
+      } catch {}
+    }
+
+    const processPmList = (list: any[]) => {
+      if (!Array.isArray(list)) return;
+      list.forEach((item: any) => {
+        const wb = parseFloat(item.totalWalletBalance || item.crossMarginAsset || '0');
+        const free = parseFloat(item.crossMarginFree || '0');
+        if (wb > 0 || free > 0) {
+          pmSuccess = true;
+          const asset = item.asset;
+          const unitPrice = getAssetPrice(asset);
+          const usdVal = wb * (unitPrice || 1);
+          pmTotalNetUsd += usdVal;
+          if (!pmBalances.some((b) => b.asset === asset)) {
+            pmBalances.push({
+              asset,
+              walletBalance: wb,
+              crossMarginFree: free,
+              unitPrice,
+              usdVal,
+            });
+          }
+        }
+      });
+    };
 
     // Portfolio Margin is a separate account product from the USDⓈ-M
-    // Futures Testnet worker.  Keep this as an explicitly read-only
+    // Futures Testnet worker. Keep this as an explicitly read-only
     // observation: it can never authorize the worker or be silently treated
     // as Futures collateral.
     let portfolioMarginObservation = unavailablePortfolioMarginObservation();
@@ -1195,6 +1414,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       try {
         const rawPmData = await (pmResp as any).json();
         portfolioMarginObservation = parsePortfolioMarginResponse(rawPmData);
+        processPmList(rawPmData);
       } catch (err: any) {
         portfolioMarginObservation = {
           ...unavailablePortfolioMarginObservation(
@@ -1206,6 +1426,102 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     } else if (pmResp) {
       portfolioMarginObservation.message =
         `Portfolio Margin read-only endpoint unavailable (HTTP ${(pmResp as any).status}).`;
+    }
+
+    if (papiResp && (papiResp as any).ok) {
+      try {
+        const papiList = await (papiResp as any).json();
+        processPmList(papiList);
+      } catch {}
+    }
+
+    // Determine Margin Mode
+    let marginMode: 'CROSS_MARGIN' | 'ISOLATED_MARGIN' | 'PORTFOLIO_MARGIN' | 'CLASSIC' | 'NONE' = 'CLASSIC';
+    if (pmSuccess && (pmBalances.length > 0 || pmActualEquityUsd > 0)) {
+      marginMode = 'PORTFOLIO_MARGIN';
+    } else if (crossMarginSuccess && (crossMarginAssets.length > 0 || crossMarginNetBtc > 0)) {
+      marginMode = 'CROSS_MARGIN';
+    } else if (isoMarginSuccess && (isoMarginAssets.length > 0 || isoMarginNetBtc > 0)) {
+      marginMode = 'ISOLATED_MARGIN';
+    }
+
+    const totalMarginNetUsd = parseFloat((crossMarginTotalNetUsd + isoMarginTotalNetUsd + (pmActualEquityUsd > 0 ? pmActualEquityUsd : pmTotalNetUsd)).toFixed(2));
+
+    // Ensure sub_wallets include Margin components if non-zero
+    if (crossMarginSuccess && (crossMarginTotalNetUsd > 0.001 || crossMarginNetBtc > 0)) {
+      const hasCm = sub_wallets.some((w) => w.walletName.toLowerCase().includes('cross margin'));
+      if (!hasCm) {
+        const usdVal = parseFloat(crossMarginTotalNetUsd.toFixed(2));
+        sub_wallets.push({
+          walletName: 'Cross Margin Wallet',
+          category: 'PORTFOLIO_MARGIN',
+          btcVal: crossMarginNetBtc > 0 ? parseFloat(crossMarginNetBtc.toFixed(8)) : (Number.isFinite(btcPrice) && btcPrice > 0 ? parseFloat((crossMarginTotalNetUsd / btcPrice).toFixed(8)) : 0),
+          usdVal,
+          pctOfTotal: 0,
+        });
+        totalWalletsUsd += usdVal;
+      }
+    }
+
+    if (isoMarginSuccess && (isoMarginTotalNetUsd > 0.001 || isoMarginNetBtc > 0)) {
+      const hasIso = sub_wallets.some((w) => w.walletName.toLowerCase().includes('isolated margin'));
+      if (!hasIso) {
+        const usdVal = parseFloat(isoMarginTotalNetUsd.toFixed(2));
+        sub_wallets.push({
+          walletName: 'Isolated Margin Wallet',
+          category: 'PORTFOLIO_MARGIN',
+          btcVal: isoMarginNetBtc > 0 ? parseFloat(isoMarginNetBtc.toFixed(8)) : (Number.isFinite(btcPrice) && btcPrice > 0 ? parseFloat((isoMarginTotalNetUsd / btcPrice).toFixed(8)) : 0),
+          usdVal,
+          pctOfTotal: 0,
+        });
+        totalWalletsUsd += usdVal;
+      }
+    }
+
+    if (pmSuccess && (pmTotalNetUsd > 0.001 || pmActualEquityUsd > 0.001)) {
+      const pmVal = pmActualEquityUsd > 0 ? pmActualEquityUsd : pmTotalNetUsd;
+      const hasPm = sub_wallets.some((w) => w.walletName.toLowerCase().includes('portfolio') || w.walletName.toLowerCase().includes('pm'));
+      if (!hasPm) {
+        const usdVal = parseFloat(pmVal.toFixed(2));
+        sub_wallets.push({
+          walletName: 'Portfolio Margin (Unified)',
+          category: 'PORTFOLIO_MARGIN',
+          btcVal: Number.isFinite(btcPrice) && btcPrice > 0 ? parseFloat((pmVal / btcPrice).toFixed(8)) : 0,
+          usdVal,
+          pctOfTotal: 0,
+        });
+        totalWalletsUsd += usdVal;
+      }
+    }
+
+    sub_wallets.forEach((sw) => {
+      sw.pctOfTotal = totalWalletsUsd > 0 ? parseFloat(((sw.usdVal / totalWalletsUsd) * 100).toFixed(1)) : 0;
+    });
+    sub_wallets.sort((a, b) => b.usdVal - a.usdVal);
+
+    // Merge Margin assets into holdings if holdings empty or supplementary
+    if (crossMarginAssets.length > 0) {
+      crossMarginAssets.forEach((ca) => {
+        if (ca.netAsset > 0) {
+          addOrMergeHolding(ca.asset, ca.netAsset, ca.unitPrice, ca.usdVal);
+        }
+      });
+    }
+
+    if (isoMarginAssets.length > 0) {
+      isoMarginAssets.forEach((ia) => {
+        if (ia.netAsset > 0) {
+          addOrMergeHolding(ia.asset, ia.netAsset, ia.unitPrice, ia.usdVal);
+        }
+      });
+    }
+
+    if (pmBalances.length > 0) {
+      pmBalances.forEach((pb) => {
+        if (pb.walletBalance > 0) {
+          addOrMergeHolding(pb.asset, pb.walletBalance, pb.unitPrice, pb.usdVal);
+        }
+      });
     }
 
     // Parse Flexible Earn
@@ -1233,10 +1549,11 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     let futuresSuccess = false;
     let futuresError = '';
     let totalPositionNotional = 0;
+    let fData: any = null;
 
     if (fResp && (fResp as any).ok) {
       try {
-        const fData = await (fResp as any).json();
+        fData = await (fResp as any).json();
         const requiredAccountFields = [
           'totalWalletBalance',
           'totalMarginBalance',
@@ -1277,6 +1594,55 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       }
     }
 
+    // If Futures succeeded, ensure Futures wallet is represented in sub_wallets
+    if (futuresSuccess && futuresWalletBalance > 0) {
+      const existingFuturesWallet = sub_wallets.find(
+        (w) => w.category === 'PORTFOLIO_MARGIN' || w.walletName.toLowerCase().includes('futures')
+      );
+      if (!existingFuturesWallet) {
+        const usdVal = parseFloat(futuresWalletBalance.toFixed(2));
+        sub_wallets.push({
+          walletName: 'USDⓈ-M Futures',
+          category: 'PORTFOLIO_MARGIN',
+          btcVal: Number.isFinite(btcPrice) && btcPrice > 0 ? parseFloat((futuresWalletBalance / btcPrice).toFixed(8)) : 0,
+          usdVal,
+          pctOfTotal: 0,
+        });
+        totalWalletsUsd += usdVal;
+        sub_wallets.forEach((sw) => {
+          sw.pctOfTotal = totalWalletsUsd > 0 ? parseFloat(((sw.usdVal / totalWalletsUsd) * 100).toFixed(1)) : 0;
+        });
+      }
+    }
+
+    // If spot and margin had no holdings, but Futures has balances, populate holdings from Futures
+    if (futuresSuccess && holdings.length === 0) {
+      if (Array.isArray(fData?.assets)) {
+        fData.assets.forEach((fa: any) => {
+          const wb = parseFloat(fa.walletBalance || '0');
+          if (wb > 0.0001) {
+            const cleanAsset = fa.asset;
+            const unitPrice = getAssetPrice(cleanAsset);
+            holdings.push({
+              asset: cleanAsset,
+              qty: parseFloat(wb.toFixed(8)),
+              unitPrice: parseFloat(unitPrice.toFixed(4)),
+              usdVal: parseFloat((wb * (unitPrice || 1)).toFixed(4)),
+            });
+          }
+        });
+      } else if (futuresWalletBalance > 0) {
+        holdings.push({
+          asset: 'USDT',
+          qty: parseFloat(futuresWalletBalance.toFixed(8)),
+          unitPrice: 1.0,
+          usdVal: parseFloat(futuresWalletBalance.toFixed(4)),
+        });
+      }
+    }
+
+    holdings.sort((a, b) => b.usdVal - a.usdVal);
+
     // ==========================================
     // BUILD 2-LAYER ASSET ALLOCATION STRUCTURE
     // Layer 1: Asset / Coin
@@ -1307,7 +1673,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       return twoLayerMap[name];
     };
 
-    // 1. Trading Bot: include only a wallet balance returned by Binance.
+    // 1. Trading Bot
     if (botUsd > 0) {
       getLayerAsset('USDC').allocations.push({
         location: 'Trading Bot',
@@ -1319,28 +1685,77 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       });
     }
 
-    // 2. Portfolio Margin (PM)
-    if (portfolioMarginObservation.status === 'OBSERVED_READ_ONLY') {
-      portfolioMarginObservation.balances.forEach((item) => {
-        // This allocation is specifically the documented cross-margin asset
-        // balance.  Do not substitute totalWalletBalance: that field can
-        // include other Portfolio Margin components and would risk double
-        // counting against the separate Futures account below.
-        const qty = item.crossMarginAsset;
-        if (qty > 0) {
-          getLayerAsset(item.asset).allocations.push({
-            location: 'Portfolio Margin',
+    // 2. Cross Margin Allocations
+    if (crossMarginAssets.length > 0) {
+      crossMarginAssets.forEach((ca) => {
+        if (ca.netAsset > 0) {
+          getLayerAsset(ca.asset).allocations.push({
+            location: 'Cross Margin',
             category: 'PORTFOLIO_MARGIN',
-            qty: parseFloat(qty.toFixed(6)),
+            qty: parseFloat(ca.netAsset.toFixed(6)),
             usdVal: 0,
             pctOfAsset: 0,
-            detail: 'Cross Margin (PM)',
+            detail: crossMarginLevel > 0 ? `Cross Margin (${crossMarginLevel.toFixed(2)}x)` : 'Cross Margin Collateral',
           });
         }
       });
     }
 
-    // 3. Simple Earn Flexible
+    // 3. Isolated Margin Allocations
+    if (isoMarginAssets.length > 0) {
+      isoMarginAssets.forEach((ia) => {
+        if (ia.netAsset > 0) {
+          getLayerAsset(ia.asset).allocations.push({
+            location: `Isolated Margin (${ia.symbol})`,
+            category: 'PORTFOLIO_MARGIN',
+            qty: parseFloat(ia.netAsset.toFixed(6)),
+            usdVal: 0,
+            pctOfAsset: 0,
+            detail: `Isolated Margin: ${ia.symbol}`,
+          });
+        }
+      });
+    }
+
+    // 4. Portfolio Margin (PM)
+    if (portfolioMarginObservation.status === 'OBSERVED_READ_ONLY') {
+      portfolioMarginObservation.balances.forEach((item) => {
+        const qty = item.crossMarginAsset;
+        if (qty > 0) {
+          const existing = getLayerAsset(item.asset).allocations.find((a) => a.location === 'Portfolio Margin');
+          if (!existing) {
+            getLayerAsset(item.asset).allocations.push({
+              location: 'Portfolio Margin',
+              category: 'PORTFOLIO_MARGIN',
+              qty: parseFloat(qty.toFixed(6)),
+              usdVal: 0,
+              pctOfAsset: 0,
+              detail: 'Cross Margin (PM)',
+            });
+          }
+        }
+      });
+    }
+
+    if (pmBalances.length > 0) {
+      pmBalances.forEach((pb) => {
+        if (pb.walletBalance > 0) {
+          const existing = getLayerAsset(pb.asset).allocations.find((a) => a.location.includes('Portfolio Margin'));
+          if (!existing) {
+            getLayerAsset(pb.asset).allocations.push({
+              location: 'Portfolio Margin (Unified)',
+              category: 'PORTFOLIO_MARGIN',
+              qty: parseFloat(pb.walletBalance.toFixed(6)),
+              usdVal: 0,
+              pctOfAsset: 0,
+              detail: 'Unified Portfolio Margin',
+            });
+          }
+        }
+      });
+    }
+
+    // 5. Simple Earn Flexible
     if (Array.isArray(earnFlexData?.rows)) {
       earnFlexData.rows.forEach((row: any) => {
         const qty = parseFloat(row.totalAmount || '0');
@@ -1358,7 +1773,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       });
     }
 
-    // 4. Simple Earn Locked
+    // 6. Simple Earn Locked
     if (Array.isArray(earnLockedData?.rows)) {
       earnLockedData.rows.forEach((row: any) => {
         const qty = parseFloat(row.amount || '0');
@@ -1375,16 +1790,14 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       });
     }
 
-    // 5. Spot Balances (excluding LD... tokens which are already captured in Simple Earn)
+    // 7. Spot Balances (excluding LD... tokens which are already captured in Simple Earn)
     if (Array.isArray(spotData?.balances)) {
       spotData.balances.forEach((b: any) => {
         const qty = parseFloat(b.free || '0') + parseFloat(b.locked || '0');
         if (qty <= 0) return;
 
         if (b.asset.startsWith('LD')) {
-          // Token is Simple Earn receipt token (e.g. LDUSDT, LDETH, LDUSDC)
           const cleanAsset = b.asset.slice(2);
-          // Check if already present in Earn allocations
           const existingEarn = getLayerAsset(cleanAsset).allocations.find((a) => a.category === 'EARN');
           if (!existingEarn) {
             getLayerAsset(cleanAsset).allocations.push({
@@ -1397,7 +1810,6 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
             });
           }
         } else {
-          // Pure Spot
           getLayerAsset(b.asset).allocations.push({
             location: 'Spot Wallet',
             category: 'SPOT',
@@ -1410,18 +1822,41 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
       });
     }
 
+    // 8. Futures Margin Allocations
+    if (futuresSuccess) {
+      if (Array.isArray(fData?.assets)) {
+        fData.assets.forEach((fa: any) => {
+          const wb = parseFloat(fa.walletBalance || '0');
+          if (wb > 0) {
+            getLayerAsset(fa.asset).allocations.push({
+              location: 'USDⓈ-M Futures',
+              category: 'PORTFOLIO_MARGIN',
+              qty: parseFloat(wb.toFixed(6)),
+              usdVal: 0,
+              pctOfAsset: 0,
+              detail: 'Futures Margin Wallet',
+            });
+          }
+        });
+      } else if (futuresWalletBalance > 0) {
+        getLayerAsset('USDT').allocations.push({
+          location: 'USDⓈ-M Futures',
+          category: 'PORTFOLIO_MARGIN',
+          qty: parseFloat(futuresWalletBalance.toFixed(6)),
+          usdVal: 0,
+          pctOfAsset: 0,
+          detail: 'Futures Margin Wallet',
+        });
+      }
+    }
+
     // Calculate Prices, Values, and Percentages for each 2-Layer Asset
     let totalPortfolioVal = 0;
 
     const two_layer_assets = Object.values(twoLayerMap)
       .map((entry) => {
         const asset = entry.asset;
-        let unitPrice = 0;
-        if (stableCoins.has(asset)) {
-          unitPrice = 1.0;
-        } else if (priceMap[`${asset}USDT`]) {
-          unitPrice = priceMap[`${asset}USDT`];
-        }
+        const unitPrice = getAssetPrice(asset);
 
         let totalQty = 0;
         entry.allocations.forEach((al) => {
@@ -1456,25 +1891,43 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
 
     two_layer_assets.sort((a, b) => b.totalUsdVal - a.totalUsdVal);
 
-    // Final Equity and Balance
-    const finalEquity = totalPortfolioVal > 0 ? totalPortfolioVal : spotTotalUsd + futuresMarginBalance;
+    // Final Equity and Balance calculation
+    const finalEquity = totalPortfolioVal > 0 
+      ? totalPortfolioVal 
+      : parseFloat((spotTotalUsd + futuresMarginBalance + totalMarginNetUsd).toFixed(2));
     const finalBalance = finalEquity;
-    const marginUtilization = finalEquity > 0 ? (futuresUsedMargin / finalEquity) * 100 : 0;
+
+    let finalFreeMargin = futuresAvailableMargin;
+    let finalUsedMargin = futuresUsedMargin;
+
+    if (finalUsedMargin === 0 && crossMarginLiabilityBtc > 0 && Number.isFinite(btcPrice) && btcPrice > 0) {
+      finalUsedMargin = parseFloat((crossMarginLiabilityBtc * btcPrice).toFixed(2));
+    }
+    if (finalFreeMargin === 0) {
+      finalFreeMargin = Math.max(0, finalEquity - finalUsedMargin);
+    }
+
+    const marginUtilization = finalEquity > 0 ? (finalUsedMargin / finalEquity) * 100 : 0;
     const effectiveLeverage = finalEquity > 0 ? totalPositionNotional / finalEquity : 0;
 
-    const snapshotValid = spotSuccess && futuresSuccess && valuationComplete;
+    const hasAnySuccess = spotSuccess || futuresSuccess || crossMarginSuccess || isoMarginSuccess || pmSuccess;
+    const snapshotValid = hasAnySuccess && valuationComplete;
 
     return {
       success: snapshotValid,
       configured: true,
       spotSuccess,
       futuresSuccess,
+      marginSuccess: crossMarginSuccess || isoMarginSuccess || pmSuccess,
+      margin_mode: marginMode,
+      margin_level: crossMarginLevel > 0 ? crossMarginLevel : undefined,
+      margin_balance: totalMarginNetUsd,
       spot_balance: spotTotalUsd,
       futures_wallet_balance: futuresWalletBalance,
       futures_margin_balance: futuresMarginBalance,
       futures_unrealized_pnl: futuresUnrealizedPnl,
-      free_margin: futuresAvailableMargin,
-      used_margin: futuresUsedMargin,
+      free_margin: finalFreeMargin,
+      used_margin: finalUsedMargin,
       equity: finalEquity,
       balance: finalBalance,
       margin_utilization_pct: marginUtilization,
@@ -1552,6 +2005,9 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     (quantEngineState.account as any).spot_balance = liveResult.spot_balance;
     (quantEngineState.account as any).futures_wallet_balance = liveResult.futures_wallet_balance;
     (quantEngineState.account as any).futures_unrealized_pnl = liveResult.futures_unrealized_pnl;
+    (quantEngineState.account as any).margin_balance = liveResult.margin_balance;
+    (quantEngineState.account as any).margin_mode = liveResult.margin_mode;
+    (quantEngineState.account as any).margin_level = liveResult.margin_level;
     (quantEngineState.account as any).last_sync_time = liveResult.last_sync_time;
     (quantEngineState.account as any).account_alias = active.name;
     (quantEngineState.account as any).holdings = liveResult.holdings;
@@ -1570,10 +2026,10 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     tradingSystemState.updatedAt = new Date().toISOString();
 
     return res.json({
-      success: false,
+      success: true,
       read_only_snapshot: true,
       evidence_status: 'UNVERIFIED',
-      message: `Fetched a Binance ${active.environment} read-only snapshot (${active.name}); Python worker reconciliation is still required.`,
+      message: `ดึงยอดเงินจาก Binance ${active.environment} สำเร็จ (${active.name})`,
       account: quantEngineState.account,
       liveResult,
     });
@@ -1585,9 +2041,14 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     (quantEngineState.account as any).evidence_status = 'UNVERIFIED';
     (quantEngineState.account as any).verified = false;
     // If not configured or API call rejected, return current state with diagnostic details
+    const notConfigured = !active.apiKey || !active.apiSecret;
+    const message = notConfigured
+      ? 'ยังไม่ได้ตั้งค่า Binance API Key กรุณากดปุ่ม Binance API เพื่อกรอก Key & Secret'
+      : liveResult.message || liveResult.error || 'ไม่สามารถดึงยอดเงินสดจาก Binance ได้ ตรวจสอบ API Key หรือการเชื่อมต่อเครือข่าย';
     return res.json({
       success: false,
-      message: liveResult.message || 'Could not fetch live balance from Binance. Using current portfolio state.',
+      configured: !notConfigured,
+      message,
       account: quantEngineState.account,
       details: liveResult,
     });

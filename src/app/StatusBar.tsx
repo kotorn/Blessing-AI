@@ -60,7 +60,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   onTogglePauseNewRisk,
   onOpenStartTradingWizard,
 }) => {
-  const { user, signIn, signOut, firestoreConnected } = useAuth();
+  const { user, signIn, signOut, firestoreConnected, isSigningIn, authError, clearAuthError } = useAuth();
   const [showKillSwitchConfirm, setShowKillSwitchConfirm] = useState(false);
 
   const isEmergency = riskState === 'EMERGENCY' || killSwitchActive;
@@ -277,15 +277,42 @@ export const StatusBar: React.FC<StatusBarProps> = ({
               </button>
             </div>
           ) : (
-            <button
-              type="button"
-              onClick={signIn}
-              className="flex items-center space-x-1 px-2.5 py-1 rounded text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer"
-              title="Sign in with Google Account"
-            >
-              <LogIn className="w-3 h-3" />
-              <span className="text-[11px]">Sign In</span>
-            </button>
+            <div className="flex items-center space-x-1.5">
+              {authError && (
+                <div className="flex items-center space-x-1 bg-amber-950/80 border border-amber-700/50 text-amber-300 text-[10px] px-1.5 py-0.5 rounded">
+                  <AlertTriangle className="w-2.5 h-2.5 text-amber-400 shrink-0" />
+                  <span className="truncate max-w-[150px]" title={authError}>{authError}</span>
+                  <button
+                    type="button"
+                    onClick={clearAuthError}
+                    className="hover:text-amber-100 ml-0.5 p-0.5"
+                    title="Dismiss"
+                  >
+                    <X className="w-2.5 h-2.5" />
+                  </button>
+                </div>
+              )}
+              <button
+                id="statusbar-google-signin-btn"
+                type="button"
+                onClick={signIn}
+                disabled={isSigningIn}
+                className="flex items-center space-x-1 px-2.5 py-1 rounded text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white transition-colors cursor-pointer"
+                title="Sign in with Google Account"
+              >
+                {isSigningIn ? (
+                  <>
+                    <RefreshCw className="w-3 h-3 animate-spin text-white" />
+                    <span className="text-[11px]">Connecting...</span>
+                  </>
+                ) : (
+                  <>
+                    <LogIn className="w-3 h-3" />
+                    <span className="text-[11px]">Sign In</span>
+                  </>
+                )}
+              </button>
+            </div>
           )}
         </div>
       </header>

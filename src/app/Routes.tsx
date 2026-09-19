@@ -92,6 +92,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = ({
           onEnterRecovery={onEnterRecovery}
           onCloseBasket={onCloseBasket}
           onOpenBalanceModal={onOpenBalanceModal}
+          onOpenKeyModal={onOpenBinanceModal}
           onNavigate={onNavigate}
         />
       );

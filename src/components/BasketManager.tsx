@@ -20,7 +20,7 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
   onCloseBasket,
   isActionLoading,
 }) => {
-  const { user, signIn, exportToGoogleSheet } = useAuth();
+  const { user, signIn, exportToGoogleSheet, isSigningIn } = useAuth();
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [lastExportUrl, setLastExportUrl] = useState<string | null>(null);
 
@@ -32,6 +32,7 @@ export const BasketManager: React.FC<BasketManagerProps> = ({
   } | null>(null);
 
   const handleQuickExport = async () => {
+    if (isSigningIn) return;
     if (!user) {
       await signIn();
       return;
