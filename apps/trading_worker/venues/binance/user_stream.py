@@ -63,11 +63,14 @@ class BinanceUserStream:
         # Socket establishment alone is not proof that the connection remains
         # usable. A received private event or a successful WebSocket
         # ping/pong is required before the execution readiness gate passes.
-        timestamp = self.last_event_at or self.last_transport_heartbeat_at
-        if timestamp is None:
+        candidates = [
+            ts
+            for ts in (self.last_event_at, self.last_transport_heartbeat_at)
+            if ts is not None and getattr(ts, "tzinfo", None) is not None
+        ]
+        if not candidates:
             return False
-        if timestamp.tzinfo is None:
-            return False
+        timestamp = max(candidates)
         try:
             max_age = float(os.getenv("PRIVATE_STREAM_MAX_AGE_SEC", "60"))
         except (TypeError, ValueError):
@@ -186,28 +189,38 @@ class BinanceUserStream:
     async def _keepalive_loop(self):
         keepalive_elapsed = 0.0
         while self.is_connected and self.running:
-            await asyncio.sleep(self.STREAM_HEARTBEAT_INTERVAL_SEC)
-            if not await self._transport_heartbeat():
-                logger.error("Private stream heartbeat failed.")
+            try:
+                await asyncio.sleep(self.STREAM_HEARTBEAT_INTERVAL_SEC)
+                if not await self._transport_heartbeat():
+                    logger.error("Private stream heartbeat failed.")
+                    self.is_connected = False
+                    if self.ws:
+                        await self.ws.close()
+                    self._trigger_reconnect()
+                    break
+
+                keepalive_elapsed += self.STREAM_HEARTBEAT_INTERVAL_SEC
+                if keepalive_elapsed < 1800:
+                    continue
+                keepalive_elapsed = 0.0
+                if await self.keepalive():
+                    logger.info("listenKey keepalive successful.")
+                    continue
+                logger.error("listenKey keepalive failed.")
                 self.is_connected = False
                 if self.ws:
                     await self.ws.close()
                 self._trigger_reconnect()
                 break
-
-            keepalive_elapsed += self.STREAM_HEARTBEAT_INTERVAL_SEC
-            if keepalive_elapsed < 1800:
-                continue
-            keepalive_elapsed = 0.0
-            if await self.keepalive():
-                logger.info("listenKey keepalive successful.")
-                continue
-            logger.error("listenKey keepalive failed.")
-            self.is_connected = False
-            if self.ws:
-                await self.ws.close()
-            self._trigger_reconnect()
-            break
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error("Unexpected error in private stream keepalive loop: %s", exc)
+                self.is_connected = False
+                if self.ws:
+                    await self.ws.close()
+                self._trigger_reconnect()
+                break
 
     async def keepalive(self) -> bool:
         """Refresh the active environment listen key and record verification time."""

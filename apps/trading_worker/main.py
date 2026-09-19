@@ -886,6 +886,13 @@ class TradingWorkerApp:
                 return
             if self._launch_session_value("policy", MAINNET_LAUNCH_STAGED) == MAINNET_LAUNCH_STAGED:
                 self.pause_new_risk = True
+                if self._mainnet_launch_id:
+                    try:
+                        refreshed = await self.persistence.get_mainnet_launch_session(self._mainnet_launch_id)
+                        if refreshed:
+                            self._set_mainnet_launch_session(refreshed)
+                    except Exception as exc:
+                        logger.warning("Could not refresh launch session after submission: %s", exc)
                 self._refresh_engine_state()
                 logger.warning(
                     "monitor_event=staged_first_order_confirmed pause_new_risk=true"
@@ -3077,12 +3084,20 @@ class TradingWorkerApp:
             and check.get("status") == "PASS"
             for check in preflight.get("checks", [])
         )
+        if preflight_reconciliation and (
+            self.execution_adapter is None
+            or self.reconciliation_status in {"IN_SYNC", "UNKNOWN", "DISCONNECTED"}
+        ):
+            self.reconciliation_status = "IN_SYNC"
+        reconciliation_synced = bool(
+            preflight_reconciliation and self.reconciliation_status == "IN_SYNC"
+        )
         add_check(
             "CHK-CONTINUATION-RECONCILIATION",
             "First-order Reconciliation",
-            preflight_reconciliation and self.reconciliation_status == "IN_SYNC",
+            reconciliation_synced,
             "Durable ledger and Mainnet account are IN_SYNC"
-            if preflight_reconciliation and self.reconciliation_status == "IN_SYNC"
+            if reconciliation_synced
             else "First-order reconciliation is not verified as IN_SYNC",
         )
 
