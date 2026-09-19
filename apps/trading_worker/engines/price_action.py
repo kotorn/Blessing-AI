@@ -43,9 +43,14 @@ class InstrumentTracker:
         price = float(price_d)
         self.ticks.append((timestamp, price))
         
+        old_prior_high = self.prior_24h_high
+        old_prior_low = self.prior_24h_low
+
         if self.prior_24h_high == Decimal("-inf"):
             self.prior_24h_high = price_d
             self.prior_24h_low = price_d
+            old_prior_high = price_d
+            old_prior_low = price_d
             
         # Update session highs/lows crudely for the streaming context
         if price_d > self.prior_24h_high:
@@ -91,12 +96,21 @@ class InstrumentTracker:
         
         if len(self.ticks) > 1:
             prev_price = Decimal(str(self.ticks[-2][1]))
-            # Poked below prior low and reclaimed
-            if price_d > self.prior_24h_low and prev_price <= self.prior_24h_low:
+            prior_recent = [Decimal(str(p)) for t, p in recent_window[:-1]]
+            prior_local_low = min(prior_recent) if len(prior_recent) >= 2 else old_prior_low
+            prior_local_high = max(prior_recent) if len(prior_recent) >= 2 else old_prior_high
+
+            swept_low = (price_d > old_prior_low and prev_price <= old_prior_low) or (
+                price_d > prior_local_low and prev_price <= prior_local_low
+            )
+            swept_high = (price_d < old_prior_high and prev_price >= old_prior_high) or (
+                price_d < prior_local_high and prev_price >= prior_local_high
+            )
+
+            if swept_low:
                 is_sweep = True
                 is_reclaim = True
-            # Poked above prior high and rejected (sweep high)
-            if price_d < self.prior_24h_high and prev_price >= self.prior_24h_high:
+            elif swept_high:
                 is_sweep = True
                 is_reclaim = False
 

@@ -725,3 +725,50 @@ async def test_worker_does_not_evaluate_disabled_strategy_engines(monkeypatch):
     await worker.handle_market_event(_carry_event())
 
     assert calls == ["grid"]
+
+
+def test_price_action_engine_detects_rolling_swing_low_reclaim():
+    pa = PriceActionEngine()
+    now = datetime.now(timezone.utc)
+
+    # Establish baseline ticks forming a local swing low
+    # 2625.0 -> 2624.5 -> 2624.0 (swing low)
+    t0 = now
+    t1 = now + timedelta(seconds=1)
+    t2 = now + timedelta(seconds=2)
+    t3 = now + timedelta(seconds=3)
+    t4 = now + timedelta(seconds=4)
+
+    e0 = MarketEvent(
+        event_id="E-0",
+        event_time=t0,
+        symbol="ETHUSDC",
+        venue="BINANCE",
+        market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("2625.0"),
+        best_bid=Decimal("2624.9"),
+        best_ask=Decimal("2625.1"),
+    )
+    s0 = pa.process_event(e0)
+    assert s0 is None  # first tick seeds tracker
+
+    # Falling ticks
+    s1 = pa.process_event(e0.model_copy(update={"event_id": "E-1", "event_time": t1, "last_price": Decimal("2624.5")}))
+    assert s1 is not None
+    assert s1.is_reclaiming is False
+
+    s2 = pa.process_event(e0.model_copy(update={"event_id": "E-2", "event_time": t2, "last_price": Decimal("2624.0")}))
+    assert s2 is not None
+    assert s2.is_reclaiming is False  # Still falling to swing low
+
+    # Bounce tick reclaiming the swing low
+    s3 = pa.process_event(e0.model_copy(update={"event_id": "E-3", "event_time": t3, "last_price": Decimal("2624.3")}))
+    assert s3 is not None
+    assert s3.is_reclaiming is True
+    assert s3.liquidity_swept is True
+
+    # Subsequent upward continuation resets reclaim
+    s4 = pa.process_event(e0.model_copy(update={"event_id": "E-4", "event_time": t4, "last_price": Decimal("2624.8")}))
+    assert s4 is not None
+    assert s4.is_reclaiming is False
+
