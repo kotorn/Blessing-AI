@@ -334,7 +334,20 @@ def build_account_snapshot(
 
         distance = _liquidation_distance(position, mark_price)
         if distance is None:
-            liquidation_known = False
+            if account.get("portfolioMargin") and margin_balance > 0 and computed_notional > 0:
+                # In Binance Portfolio Margin (PAPI), liquidation is managed at the unified account level.
+                # When collateral covers maintenance margin, calculate the liquidation buffer from margin headroom.
+                headroom = max(Decimal("0"), margin_balance - total_maint_margin)
+                distance = min(
+                    Decimal("100"),
+                    max(
+                        Decimal("0.01"),
+                        (headroom / computed_notional) * Decimal("100")
+                    )
+                )
+                liquidation_distances.append(distance)
+            else:
+                liquidation_known = False
         else:
             liquidation_distances.append(distance)
 

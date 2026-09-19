@@ -1173,45 +1173,49 @@ class TradingWorkerApp:
         autonomous execution lease gate.
         """
 
+        def fail(reason: str) -> bool:
+            logger.warning("Mainnet snapshot risk check rejected: %s", reason)
+            return False
+
         if snapshot is None or not getattr(snapshot, "valid", False):
-            return False
+            return fail("snapshot is None or not valid")
         if getattr(adapter, "env", None) != BinanceEnvironment.MAINNET:
-            return False
+            return fail(f"adapter env is not MAINNET: {getattr(adapter, 'env', None)}")
         if freshness_verified is None:
             freshness_check = getattr(adapter, "is_account_snapshot_fresh", None)
             freshness_verified = bool(callable(freshness_check) and freshness_check())
         if not freshness_verified:
-            return False
+            return fail("snapshot freshness_verified is false")
 
         lease = getattr(adapter, "execution_lease", None)
         if require_execution_lease and bool(getattr(adapter, "execution_lease_required", True)) and (
             lease is None or getattr(lease, "fencing_token", None) is None
         ):
-            return False
+            return fail("execution lease required but missing")
         if str(getattr(snapshot, "collateral_asset", "")).upper() != "USDC":
-            return False
+            return fail(f"collateral_asset is not USDC: {getattr(snapshot, 'collateral_asset', None)}")
         if str(getattr(snapshot, "risk_currency", "")).upper() != "USDC":
-            return False
+            return fail(f"risk_currency is not USDC: {getattr(snapshot, 'risk_currency', None)}")
         if str(getattr(snapshot, "daily_loss_asset", "")).upper() != "USDC":
-            return False
+            return fail(f"daily_loss_asset is not USDC: {getattr(snapshot, 'daily_loss_asset', None)}")
         if not bool(getattr(snapshot, "daily_loss_known", False)):
-            return False
+            return fail("daily_loss_known is false")
         if not bool(getattr(snapshot, "daily_pnl_includes_fees", False)):
-            return False
+            return fail("daily_pnl_includes_fees is false")
         if not bool(getattr(snapshot, "daily_pnl_includes_funding", False)):
-            return False
+            return fail("daily_pnl_includes_funding is false")
         if not bool(getattr(snapshot, "configured_leverage_known", False)):
-            return False
+            return fail("configured_leverage_known is false")
         if not bool(getattr(snapshot, "margin_mode_known", False)):
-            return False
+            return fail("margin_mode_known is false")
         if str(getattr(snapshot, "margin_mode", "")).upper() not in {
             "CROSS",
             "ISOLATED",
             "SINGLE_ASSET_CROSS",
         }:
-            return False
+            return fail(f"unsupported margin_mode: {getattr(snapshot, 'margin_mode', None)}")
         if str(getattr(snapshot, "liquidation_safety", "")).upper() != "KNOWN":
-            return False
+            return fail(f"liquidation_safety is not KNOWN: {getattr(snapshot, 'liquidation_safety', None)}")
 
         try:
             limits = TestnetSafetyLimits.from_environment(BinanceEnvironment.MAINNET)
@@ -1225,8 +1229,8 @@ class TradingWorkerApp:
             total_position_notional = Decimal(
                 str(getattr(snapshot, "total_position_notional", None))
             )
-        except (InvalidOperation, TypeError, ValueError):
-            return False
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            return fail(f"failed to parse decimal fields: {exc}")
 
         if (
             not collateral.is_finite()
@@ -1244,37 +1248,40 @@ class TradingWorkerApp:
             or total_position_notional < 0
             or total_position_notional > limits.max_total_open_notional
         ):
-            return False
+            return fail(
+                f"limits breached: collateral={collateral} wallet={wallet_balance} avail={available_balance} "
+                f"eff_lev={effective_leverage} notional={total_position_notional}"
+            )
         if (
             not configured_leverage.is_finite()
             or configured_leverage <= 0
             or configured_leverage > limits.max_leverage
         ):
-            return False
+            return fail(f"configured_leverage out of limits: {configured_leverage}")
         if not daily_pnl.is_finite() or not unrealized_pnl.is_finite():
-            return False
+            return fail(f"daily_pnl or unrealized_pnl not finite: daily={daily_pnl} unrealized={unrealized_pnl}")
         daily_loss = max(Decimal("0"), -(daily_pnl + unrealized_pnl))
         if not daily_loss.is_finite() or daily_loss >= limits.max_daily_loss:
-            return False
+            return fail(f"daily_loss out of limits: {daily_loss} >= {limits.max_daily_loss}")
 
         liquidation_distance = getattr(snapshot, "min_liquidation_distance_pct", None)
         if total_position_notional != 0:
             try:
                 if liquidation_distance is None or not Decimal(str(liquidation_distance)).is_finite() or Decimal(str(liquidation_distance)) <= 0:
-                    return False
-            except (InvalidOperation, TypeError, ValueError):
-                return False
+                    return fail(f"invalid liquidation_distance for active position: {liquidation_distance}")
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                return fail(f"failed parsing liquidation_distance: {exc}")
 
         window_start = getattr(snapshot, "daily_loss_window_start", None)
         window_end = getattr(snapshot, "daily_loss_window_end", None)
         if not isinstance(window_start, datetime) or not isinstance(window_end, datetime):
-            return False
+            return fail(f"window_start/end not datetime: {type(window_start)} {type(window_end)}")
         if window_start.tzinfo is None or window_end.tzinfo is None:
-            return False
+            return fail("window_start/end missing tzinfo")
         start_utc = window_start.astimezone(timezone.utc)
         end_utc = window_end.astimezone(timezone.utc)
         now_utc = utc_now()
-        return (
+        in_window = (
             start_utc.hour == 0
             and start_utc.minute == 0
             and start_utc.second == 0
@@ -1283,6 +1290,9 @@ class TradingWorkerApp:
             and end_utc <= start_utc + timedelta(days=1)
             and start_utc <= now_utc < end_utc
         )
+        if not in_window:
+            return fail(f"daily loss window invalid: start={start_utc} end={end_utc} now={now_utc}")
+        return True
 
     def is_mainnet_account_risk_ready(self) -> bool:
         """Require independently observed Mainnet collateral, mode, leverage, and PnL."""

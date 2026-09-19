@@ -225,3 +225,54 @@ async def test_reconciliation_snapshot_portfolio_margin():
     assert snapshot.available_balance == Decimal("50.88337369")
     assert snapshot.configured_leverage == Decimal("2")
     assert snapshot.configured_leverage_known is True
+
+
+def test_build_account_snapshot_portfolio_margin_liquidation_distance():
+    account = {
+        "portfolioMargin": True,
+        "assets": [
+            {
+                "asset": "USDC",
+                "walletBalance": "50.0",
+                "marginBalance": "50.0",
+                "availableBalance": "50.0",
+                "crossMarginAsset": "50.0",
+                "crossMarginFree": "50.0",
+                "unrealizedProfit": "0.0",
+                "initialMargin": "8.5",
+                "maintMargin": "1.0",
+                "positionInitialMargin": "8.5",
+            }
+        ],
+        "positions": [
+            {
+                "symbol": "ETHUSDC",
+                "positionSide": "BOTH",
+                "leverage": "2",
+                "positionAmt": "0.007",
+                "entryPrice": "2450.0",
+                "markPrice": "2450.0",
+                "liquidationPrice": "0",  # Binance PM returns 0
+                "initialMargin": "8.575",
+                "maintMargin": "0.17",
+                "unrealizedProfit": "0.0",
+            }
+        ],
+    }
+    positions = account["positions"]
+    snapshot = build_account_snapshot(
+        account,
+        positions,
+        environment="BINANCE_MAINNET",
+        daily_realized_pnl=Decimal("0"),
+        daily_loss_known=True,
+        daily_loss_asset="USDC",
+        daily_pnl_includes_fees=True,
+        daily_pnl_includes_funding=True,
+    )
+    assert snapshot.liquidation_safety == "KNOWN"
+    assert snapshot.min_liquidation_distance_pct is not None
+    assert snapshot.min_liquidation_distance_pct > 0
+    # Headroom = 50 - 1 = 49. Notional = 0.007 * 2450 = 17.15. Distance = min(100, (49 / 17.15) * 100) = 100
+    assert snapshot.min_liquidation_distance_pct == Decimal("100")
+
