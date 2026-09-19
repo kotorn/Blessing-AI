@@ -131,7 +131,9 @@ describe('control-plane authentication contract', () => {
 
   it('requires verified control-plane authorization for system and quant routes', () => {
     expect(server).toContain('authorizeOperatorRequest');
-    expect(server).toContain("app.use(['/api/system', '/api/quant', '/api/binance', '/api/release']");
+    expect(server).toContain(
+      "app.use(['/api/system', '/api/quant', '/api/binance', '/api/release', '/api/google']"
+    );
     expect(server).toContain('CONTROL_PLANE_AUTH_REQUIRED');
     expect(server).toContain('CONTROL_PLANE_AUTH_FORBIDDEN');
     expect(server).toContain("requiredRole: ControlPlaneRole");
@@ -139,6 +141,9 @@ describe('control-plane authentication contract', () => {
     expect(server).toContain('/api/release/mainnet/approve');
     expect(server.indexOf("app.use(['/api/system', '/api/quant', '/api/binance']")).toBeLessThan(
       server.indexOf("app.get('/api/binance/verify-key'")
+    );
+    expect(server.indexOf("app.use(['/api/system', '/api/quant', '/api/binance', '/api/release', '/api/google']")).toBeLessThan(
+      server.indexOf("app.get('/api/google/products'")
     );
   });
 

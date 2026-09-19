@@ -176,7 +176,7 @@ app.use(express.json());
 // Binance profile/balance endpoints cannot bypass server-side Firebase RBAC.
 // The implementation is declared below as a function declaration and is
 // therefore available when Express starts handling requests.
-app.use(['/api/system', '/api/quant', '/api/binance', '/api/release'], (req, res, next) => {
+app.use(['/api/system', '/api/quant', '/api/binance', '/api/release', '/api/google'], (req, res, next) => {
   void enforceOperatorAccess(req, res, next).catch(() => {
     if (res.headersSent) return;
     res.status(503).json({
