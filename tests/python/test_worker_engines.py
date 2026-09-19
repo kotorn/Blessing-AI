@@ -772,3 +772,64 @@ def test_price_action_engine_detects_rolling_swing_low_reclaim():
     assert s4 is not None
     assert s4.is_reclaiming is False
 
+
+@pytest.mark.asyncio
+async def test_observed_grid_depth_recognizes_bai_client_order_ids():
+    from unittest.mock import AsyncMock, MagicMock
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from domain.models import ExchangeFill, ExchangePosition, ExecutionOrder, OrderSide, PositionSide
+
+    app = TradingWorkerApp()
+    app.execution_mode = WorkerExecutionMode.LIVE
+
+    mock_adapter = MagicMock()
+    mock_ledger = MagicMock()
+    mock_adapter.ledger = mock_ledger
+
+    # Position: 0.007 ETH
+    mock_ledger.get_positions = AsyncMock(return_value=[
+        ExchangePosition(symbol="ETHUSDC", quantity=Decimal("0.007"), position_side=PositionSide.BOTH)
+    ])
+
+    # Order in Cloud SQL without source_intent_ids, but with BAI- client_order_id
+    mock_ledger.get_all_orders = AsyncMock(return_value=[
+        ExecutionOrder(
+            symbol="ETHUSDC",
+            client_order_id="BAI-1953cad9da3d-0-1",
+            side=OrderSide.BUY,
+            quantity=Decimal("0.007"),
+            price=Decimal("2450"),
+            status="FILLED",
+            source_intent_ids=[],
+        )
+    ])
+
+    # Fill in Cloud SQL without source_intent_ids, but with matching BAI- client_order_id
+    mock_ledger.get_fills = AsyncMock(return_value=[
+        ExchangeFill(
+            symbol="ETHUSDC",
+            client_order_id="BAI-1953cad9da3d-0-1",
+            exchange_order_id="12345",
+            exchange_trade_id="892779718",
+            side=OrderSide.BUY,
+            position_side=PositionSide.BOTH,
+            quantity=Decimal("0.007"),
+            price=Decimal("2450"),
+            commission=Decimal("0.01"),
+            commission_asset="USDC",
+            realized_pnl=Decimal("0"),
+            maker=True,
+            event_time=datetime.now(timezone.utc),
+            transaction_time=datetime.now(timezone.utc),
+            source="BINANCE_MAINNET",
+            source_intent_ids=[],
+        )
+    ])
+
+    app.execution_adapter = mock_adapter
+
+    depth = await app._observed_grid_depth("ETHUSDC")
+    # Must recognise the filled order as depth 1, NOT capped at 5!
+    assert depth == 1
+
+

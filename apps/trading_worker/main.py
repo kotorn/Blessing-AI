@@ -1004,11 +1004,17 @@ class TradingWorkerApp:
         }
 
     @staticmethod
-    def _has_grid_lineage(value: object) -> bool:
-        return any(
+    def _has_grid_lineage(value: object, client_order_id: str | None = None) -> bool:
+        if any(
             str(intent_id).upper().startswith("GRID-")
             for intent_id in (value or [])
-        )
+        ):
+            return True
+        if client_order_id:
+            cid = str(client_order_id).upper()
+            if cid.startswith("BAI-") or cid.startswith("B-") or cid.startswith("GRID-"):
+                return True
+        return False
 
     async def _observed_grid_depth(self, symbol: str) -> int:
         """Read grid depth from Worker-owned ledger lineage before expansion."""
@@ -1041,7 +1047,10 @@ class TradingWorkerApp:
                 order
                 for order in all_orders
                 if str(order.symbol).upper() == normalized_symbol
-                and self._has_grid_lineage(order.source_intent_ids)
+                and (
+                    self._has_grid_lineage(order.source_intent_ids, getattr(order, "client_order_id", None))
+                    or str(getattr(order, "strategy_id", "")).strip().lower() in {"grid", "structural grid"}
+                )
             ]
             open_grid_orders = sum(
                 1
@@ -1056,7 +1065,8 @@ class TradingWorkerApp:
                 if str(fill.symbol).upper() == normalized_symbol
                 and (
                     str(fill.client_order_id) in grid_order_ids
-                    or self._has_grid_lineage(fill.source_intent_ids)
+                    or self._has_grid_lineage(fill.source_intent_ids, getattr(fill, "client_order_id", None))
+                    or str(getattr(fill, "strategy_id", "")).strip().lower() in {"grid", "structural grid"}
                 )
             }
             return self.grid_engine.observed_depth(
@@ -3761,8 +3771,23 @@ class TradingWorkerApp:
         )
         
         intents = [i for i in [grid_intent, trend_intent, shock_intent, carry_intent] if i]
-        
-        # Real or simulated RiskSnapshot
+
+        if (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and getattr(self, "engine_state", None) == WorkerEngineState.ARMED
+        ):
+            now_mono = time.monotonic()
+            if now_mono - getattr(self, "_last_live_eval_log_at", 0.0) >= 10.0:
+                self._last_live_eval_log_at = now_mono
+                grid_delta = grid_intent.desired_delta_qty if grid_intent else None
+                logger.info(
+                    "[MAINNET_EVAL] symbol=%s price=%s depth=%s reclaim=%s grid_delta=%s",
+                    event.symbol,
+                    event.last_price,
+                    grid_depth,
+                    getattr(pa_state, "is_reclaiming", None),
+                    grid_delta,
+                )
         if self.execution_mode in {
             WorkerExecutionMode.TESTNET,
             WorkerExecutionMode.LIVE,
