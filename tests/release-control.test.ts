@@ -19,6 +19,13 @@ const NOW = new Date();
 const PREFLIGHT_AT = new Date(NOW.getTime() - 10_000);
 const EXPIRY = new Date(NOW.getTime() + 60 * 60 * 1000);
 
+const PASSING_REPO_TIER = { checks: [{ id: 'repo', status: 'PASS' }], overall_passed: true };
+const PASSING_CLOUD_TIER = {
+  checks: [{ id: 'cloud', status: 'PASS' }],
+  overall_passed: true,
+  generated_at: NOW.toISOString(),
+};
+
 function candidate() {
   return newReleaseCandidate({
     repoSha: 'fe21dba30f3379c59ff748f442d569e107fbb846',
@@ -26,11 +33,14 @@ function candidate() {
     workerRevision: 'blessing-trading-worker-00003-abc',
     secretVersions: { sql: '1', apiKey: '1', apiSecret: '1' },
     preflightEvidenceHash: '1'.repeat(64),
-    repoGateEvidenceHash: '2'.repeat(64),
-    cloudGateEvidenceHash: '3'.repeat(64),
+    repoGateEvidenceHash: hashEvidence(PASSING_REPO_TIER),
+    cloudGateEvidenceHash: hashEvidence(PASSING_CLOUD_TIER),
     expiresAt: EXPIRY.toISOString(),
     nonce: 'release-nonce-123456',
-  }, NOW);
+  }, NOW, {
+    repoGateOutput: PASSING_REPO_TIER,
+    cloudGateOutput: PASSING_CLOUD_TIER,
+  });
 }
 
 function passingSnapshot(): ReleaseVerificationSnapshot {
@@ -238,5 +248,61 @@ describe('mainnet release control boundary', () => {
         cloudGateOutput: cloudTier,
       }),
     ).toContain('cloudGateEvidenceHash does not match freshly-run cloud gate output');
+  });
+
+  it('refuses to create a candidate without real gate output, even with a matching hash', () => {
+    const base = {
+      repoSha: 'fe21dba30f3379c59ff748f442d569e107fbb846',
+      imageDigest: IMAGE,
+      workerRevision: 'blessing-trading-worker-00003-abc',
+      secretVersions: { sql: '1', apiKey: '1', apiSecret: '1' },
+      preflightEvidenceHash: '1'.repeat(64),
+      expiresAt: EXPIRY.toISOString(),
+      nonce: 'release-nonce-123456',
+    };
+
+    // No gate output at all -- a caller cannot skip the check by omitting it.
+    expect(() =>
+      newReleaseCandidate(
+        {
+          ...base,
+          repoGateEvidenceHash: hashEvidence(PASSING_REPO_TIER),
+          cloudGateEvidenceHash: hashEvidence(PASSING_CLOUD_TIER),
+        },
+        NOW,
+      ),
+    ).toThrow(/repoGateOutput is required|cloudGateOutput is required/);
+
+    // A caller who fabricates a payload that says overall_passed: false is
+    // rejected even though the hash is internally consistent.
+    const failingRepoTier = { checks: [{ id: 'repo', status: 'FAIL' }], overall_passed: false };
+    expect(() =>
+      newReleaseCandidate(
+        {
+          ...base,
+          repoGateEvidenceHash: hashEvidence(failingRepoTier),
+          cloudGateEvidenceHash: hashEvidence(PASSING_CLOUD_TIER),
+        },
+        NOW,
+        { repoGateOutput: failingRepoTier, cloudGateOutput: PASSING_CLOUD_TIER },
+      ),
+    ).toThrow(/repoGateOutput.overall_passed must be true/);
+
+    // Stale cloud evidence (older than the freshness window) is rejected.
+    const staleCloudTier = {
+      ...PASSING_CLOUD_TIER,
+      generated_at: new Date(NOW.getTime() - 25 * 60 * 60 * 1000).toISOString(),
+    };
+    expect(() =>
+      newReleaseCandidate(
+        {
+          ...base,
+          repoGateEvidenceHash: hashEvidence(PASSING_REPO_TIER),
+          cloudGateEvidenceHash: hashEvidence(staleCloudTier),
+        },
+        NOW,
+        { repoGateOutput: PASSING_REPO_TIER, cloudGateOutput: staleCloudTier },
+      ),
+    ).toThrow(/cloudGateOutput.generated_at is stale/);
   });
 });
