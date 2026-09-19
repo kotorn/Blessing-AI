@@ -141,7 +141,7 @@ class GridStrategyEngine:
             if self.base_order_qty is not None:
                 base_qty = self.base_order_qty
             elif str(pa_state.symbol).upper() == "ETHUSDC":
-                base_qty = Decimal("0.015")
+                base_qty = Decimal("0.028")
             else:
                 base_qty = Decimal("0.1")
             delta = base_qty * Decimal(remaining_levels) / Decimal(self.max_grid_levels)

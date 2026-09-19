@@ -486,7 +486,7 @@ def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
     grid = GridStrategyEngine()
     intent = grid.evaluate(pa_state, market_state, grid_depth=0)
     assert intent is not None
-    assert intent.desired_delta_qty == Decimal("0.015")
+    assert intent.desired_delta_qty == Decimal("0.028")
 
     # Dynamic clamp in worker
     worker = TradingWorkerApp(symbols=["ETHUSDC"])
@@ -536,5 +536,71 @@ def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
     assert clamped_notional >= Decimal("5.0")
     assert clamped_order.quantity == Decimal("0.018")  # 45 / 2500 = 0.018
     assert decision.net_exposure_delta == Decimal("0.018")
+
+
+def test_clamp_order_notional_bumps_undersized_order_to_satisfy_min_notional():
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from apps.trading_worker.venues.binance.models import TestnetSafetyLimits
+    from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
+    from domain.models import (
+        ExecutionDecision,
+        OrderIntent,
+        OrderSide,
+        OrderType,
+        PositionSide,
+        TimeInForce,
+        MarketType,
+    )
+    from datetime import datetime, timezone
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+
+    rules = SymbolTradingRules("ETHUSDC")
+    rules.status = "TRADING"
+    rules.min_qty = Decimal("0.001")
+    rules.max_qty = Decimal("1000.0")
+    rules.step_size = Decimal("0.001")
+    rules.min_price = Decimal("0.01")
+    rules.max_price = Decimal("100000.0")
+    rules.tick_size = Decimal("0.01")
+    rules.min_notional = Decimal("20.0")
+
+    class MockLimitsAdapter:
+        safety_limits = TestnetSafetyLimits.from_environment("MAINNET")
+        symbol_rules = {"ETHUSDC": rules}
+
+    worker.execution_adapter = MockLimitsAdapter()
+
+    now = datetime.now(timezone.utc)
+    undersized_order = OrderIntent(
+        client_order_id="B-SYS-TEST-MIN-NOTIONAL",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.005"),  # 0.005 * 2500 = 12.5 USDC < 20 USDC
+        created_at=now,
+    )
+    decision = ExecutionDecision(
+        decision_id="DEC-TEST-CLAMP-MIN",
+        symbol="ETHUSDC",
+        action="SUBMIT_ORDER",
+        orders=[undersized_order],
+        net_exposure_delta=Decimal("0.005"),
+        timestamp=now,
+    )
+
+    decision = worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2500.0"))
+
+    clamped_order = decision.orders[0]
+    clamped_notional = clamped_order.quantity * Decimal("2500.0")
+    assert clamped_notional >= Decimal("20.0"), f"Expected >= 20, got {clamped_notional}"
+    assert clamped_notional <= Decimal("50.0"), f"Expected <= 50, got {clamped_notional}"
+    assert clamped_order.quantity == Decimal("0.010")  # 25 / 2500 = 0.010
+    assert decision.net_exposure_delta == Decimal("0.010")
+
 
 

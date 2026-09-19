@@ -1,7 +1,7 @@
 import { getTradingAdminIdToken } from './mint_trading_admin_token.mjs';
 
 const CONTROL_PLANE_URL = 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
-const APPROVAL_ID = 'approval-f33f4d55-daaf-46b5-881a-a54d68633228';
+const APPROVAL_ID = 'approval-1f67d2e2-6b86-4816-a0dc-006bf2589ae3';
 
 async function main() {
   console.log('--- Minting verified trading_admin Firebase token ---');

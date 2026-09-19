@@ -3558,15 +3558,15 @@ class TradingWorkerApp:
                 for order in getattr(decision, "orders", []):
                     if not getattr(order, "reduce_only", False):
                         est_notional = order.quantity * price
+                        order_type_val = getattr(order.order_type, "value", order.order_type)
+                        min_notional = rules.min_notional_for(order_type_val)
                         if est_notional > max_order_notional:
                             # Target 90% of max notional, capped at 45 USDC for the 50 USDC pilot limit
                             target_notional = min(max_order_notional * Decimal("0.90"), Decimal("45.0"))
                             target_qty = target_notional / price
-                            order_type_val = getattr(order.order_type, "value", order.order_type)
                             is_market = order_type_val == OrderType.MARKET.value
                             clamped_qty = rules.normalize_quantity(target_qty, is_market=is_market)
                             min_qty = rules.market_min_qty if is_market and rules.market_min_qty else rules.min_qty
-                            min_notional = rules.min_notional_for(order_type_val)
                             if (
                                 clamped_qty >= min_qty
                                 and (clamped_qty * price) >= min_notional
@@ -3577,6 +3577,32 @@ class TradingWorkerApp:
                                     order.client_order_id,
                                     order.quantity,
                                     clamped_qty,
+                                    max_order_notional,
+                                )
+                                new_orders.append(order.model_copy(update={"quantity": clamped_qty}))
+                                clamped_any = True
+                                continue
+                        elif min_notional > 0 and est_notional < min_notional:
+                            target_notional = min(
+                                min_notional * Decimal("1.25"),
+                                max_order_notional * Decimal("0.90"),
+                                Decimal("45.0"),
+                            )
+                            target_qty = target_notional / price
+                            is_market = order_type_val == OrderType.MARKET.value
+                            clamped_qty = rules.normalize_quantity(target_qty, is_market=is_market)
+                            min_qty = rules.market_min_qty if is_market and rules.market_min_qty else rules.min_qty
+                            if (
+                                clamped_qty >= min_qty
+                                and (clamped_qty * price) >= min_notional
+                                and (clamped_qty * price) <= max_order_notional
+                            ):
+                                logger.info(
+                                    "Bumping order %s quantity from %s to %s to satisfy exchange min_notional %s (capped at %s)",
+                                    order.client_order_id,
+                                    order.quantity,
+                                    clamped_qty,
+                                    min_notional,
                                     max_order_notional,
                                 )
                                 new_orders.append(order.model_copy(update={"quantity": clamped_qty}))
