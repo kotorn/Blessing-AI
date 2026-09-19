@@ -390,7 +390,6 @@ class PersistenceRepository:
             SET state = 'CLOSED', updated_at = CURRENT_TIMESTAMP
             WHERE symbol = $1
               AND approval_id != $2
-              AND submitted_orders = 0
               AND state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED', 'REAUTH_REQUIRED')
             """,
             symbol.upper(),
