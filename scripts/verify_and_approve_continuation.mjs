@@ -2,8 +2,8 @@ import { execSync } from 'node:child_process';
 import { getTradingAdminIdToken } from './mint_trading_admin_token.mjs';
 
 const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
-const CANDIDATE_ID = process.env.CANDIDATE_ID || 'rc-a90d1009-d6ba-4e3c-9bcd-fb155f39fed4';
-const LAUNCH_ID = process.env.LAUNCH_ID || 'launch-approval-36ab457f-cf1d-44c2-ae37-2f4aac33b7dc';
+const CANDIDATE_ID = process.env.CANDIDATE_ID || 'rc-4761d427-d8a3-4dd8-9468-4464fd264015';
+const LAUNCH_ID = process.env.LAUNCH_ID || 'launch-approval-ee805cdf-1005-41a5-9a55-48734a418ec8';
 
 async function getReleaseControllerIdToken() {
   const token = execSync('gcloud auth print-access-token', { encoding: 'utf-8' }).trim();
