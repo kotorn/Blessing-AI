@@ -693,9 +693,10 @@ class BinanceReconciliation:
             self.last_diffs = diffs
         if status == "MISMATCH":
             logger.error(
-                "monitor_event=reconciliation_drift environment=%s diff_count=%d",
+                "monitor_event=reconciliation_drift environment=%s diff_count=%d diffs=%s",
                 self.environment,
                 len(diffs or []),
+                [(d.code, d.symbol, str(d.local_value), str(d.exchange_value)) for d in (diffs or [])],
             )
         elif status == "UNKNOWN":
             logger.error(

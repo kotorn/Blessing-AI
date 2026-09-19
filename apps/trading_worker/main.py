@@ -2306,13 +2306,17 @@ class TradingWorkerApp:
                     reconciliation_ready = (
                         adapter.reconciliation.last_status == "IN_SYNC"
                     )
+                    diff_summary = ", ".join(
+                        f"{d.code}:{d.symbol}:{d.local_value}->{d.exchange_value}"
+                        for d in getattr(adapter.reconciliation, "last_diffs", [])
+                    )
                     add_check(
                         "CHK-PREFLIGHT-RECONCILIATION",
                         "Account Reconciliation",
                         reconciliation_ready,
                         "Mainnet positions, open orders, fills, and account snapshot are in sync"
                         if reconciliation_ready
-                        else "Mainnet exchange state is not reconciled with the disposable preflight ledger",
+                        else f"Mainnet exchange state is not reconciled with the disposable preflight ledger: {diff_summary or 'NO_DIFFS_REPORTED'}",
                     )
                     add_check(
                         "CHK-PREFLIGHT-PRIVATE-STREAM",
