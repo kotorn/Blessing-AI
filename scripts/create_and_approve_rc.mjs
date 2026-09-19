@@ -2,9 +2,9 @@ import crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { getTradingAdminIdToken } from './mint_trading_admin_token.mjs';
 
-const CONTROL_PLANE_URL = 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
-const WORKER_IMAGE_DIGEST = 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/trading-worker@sha256:8be729f37fd91fcd7c5a58005cbe482534cff5380931c230d9248c68d290b2eb';
-const WORKER_REVISION = 'blessing-trading-worker-00035-hb8';
+const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
+const WORKER_IMAGE_DIGEST = process.env.WORKER_IMAGE_DIGEST || 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/trading-worker@sha256:8be729f37fd91fcd7c5a58005cbe482534cff5380931c230d9248c68d290b2eb';
+const WORKER_REVISION = process.env.WORKER_REVISION || 'blessing-trading-worker-00035-hb8';
 
 async function getReleaseControllerIdToken() {
   const token = execSync('gcloud auth print-access-token', { encoding: 'utf-8' }).trim();
