@@ -45,10 +45,18 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e ".[dev]"
         
-    - name: Python Unit Tests
+    - name: Python Lint (error-level rules)
+      run: ruff check --select E9,F63,F7,F82 .
+
+    - name: Python Unit Tests (coverage floor 65%)
       env:
         PYTHONPATH: .
-      run: pytest tests/python/ -m "not contract_readonly and not contract_mutating and not contract_soak"
+      run: >
+        pytest tests/python/
+        -m "not contract_readonly and not contract_mutating and not contract_soak"
+        --cov=apps --cov=domain --cov=venues --cov=data --cov=ai --cov=infrastructure
+        --cov-report=term-missing:skip-covered
+        --cov-fail-under=65
       
     - name: Hygiene Check
       run: |

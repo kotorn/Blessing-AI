@@ -274,7 +274,7 @@ let tradingSystemState: TradingSystemState = {
 
 let riskConfiguration: RiskConfiguration = RISK_PROFILES.BALANCED;
 
-let quantEngineState = {
+const quantEngineState = {
   account: {
     // These are deliberately neutral until a verified account snapshot is
     // loaded. The fixture objects below remain research fixtures only.
@@ -1047,7 +1047,7 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     let spotTotalUsd = 0;
     let spotSuccess = false;
     let spotError = '';
-    let holdings: Array<{ asset: string; qty: number; unitPrice: number; usdVal: number }> = [];
+    const holdings: Array<{ asset: string; qty: number; unitPrice: number; usdVal: number }> = [];
 
     const [
       spotResp,

@@ -1,0 +1,16 @@
+# Local gate matching the CI error-level ruff rule set. Install with:
+#   pip install pre-commit && pre-commit install
+# Deliberately excludes whitespace/EOL rewriters to avoid mass churn in a
+# mixed-CRLF Windows checkout.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: [--select, E9,F63,F7,F82]
