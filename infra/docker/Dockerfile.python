@@ -1,0 +1,27 @@
+# Shared development image for the docker-compose Python services (trading
+# worker and market-data collector). Cloud Run deployments use Dockerfile.worker;
+# this image skips the pinned Binance CLI stage for fast local builds.
+FROM python:3.13-slim
+
+# Prevent python from writing pyc files to disc and buffering stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+WORKDIR /app
+
+# Runtime dependencies are pinned in-repository for the worker path; the
+# collector additionally needs structlog.
+COPY requirements-worker.txt ./requirements-worker.txt
+RUN pip install --no-cache-dir --requirement requirements-worker.txt structlog
+
+# Copy the service codebases (collector + worker) and the shared legacy packages
+COPY data/ ./data/
+COPY domain/ ./domain/
+COPY venues/ ./venues/
+COPY apps/ ./apps/
+
+# Safe defaults; docker-compose service environments may override per service
+ENV EXECUTION_MODE=PAPER
+ENV MAINNET_LIVE_APPROVED=false
+CMD ["python", "-m", "apps.trading_worker.main"]

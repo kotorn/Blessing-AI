@@ -29,11 +29,13 @@ execution costs.
 # 1. Clone repository and setup environment
 cp .env.example .env
 
-# 2. Start NATS, PostgreSQL, Redis, and Traders
+# 2. Start NATS, PostgreSQL, Redis, the market-data collector, and the trading worker
 docker compose up -d
 
-# 3. Access Interactive Control Cockpit
-# Open http://localhost:3000 in your browser
+# 3. Access the services
+# Worker control API:  http://localhost:8000  (health/state endpoints)
+# Control Plane cockpit: http://localhost:3000 (requires Firebase credentials
+# and ADC for full functionality; for active development prefer `npm run dev`)
 ```
 
 ---

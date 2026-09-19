@@ -75,7 +75,11 @@ services:
       dockerfile: infra/docker/Dockerfile.python
     container_name: blessing-trader
     command: ["python", "-m", "apps.trading_worker.main"]
+    ports:
+      - "8000:8080"
     environment:
+      - EXECUTION_MODE=PAPER
+      - MAINNET_LIVE_APPROVED=false
       - NATS_URL=nats://nats:4222
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=${POSTGRES_PORT:?POSTGRES_PORT must be set}
@@ -103,35 +107,13 @@ services:
       - redis
     restart: unless-stopped
 
-  blessing-api:
-    build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.python
-    container_name: blessing-control-api
-    command: ["uvicorn", "apps.control_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-    ports:
-      - "8000:8000"
-    environment:
-      - NATS_URL=nats://nats:4222
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=${POSTGRES_PORT:?POSTGRES_PORT must be set}
-      - POSTGRES_DB=${POSTGRES_DB:?POSTGRES_DB must be set}
-      - POSTGRES_USER=${POSTGRES_USER:?POSTGRES_USER must be set}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
-      - PERSISTENCE_MODE=${PERSISTENCE_MODE:-OPTIONAL}
-      - REDIS_URL=redis://redis:6379/0
-    depends_on:
-      - postgres
-      - redis
-    restart: unless-stopped
-
   # ---------------------------------------------------------------------------
   # Web Cockpit / Interactive Trader Dashboard
   # ---------------------------------------------------------------------------
   blessing-dashboard:
     build:
       context: .
-      dockerfile: infra/docker/Dockerfile.node
+      dockerfile: Dockerfile.control-plane
     container_name: blessing-dashboard
     ports:
       - "3000:3000"
