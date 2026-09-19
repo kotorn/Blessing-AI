@@ -44,6 +44,7 @@ class PersistenceConfig:
     retry_max_seconds: float = 30.0
     drain_timeout_seconds: float = 10.0
     poll_interval_seconds: float = 0.25
+    idle_poll_max_seconds: float = 1.0
     pre_submission_timeout_seconds: float = 5.0
 
     @classmethod
@@ -88,6 +89,9 @@ class PersistenceConfig:
                 "PERSISTENCE_DRAIN_TIMEOUT_SECONDS", 10.0
             ),
             poll_interval_seconds=positive_float("PERSISTENCE_POLL_INTERVAL_SECONDS", 0.25),
+            idle_poll_max_seconds=positive_float(
+                "PERSISTENCE_IDLE_POLL_MAX_SECONDS", 1.0
+            ),
             pre_submission_timeout_seconds=positive_float(
                 "PERSISTENCE_PRE_SUBMISSION_TIMEOUT_SECONDS", 5.0
             ),
@@ -796,6 +800,9 @@ class PersistenceManager:
     async def _outbox_dispatcher(self) -> None:
         if self.repository is None:
             return
+        poll_interval = self.config.poll_interval_seconds
+        idle_poll_max = max(self.config.idle_poll_max_seconds, poll_interval)
+        idle_interval = poll_interval
         while True:
             stopping = self._stop_event.is_set()
             if stopping and self._write_queue.empty():
@@ -803,11 +810,22 @@ class PersistenceManager:
                     return
             try:
                 processed = await self.repository.dispatch_one()
-                await self._refresh_pending_count()
+                if processed:
+                    # Activity resets the idle backoff immediately.
+                    idle_interval = poll_interval
+                    await self._refresh_pending_count()
+                elif idle_interval == poll_interval:
+                    # First idle iteration: refresh the pending gauge once, then
+                    # start backing off so an idle system stops issuing two
+                    # Postgres queries every poll interval.
+                    await self._refresh_pending_count()
+                    idle_interval = min(idle_interval * 2, idle_poll_max)
+                else:
+                    idle_interval = min(idle_interval * 2, idle_poll_max)
                 if not processed:
                     if stopping and self._write_queue.empty():
                         return
-                    await asyncio.sleep(self.config.poll_interval_seconds)
+                    await asyncio.sleep(idle_interval)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

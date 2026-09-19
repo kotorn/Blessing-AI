@@ -670,6 +670,8 @@ class TradingWorkerApp:
         self.active_configuration = None
         self.updated_at = utc_now()
         self.last_market_event_at: Dict[str, datetime] = {}
+        # symbol -> (ledger_version, depth); invalidated by any ledger mutation.
+        self._observed_grid_depth_cache: Dict[str, tuple] = {}
         self.decision_execution_gate = DecisionExecutionGate(self)
         self.persistence = PersistenceManager(
             instrument_rules_provider=self._persistence_instrument_rules
@@ -1038,6 +1040,12 @@ class TradingWorkerApp:
             # No authoritative ledger means no safe assumption about depth.
             return self.grid_engine.max_grid_levels
         normalized_symbol = str(symbol).upper()
+        ledger_version = getattr(adapter.ledger, "version", None)
+        cached = self._observed_grid_depth_cache.get(normalized_symbol)
+        if cached is not None and ledger_version is not None and cached[0] == ledger_version:
+            # The ledger only changes on order/fill/position mutations; market
+            # events alone cannot move depth, so the scan can be skipped.
+            return cached[1]
         try:
             positions = await adapter.ledger.get_positions()
             position_qty = sum(
@@ -1076,11 +1084,14 @@ class TradingWorkerApp:
                     or str(getattr(fill, "strategy_id", "")).strip().lower() in {"grid", "structural grid"}
                 )
             }
-            return self.grid_engine.observed_depth(
+            depth = self.grid_engine.observed_depth(
                 position_qty=position_qty,
                 open_grid_orders=open_grid_orders,
                 filled_grid_orders=len(filled_grid_order_ids),
             )
+            if ledger_version is not None:
+                self._observed_grid_depth_cache[normalized_symbol] = (ledger_version, depth)
+            return depth
         except Exception as exc:
             logger.error(
                 "Unable to prove observed grid depth for %s; blocking grid expansion: %s",

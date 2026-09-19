@@ -861,6 +861,7 @@ async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTes
     const spotSig = sign(apiSecret, spotQuery);
     const spotResp = await fetch(`${spotBase}/api/v3/account?${spotQuery}&signature=${spotSig}`, {
       headers: { 'X-MBX-APIKEY': apiKey },
+      signal: AbortSignal.timeout(15_000),
     });
     const spotData: any = await spotResp.json();
     if (spotResp.ok) {
@@ -878,6 +879,7 @@ async function verifyBinanceCredentials(apiKey: string, apiSecret: string, isTes
     const fSig = sign(apiSecret, fQuery);
     const fResp = await fetch(`${futuresBase}/fapi/v1/positionSide/dual?${fQuery}&signature=${fSig}`, {
       headers: { 'X-MBX-APIKEY': apiKey },
+      signal: AbortSignal.timeout(15_000),
     });
     const fData: any = await fResp.json();
     if (fResp.ok) {
@@ -1060,22 +1062,28 @@ async function fetchBinanceLiveBalances(apiKey: string, apiSecret: string, isTes
     ] = await Promise.all([
       fetch(`${spotBase}/api/v3/account?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(15_000),
       }).catch((e) => ({ ok: false, status: 500, json: async () => ({ msg: e.message }) })),
-      fetch(`${spotBase}/api/v3/ticker/price`).catch(() => null),
+      fetch(`${spotBase}/api/v3/ticker/price`, { signal: AbortSignal.timeout(15_000) }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/asset/wallet/balance?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(15_000),
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/portfolio/balance?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(15_000),
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/simple-earn/flexible/position?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(15_000),
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/simple-earn/locked/position?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(15_000),
       }).catch(() => null),
       fetch(`${futuresBase}/fapi/v2/account?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(15_000),
       }).catch(() => null),
     ]);
 
@@ -1644,7 +1652,13 @@ async function forwardWorkerRequest(
   headers.set('X-Worker-Caller', 'blessing-control-plane');
   let response: globalThis.Response;
   try {
-    response = await fetch(WORKER_URL + pathName, { ...init, headers });
+    // Bounded so a hung Worker cannot stall operator routes indefinitely;
+    // worker paths may include reconciliation, so the cap is generous.
+    response = await fetch(WORKER_URL + pathName, {
+      ...init,
+      headers,
+      signal: init?.signal ?? AbortSignal.timeout(30_000),
+    });
   } catch (error) {
     console.warn(
       `monitor_event=control_plane_oidc_failure path=${pathName.split('?')[0]} error_class=${error instanceof Error ? error.name : 'unknown'}`,
