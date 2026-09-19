@@ -61,8 +61,36 @@ async function main() {
   }
 
   const gitSha = execSync('git rev-parse HEAD', { encoding: 'utf-8' }).trim();
-  const repoGateHash = crypto.createHash('sha256').update(`repo-gate-evidence-${gitSha}`).digest('hex');
-  const cloudGateHash = crypto.createHash('sha256').update(`cloud-gate-evidence-${WORKER_REVISION}`).digest('hex');
+
+  console.log('\n--- Step 2b: Running Release Gate (repo + cloud tiers) ---');
+  try {
+    execSync(
+      `pwsh -NoProfile -ExecutionPolicy Bypass -File infra/release_gate/cloud_gate.ps1 -ControlPlaneBaseUrl "${CONTROL_PLANE_URL}" -WorkerBaseUrl "${CONTROL_PLANE_URL}" -ExpectedImageDigest "${WORKER_IMAGE_DIGEST}"`,
+      { stdio: 'inherit' }
+    );
+  } catch {
+    console.warn('cloud_gate.ps1 exited with warnings; gate.py will validate evidence.');
+  }
+
+  const gateRaw = execSync('python -m apps.release_gate.gate', { encoding: 'utf-8' });
+  const gateOutput = JSON.parse(gateRaw);
+
+  const stableJson = (value) => {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+    const entries = Object.entries(value)
+      .filter(([, val]) => val !== undefined)
+      .sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`).join(',')}}`;
+  };
+  const hashEvidence = (val) => crypto.createHash('sha256').update(stableJson(val), 'utf8').digest('hex');
+
+  const repoGateHash = hashEvidence(gateOutput.repo_tier);
+  const cloudGateHash = hashEvidence(gateOutput.cloud_tier);
+  console.log(`- repoGateEvidenceHash: ${repoGateHash}`);
+  console.log(`- cloudGateEvidenceHash: ${cloudGateHash}`);
+  console.log(`- overall_passed: ${gateOutput.overall_passed}`);
+
   const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
   const nonce = `nonce-${crypto.randomBytes(16).toString('hex')}`;
 
@@ -78,6 +106,8 @@ async function main() {
     preflightEvidenceHash: preflightData.evidenceHash,
     repoGateEvidenceHash: repoGateHash,
     cloudGateEvidenceHash: cloudGateHash,
+    repoGateOutput: gateOutput.repo_tier,
+    cloudGateOutput: gateOutput.cloud_tier,
     expiresAt,
     nonce,
   };

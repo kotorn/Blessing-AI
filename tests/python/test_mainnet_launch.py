@@ -55,6 +55,16 @@ class LaunchDatabase:
                 self.row["state"] = "PAUSED_NEW_RISK"
                 return "UPDATE 1"
             return "UPDATE 0"
+        if "UPDATE mainnet_launch_sessions" in query and "submitted_orders = 0" in query:
+            if (
+                self.row
+                and self.row.get("symbol") == args[0]
+                and self.row.get("approval_id") != args[1]
+                and int(self.row.get("submitted_orders", 0) or 0) == 0
+            ):
+                self.row["state"] = "CLOSED"
+                return "UPDATE 1"
+            return "UPDATE 0"
         return "INSERT 0 1"
 
     async def fetchrow(self, query: str, *args: object):
@@ -89,6 +99,15 @@ class LaunchDatabase:
         if "WHERE approval_id = $1" in query:
             return self.row
         if "WHERE symbol = $1" in query:
+            if "submitted_orders > 0" in query:
+                if (
+                    self.row
+                    and self.row.get("symbol") == args[0]
+                    and self.row.get("approval_id") != args[1]
+                    and int(self.row.get("submitted_orders", 0) or 0) > 0
+                ):
+                    return self.row
+                return None
             return self.row
         return None
 
@@ -195,6 +214,15 @@ class AutonomousLaunchDatabase:
         if "WHERE launch_id = $1" in query:
             return self.row if self.row and self.row["launch_id"] == args[0] else None
         if "WHERE symbol = $1" in query:
+            if "submitted_orders > 0" in query:
+                if (
+                    self.row
+                    and self.row.get("symbol") == args[0]
+                    and self.row.get("approval_id") != args[1]
+                    and int(self.row.get("submitted_orders", 0) or 0) > 0
+                ):
+                    return self.row
+                return None
             return self.row
         return None
 
@@ -223,6 +251,41 @@ async def test_launch_session_reservation_is_atomic_and_restart_safe():
     assert persisted is not None
     assert persisted["submitted_orders"] == 1
     assert persisted["state"] == "PAUSED_NEW_RISK"
+
+
+@pytest.mark.asyncio
+async def test_cannot_arm_new_session_when_prior_session_has_unreviewed_order():
+    db = LaunchDatabase()
+    repository = PersistenceRepository(db)  # type: ignore[arg-type]
+
+    # First session is created, reserves order, submits order -> paused
+    session = await repository.create_mainnet_launch_session(
+        launch_id="launch-approval-orig",
+        approval_id="approval-orig",
+        image_digest=IMAGE,
+    )
+    assert session["state"] == "ACTIVE"
+    assert await repository.reserve_mainnet_risk_order("launch-approval-orig") is True
+    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-orig") is True
+    assert db.row["state"] == "PAUSED_NEW_RISK"
+    assert db.row["submitted_orders"] == 1
+
+    # Attempting to arm/create a new session for the same symbol with a different approval
+    # MUST raise a clear domain error and MUST NOT close the prior session.
+    with pytest.raises(
+        RuntimeError,
+        match="existing session launch-approval-orig has a submitted order pending review",
+    ):
+        await repository.create_mainnet_launch_session(
+            launch_id="launch-approval-new",
+            approval_id="approval-new",
+            image_digest=IMAGE,
+        )
+
+    # Prior session remains unchanged and NOT closed
+    assert db.row["state"] == "PAUSED_NEW_RISK"
+    assert db.row["launch_id"] == "launch-approval-orig"
+    assert db.row["submitted_orders"] == 1
 
 
 @pytest.mark.asyncio

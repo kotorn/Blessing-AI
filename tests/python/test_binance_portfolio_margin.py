@@ -276,3 +276,101 @@ def test_build_account_snapshot_portfolio_margin_liquidation_distance():
     # Headroom = 50 - 1 = 49. Notional = 0.007 * 2450 = 17.15. Distance = min(100, (49 / 17.15) * 100) = 100
     assert snapshot.min_liquidation_distance_pct == Decimal("100")
 
+
+def test_build_account_snapshot_portfolio_margin_zero_headroom_floors_at_zero():
+    """When maintenance margin exhausts margin balance, liquidation distance must floor at 0, not 0.01."""
+    account = {
+        "portfolioMargin": True,
+        "assets": [
+            {
+                "asset": "USDC",
+                "walletBalance": "10.0",
+                "marginBalance": "10.0",
+                "availableBalance": "0.0",
+                "crossMarginAsset": "10.0",
+                "crossMarginFree": "0.0",
+                "unrealizedProfit": "0.0",
+                "initialMargin": "10.0",
+                "maintMargin": "10.0",
+                "positionInitialMargin": "10.0",
+            }
+        ],
+        "positions": [
+            {
+                "symbol": "ETHUSDC",
+                "positionSide": "BOTH",
+                "leverage": "2",
+                "positionAmt": "0.010",
+                "entryPrice": "2000.0",
+                "markPrice": "2000.0",
+                "liquidationPrice": "0",
+                "initialMargin": "10.0",
+                "maintMargin": "10.0",
+                "unrealizedProfit": "0.0",
+            }
+        ],
+    }
+    positions = account["positions"]
+    snapshot = build_account_snapshot(
+        account,
+        positions,
+        environment="BINANCE_MAINNET",
+        daily_realized_pnl=Decimal("0"),
+        daily_loss_known=True,
+        daily_loss_asset="USDC",
+        daily_pnl_includes_fees=True,
+        daily_pnl_includes_funding=True,
+    )
+    # Headroom is max(0, 10.0 - 10.0) = 0. Distance must be exactly 0 (floored at 0, not 0.01).
+    assert snapshot.min_liquidation_distance_pct == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_portfolio_margin_synthesizes_margin_balance_with_unrealized_pnl():
+    """Synthesized PM marginBalance must equal crossMarginAsset + umUnrealizedPNL (drawdown aware)."""
+    class FakeDrawdownReconciliationClient:
+        env = BinanceEnvironment.MAINNET
+        portfolio_margin = True
+
+        async def request(self, method, path, **kwargs):
+            if path == "/papi/v1/um/positionRisk":
+                return []
+            if path == "/papi/v1/um/openOrders":
+                return []
+            if path == "/papi/v1/balance":
+                return [
+                    {
+                        "asset": "USDC",
+                        "crossMarginAsset": "100.0",
+                        "crossMarginFree": "80.0",
+                        "umUnrealizedPNL": "-15.5",
+                    }
+                ]
+            if path == "/papi/v1/um/account":
+                return {
+                    "assets": [
+                        {
+                            "asset": "USDC",
+                            "initialMargin": "10.0",
+                            "maintMargin": "5.0",
+                            "positionInitialMargin": "10.0",
+                        }
+                    ],
+                    "positions": [],
+                }
+            if path == "/papi/v1/um/income":
+                return []
+            raise AssertionError(f"unexpected request: {path}")
+
+    from apps.trading_worker.venues.binance.ledger import InMemoryLedger
+    reconciliation = BinanceReconciliation(FakeDrawdownReconciliationClient(), InMemoryLedger())
+    account, positions, open_orders = await reconciliation._fetch_reconciliation_snapshot_inputs()
+
+    usdc_asset = account["assets"][0]
+    assert usdc_asset["asset"] == "USDC"
+    assert usdc_asset["walletBalance"] == "100.0"
+    # marginBalance = 100.0 + (-15.5) = 84.5 (not 100.0)
+    assert usdc_asset["marginBalance"] == "84.5"
+    assert usdc_asset["unrealizedProfit"] == "-15.5"
+
+

@@ -191,7 +191,38 @@ export function hashEvidence(value: unknown): string {
   return crypto.createHash('sha256').update(stableJson(value), 'utf8').digest('hex');
 }
 
-export function newReleaseCandidate(input: ReleaseCandidateInput, now = new Date()): ReleaseCandidate {
+export interface ReleaseCandidateValidationOptions {
+  repoGateOutput?: unknown;
+  cloudGateOutput?: unknown;
+  expectedRepoGateHash?: string;
+  expectedCloudGateHash?: string;
+}
+
+export function verifyGateEvidenceMatch(
+  candidate: Partial<ReleaseCandidate>,
+  gateOutput: { repo_tier?: unknown; cloud_tier?: unknown },
+): string[] {
+  const failures: string[] = [];
+  if (gateOutput.repo_tier) {
+    const expected = hashEvidence(gateOutput.repo_tier);
+    if (asString(candidate.repoGateEvidenceHash) !== expected) {
+      failures.push('repoGateEvidenceHash does not match freshly-run repo gate output');
+    }
+  }
+  if (gateOutput.cloud_tier) {
+    const expected = hashEvidence(gateOutput.cloud_tier);
+    if (asString(candidate.cloudGateEvidenceHash) !== expected) {
+      failures.push('cloudGateEvidenceHash does not match freshly-run cloud gate output');
+    }
+  }
+  return failures;
+}
+
+export function newReleaseCandidate(
+  input: ReleaseCandidateInput,
+  now = new Date(),
+  options: ReleaseCandidateValidationOptions = {},
+): ReleaseCandidate {
   const candidate: ReleaseCandidate = {
     candidateId: `rc-${crypto.randomUUID()}`,
     repoSha: asString(input.repoSha),
@@ -216,7 +247,7 @@ export function newReleaseCandidate(input: ReleaseCandidateInput, now = new Date
     createdAt: now.toISOString(),
     status: 'PENDING_APPROVAL',
   };
-  const failures = validateReleaseCandidate(candidate, now);
+  const failures = validateReleaseCandidate(candidate, now, options);
   if (failures.length) throw new Error(failures.join('; '));
   return candidate;
 }
@@ -224,6 +255,7 @@ export function newReleaseCandidate(input: ReleaseCandidateInput, now = new Date
 export function validateReleaseCandidate(
   candidate: Partial<ReleaseCandidate> | undefined,
   now = new Date(),
+  options: ReleaseCandidateValidationOptions = {},
 ): string[] {
   if (!candidate) return ['release candidate is missing'];
   const failures: string[] = [];
@@ -244,6 +276,21 @@ export function validateReleaseCandidate(
     ['cloudGateEvidenceHash', candidate.cloudGateEvidenceHash],
   ] as const) {
     if (!SHA256_RE.test(asString(value))) failures.push(`${name} must be a SHA-256 hash`);
+  }
+  if (options.repoGateOutput || options.cloudGateOutput) {
+    failures.push(
+      ...verifyGateEvidenceMatch(candidate, {
+        repo_tier: options.repoGateOutput,
+        cloud_tier: options.cloudGateOutput,
+      }),
+    );
+  } else {
+    if (options.expectedRepoGateHash && asString(candidate.repoGateEvidenceHash) !== options.expectedRepoGateHash) {
+      failures.push('repoGateEvidenceHash does not match freshly-run repo gate output');
+    }
+    if (options.expectedCloudGateHash && asString(candidate.cloudGateEvidenceHash) !== options.expectedCloudGateHash) {
+      failures.push('cloudGateEvidenceHash does not match freshly-run cloud gate output');
+    }
   }
   if (candidate.launchPolicy !== RELEASE_POLICY) failures.push('launchPolicy must be STAGED_FIRST_ORDER');
   const expiresAt = Date.parse(asString(candidate.expiresAt));

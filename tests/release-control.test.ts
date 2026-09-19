@@ -8,6 +8,7 @@ import {
   newReleaseCandidate,
   sanitizePreflightEvidence,
   validateApprovalPrerequisites,
+  validateReleaseCandidate,
   type ReleaseVerificationSnapshot,
 } from '../src/backend/release.js';
 import { InMemoryReleaseStore } from '../src/backend/release-store.js';
@@ -204,5 +205,38 @@ describe('mainnet release control boundary', () => {
     expect(evidence.checks[0].message).toContain('token=<redacted>');
     expect(JSON.stringify(evidence)).not.toContain('secret-value');
     expect(hashEvidence(evidence)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('verifies candidate gate hashes against freshly-run gate evidence', () => {
+    const validCandidate = candidate();
+    const repoTier = { checks: [{ id: 'test', status: 'PASS' }], overall_passed: true };
+    const cloudTier = { checks: [{ id: 'cloud', status: 'PASS' }], overall_passed: true };
+    const matchingCandidate = {
+      ...validCandidate,
+      repoGateEvidenceHash: hashEvidence(repoTier),
+      cloudGateEvidenceHash: hashEvidence(cloudTier),
+    };
+
+    // Accepts matching gate evidence
+    expect(
+      validateReleaseCandidate(matchingCandidate, NOW, {
+        repoGateOutput: repoTier,
+        cloudGateOutput: cloudTier,
+      }),
+    ).toEqual([]);
+
+    // Rejects mismatched repo gate output
+    expect(
+      validateReleaseCandidate(validCandidate, NOW, {
+        repoGateOutput: repoTier,
+      }),
+    ).toContain('repoGateEvidenceHash does not match freshly-run repo gate output');
+
+    // Rejects mismatched cloud gate output
+    expect(
+      validateReleaseCandidate(validCandidate, NOW, {
+        cloudGateOutput: cloudTier,
+      }),
+    ).toContain('cloudGateEvidenceHash does not match freshly-run cloud gate output');
   });
 });

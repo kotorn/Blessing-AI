@@ -3084,11 +3084,13 @@ class TradingWorkerApp:
             and check.get("status") == "PASS"
             for check in preflight.get("checks", [])
         )
-        if preflight_reconciliation and (
-            self.execution_adapter is None
-            or self.reconciliation_status in {"IN_SYNC", "UNKNOWN", "DISCONNECTED"}
-        ):
-            self.reconciliation_status = "IN_SYNC"
+        if self.execution_adapter is not None:
+            try:
+                self.reconciliation_status = await self.execution_adapter.reconciliation.reconcile()
+            except Exception as exc:
+                logger.error("Execution adapter reconciliation failed: %s", exc)
+                self.reconciliation_status = "UNKNOWN"
+            self._sync_adapter_state()
         reconciliation_synced = bool(
             preflight_reconciliation and self.reconciliation_status == "IN_SYNC"
         )
@@ -3463,8 +3465,11 @@ class TradingWorkerApp:
                         symbol="ETHUSDC",
                     )
                 except Exception as exc:
-                    logger.error("Mainnet staged launch session unavailable: %s", type(exc).__name__)
+                    error_msg = str(exc)
+                    logger.error("Mainnet staged launch session unavailable: %s (%s)", type(exc).__name__, exc)
                     await self._reset_after_failed_exchange_arm()
+                    if "submitted order pending review" in error_msg:
+                        return False, "LIVE staged launch failed: existing session has a submitted order pending review."
                     return False, "LIVE staged launch session is unavailable; execution remains disarmed."
                 if (
                     str(session.get("state", "")) != "ACTIVE"

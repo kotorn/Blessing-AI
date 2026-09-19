@@ -1920,12 +1920,10 @@ async function currentReleaseVerification(
     (!configuredDigest || configuredDigest === workerImageDigest)
     && (!configuredRevision || configuredRevision === workerRevision)
   );
-  const reconciliationCheck = preflight.checks.find(
-    (check) => check.id === 'CHK-PREFLIGHT-RECONCILIATION',
+  const preflightReconciliationStatus = resolveReconciliationStatus(
+    preflight.checks,
+    state.reconciliation_status,
   );
-  const preflightReconciliationStatus = reconciliationCheck?.status === 'PASS'
-    ? 'IN_SYNC'
-    : String(state.reconciliation_status || '');
   const preflightHasRequiredEvidence = preflight.checks.length > 0
     && preflight.checks.every((check) => !check.required || check.status === 'PASS');
   return {
@@ -2071,6 +2069,12 @@ function continuationVerificationSnapshot(
 ): ContinuationVerificationSnapshot {
   const workerImageDigest = String(workerState.worker_image_digest || '').trim();
   const workerRevision = String(workerState.worker_revision || '').trim();
+  const preflightHasRequiredEvidence = evidence.preflight.checks.length > 0
+    && evidence.preflight.checks.every((check) => !check.required || check.status === 'PASS');
+  const preflightPassed = evidence.preflightPassed
+    && preflightHasRequiredEvidence
+    && evidence.preflightOrderSubmissionAttempts === 0
+    && evidence.preflightOrderEndpointAttempts === 0;
   return {
     currentImageDigest: workerImageDigest,
     currentWorkerRevision: workerRevision,
@@ -2085,7 +2089,7 @@ function continuationVerificationSnapshot(
       : undefined,
     currentSubmittedOrders: evidence.submittedOrders,
     currentSecretVersions: secretVersionsFromState(workerState.secret_versions),
-    preflightPassed: evidence.preflightPassed,
+    preflightPassed,
     preflightObservedAt: evidence.observedAt,
     preflightOrderEndpointAttempts: evidence.preflightOrderEndpointAttempts,
     preflightOrderSubmissionAttempts: evidence.preflightOrderSubmissionAttempts,
@@ -3006,7 +3010,11 @@ app.post('/api/system/reconcile', async (req, res) => {
 // ---------------------------------------------------------------------------
 app.post('/internal/release/candidate', async (req: Request, res: Response) => {
   try {
-    const candidate = newReleaseCandidate(releaseCandidateInputFromRequest(req.body));
+    const body = releaseRequestObject(req.body) || {};
+    const candidate = newReleaseCandidate(releaseCandidateInputFromRequest(body), undefined, {
+      repoGateOutput: body.repoGateOutput,
+      cloudGateOutput: body.cloudGateOutput,
+    });
     let workerStateResponse;
     try {
       workerStateResponse = await forwardWorkerRequest('/state');

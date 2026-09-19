@@ -110,6 +110,16 @@ describe('autonomous continuation release boundary', () => {
       { ...snapshot(), currentSecretVersions: { sql: '2', apiKey: '1', apiSecret: '1' } },
       NOW,
     )).toContain('Worker Secret Manager versions do not match the approved release');
+    expect(validateContinuationPrerequisites(
+      record,
+      { ...snapshot(), preflightPassed: false },
+      NOW,
+    )).toContain('continuation preflight evidence is missing, failed, or stale');
+    expect(validateContinuationPrerequisites(
+      record,
+      { ...snapshot(), reconciliationStatus: 'DRIFT_DETECTED' },
+      NOW,
+    )).toContain('reconciliation is not IN_SYNC');
   });
 
   it('claims and consumes a continuation exactly once', async () => {

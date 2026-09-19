@@ -368,6 +368,8 @@ def _read_worker_service(
         "PERSISTENCE_MODE": "REQUIRED",
         "EXECUTION_LEASE_REQUIRED": "true",
         "MAINNET_LAUNCH_POLICY": "STAGED_FIRST_ORDER",
+        "MAINNET_MAX_RISK_INCREASING_ORDERS": "1",
+        "MAINNET_PREFLIGHT_MAX_AGE_SEC": "60",
         "BINANCE_PORTFOLIO_MARGIN": "true",
         "WORKER_IMAGE_DIGEST": values["IMAGE_URI"],
         "WORKER_REVISION": expected_source_revision,

@@ -341,7 +341,7 @@ def build_account_snapshot(
                 distance = min(
                     Decimal("100"),
                     max(
-                        Decimal("0.01"),
+                        Decimal("0"),
                         (headroom / computed_notional) * Decimal("100")
                     )
                 )
@@ -566,10 +566,14 @@ class BinanceReconciliation:
                 {},
             )
 
+            cross_asset_dec = Decimal(str(cross_asset or "0"))
+            unrealized_pnl_dec = Decimal(str(unrealized_pnl or "0"))
+            margin_balance_dec = cross_asset_dec + unrealized_pnl_dec
+
             papi_usdc_asset = {
                 "asset": "USDC",
                 "walletBalance": str(cross_asset),
-                "marginBalance": str(cross_asset),
+                "marginBalance": str(margin_balance_dec),
                 "availableBalance": str(cross_free),
                 "unrealizedProfit": str(unrealized_pnl),
                 "initialMargin": str(um_usdc.get("initialMargin", "0")),
