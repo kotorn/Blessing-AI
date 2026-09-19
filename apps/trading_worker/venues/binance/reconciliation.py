@@ -483,6 +483,7 @@ class BinanceReconciliation:
         self.last_status = "UNKNOWN"
         self.authentication_failed = False
         self._unattributed_fill_diffs: List[ReconciliationDiff] = []
+        self._recovered_trade_ids: set[str] = set()
         self.daily_loss_window_start: datetime | None = None
         self.daily_loss_window_end: datetime | None = None
 
@@ -705,6 +706,23 @@ class BinanceReconciliation:
             )
         return status
 
+    async def _resolve_missing_exchange_order_ids(self, tracked_orders: List[Any]) -> None:
+        """Resolve exchange_order_id via order endpoint for tracked orders before trade recovery."""
+        for order in tracked_orders:
+            if getattr(order, "client_order_id", None) and not getattr(order, "exchange_order_id", None):
+                try:
+                    order_info = await self.rest_client.request(
+                        "GET",
+                        self._order_path,
+                        signed=True,
+                        params={"symbol": order.symbol, "origClientOrderId": order.client_order_id},
+                    )
+                    if isinstance(order_info, dict) and order_info.get("orderId"):
+                        order.exchange_order_id = str(order_info["orderId"])
+                        await self.ledger.upsert_order(order)
+                except Exception as exc:
+                    logger.debug("Pre-trade recovery order query skipped for %s: %s", order.client_order_id, exc)
+
     async def _recover_recent_trades(
         self, symbols: set[str]
     ) -> List[ReconciliationDiff]:
@@ -766,6 +784,10 @@ class BinanceReconciliation:
             )
         recovered_fills: List[ExchangeFill] = []
         for trade in matching_trades:
+            for key in ("id", "orderId"):
+                raw_id = trade.get(key)
+                if raw_id not in (None, ""):
+                    self._recovered_trade_ids.add(str(raw_id))
             recovered_fills.append(
                 _exchange_fill_from_trade(
                     trade, local_order, source=f"{self.environment}_RECOVERY"
@@ -1108,6 +1130,16 @@ class BinanceReconciliation:
                     )
                 )
 
+        if self._recovered_trade_ids:
+            diffs = [
+                d
+                for d in diffs
+                if not (
+                    d.code == "EXCHANGE_FILL_UNKNOWN_LOCALLY"
+                    and str(d.exchange_value) in self._recovered_trade_ids
+                )
+            ]
+
         for exchange_order_id, exchange_order in exchange_order_ids.items():
             local_match = None
             client_id = exchange_order.get("clientOrderId")
@@ -1318,6 +1350,7 @@ class BinanceReconciliation:
                 if callable(get_all_orders)
                 else await self.ledger.get_open_orders()
             )
+            await self._resolve_missing_exchange_order_ids(tracked_orders)
             symbols.update(
                 str(order.symbol)
                 for order in tracked_orders
@@ -1408,6 +1441,7 @@ class BinanceReconciliation:
                 if callable(get_all_orders)
                 else await self.ledger.get_open_orders()
             )
+            await self._resolve_missing_exchange_order_ids(tracked_orders)
             symbols.update(
                 str(order.symbol)
                 for order in tracked_orders
