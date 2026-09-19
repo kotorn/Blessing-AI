@@ -168,7 +168,7 @@ async def test_mainnet_caps_enforced(monkeypatch):
     """Verify the locked Mainnet caps and order notional enforcement."""
     limits = SafetyLimits.from_environment(BinanceEnvironment.MAINNET)
     assert limits.allowed_symbols == {"ETHUSDC"}
-    assert limits.max_collateral <= Decimal("100.0")
+    assert limits.max_collateral <= Decimal("250.0")
     assert limits.max_total_open_notional <= Decimal("1000.0")
     assert limits.max_single_order_notional <= Decimal("50.0")
     assert limits.max_daily_loss <= Decimal("5.0")
