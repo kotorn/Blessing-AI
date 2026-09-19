@@ -44,7 +44,7 @@ export async function getTradingAdminIdToken() {
   return { idToken: data.idToken, decoded };
 }
 
-if (process.argv[1].endsWith('mint_trading_admin_token.mjs')) {
+if (process.argv[1]?.endsWith('mint_trading_admin_token.mjs')) {
   try {
     const { idToken, decoded } = await getTradingAdminIdToken();
     console.log(JSON.stringify({

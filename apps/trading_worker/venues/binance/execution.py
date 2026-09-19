@@ -1064,16 +1064,20 @@ class BinanceExecutionAdapter:
                 f"Binance returned terminal order status {normalized_status}",
             )
 
-        response_price = response.get("price")
-        if response_price in (None, "", "0", 0):
-            response_price = response.get("avgPrice")
-        if response_price not in (None, "", "0", 0):
-            try:
-                price = Decimal(str(response_price))
-            except (InvalidOperation, TypeError, ValueError) as exc:
-                raise BinanceTransportAmbiguity("Binance order response price is invalid") from exc
-            if not price.is_finite() or price <= 0:
-                raise BinanceTransportAmbiguity("Binance order response price is unusable")
+        parsed_price: Optional[Decimal] = None
+        for candidate_key in ("price", "avgPrice"):
+            raw_val = response.get(candidate_key)
+            if raw_val not in (None, "", "0", 0):
+                try:
+                    p = Decimal(str(raw_val))
+                    if p.is_finite() and p > 0:
+                        parsed_price = p
+                        break
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise BinanceTransportAmbiguity("Binance order response price is invalid") from exc
+
+        if parsed_price is not None:
+            price = parsed_price
             if prepared.price is not None and price != prepared.price:
                 raise BinanceTransportAmbiguity(
                     "Binance order response price does not match the normalized intent"

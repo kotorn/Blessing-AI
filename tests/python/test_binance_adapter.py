@@ -233,3 +233,43 @@ async def test_private_adapter_mutation_also_requires_worker_authority(adapter):
     assert await adapter._execute_decision(decision) == []
     assert adapter.rest_client.calls == []
 
+
+def test_parse_order_response_handles_zero_avg_price_for_market_order(adapter):
+    intent = OrderIntent(
+        client_order_id="TEST-CLIENT-ORDER-ID",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.012"),
+    )
+    prepared = type(
+        "PreparedStub",
+        (),
+        {
+            "symbol": "ETHUSDC",
+            "side": OrderSide.BUY,
+            "order_type": OrderType.MARKET,
+            "quantity": Decimal("0.012"),
+            "price": None,
+            "estimated_price": Decimal("2625.50"),
+        },
+    )()
+    # Typical Binance response for market order acknowledgment before full match details
+    response = {
+        "orderId": 12345678,
+        "symbol": "ETHUSDC",
+        "clientOrderId": "TEST-CLIENT-ORDER-ID",
+        "status": "NEW",
+        "origQty": "0.012",
+        "price": "0",
+        "avgPrice": "0.00000",
+    }
+    parsed = adapter._order_from_response(intent, response, prepared, "TEST-CLIENT-ORDER-ID")
+    assert parsed.price == Decimal("2625.50")
+    assert parsed.exchange_order_id == "12345678"
+    assert parsed.status == "NEW"
+
+
