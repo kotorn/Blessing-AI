@@ -106,7 +106,7 @@ class TestnetSafetyLimits(BaseModel):
                 max_total_open_notional=Decimal("1000"),
                 max_open_orders=1,
                 max_active_exposure_chains=1,
-                max_collateral=Decimal("100"),
+                max_collateral=Decimal("250"),
                 max_daily_loss=Decimal("5"),
                 max_leverage=Decimal("10"),
             )

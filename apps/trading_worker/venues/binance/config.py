@@ -17,6 +17,15 @@ WS_URLS = {
     BinanceEnvironment.MAINNET: "wss://fstream.binance.com/ws",
 }
 
+PAPI_REST_URL = "https://papi.binance.com"
+PAPI_WS_URL = "wss://fstream.binance.com/pm/ws"
+
+
+def is_portfolio_margin_enabled() -> bool:
+    """Return True if Binance Portfolio Margin mode is requested via environment."""
+    import os
+    return os.getenv("BINANCE_PORTFOLIO_MARGIN", "false").lower() in ("true", "1", "yes")
+
 
 def environment_label(env: BinanceEnvironment) -> str:
     """Return the explicit provenance label used in evidence and ledgers."""

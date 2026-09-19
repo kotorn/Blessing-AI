@@ -89,6 +89,18 @@ describe('release integrity contract', () => {
     expect(controlPlaneTransport).not.toContain('blessing-trading-worker');
   });
 
+  it('exposes a JSON Control Plane readiness route before the SPA fallback', () => {
+    expect(server).toContain("app.get('/ready'");
+    expect(server).toContain('const readiness = await controlPlaneReadiness()');
+    expect(server).toContain("return res.status(readiness.status === 'ready' ? 200 : 503).json(readiness)");
+    expect(server).toContain("controlPlaneHealthy: false");
+  });
+
+  it('prevents reconciliation-status masking in release and continuation verification', () => {
+    expect(server).toContain('resolveReconciliationStatus(');
+    expect(server).toContain('preflightHasRequiredEvidence');
+  });
+
   it('provides read-only continuation evidence through the fixed OIDC boundary', () => {
     expect(continuationVerification).toContain('auth print-identity-token');
     expect(continuationVerification).toContain('/internal/release/continuation-readiness');
@@ -136,6 +148,8 @@ describe('release integrity contract', () => {
     expect(releaseController).toContain('cloudsql-instances');
     expect(releaseController).toContain('promoted Worker revision');
     expect(releaseController).toContain('MAINNET_LAUNCH_POLICY=STAGED_FIRST_ORDER');
+    expect(releaseController).toContain('"MAINNET_MAX_RISK_INCREASING_ORDERS": "1"');
+    expect(releaseController).toContain('"MAINNET_PREFLIGHT_MAX_AGE_SEC": "60"');
     expect(releaseController).toContain('--no-allow-unauthenticated');
     expect(releaseController).toContain('/internal/release/verify');
     expect(releaseController).toContain('/internal/release/readiness');

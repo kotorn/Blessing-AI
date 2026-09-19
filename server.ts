@@ -759,6 +759,25 @@ app.get('/api/health', (req: Request, res: Response) => {
   });
 });
 
+// Cloud Run probes this path directly.  Keep it separate from the SPA
+// fallback and from the lightweight process health endpoint so a rendered
+// HTML document can never be mistaken for a ready Control Plane.  The
+// readiness helper performs the server-side Firebase, release-store, and
+// Worker OIDC checks and returns 503 when any required dependency is not
+// verified.
+app.get('/ready', async (_req: Request, res: Response) => {
+  try {
+    const readiness = await controlPlaneReadiness();
+    return res.status(readiness.status === 'ready' ? 200 : 503).json(readiness);
+  } catch {
+    return res.status(503).json({
+      status: 'degraded',
+      controlPlaneHealthy: false,
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
 interface ApiKeyProfile {
   id: string;
   name: string;
@@ -1901,12 +1920,10 @@ async function currentReleaseVerification(
     (!configuredDigest || configuredDigest === workerImageDigest)
     && (!configuredRevision || configuredRevision === workerRevision)
   );
-  const reconciliationCheck = preflight.checks.find(
-    (check) => check.id === 'CHK-PREFLIGHT-RECONCILIATION',
+  const preflightReconciliationStatus = resolveReconciliationStatus(
+    preflight.checks,
+    state.reconciliation_status,
   );
-  const preflightReconciliationStatus = reconciliationCheck?.status === 'PASS'
-    ? 'IN_SYNC'
-    : String(state.reconciliation_status || '');
   const preflightHasRequiredEvidence = preflight.checks.length > 0
     && preflight.checks.every((check) => !check.required || check.status === 'PASS');
   return {
@@ -2052,6 +2069,12 @@ function continuationVerificationSnapshot(
 ): ContinuationVerificationSnapshot {
   const workerImageDigest = String(workerState.worker_image_digest || '').trim();
   const workerRevision = String(workerState.worker_revision || '').trim();
+  const preflightHasRequiredEvidence = evidence.preflight.checks.length > 0
+    && evidence.preflight.checks.every((check) => !check.required || check.status === 'PASS');
+  const preflightPassed = evidence.preflightPassed
+    && preflightHasRequiredEvidence
+    && evidence.preflightOrderSubmissionAttempts === 0
+    && evidence.preflightOrderEndpointAttempts === 0;
   return {
     currentImageDigest: workerImageDigest,
     currentWorkerRevision: workerRevision,
@@ -2066,7 +2089,7 @@ function continuationVerificationSnapshot(
       : undefined,
     currentSubmittedOrders: evidence.submittedOrders,
     currentSecretVersions: secretVersionsFromState(workerState.secret_versions),
-    preflightPassed: evidence.preflightPassed,
+    preflightPassed,
     preflightObservedAt: evidence.observedAt,
     preflightOrderEndpointAttempts: evidence.preflightOrderEndpointAttempts,
     preflightOrderSubmissionAttempts: evidence.preflightOrderSubmissionAttempts,
@@ -2987,7 +3010,11 @@ app.post('/api/system/reconcile', async (req, res) => {
 // ---------------------------------------------------------------------------
 app.post('/internal/release/candidate', async (req: Request, res: Response) => {
   try {
-    const candidate = newReleaseCandidate(releaseCandidateInputFromRequest(req.body));
+    const body = releaseRequestObject(req.body) || {};
+    const candidate = newReleaseCandidate(releaseCandidateInputFromRequest(body), undefined, {
+      repoGateOutput: body.repoGateOutput,
+      cloudGateOutput: body.cloudGateOutput,
+    });
     let workerStateResponse;
     try {
       workerStateResponse = await forwardWorkerRequest('/state');
@@ -3205,7 +3232,13 @@ app.post('/internal/release/consume', async (req: Request, res: Response) => {
         evidence_status: 'UNVERIFIED',
       });
     }
-    const approval = await store.consumeApproval(candidateId);
+    let approval;
+    if (candidate.status === 'CONSUMED' && candidate.approvalId) {
+      approval = await store.getConsumedApproval(candidate.approvalId);
+      if (!approval) throw new Error('Release candidate approval cannot be resolved');
+    } else {
+      approval = await store.consumeApproval(candidateId);
+    }
     return res.json({ ...approval, consumed: true, executionActivated: false, evidence_status: 'VERIFIED' });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Approval consumption failed';

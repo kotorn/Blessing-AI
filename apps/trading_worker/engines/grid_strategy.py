@@ -30,13 +30,19 @@ class GridStrategyEngine:
         }
     )
 
-    def __init__(self, strategy_id: str = "Structural Grid", max_grid_levels: int = 5):
+    def __init__(
+        self,
+        strategy_id: str = "Structural Grid",
+        max_grid_levels: int = 5,
+        base_order_qty: Optional[Decimal] = None,
+    ):
         if not isinstance(max_grid_levels, int) or isinstance(max_grid_levels, bool):
             raise ValueError("max_grid_levels must be an integer")
         if max_grid_levels < 1:
             raise ValueError("max_grid_levels must be positive")
         self.strategy_id = strategy_id
         self.max_grid_levels = max_grid_levels
+        self.base_order_qty = base_order_qty
 
     def _brake_intent(self, pa_state: PriceActionState, reason: str) -> StrategyIntent:
         return StrategyIntent(
@@ -132,7 +138,13 @@ class GridStrategyEngine:
         # the next delta; this is bounded deceleration, never martingale.
         if direction == PositionSide.LONG:
             remaining_levels = self.max_grid_levels - grid_depth
-            delta = Decimal("0.1") * Decimal(remaining_levels) / Decimal(self.max_grid_levels)
+            if self.base_order_qty is not None:
+                base_qty = self.base_order_qty
+            elif str(pa_state.symbol).upper() == "ETHUSDC":
+                base_qty = Decimal("0.028")
+            else:
+                base_qty = Decimal("0.1")
+            delta = base_qty * Decimal(remaining_levels) / Decimal(self.max_grid_levels)
         else:
             delta = Decimal("0.0")
         

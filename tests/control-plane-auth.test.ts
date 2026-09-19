@@ -84,6 +84,51 @@ describe('control-plane authentication contract', () => {
     expect(viewer.role).toBe('viewer');
   });
 
+  it('rejects custom tokens for trading_admin actions and requires interactive google sign-in', async () => {
+    const request = (authorization: string) => ({
+      header: () => authorization,
+    }) as any;
+
+    firebaseAuthMock.verifyIdToken
+      .mockResolvedValueOnce({
+        uid: 'admin-custom',
+        role: 'trading_admin',
+        firebase: { sign_in_provider: 'custom' },
+      })
+      .mockResolvedValueOnce({
+        uid: 'admin-google',
+        role: 'trading_admin',
+        firebase: { sign_in_provider: 'google.com' },
+      })
+      .mockResolvedValueOnce({
+        uid: 'operator-custom',
+        role: 'operator',
+        firebase: { sign_in_provider: 'custom' },
+      });
+
+    // trading_admin rejected when custom token
+    const customAdmin = await authorizeOperatorRequest(request('Bearer custom-admin'), {
+      requiredRole: 'trading_admin',
+    });
+    expect(customAdmin.ok).toBe(false);
+    expect(customAdmin.forbidden).toBe(true);
+    expect(customAdmin.error).toContain('Interactive Google sign-in is required');
+
+    // trading_admin allowed with google sign-in
+    const googleAdmin = await authorizeOperatorRequest(request('Bearer google-admin'), {
+      requiredRole: 'trading_admin',
+    });
+    expect(googleAdmin.ok).toBe(true);
+    expect(googleAdmin.role).toBe('trading_admin');
+
+    // operator allowed even with custom token
+    const customOperator = await authorizeOperatorRequest(request('Bearer custom-operator'), {
+      requiredRole: 'operator',
+    });
+    expect(customOperator.ok).toBe(true);
+    expect(customOperator.role).toBe('operator');
+  });
+
   it('requires verified control-plane authorization for system and quant routes', () => {
     expect(server).toContain('authorizeOperatorRequest');
     expect(server).toContain("app.use(['/api/system', '/api/quant', '/api/binance', '/api/release']");
@@ -145,10 +190,20 @@ describe('control-plane authentication contract', () => {
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/disarm' })).toBe('operator');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/arm', body: { executionMode: 'TESTNET' } })).toBe('operator');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/arm', body: { executionMode: 'LIVE' } })).toBe('trading_admin');
-    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/kill-switch' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/kill-switch', body: { active: true } })).toBe('operator');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/kill-switch', body: { active: false } })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/preflight/read-only' })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/quant/backtest/run' })).toBe('operator');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/quant/ai/research' })).toBe('operator');
+
+    // Case-insensitivity verification matching Express default route dispatching
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/API/RELEASE/MAINNET/APPROVE' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/Release/Mainnet/Continuation/Approve' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/Continue' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/ARM', body: { executionMode: 'LIVE' } })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/API/SYSTEM/KILL-SWITCH', body: { active: false } })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/API/SYSTEM/KILL-SWITCH', body: { active: true } })).toBe('operator');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/preflight/READ-ONLY' })).toBe('trading_admin');
   });
 
   it('does not accept Mainnet credentials through the browser profile store', () => {

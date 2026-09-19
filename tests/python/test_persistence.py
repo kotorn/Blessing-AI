@@ -614,3 +614,49 @@ def test_persistence_schema_matches_outbox_and_hedge_identity_contract():
     assert "CREATE TABLE IF NOT EXISTS persistence_outbox" in schema
     assert "ADD COLUMN IF NOT EXISTS exchange_order_id VARCHAR(64)" in migration
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_venue_symbol_side" in migration
+
+
+@pytest.mark.asyncio
+async def test_create_mainnet_launch_session_rejects_arming_when_prior_has_unreviewed_orders():
+    """Arming a new session while prior session has submitted_orders > 0 must raise and preserve prior."""
+
+    class MockDb:
+        def __init__(self):
+            self.closed_called = False
+            self.prior_session = {
+                "launch_id": "launch-approval-prior",
+                "approval_id": "approval-prior",
+                "submitted_orders": 1,
+                "state": "PAUSED_NEW_RISK",
+            }
+
+        async def execute(self, query: str, *args: object) -> str:
+            if "UPDATE mainnet_launch_sessions" in query:
+                if "submitted_orders = 0" in query:
+                    return "UPDATE 0"
+                self.closed_called = True
+                return "UPDATE 1"
+            return "INSERT 0 1"
+
+        async def fetchrow(self, query: str, *args: object):
+            if "submitted_orders > 0" in query:
+                return self.prior_session
+            return self.prior_session
+
+    db = MockDb()
+    repo = PersistenceRepository(db)  # type: ignore[arg-type]
+
+    image_digest = "asia-southeast1-docker.pkg.dev/demo/trading-worker@sha256:" + "b" * 64
+    with pytest.raises(
+        RuntimeError,
+        match="existing session launch-approval-prior has a submitted order pending review",
+    ):
+        await repo.create_mainnet_launch_session(
+            launch_id="launch-approval-new",
+            approval_id="approval-new",
+            image_digest=image_digest,
+            symbol="ETHUSDC",
+        )
+
+    assert not db.closed_called
+

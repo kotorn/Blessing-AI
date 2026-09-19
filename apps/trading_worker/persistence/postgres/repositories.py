@@ -386,20 +386,54 @@ class PersistenceRepository:
             raise ValueError("Mainnet staged launch permits exactly one risk-increasing order")
         await self.db.execute(
             """
-            INSERT INTO mainnet_launch_sessions (
-                launch_id, approval_id, image_digest, symbol, policy,
-                max_risk_increasing_orders, reserved_orders, submitted_orders,
-                state, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT (approval_id) DO NOTHING
+            UPDATE mainnet_launch_sessions
+            SET state = 'CLOSED', updated_at = CURRENT_TIMESTAMP
+            WHERE symbol = $1
+              AND approval_id != $2
+              AND state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED', 'REAUTH_REQUIRED')
+              AND submitted_orders = 0
             """,
-            launch_id,
-            approval_id,
-            image_digest,
             symbol.upper(),
-            policy,
-            max_risk_increasing_orders,
+            approval_id,
         )
+        unreviewed = await self.db.fetchrow(
+            """
+            SELECT launch_id, approval_id, submitted_orders, state
+            FROM mainnet_launch_sessions
+            WHERE symbol = $1
+              AND approval_id != $2
+              AND state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED', 'AUTONOMOUS_ACTIVE', 'REAUTH_REQUIRED')
+              AND submitted_orders > 0
+            """,
+            symbol.upper(),
+            approval_id,
+        )
+        if unreviewed is not None:
+            raise RuntimeError(
+                f"existing session {unreviewed['launch_id']} has a submitted order pending review"
+            )
+        try:
+            await self.db.execute(
+                """
+                INSERT INTO mainnet_launch_sessions (
+                    launch_id, approval_id, image_digest, symbol, policy,
+                    max_risk_increasing_orders, reserved_orders, submitted_orders,
+                    state, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (approval_id) DO NOTHING
+                """,
+                launch_id,
+                approval_id,
+                image_digest,
+                symbol.upper(),
+                policy,
+                max_risk_increasing_orders,
+            )
+        except Exception as exc:
+            exc_name = type(exc).__name__
+            if "UniqueViolation" in exc_name or "unique" in str(exc).lower():
+                raise RuntimeError("existing session has a submitted order pending review") from exc
+            raise
         row = await self.db.fetchrow(
             """
             SELECT launch_id, approval_id, image_digest, symbol, policy,

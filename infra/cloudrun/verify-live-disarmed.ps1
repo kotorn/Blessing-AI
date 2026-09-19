@@ -15,7 +15,8 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$ControlPlaneUrl,
   [ValidateSet("true", "false")]
-  [string]$ExpectedMainnetLiveApproved = "false"
+  [string]$ExpectedMainnetLiveApproved = "false",
+  [string]$ReleaseControllerServiceAccount = "blessing-release-controller@gen-lang-client-0730128480.iam.gserviceaccount.com"
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,7 +34,11 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
   -ExpectedExecutionMode "LIVE" `
   -ExpectedMainnetLiveApproved $ExpectedMainnetLiveApproved
 
-$token = (& gcloud auth print-identity-token --audiences=$ControlPlaneUrl 2>$null).Trim()
+$rawToken = & gcloud auth print-identity-token --impersonate-service-account=$ReleaseControllerServiceAccount --audiences=$ControlPlaneUrl --include-email --verbosity=error 2>$null
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace("$rawToken")) {
+  $rawToken = & gcloud auth print-identity-token --audiences=$ControlPlaneUrl --verbosity=error 2>$null
+}
+$token = ([string]$rawToken).Trim()
 if ([string]::IsNullOrWhiteSpace($token)) { throw "Release Controller OIDC token could not be obtained" }
 $headers = @{ Authorization = "Bearer $token" }
 $runtime = Invoke-RestMethod -Method Post -Uri "$ControlPlaneUrl/internal/release/runtime" -Headers $headers -ContentType "application/json" -Body "{}"

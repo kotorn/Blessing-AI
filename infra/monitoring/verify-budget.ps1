@@ -28,9 +28,13 @@ if ($null -ne $budget.budgetFilter -and $null -ne $budget.budgetFilter.projects)
 } elseif ($null -ne $budget.filter -and $null -ne $budget.filter.projects) {
   $projects = @($budget.filter.projects | ForEach-Object { [string]$_ })
 }
-$expectedProject = "projects/$ProjectId"
-if ($projects.Count -ne 1 -or $projects[0] -ne $expectedProject) {
-  throw "Budget must be scoped only to $expectedProject"
+$projectNumber = (& gcloud projects describe $ProjectId --format="value(projectNumber)" 2>$null).Trim()
+$expectedProjects = @("projects/$ProjectId")
+if (-not [string]::IsNullOrWhiteSpace($projectNumber)) {
+  $expectedProjects += "projects/$projectNumber"
+}
+if ($projects.Count -ne 1 -or $projects[0] -notin $expectedProjects) {
+  throw "Budget must be scoped only to projects/$ProjectId"
 }
 
 $thresholdRules = @($budget.thresholdRules)

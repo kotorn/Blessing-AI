@@ -79,6 +79,7 @@ class BinanceExecutionAdapter:
         env: BinanceEnvironment = BinanceEnvironment.TESTNET,
         ledger: Optional[ExecutionLedger] = None,
         preflight_only: bool = False,
+        portfolio_margin: Optional[bool] = None,
     ):
         if not isinstance(env, BinanceEnvironment):
             raise ValueError("Binance execution requires TESTNET or MAINNET")
@@ -89,15 +90,16 @@ class BinanceExecutionAdapter:
 
         self.env = env
         self.preflight_only = bool(preflight_only)
-        self.api_key = api_key
-        self.api_secret = api_secret
+        self.api_key = "".join(str(api_key or "").split())
+        self.api_secret = "".join(str(api_secret or "").split())
         self.ledger = ledger or InMemoryLedger()
         self.safety_limits = TestnetSafetyLimits.from_environment(env)
         self.rest_client = BinanceRestClient(
-            api_key,
-            api_secret,
+            self.api_key,
+            self.api_secret,
             env,
             read_only=self.preflight_only,
+            portfolio_margin=portfolio_margin,
         )
         self.capabilities = BinanceCapabilities()
         self.user_stream = BinanceUserStream(
@@ -166,6 +168,22 @@ class BinanceExecutionAdapter:
     def mutation_lock(self) -> asyncio.Lock:
         """Serialize all mutable Binance REST operations with the kill switch."""
         return self._mutation_lock
+
+    @property
+    def portfolio_margin(self) -> bool:
+        return getattr(self.rest_client, "portfolio_margin", False)
+
+    @property
+    def _order_path(self) -> str:
+        return "/papi/v1/um/order" if self.portfolio_margin else "/fapi/v1/order"
+
+    @property
+    def _open_orders_path(self) -> str:
+        return "/papi/v1/um/openOrders" if self.portfolio_margin else "/fapi/v1/openOrders"
+
+    @property
+    def _position_risk_path(self) -> str:
+        return "/papi/v1/um/positionRisk" if self.portfolio_margin else "/fapi/v2/positionRisk"
 
     @property
     def authenticated(self) -> bool:
@@ -1046,16 +1064,20 @@ class BinanceExecutionAdapter:
                 f"Binance returned terminal order status {normalized_status}",
             )
 
-        response_price = response.get("price")
-        if response_price in (None, "", "0", 0):
-            response_price = response.get("avgPrice")
-        if response_price not in (None, "", "0", 0):
-            try:
-                price = Decimal(str(response_price))
-            except (InvalidOperation, TypeError, ValueError) as exc:
-                raise BinanceTransportAmbiguity("Binance order response price is invalid") from exc
-            if not price.is_finite() or price <= 0:
-                raise BinanceTransportAmbiguity("Binance order response price is unusable")
+        parsed_price: Optional[Decimal] = None
+        for candidate_key in ("price", "avgPrice"):
+            raw_val = response.get(candidate_key)
+            if raw_val not in (None, "", "0", 0):
+                try:
+                    p = Decimal(str(raw_val))
+                    if p.is_finite() and p > 0:
+                        parsed_price = p
+                        break
+                except (InvalidOperation, TypeError, ValueError) as exc:
+                    raise BinanceTransportAmbiguity("Binance order response price is invalid") from exc
+
+        if parsed_price is not None:
+            price = parsed_price
             if prepared.price is not None and price != prepared.price:
                 raise BinanceTransportAmbiguity(
                     "Binance order response price does not match the normalized intent"
@@ -1109,7 +1131,7 @@ class BinanceExecutionAdapter:
             try:
                 status_response = await self.rest_client.request(
                     "GET",
-                    "/fapi/v1/order",
+                    self._order_path,
                     signed=True,
                     params={"symbol": prepared.symbol, "origClientOrderId": client_order_id},
                 )
@@ -1390,7 +1412,7 @@ class BinanceExecutionAdapter:
                 self.order_submission_attempts += 1
                 submission_attempted = True
                 response = await self.rest_client.request(
-                    "POST", "/fapi/v1/order", signed=True, params=params
+                    "POST", self._order_path, signed=True, params=params
                 )
                 if not isinstance(response, dict):
                     raise BinanceTransportAmbiguity("Binance order response is invalid")
@@ -1489,7 +1511,7 @@ class BinanceExecutionAdapter:
         try:
             return await self.rest_client.request(
                 "GET",
-                "/fapi/v1/order",
+                self._order_path,
                 signed=True,
                 params={"symbol": symbol.upper(), "origClientOrderId": client_order_id},
             )
@@ -1524,7 +1546,7 @@ class BinanceExecutionAdapter:
         async with self._mutation_lock:
             try:
                 open_orders = await self.rest_client.request(
-                    "GET", "/fapi/v1/openOrders", signed=True
+                    "GET", self._open_orders_path, signed=True
                 )
                 if not isinstance(open_orders, list):
                     return {
@@ -1542,7 +1564,7 @@ class BinanceExecutionAdapter:
                     try:
                         response = await self.rest_client.request(
                             "DELETE",
-                            "/fapi/v1/order",
+                            self._order_path,
                             signed=True,
                             params={"symbol": symbol, "orderId": order_id},
                         )
@@ -1561,7 +1583,7 @@ class BinanceExecutionAdapter:
                         cancel_failures += 1
 
                 remaining = await self.rest_client.request(
-                    "GET", "/fapi/v1/openOrders", signed=True
+                    "GET", self._open_orders_path, signed=True
                 )
                 if not isinstance(remaining, list):
                     return {
@@ -1627,7 +1649,7 @@ class BinanceExecutionAdapter:
         try:
             response = await self.rest_client.request(
                 "DELETE",
-                "/fapi/v1/order",
+                self._order_path,
                 signed=True,
                 params={"symbol": symbol.upper(), "origClientOrderId": orig_client_order_id},
             )
@@ -1858,7 +1880,7 @@ class BinanceExecutionAdapter:
             await self._assert_execution_lease(amendment_risk)
             response = await self.rest_client.request(
                 "PUT",
-                "/fapi/v1/order",
+                self._order_path,
                 signed=True,
                 params=params,
             )
@@ -1979,7 +2001,7 @@ class BinanceExecutionAdapter:
         self.last_emergency_result = {"status": "UNKNOWN", "submitted_orders": 0}
         try:
             positions = await self.rest_client.request(
-                "GET", "/fapi/v2/positionRisk", signed=True
+                "GET", self._position_risk_path, signed=True
             )
         except BinanceAuthenticationError:
             self.invalidate_authentication()

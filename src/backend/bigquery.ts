@@ -161,6 +161,19 @@ export async function authorizeFirebaseRequest(
         };
       }
     }
+    const signInProvider = (decoded as { firebase?: { sign_in_provider?: string } }).firebase?.sign_in_provider;
+    if (requiredRole === 'trading_admin' && signInProvider === 'custom') {
+      return {
+        ok: false,
+        mode: 'FIREBASE_ID_TOKEN',
+        uid: decoded.uid,
+        claims,
+        roles,
+        role: highestControlPlaneRole(roles),
+        forbidden: true,
+        error: 'Interactive Google sign-in is required for trading_admin actions; custom token authentication is rejected',
+      };
+    }
     if (options.requireTelemetryProducer) {
       const isTelemetryProducer = claims.telemetryProducer === true || claims.bigqueryTelemetryProducer === true;
       if (!isTelemetryProducer) {

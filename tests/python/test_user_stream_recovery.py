@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -28,6 +28,20 @@ async def test_private_stream_needs_event_or_transport_heartbeat():
 
     stream.last_event_at = None
     stream.last_transport_heartbeat_at = datetime.now(UTC)
+    assert stream.is_healthy() is True
+
+
+async def test_private_stream_healthy_when_event_old_but_transport_heartbeat_fresh():
+    stream = BinanceUserStream(None, BinanceEnvironment.TESTNET)
+    stream.running = True
+    stream.is_connected = True
+    stream.connected_at = datetime.now(UTC)
+
+    # Event was 120 seconds ago (older than 60s max_age)
+    stream.last_event_at = datetime.now(UTC) - timedelta(seconds=120)
+    # Transport ping/pong heartbeat was 5 seconds ago (fresh)
+    stream.last_transport_heartbeat_at = datetime.now(UTC) - timedelta(seconds=5)
+
     assert stream.is_healthy() is True
 
 

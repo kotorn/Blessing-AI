@@ -8,6 +8,7 @@ import re
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -27,7 +28,7 @@ from pydantic import (
 )
 
 from domain.enums import RiskState
-from domain.models import Instrument, MarketEvent, MarketType, RiskSnapshot, utc_now
+from domain.models import Instrument, MarketEvent, MarketType, OrderSide, OrderType, RiskSnapshot, utc_now
 
 from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
 from apps.trading_worker.engines.funding_carry import (
@@ -47,6 +48,7 @@ from apps.trading_worker.venues.binance.config import (
     BinanceEnvironment,
     environment_label,
     get_ws_url,
+    is_portfolio_margin_enabled,
 )
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.gates import DecisionExecutionGate
@@ -678,6 +680,7 @@ class TradingWorkerApp:
         self._execution_lease_last_renewed_at = 0.0
         self._mainnet_launch_id: Optional[str] = None
         self._mainnet_launch_session: Optional[dict[str, Any]] = None
+        self._last_risk_snapshot_enqueued_at: float = 0.0
 
     def _set_mainnet_launch_session(self, session: Optional[dict[str, Any]]) -> None:
         """Project durable launch identity into the process-local API state."""
@@ -883,6 +886,13 @@ class TradingWorkerApp:
                 return
             if self._launch_session_value("policy", MAINNET_LAUNCH_STAGED) == MAINNET_LAUNCH_STAGED:
                 self.pause_new_risk = True
+                if self._mainnet_launch_id:
+                    try:
+                        refreshed = await self.persistence.get_mainnet_launch_session(self._mainnet_launch_id)
+                        if refreshed:
+                            self._set_mainnet_launch_session(refreshed)
+                    except Exception as exc:
+                        logger.warning("Could not refresh launch session after submission: %s", exc)
                 self._refresh_engine_state()
                 logger.warning(
                     "monitor_event=staged_first_order_confirmed pause_new_risk=true"
@@ -1001,11 +1011,17 @@ class TradingWorkerApp:
         }
 
     @staticmethod
-    def _has_grid_lineage(value: object) -> bool:
-        return any(
+    def _has_grid_lineage(value: object, client_order_id: str | None = None) -> bool:
+        if any(
             str(intent_id).upper().startswith("GRID-")
             for intent_id in (value or [])
-        )
+        ):
+            return True
+        if client_order_id:
+            cid = str(client_order_id).upper()
+            if cid.startswith("BAI-") or cid.startswith("B-") or cid.startswith("GRID-"):
+                return True
+        return False
 
     async def _observed_grid_depth(self, symbol: str) -> int:
         """Read grid depth from Worker-owned ledger lineage before expansion."""
@@ -1038,7 +1054,10 @@ class TradingWorkerApp:
                 order
                 for order in all_orders
                 if str(order.symbol).upper() == normalized_symbol
-                and self._has_grid_lineage(order.source_intent_ids)
+                and (
+                    self._has_grid_lineage(order.source_intent_ids, getattr(order, "client_order_id", None))
+                    or str(getattr(order, "strategy_id", "")).strip().lower() in {"grid", "structural grid"}
+                )
             ]
             open_grid_orders = sum(
                 1
@@ -1053,7 +1072,8 @@ class TradingWorkerApp:
                 if str(fill.symbol).upper() == normalized_symbol
                 and (
                     str(fill.client_order_id) in grid_order_ids
-                    or self._has_grid_lineage(fill.source_intent_ids)
+                    or self._has_grid_lineage(fill.source_intent_ids, getattr(fill, "client_order_id", None))
+                    or str(getattr(fill, "strategy_id", "")).strip().lower() in {"grid", "structural grid"}
                 )
             }
             return self.grid_engine.observed_depth(
@@ -1170,45 +1190,49 @@ class TradingWorkerApp:
         autonomous execution lease gate.
         """
 
+        def fail(reason: str) -> bool:
+            logger.warning("Mainnet snapshot risk check rejected: %s", reason)
+            return False
+
         if snapshot is None or not getattr(snapshot, "valid", False):
-            return False
+            return fail("snapshot is None or not valid")
         if getattr(adapter, "env", None) != BinanceEnvironment.MAINNET:
-            return False
+            return fail(f"adapter env is not MAINNET: {getattr(adapter, 'env', None)}")
         if freshness_verified is None:
             freshness_check = getattr(adapter, "is_account_snapshot_fresh", None)
             freshness_verified = bool(callable(freshness_check) and freshness_check())
         if not freshness_verified:
-            return False
+            return fail("snapshot freshness_verified is false")
 
         lease = getattr(adapter, "execution_lease", None)
         if require_execution_lease and bool(getattr(adapter, "execution_lease_required", True)) and (
             lease is None or getattr(lease, "fencing_token", None) is None
         ):
-            return False
+            return fail("execution lease required but missing")
         if str(getattr(snapshot, "collateral_asset", "")).upper() != "USDC":
-            return False
+            return fail(f"collateral_asset is not USDC: {getattr(snapshot, 'collateral_asset', None)}")
         if str(getattr(snapshot, "risk_currency", "")).upper() != "USDC":
-            return False
+            return fail(f"risk_currency is not USDC: {getattr(snapshot, 'risk_currency', None)}")
         if str(getattr(snapshot, "daily_loss_asset", "")).upper() != "USDC":
-            return False
+            return fail(f"daily_loss_asset is not USDC: {getattr(snapshot, 'daily_loss_asset', None)}")
         if not bool(getattr(snapshot, "daily_loss_known", False)):
-            return False
+            return fail("daily_loss_known is false")
         if not bool(getattr(snapshot, "daily_pnl_includes_fees", False)):
-            return False
+            return fail("daily_pnl_includes_fees is false")
         if not bool(getattr(snapshot, "daily_pnl_includes_funding", False)):
-            return False
+            return fail("daily_pnl_includes_funding is false")
         if not bool(getattr(snapshot, "configured_leverage_known", False)):
-            return False
+            return fail("configured_leverage_known is false")
         if not bool(getattr(snapshot, "margin_mode_known", False)):
-            return False
+            return fail("margin_mode_known is false")
         if str(getattr(snapshot, "margin_mode", "")).upper() not in {
             "CROSS",
             "ISOLATED",
             "SINGLE_ASSET_CROSS",
         }:
-            return False
+            return fail(f"unsupported margin_mode: {getattr(snapshot, 'margin_mode', None)}")
         if str(getattr(snapshot, "liquidation_safety", "")).upper() != "KNOWN":
-            return False
+            return fail(f"liquidation_safety is not KNOWN: {getattr(snapshot, 'liquidation_safety', None)}")
 
         try:
             limits = TestnetSafetyLimits.from_environment(BinanceEnvironment.MAINNET)
@@ -1222,8 +1246,8 @@ class TradingWorkerApp:
             total_position_notional = Decimal(
                 str(getattr(snapshot, "total_position_notional", None))
             )
-        except (InvalidOperation, TypeError, ValueError):
-            return False
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            return fail(f"failed to parse decimal fields: {exc}")
 
         if (
             not collateral.is_finite()
@@ -1241,37 +1265,40 @@ class TradingWorkerApp:
             or total_position_notional < 0
             or total_position_notional > limits.max_total_open_notional
         ):
-            return False
+            return fail(
+                f"limits breached: collateral={collateral} wallet={wallet_balance} avail={available_balance} "
+                f"eff_lev={effective_leverage} notional={total_position_notional}"
+            )
         if (
             not configured_leverage.is_finite()
             or configured_leverage <= 0
             or configured_leverage > limits.max_leverage
         ):
-            return False
+            return fail(f"configured_leverage out of limits: {configured_leverage}")
         if not daily_pnl.is_finite() or not unrealized_pnl.is_finite():
-            return False
+            return fail(f"daily_pnl or unrealized_pnl not finite: daily={daily_pnl} unrealized={unrealized_pnl}")
         daily_loss = max(Decimal("0"), -(daily_pnl + unrealized_pnl))
         if not daily_loss.is_finite() or daily_loss >= limits.max_daily_loss:
-            return False
+            return fail(f"daily_loss out of limits: {daily_loss} >= {limits.max_daily_loss}")
 
         liquidation_distance = getattr(snapshot, "min_liquidation_distance_pct", None)
         if total_position_notional != 0:
             try:
                 if liquidation_distance is None or not Decimal(str(liquidation_distance)).is_finite() or Decimal(str(liquidation_distance)) <= 0:
-                    return False
-            except (InvalidOperation, TypeError, ValueError):
-                return False
+                    return fail(f"invalid liquidation_distance for active position: {liquidation_distance}")
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                return fail(f"failed parsing liquidation_distance: {exc}")
 
         window_start = getattr(snapshot, "daily_loss_window_start", None)
         window_end = getattr(snapshot, "daily_loss_window_end", None)
         if not isinstance(window_start, datetime) or not isinstance(window_end, datetime):
-            return False
+            return fail(f"window_start/end not datetime: {type(window_start)} {type(window_end)}")
         if window_start.tzinfo is None or window_end.tzinfo is None:
-            return False
+            return fail("window_start/end missing tzinfo")
         start_utc = window_start.astimezone(timezone.utc)
         end_utc = window_end.astimezone(timezone.utc)
         now_utc = utc_now()
-        return (
+        in_window = (
             start_utc.hour == 0
             and start_utc.minute == 0
             and start_utc.second == 0
@@ -1280,6 +1307,9 @@ class TradingWorkerApp:
             and end_utc <= start_utc + timedelta(days=1)
             and start_utc <= now_utc < end_utc
         )
+        if not in_window:
+            return fail(f"daily loss window invalid: start={start_utc} end={end_utc} now={now_utc}")
+        return True
 
     def is_mainnet_account_risk_ready(self) -> bool:
         """Require independently observed Mainnet collateral, mode, leverage, and PnL."""
@@ -1422,12 +1452,13 @@ class TradingWorkerApp:
         """Derive the single operational state from canonical control flags."""
         if self.kill_switch_active:
             self.engine_state = WorkerEngineState.EMERGENCY
+        elif self.active_configuration is None:
+            self.engine_state = WorkerEngineState.DISARMED
         elif (
             self.execution_mode in {
                 WorkerExecutionMode.TESTNET,
                 WorkerExecutionMode.LIVE,
             }
-            and self.active_configuration is not None
             and (
                 self.connection_state != ConnectionState.READY.value
                 or not self.authenticated
@@ -1446,11 +1477,7 @@ class TradingWorkerApp:
         elif self.pause_new_risk:
             self.engine_state = WorkerEngineState.PAUSED_NEW_RISK
         else:
-            self.engine_state = (
-                WorkerEngineState.ARMED
-                if self.active_configuration
-                else WorkerEngineState.DISARMED
-            )
+            self.engine_state = WorkerEngineState.ARMED
 
     def get_state(self) -> WorkerRuntimeState:
         self._sync_adapter_state()
@@ -2176,13 +2203,32 @@ class TradingWorkerApp:
             try:
                 try:
                     persistence = self.persistence.readiness()
-                    pending_outbox = persistence.get("pending_outbox")
-                    failed_writes = persistence.get("failed_writes")
+                    has_pending = (
+                        isinstance(persistence, Mapping)
+                        and "pending_outbox" in persistence
+                    )
+                    has_failed = (
+                        isinstance(persistence, Mapping)
+                        and "failed_writes" in persistence
+                    )
+                    pending_outbox = persistence.get("pending_outbox") if has_pending else None
+                    failed_writes = persistence.get("failed_writes") if has_failed else None
+
+                    def _is_explicit_zero_counter(val: Any) -> bool:
+                        if val is None or isinstance(val, bool):
+                            return False
+                        if isinstance(val, (int, float, Decimal)):
+                            return val == 0
+                        return False
+
                     persistence_ready = bool(
-                        persistence.get("mode") == "REQUIRED"
+                        isinstance(persistence, Mapping)
+                        and persistence.get("mode") == "REQUIRED"
                         and persistence.get("durable") is True
-                        and (pending_outbox in (None, 0))
-                        and (failed_writes in (None, 0))
+                        and has_pending
+                        and _is_explicit_zero_counter(pending_outbox)
+                        and has_failed
+                        and _is_explicit_zero_counter(failed_writes)
                     )
                 except Exception:
                     persistence_error = True
@@ -2226,11 +2272,12 @@ class TradingWorkerApp:
 
                 if credentials_configured and not durable_ledger_error:
                     adapter = BinanceExecutionAdapter(
-                        api_key=os.getenv("BINANCE_MAINNET_API_KEY", ""),
-                        api_secret=os.getenv("BINANCE_MAINNET_API_SECRET", ""),
+                        api_key="".join(str(os.getenv("BINANCE_MAINNET_API_KEY", "")).split()),
+                        api_secret="".join(str(os.getenv("BINANCE_MAINNET_API_SECRET", "")).split()),
                         env=BinanceEnvironment.MAINNET,
                         ledger=durable_ledger,
                         preflight_only=True,
+                        portfolio_margin=is_portfolio_margin_enabled(),
                     )
                     connected = await adapter.connect()
                     try:
@@ -2286,13 +2333,17 @@ class TradingWorkerApp:
                     reconciliation_ready = (
                         adapter.reconciliation.last_status == "IN_SYNC"
                     )
+                    diff_summary = ", ".join(
+                        f"{d.code}:{d.symbol}:{d.local_value}->{d.exchange_value}"
+                        for d in getattr(adapter.reconciliation, "last_diffs", [])
+                    )
                     add_check(
                         "CHK-PREFLIGHT-RECONCILIATION",
                         "Account Reconciliation",
                         reconciliation_ready,
                         "Mainnet positions, open orders, fills, and account snapshot are in sync"
                         if reconciliation_ready
-                        else "Mainnet exchange state is not reconciled with the disposable preflight ledger",
+                        else f"Mainnet exchange state is not reconciled with the disposable preflight ledger: {diff_summary or 'NO_DIFFS_REPORTED'}",
                     )
                     add_check(
                         "CHK-PREFLIGHT-PRIVATE-STREAM",
@@ -2494,7 +2545,12 @@ class TradingWorkerApp:
                 self._launch_session_value("policy") == MAINNET_LAUNCH_AUTONOMOUS
                 and self._launch_session_value("state") == "AUTONOMOUS_ACTIVE"
             )
-            if not autonomous:
+            staged_pending = (
+                self._launch_session_value("policy") == MAINNET_LAUNCH_STAGED
+                and self._launch_session_value("state") == "ACTIVE"
+                and int(self._launch_session_value("submitted_orders", 0) or 0) == 0
+            )
+            if not autonomous and not staged_pending:
                 self.pause_new_risk = True
                 self._refresh_engine_state()
                 logger.warning(
@@ -2771,8 +2827,8 @@ class TradingWorkerApp:
 
         self.engine_state = WorkerEngineState.ARMING
         exchange_environment = BinanceEnvironment.MAINNET
-        api_key = os.getenv("BINANCE_MAINNET_API_KEY", "")
-        api_secret = os.getenv("BINANCE_MAINNET_API_SECRET", "")
+        api_key = "".join(str(os.getenv("BINANCE_MAINNET_API_KEY", "")).split())
+        api_secret = "".join(str(os.getenv("BINANCE_MAINNET_API_SECRET", "")).split())
         self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
             exchange_environment
         ).max_leverage
@@ -2792,6 +2848,7 @@ class TradingWorkerApp:
                 api_secret=api_secret,
                 env=exchange_environment,
                 ledger=durable_ledger,
+                portfolio_margin=is_portfolio_margin_enabled(),
             )
             if self.execution_adapter.ledger:
                 self.execution_adapter.ledger.on_order_update = self.persistence.enqueue_order
@@ -3027,12 +3084,22 @@ class TradingWorkerApp:
             and check.get("status") == "PASS"
             for check in preflight.get("checks", [])
         )
+        if self.execution_adapter is not None:
+            try:
+                self.reconciliation_status = await self.execution_adapter.reconciliation.reconcile()
+            except Exception as exc:
+                logger.error("Execution adapter reconciliation failed: %s", exc)
+                self.reconciliation_status = "UNKNOWN"
+            self._sync_adapter_state()
+        reconciliation_synced = bool(
+            preflight_reconciliation and self.reconciliation_status == "IN_SYNC"
+        )
         add_check(
             "CHK-CONTINUATION-RECONCILIATION",
             "First-order Reconciliation",
-            preflight_reconciliation and self.reconciliation_status == "IN_SYNC",
+            reconciliation_synced,
             "Durable ledger and Mainnet account are IN_SYNC"
-            if preflight_reconciliation and self.reconciliation_status == "IN_SYNC"
+            if reconciliation_synced
             else "First-order reconciliation is not verified as IN_SYNC",
         )
 
@@ -3276,14 +3343,14 @@ class TradingWorkerApp:
                 else BinanceEnvironment.TESTNET
             )
             if mode == "LIVE":
-                api_key = os.getenv("BINANCE_MAINNET_API_KEY", "")
-                api_secret = os.getenv("BINANCE_MAINNET_API_SECRET", "")
+                api_key = "".join(str(os.getenv("BINANCE_MAINNET_API_KEY", "")).split())
+                api_secret = "".join(str(os.getenv("BINANCE_MAINNET_API_SECRET", "")).split())
                 self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
                     exchange_environment
                 ).max_leverage
             else:
-                api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
-                api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+                api_key = "".join(str(os.getenv("BINANCE_TESTNET_API_KEY", "")).split())
+                api_secret = "".join(str(os.getenv("BINANCE_TESTNET_API_SECRET", "")).split())
                 self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
                     exchange_environment
                 ).max_leverage
@@ -3321,6 +3388,7 @@ class TradingWorkerApp:
                         api_secret=api_secret,
                         env=exchange_environment,
                         ledger=durable_ledger,
+                        portfolio_margin=is_portfolio_margin_enabled(),
                     )
 
                 # Bind persistence callbacks on every arm. This also repairs
@@ -3397,8 +3465,11 @@ class TradingWorkerApp:
                         symbol="ETHUSDC",
                     )
                 except Exception as exc:
-                    logger.error("Mainnet staged launch session unavailable: %s", type(exc).__name__)
+                    error_msg = str(exc)
+                    logger.error("Mainnet staged launch session unavailable: %s (%s)", type(exc).__name__, exc)
                     await self._reset_after_failed_exchange_arm()
+                    if "submitted order pending review" in error_msg:
+                        return False, "LIVE staged launch failed: existing session has a submitted order pending review."
                     return False, "LIVE staged launch session is unavailable; execution remains disarmed."
                 if (
                     str(session.get("state", "")) != "ACTIVE"
@@ -3468,6 +3539,96 @@ class TradingWorkerApp:
             else WorkerEngineState.DISARMED
         )
         logger.info("Worker DISARMED")
+
+    def _clamp_order_notional_if_needed(
+        self,
+        decision,
+        reference_price: Optional[Decimal] = None,
+    ):
+        """Clamp risk-increasing orders to safely satisfy venue single-order notional caps."""
+        if self.execution_adapter is None:
+            return decision
+        limits = getattr(self.execution_adapter, "safety_limits", None)
+        rules = (
+            getattr(self.execution_adapter, "symbol_rules", {}).get(decision.symbol)
+            if self.execution_adapter
+            else None
+        )
+        price = reference_price
+        if limits and rules and price and price > 0:
+            max_order_notional = getattr(limits, "max_single_order_notional", None)
+            if max_order_notional and max_order_notional > 0:
+                new_orders = []
+                clamped_any = False
+                for order in getattr(decision, "orders", []):
+                    if not getattr(order, "reduce_only", False):
+                        est_notional = order.quantity * price
+                        order_type_val = getattr(order.order_type, "value", order.order_type)
+                        min_notional = rules.min_notional_for(order_type_val)
+                        if est_notional > max_order_notional:
+                            # Target 90% of max notional, capped at 45 USDC for the 50 USDC pilot limit
+                            target_notional = min(max_order_notional * Decimal("0.90"), Decimal("45.0"))
+                            target_qty = target_notional / price
+                            is_market = order_type_val == OrderType.MARKET.value
+                            clamped_qty = rules.normalize_quantity(target_qty, is_market=is_market)
+                            min_qty = rules.market_min_qty if is_market and rules.market_min_qty else rules.min_qty
+                            if (
+                                clamped_qty >= min_qty
+                                and (clamped_qty * price) >= min_notional
+                                and (clamped_qty * price) <= max_order_notional
+                            ):
+                                logger.info(
+                                    "Clamping order %s quantity from %s to %s to satisfy single-order cap %s",
+                                    order.client_order_id,
+                                    order.quantity,
+                                    clamped_qty,
+                                    max_order_notional,
+                                )
+                                new_orders.append(order.model_copy(update={"quantity": clamped_qty}))
+                                clamped_any = True
+                                continue
+                        elif min_notional > 0 and est_notional < min_notional:
+                            target_notional = min(
+                                min_notional * Decimal("1.25"),
+                                max_order_notional * Decimal("0.90"),
+                                Decimal("45.0"),
+                            )
+                            target_qty = target_notional / price
+                            is_market = order_type_val == OrderType.MARKET.value
+                            clamped_qty = rules.normalize_quantity(target_qty, is_market=is_market)
+                            min_qty = rules.market_min_qty if is_market and rules.market_min_qty else rules.min_qty
+                            if (
+                                clamped_qty >= min_qty
+                                and (clamped_qty * price) >= min_notional
+                                and (clamped_qty * price) <= max_order_notional
+                            ):
+                                logger.info(
+                                    "Bumping order %s quantity from %s to %s to satisfy exchange min_notional %s (capped at %s)",
+                                    order.client_order_id,
+                                    order.quantity,
+                                    clamped_qty,
+                                    min_notional,
+                                    max_order_notional,
+                                )
+                                new_orders.append(order.model_copy(update={"quantity": clamped_qty}))
+                                clamped_any = True
+                                continue
+                    new_orders.append(order)
+                if clamped_any:
+                    new_delta = sum(
+                        (
+                            o.quantity if o.side == OrderSide.BUY else -o.quantity
+                            for o in new_orders
+                        ),
+                        Decimal("0.0"),
+                    )
+                    return decision.model_copy(
+                        update={
+                            "orders": new_orders,
+                            "net_exposure_delta": new_delta,
+                        }
+                    )
+        return decision
 
     def _evaluate_execution_gate(self, decision) -> tuple[bool, str]:
         result = self.decision_execution_gate.check(decision)
@@ -3625,6 +3786,8 @@ class TradingWorkerApp:
             return
             
         market_state = self.market_state_engine.classify(pa_state)
+        if not self.active_configuration:
+            return
 
         enabled_strategies = self._enabled_strategies()
         grid_depth = (
@@ -3654,8 +3817,23 @@ class TradingWorkerApp:
         )
         
         intents = [i for i in [grid_intent, trend_intent, shock_intent, carry_intent] if i]
-        
-        # Real or simulated RiskSnapshot
+
+        if (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and getattr(self, "engine_state", None) == WorkerEngineState.ARMED
+        ):
+            now_mono = time.monotonic()
+            if now_mono - getattr(self, "_last_live_eval_log_at", 0.0) >= 10.0:
+                self._last_live_eval_log_at = now_mono
+                grid_delta = grid_intent.desired_delta_qty if grid_intent else None
+                logger.info(
+                    "[MAINNET_EVAL] symbol=%s price=%s depth=%s reclaim=%s grid_delta=%s",
+                    event.symbol,
+                    event.last_price,
+                    grid_depth,
+                    getattr(pa_state, "is_reclaiming", None),
+                    grid_delta,
+                )
         if self.execution_mode in {
             WorkerExecutionMode.TESTNET,
             WorkerExecutionMode.LIVE,
@@ -3678,8 +3856,29 @@ class TradingWorkerApp:
                     != self._current_exchange_label()
                     or not self.is_account_snapshot_ready()
                 ):
+                    reconciler = getattr(getattr(self.execution_adapter, "reconciliation", None), "reconcile", None)
+                    if callable(reconciler):
+                        try:
+                            sync_result = await reconciler()
+                            if sync_result == "IN_SYNC":
+                                self.reconciliation_status = "IN_SYNC"
+                                snapshot = await self.execution_adapter.ledger.get_account_snapshot()
+                        except Exception as exc:
+                            logger.warning("Auto-reconcile on missing snapshot failed: %s", exc)
+
+                if (
+                    snapshot is None
+                    or not getattr(snapshot, "valid", False)
+                    or getattr(snapshot, "exchange_environment", None)
+                    != self._current_exchange_label()
+                    or not self.is_account_snapshot_ready()
+                ):
                     logger.error("No account snapshot available from execution adapter")
                     self.connection_state = "DEGRADED"
+                    # A staged launch still requires an authoritative account
+                    # snapshot before the first risk-increasing decision.  The
+                    # staged order limit is an order-count guard, not a
+                    # substitute for account truth.
                     self.pause_new_risk = True
                     self._refresh_engine_state()
                     return # Block execution if no account truth
@@ -3719,7 +3918,10 @@ class TradingWorkerApp:
                     ),
                     realized_pnl_24h_known=bool(snapshot.daily_loss_known),
                 )
-                self.persistence.enqueue_risk_snapshot(risk_snapshot)
+                now_monotonic = time.monotonic()
+                if now_monotonic - self._last_risk_snapshot_enqueued_at >= 10.0:
+                    self.persistence.enqueue_risk_snapshot(risk_snapshot)
+                    self._last_risk_snapshot_enqueued_at = now_monotonic
                 
                 positions = await self.execution_adapter.ledger.get_positions()
                 normalized_event_symbol = str(event.symbol).upper()
@@ -3803,8 +4005,18 @@ class TradingWorkerApp:
                     launch_readiness = self.get_launch_readiness()
                     if self.execution_mode == WorkerExecutionMode.LIVE:
                         autonomous_enabled = self._env_flag("MAINNET_LIVE_APPROVED", False)
-                        readiness_key = "mainnet_autonomous_ready"
+                        policy = str(self._launch_session_value("policy", MAINNET_LAUNCH_STAGED))
+                        if policy == MAINNET_LAUNCH_STAGED:
+                            live_ready = bool(
+                                launch_readiness.get("mainnet_preflight_ready")
+                                and launch_readiness.get("mainnet_launch_state") == "ACTIVE"
+                                and self.engine_state == WorkerEngineState.ARMED
+                                and not self.pause_new_risk
+                            )
+                        else:
+                            live_ready = bool(launch_readiness.get("mainnet_autonomous_ready"))
                         environment_name = "MAINNET"
+                        is_ready = autonomous_enabled and live_ready
                     else:
                         autonomous_enabled = self._env_flag(
                             "AUTONOMOUS_TESTNET_EXECUTION", False
@@ -3815,7 +4027,9 @@ class TradingWorkerApp:
                             else "testnet_autonomous_ready"
                         )
                         environment_name = "TESTNET"
-                    if autonomous_enabled and launch_readiness[readiness_key]:
+                        is_ready = autonomous_enabled and bool(launch_readiness.get(readiness_key, False))
+                    if is_ready:
+                        decision = self._clamp_order_notional_if_needed(decision, event.last_price)
                         is_safe, reason = self._evaluate_execution_gate(decision)
                         if is_safe:
                             logger.info(

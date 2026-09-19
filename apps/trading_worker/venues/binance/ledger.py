@@ -320,10 +320,17 @@ class InMemoryLedger:
         *,
         mark_initialized: bool = True,
     ) -> None:
+        old_active = {
+            (p.symbol, p.position_side)
+            for p in self.positions
+            if p.quantity != Decimal("0")
+        }
         self.positions = [self._to_exchange_position(p) for p in raw_positions]
         if self.on_position_update:
             for p in self.positions:
-                self.on_position_update(p)
+                key = (p.symbol, p.position_side)
+                if p.quantity != Decimal("0") or key in old_active:
+                    self.on_position_update(p)
         if mark_initialized:
             self._initialized = True
 
@@ -334,13 +341,16 @@ class InMemoryLedger:
         norm_pos = self._to_exchange_position(raw_position)
         for i, p in enumerate(self.positions):
             if p.symbol == norm_pos.symbol and p.position_side == norm_pos.position_side:
+                old_amount = p.quantity
                 self.positions[i] = norm_pos
                 if self.on_position_update:
-                    self.on_position_update(norm_pos)
+                    if norm_pos.quantity != Decimal("0") or old_amount != Decimal("0"):
+                        self.on_position_update(norm_pos)
                 return
         self.positions.append(norm_pos)
         if self.on_position_update:
-            self.on_position_update(norm_pos)
+            if norm_pos.quantity != Decimal("0"):
+                self.on_position_update(norm_pos)
         
     async def get_open_orders(self) -> List[ExecutionOrder]:
         return [o for o in self.orders.values() if o.status in ("NEW", "PARTIALLY_FILLED")]

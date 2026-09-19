@@ -191,7 +191,88 @@ export function hashEvidence(value: unknown): string {
   return crypto.createHash('sha256').update(stableJson(value), 'utf8').digest('hex');
 }
 
-export function newReleaseCandidate(input: ReleaseCandidateInput, now = new Date()): ReleaseCandidate {
+export interface ReleaseCandidateValidationOptions {
+  repoGateOutput?: unknown;
+  cloudGateOutput?: unknown;
+  expectedRepoGateHash?: string;
+  expectedCloudGateHash?: string;
+  maxCloudGateEvidenceAgeSec?: number;
+}
+
+const DEFAULT_MAX_CLOUD_GATE_EVIDENCE_AGE_SEC = 86_400;
+
+export function verifyGateEvidenceMatch(
+  candidate: Partial<ReleaseCandidate>,
+  gateOutput: { repo_tier?: unknown; cloud_tier?: unknown },
+): string[] {
+  const failures: string[] = [];
+  if (gateOutput.repo_tier !== undefined) {
+    const expected = hashEvidence(gateOutput.repo_tier);
+    if (asString(candidate.repoGateEvidenceHash) !== expected) {
+      failures.push('repoGateEvidenceHash does not match freshly-run repo gate output');
+    }
+  }
+  if (gateOutput.cloud_tier !== undefined) {
+    const expected = hashEvidence(gateOutput.cloud_tier);
+    if (asString(candidate.cloudGateEvidenceHash) !== expected) {
+      failures.push('cloudGateEvidenceHash does not match freshly-run cloud gate output');
+    }
+  }
+  return failures;
+}
+
+/**
+ * A hash-match alone only proves the caller's claimed hash agrees with the
+ * caller's own claimed payload -- it says nothing about whether that payload
+ * came from a real gate run. This is a best-effort substance check (shape,
+ * a genuine PASS, and -- for the cloud tier, which is written to disk by
+ * infra/release_gate/cloud_gate.ps1 with a generated_at timestamp -- recency)
+ * so an empty or stale fabrication is rejected even though it is internally
+ * consistent. It cannot achieve true non-repudiation: a caller who controls
+ * both the evidence blob and its hash can still fabricate a well-shaped,
+ * fresh, "passing" blob. Closing that gap needs the evidence to be signed by
+ * the Release Controller's Cloud Build pipeline (e.g. HMAC via a Secret
+ * Manager key only that pipeline can read) and verified here -- tracked as a
+ * follow-up, not implemented in this change.
+ */
+function validateGateOutputSubstance(
+  label: 'repo' | 'cloud',
+  output: unknown,
+  now: Date,
+  maxAgeSec: number,
+): string[] {
+  const failures: string[] = [];
+  const prefix = `${label}GateOutput`;
+  if (!output || typeof output !== 'object' || Array.isArray(output)) {
+    failures.push(`${prefix} is required and must be an object`);
+    return failures;
+  }
+  const record = output as Record<string, unknown>;
+  if (record.overall_passed !== true) {
+    failures.push(`${prefix}.overall_passed must be true`);
+  }
+  if (!Array.isArray(record.checks) || record.checks.length === 0) {
+    failures.push(`${prefix}.checks must be a non-empty array`);
+  }
+  if (label === 'cloud') {
+    const generatedAt = Date.parse(asString(record.generated_at));
+    if (!Number.isFinite(generatedAt)) {
+      failures.push(`${prefix}.generated_at must be a valid timestamp`);
+    } else {
+      const ageSec = (now.getTime() - generatedAt) / 1000;
+      if (ageSec < 0 || ageSec > maxAgeSec) {
+        failures.push(`${prefix}.generated_at is stale or in the future (age=${Math.round(ageSec)}s, limit=${maxAgeSec}s)`);
+      }
+    }
+  }
+  return failures;
+}
+
+export function newReleaseCandidate(
+  input: ReleaseCandidateInput,
+  now = new Date(),
+  options: ReleaseCandidateValidationOptions = {},
+): ReleaseCandidate {
   const candidate: ReleaseCandidate = {
     candidateId: `rc-${crypto.randomUUID()}`,
     repoSha: asString(input.repoSha),
@@ -216,7 +297,12 @@ export function newReleaseCandidate(input: ReleaseCandidateInput, now = new Date
     createdAt: now.toISOString(),
     status: 'PENDING_APPROVAL',
   };
-  const failures = validateReleaseCandidate(candidate, now);
+  const maxAgeSec = options.maxCloudGateEvidenceAgeSec ?? DEFAULT_MAX_CLOUD_GATE_EVIDENCE_AGE_SEC;
+  const failures = [
+    ...validateReleaseCandidate(candidate, now, options),
+    ...validateGateOutputSubstance('repo', options.repoGateOutput, now, maxAgeSec),
+    ...validateGateOutputSubstance('cloud', options.cloudGateOutput, now, maxAgeSec),
+  ];
   if (failures.length) throw new Error(failures.join('; '));
   return candidate;
 }
@@ -224,6 +310,7 @@ export function newReleaseCandidate(input: ReleaseCandidateInput, now = new Date
 export function validateReleaseCandidate(
   candidate: Partial<ReleaseCandidate> | undefined,
   now = new Date(),
+  options: ReleaseCandidateValidationOptions = {},
 ): string[] {
   if (!candidate) return ['release candidate is missing'];
   const failures: string[] = [];
@@ -244,6 +331,21 @@ export function validateReleaseCandidate(
     ['cloudGateEvidenceHash', candidate.cloudGateEvidenceHash],
   ] as const) {
     if (!SHA256_RE.test(asString(value))) failures.push(`${name} must be a SHA-256 hash`);
+  }
+  if (options.repoGateOutput || options.cloudGateOutput) {
+    failures.push(
+      ...verifyGateEvidenceMatch(candidate, {
+        repo_tier: options.repoGateOutput,
+        cloud_tier: options.cloudGateOutput,
+      }),
+    );
+  } else {
+    if (options.expectedRepoGateHash && asString(candidate.repoGateEvidenceHash) !== options.expectedRepoGateHash) {
+      failures.push('repoGateEvidenceHash does not match freshly-run repo gate output');
+    }
+    if (options.expectedCloudGateHash && asString(candidate.cloudGateEvidenceHash) !== options.expectedCloudGateHash) {
+      failures.push('cloudGateEvidenceHash does not match freshly-run cloud gate output');
+    }
   }
   if (candidate.launchPolicy !== RELEASE_POLICY) failures.push('launchPolicy must be STAGED_FIRST_ORDER');
   const expiresAt = Date.parse(asString(candidate.expiresAt));
@@ -276,7 +378,9 @@ export function validateApprovalPrerequisites(
   maxPreflightAgeSeconds = 60,
 ): string[] {
   const failures = validateReleaseCandidate(candidate, now);
-  if (candidate.status !== 'PENDING_APPROVAL') failures.push(`candidate status is ${candidate.status}`);
+  if (candidate.status !== 'PENDING_APPROVAL' && candidate.status !== 'APPROVED' && candidate.status !== 'CONSUMED') {
+    failures.push(`candidate status is ${candidate.status}`);
+  }
   if (snapshot.currentImageDigest !== candidate.imageDigest) failures.push('worker image digest does not match candidate');
   if (snapshot.currentWorkerRevision !== candidate.workerRevision) failures.push('worker revision does not match candidate');
   if (snapshot.currentExecutionMode !== RELEASE_EXECUTION_MODE) failures.push('worker execution mode is not LIVE');

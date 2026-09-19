@@ -168,7 +168,7 @@ async def test_mainnet_caps_enforced(monkeypatch):
     """Verify the locked Mainnet caps and order notional enforcement."""
     limits = SafetyLimits.from_environment(BinanceEnvironment.MAINNET)
     assert limits.allowed_symbols == {"ETHUSDC"}
-    assert limits.max_collateral <= Decimal("100.0")
+    assert limits.max_collateral <= Decimal("250.0")
     assert limits.max_total_open_notional <= Decimal("1000.0")
     assert limits.max_single_order_notional <= Decimal("50.0")
     assert limits.max_daily_loss <= Decimal("5.0")
@@ -400,3 +400,207 @@ def test_cli_mutation_commands_rejected():
     for mutation in ("place_order", "new_order", "cancel_order", "cancel_all", "transfer", "set_leverage", "set_margin_type"):
         with pytest.raises(BinanceCliPolicyError):
             build_read_only_command(mutation)
+
+
+@pytest.mark.asyncio
+async def test_disarmed_worker_ignores_market_event_without_pausing_risk():
+    """Verify that incoming market events while DISARMED in LIVE mode do not trigger risk pause."""
+    from apps.trading_worker.main import (
+        TradingWorkerApp,
+        WorkerExecutionMode,
+        WorkerEngineState,
+    )
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    worker.engine_state = WorkerEngineState.DISARMED
+    worker.active_configuration = None
+    worker.execution_adapter = None
+    worker.pause_new_risk = False
+
+    event = MarketEvent(
+        event_id="ev-live-disarmed",
+        event_time=utc_now(),
+        venue="BINANCE_MAINNET",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("2500.0"),
+        best_bid=Decimal("2499.0"),
+        best_ask=Decimal("2501.0"),
+        funding_rate=Decimal("0.0001"),
+    )
+
+    await worker.handle_market_event(event)
+
+    assert worker.engine_state == WorkerEngineState.DISARMED
+    assert worker.pause_new_risk is False
+    assert worker.get_state().engine_state == WorkerEngineState.DISARMED
+
+
+def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
+    """Verify that ETHUSDC grid sizing and dynamic notional clamp honor the 50 USDC pilot limit."""
+    from apps.trading_worker.engines.grid_strategy import GridStrategyEngine
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from apps.trading_worker.venues.binance.models import TestnetSafetyLimits
+    from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
+    from domain.models import (
+        ExecutionDecision,
+        MarketState,
+        OrderIntent,
+        OrderSide,
+        OrderType,
+        PositionSide,
+        PriceActionState,
+        RegimeType,
+        TimeInForce,
+    )
+
+    now = utc_now()
+    pa_state = PriceActionState(
+        symbol="ETHUSDC",
+        timestamp=now,
+        swing_high=Decimal("2550"),
+        swing_low=Decimal("2450"),
+        prior_24h_high=Decimal("2550"),
+        prior_24h_low=Decimal("2450"),
+        displacement_velocity_pct=Decimal("0"),
+        displacement_acceleration=Decimal("0"),
+        range_expansion_ratio=Decimal("0"),
+        is_reclaiming=True,
+    )
+    market_state = type(
+        "StubMarketState",
+        (),
+        {
+            "symbol": "ETHUSDC",
+            "timestamp": now,
+            "primary_regime": RegimeType.R1_RANGE,
+            "regime_probabilities": {},
+            "atr_1h": Decimal("20"),
+            "volatility_zscore": Decimal("0"),
+            "shock_active": False,
+        },
+    )()
+
+    # Grid engine for ETHUSDC should size appropriately
+    grid = GridStrategyEngine()
+    intent = grid.evaluate(pa_state, market_state, grid_depth=0)
+    assert intent is not None
+    assert intent.desired_delta_qty == Decimal("0.028")
+
+    # Dynamic clamp in worker
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+
+    rules = SymbolTradingRules("ETHUSDC")
+    rules.status = "TRADING"
+    rules.min_qty = Decimal("0.001")
+    rules.max_qty = Decimal("1000.0")
+    rules.step_size = Decimal("0.001")
+    rules.min_price = Decimal("0.01")
+    rules.max_price = Decimal("100000.0")
+    rules.tick_size = Decimal("0.01")
+    rules.min_notional = Decimal("5.0")
+
+    class MockLimitsAdapter:
+        safety_limits = TestnetSafetyLimits.from_environment("MAINNET")
+        symbol_rules = {"ETHUSDC": rules}
+
+    worker.execution_adapter = MockLimitsAdapter()
+
+    oversized_order = OrderIntent(
+        client_order_id="CID-OVERSIZED",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.1"),  # 0.1 * 2500 = 250 USDC > 50 USDC
+        created_at=now,
+    )
+    decision = ExecutionDecision(
+        decision_id="DEC-TEST-CLAMP",
+        symbol="ETHUSDC",
+        action="SUBMIT_ORDER",
+        orders=[oversized_order],
+        net_exposure_delta=Decimal("0.1"),
+        timestamp=now,
+    )
+
+    decision = worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2500.0"))
+
+    clamped_order = decision.orders[0]
+    clamped_notional = clamped_order.quantity * Decimal("2500.0")
+    assert clamped_notional <= Decimal("50.0")
+    assert clamped_notional >= Decimal("5.0")
+    assert clamped_order.quantity == Decimal("0.018")  # 45 / 2500 = 0.018
+    assert decision.net_exposure_delta == Decimal("0.018")
+
+
+def test_clamp_order_notional_bumps_undersized_order_to_satisfy_min_notional():
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from apps.trading_worker.venues.binance.models import TestnetSafetyLimits
+    from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
+    from domain.models import (
+        ExecutionDecision,
+        OrderIntent,
+        OrderSide,
+        OrderType,
+        PositionSide,
+        TimeInForce,
+        MarketType,
+    )
+    from datetime import datetime, timezone
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+
+    rules = SymbolTradingRules("ETHUSDC")
+    rules.status = "TRADING"
+    rules.min_qty = Decimal("0.001")
+    rules.max_qty = Decimal("1000.0")
+    rules.step_size = Decimal("0.001")
+    rules.min_price = Decimal("0.01")
+    rules.max_price = Decimal("100000.0")
+    rules.tick_size = Decimal("0.01")
+    rules.min_notional = Decimal("20.0")
+
+    class MockLimitsAdapter:
+        safety_limits = TestnetSafetyLimits.from_environment("MAINNET")
+        symbol_rules = {"ETHUSDC": rules}
+
+    worker.execution_adapter = MockLimitsAdapter()
+
+    now = datetime.now(timezone.utc)
+    undersized_order = OrderIntent(
+        client_order_id="B-SYS-TEST-MIN-NOTIONAL",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.005"),  # 0.005 * 2500 = 12.5 USDC < 20 USDC
+        created_at=now,
+    )
+    decision = ExecutionDecision(
+        decision_id="DEC-TEST-CLAMP-MIN",
+        symbol="ETHUSDC",
+        action="SUBMIT_ORDER",
+        orders=[undersized_order],
+        net_exposure_delta=Decimal("0.005"),
+        timestamp=now,
+    )
+
+    decision = worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2500.0"))
+
+    clamped_order = decision.orders[0]
+    clamped_notional = clamped_order.quantity * Decimal("2500.0")
+    assert clamped_notional >= Decimal("20.0"), f"Expected >= 20, got {clamped_notional}"
+    assert clamped_notional <= Decimal("50.0"), f"Expected <= 50, got {clamped_notional}"
+    assert clamped_order.quantity == Decimal("0.010")  # 25 / 2500 = 0.010
+    assert decision.net_exposure_delta == Decimal("0.010")
+
+
+

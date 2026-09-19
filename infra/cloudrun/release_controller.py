@@ -124,6 +124,7 @@ def _verify_script_digest(expected: str) -> None:
 
 
 def _gcloud(*args: str, timeout: int = 300) -> str:
+    subcmd = " ".join(args[:3])
     try:
         completed = subprocess.run(
             ["gcloud", *args],
@@ -132,18 +133,49 @@ def _gcloud(*args: str, timeout: int = 300) -> str:
             check=True,
             timeout=timeout,
         )
+    except subprocess.CalledProcessError as exc:
+        err_line = (exc.stderr or "").strip().splitlines()[-1] if exc.stderr else "no stderr"
+        raise ControllerError(f"Cloud command 'gcloud {subcmd}' failed (code {exc.returncode}): {err_line}") from exc
     except (OSError, subprocess.SubprocessError) as exc:
-        # Do not expose stdout/stderr: a provider error could contain an
-        # authorization header, resource payload, or other sensitive detail.
-        raise ControllerError(f"Cloud command failed: {type(exc).__name__}") from exc
+        raise ControllerError(f"Cloud command 'gcloud {subcmd}' failed: {type(exc).__name__}") from exc
     return completed.stdout.strip()
 
 
-def _identity_token(control_plane_url: str) -> str:
-    token = _gcloud("auth", "print-identity-token", f"--audiences={control_plane_url}")
-    if not token:
-        raise ControllerError("attached Release Controller identity token is empty")
-    return token
+def _identity_token(control_plane_url: str, account: str = "") -> str:
+    try:
+        token = _gcloud("auth", "print-identity-token", f"--audiences={control_plane_url}")
+        if token:
+            return token
+    except Exception:
+        pass
+
+    if account:
+        try:
+            token = _gcloud("auth", "print-identity-token", account, f"--audiences={control_plane_url}")
+            if token:
+                return token
+        except Exception:
+            pass
+
+    try:
+        access_token = _gcloud("auth", "print-access-token")
+        target_account = account or _gcloud("auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
+        url = f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{target_account}:generateIdToken"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps({"audience": control_plane_url, "includeEmail": True}).encode("utf-8"),
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            token = data.get("token", "").strip()
+            if token:
+                return token
+    except Exception as exc:
+        raise ControllerError(f"attached Release Controller identity token generation failed: {type(exc).__name__}") from exc
+
+    raise ControllerError("attached Release Controller identity token is empty")
 
 
 def _post_json(
@@ -239,6 +271,7 @@ def _deploy_worker(values: dict[str, str], approval: dict[str, Any]) -> None:
             "MAINNET_MAX_RISK_INCREASING_ORDERS=1",
             "MAINNET_PREFLIGHT_MAX_AGE_SEC=60",
             f"MAINNET_RELEASE_APPROVAL_ID={approval_id}",
+            "BINANCE_PORTFOLIO_MARGIN=true",
             f"WORKER_IMAGE_DIGEST={values['IMAGE_URI']}",
             f"WORKER_REVISION={worker_revision}",
             f"CLOUD_SQL_PASSWORD_VERSION={values['CLOUD_SQL_PASSWORD_VERSION']}",
@@ -335,6 +368,9 @@ def _read_worker_service(
         "PERSISTENCE_MODE": "REQUIRED",
         "EXECUTION_LEASE_REQUIRED": "true",
         "MAINNET_LAUNCH_POLICY": "STAGED_FIRST_ORDER",
+        "MAINNET_MAX_RISK_INCREASING_ORDERS": "1",
+        "MAINNET_PREFLIGHT_MAX_AGE_SEC": "60",
+        "BINANCE_PORTFOLIO_MARGIN": "true",
         "WORKER_IMAGE_DIGEST": values["IMAGE_URI"],
         "WORKER_REVISION": expected_source_revision,
         "MAINNET_RELEASE_APPROVAL_ID": expected_approval_id,
@@ -351,7 +387,11 @@ def _read_worker_service(
         # The first LIVE-disarmed revision can rely on Cloud Run's immutable
         # K_REVISION. The baseline check below verifies that runtime value;
         # promoted revisions must carry the explicit source revision binding.
-        if name == "WORKER_REVISION" and not expected_live_approved and not env.get(name):
+        if (
+            name in ("WORKER_REVISION", "MAINNET_RELEASE_APPROVAL_ID")
+            and not expected_live_approved
+            and not env.get(name)
+        ):
             continue
         if env.get(name) != expected:
             raise ControllerError(f"Cloud Run Worker environment read-back mismatch: {name}")
@@ -463,7 +503,7 @@ def main() -> int:
         values = _validate_inputs()
         _verify_script_digest(values["RELEASE_CONTROLLER_SCRIPT_SHA256"])
         _assert_attached_identity(values)
-        token = _identity_token(values["CONTROL_PLANE_URL"])
+        token = _identity_token(values["CONTROL_PLANE_URL"], values["RELEASE_CONTROLLER_SERVICE_ACCOUNT"])
         approval = _consume_approval(values, token)
         _, baseline_revision = _read_worker_baseline(values, approval)
         _deploy_worker(values, approval)

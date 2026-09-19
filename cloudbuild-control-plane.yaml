@@ -3,16 +3,20 @@ substitutions:
   # it to the immutable digest and pass that digest to deploy-control-plane.ps1.
   _IMAGE_TAG: 'control-plane-$BUILD_ID'
 
-steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'build'
-      - '-f'
-      - 'Dockerfile.control-plane'
-      - '-t'
-      - 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/control-plane:${_IMAGE_TAG}'
-      - '.'
+logsBucket: 'gs://gen-lang-client-0730128480_cloudbuild/logs'
 
-images:
-  - 'asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/control-plane:${_IMAGE_TAG}'
+steps:
+  # See cloudbuild.yaml for why this runs through bash instead of handing
+  # ${_IMAGE_TAG} straight to `docker` / the top-level images: field.
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    env:
+      - 'BUILD_ID=$BUILD_ID'
+    args:
+      - '-c'
+      - |
+        set -euo pipefail
+        IMAGE="asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/control-plane:${_IMAGE_TAG}"
+        docker build -f Dockerfile.control-plane -t "$$IMAGE" .
+        docker push "$$IMAGE"
 timeout: '1200s'

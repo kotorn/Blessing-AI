@@ -193,7 +193,7 @@ export async function authorizeInternalServiceRequest(
  * control mutations require operator or better, and reads require viewer.
  */
 export function requiredControlPlaneRole(req: ControlPlaneRequestLike): ControlPlaneRole {
-  const route = (req.originalUrl || req.path || '').split('?')[0];
+  const route = (req.originalUrl || req.path || '').split('?')[0].toLowerCase();
   const method = String(req.method || 'GET').toUpperCase();
   if (method === 'GET' || method === 'HEAD') return 'viewer';
 
@@ -213,7 +213,10 @@ export function requiredControlPlaneRole(req: ControlPlaneRequestLike): ControlP
   }
 
   if (route.endsWith('/kill-switch') || route.endsWith('/killswitch')) {
-    return 'trading_admin';
+    const active = (req.body as { active?: unknown } | undefined)?.active;
+    // Disengaging the kill switch (active === false) strictly requires trading_admin.
+    // Engaging the emergency kill switch (active !== false) is accessible to operators.
+    return active === false ? 'trading_admin' : 'operator';
   }
 
   return 'operator';

@@ -671,9 +671,15 @@ class PersistenceManager:
         )
 
     def enqueue_position(self, position: ExchangePosition) -> bool:
-        instrument = self._require_instrument(position.symbol)
-        if instrument is None:
-            return False
+        qty = getattr(position, "quantity", getattr(position, "position_amount", Decimal("1")))
+        if qty == Decimal("0"):
+            instrument = self._instrument_for(position.symbol)
+            if instrument is None:
+                return False
+        else:
+            instrument = self._require_instrument(position.symbol)
+            if instrument is None:
+                return False
         timestamp = _utc(position.event_time)
         position_side = str(_enum_value(position.position_side))
         # REST-refreshed positions (emergency flatten, reconciliation) never
