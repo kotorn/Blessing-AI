@@ -2673,7 +2673,7 @@ app.post('/api/system/arm', async (req, res) => {
       armedAt: new Date().toISOString()
     };
     
-    auditRepository.logEvent({
+    await auditRepository.logEvent({
       eventType: 'ENGINE_ARMED',
       previousState,
       newState: 'ARMED',
@@ -2866,7 +2866,7 @@ app.post('/api/system/continue', async (req: Request, res: Response) => {
       });
     }
     projectWorkerState(workerState);
-    auditRepository.logEvent({
+    await auditRepository.logEvent({
       eventType: 'AUTONOMOUS_CONTINUATION_ACTIVATED',
       previousState: tradingSystemState.engineState,
       newState: 'ARMED',
@@ -2909,7 +2909,7 @@ app.post('/api/system/disarm', async (req, res) => {
     }
     tradingSystemState.engineState = 'DISARMED';
     
-    auditRepository.logEvent({
+    await auditRepository.logEvent({
       eventType: 'ENGINE_DISARMED',
       previousState,
       newState: 'DISARMED',
@@ -3446,7 +3446,7 @@ app.post('/api/quant/killswitch', async (req: Request, res: Response) => {
     tradingSystemState.killSwitchActive = actualActive;
     if (actualActive) tradingSystemState.engineState = 'EMERGENCY';
     else if (forwarded.data.status === 'CONFIRMED') tradingSystemState.engineState = 'DISARMED';
-    auditRepository.logEvent({
+    await auditRepository.logEvent({
       eventType: actualActive ? 'KILL_SWITCH_ENGAGED' : 'KILL_SWITCH_RELEASED',
       previousState: prevState,
       newState: tradingSystemState.engineState,
