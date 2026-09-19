@@ -217,7 +217,7 @@ class BinanceRestClient:
                 "Binance request is outside the fixed USDⓈ-M endpoint allowlist: "
                 f"{method_upper} {path}"
             )
-        if path in ("/fapi/v1/order", "/papi/v1/um/order"):
+        if path in ("/fapi/v1/order", "/papi/v1/um/order") and method_upper in ("POST", "PUT", "DELETE"):
             self.order_endpoint_attempts += 1
             if self.read_only:
                 raise PermissionError(

@@ -1,7 +1,7 @@
 import os
 import pytest
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from apps.trading_worker.venues.binance.config import (
     BinanceEnvironment,
@@ -60,6 +60,33 @@ async def test_rest_client_read_only_blocks_papi_order():
     with pytest.raises(PermissionError, match="Read-only Binance client cannot call the order endpoint"):
         await client.request("POST", "/papi/v1/um/order", signed=True)
     assert client.order_endpoint_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_rest_client_read_only_allows_get_order_query():
+    client = BinanceRestClient(
+        "key", "secret", BinanceEnvironment.MAINNET, read_only=True, portfolio_margin=True
+    )
+    class MockContextManager:
+        def __init__(self, resp):
+            self.resp = resp
+        async def __aenter__(self):
+            return self.resp
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value={"symbol": "ETHUSDC", "orderId": 12345, "status": "FILLED"})
+    mock_resp.headers = {}
+    mock_session = MagicMock()
+    mock_session.request = MagicMock(return_value=MockContextManager(mock_resp))
+    client.session = mock_session
+    client._server_time_offset_ms = 0
+
+    res = await client.request("GET", "/papi/v1/um/order", signed=True, params={"symbol": "ETHUSDC"})
+    assert res["status"] == "FILLED"
+    assert client.order_endpoint_attempts == 0
 
 
 @pytest.mark.asyncio
