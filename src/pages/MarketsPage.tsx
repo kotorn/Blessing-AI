@@ -1,14 +1,7 @@
 import React, { useState } from 'react';
 import {
   LineChart,
-  Layers,
-  Compass,
-  Zap,
-  DollarSign,
   Info,
-  Clock,
-  ChevronRight,
-  ShieldCheck,
 } from 'lucide-react';
 import { InstrumentData } from '../types';
 import { InstrumentsPanel } from '../components/InstrumentsPanel';

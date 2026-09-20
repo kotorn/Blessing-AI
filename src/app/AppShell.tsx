@@ -12,8 +12,10 @@ import { BalanceAllocationModal } from '../components/BalanceAllocationModal';
 import { GoogleCloudCenterModal } from '../components/GoogleCloudCenterModal';
 import { GoogleWorkspaceModal } from '../components/GoogleWorkspaceModal';
 import { StartTradingWizard } from '../components/StartTradingWizard';
+import { ConfirmationModal } from '../components/ConfirmationModal';
+import { ActionFeedback, ActionToast } from '../components/ActionToast';
 import { binanceApi, BinanceKeyStatus } from '../api/binance';
-import { AlertTriangle, Power } from 'lucide-react';
+import { Power } from 'lucide-react';
 
 export const AppShell: React.FC = () => {
   const { cloudAudit, firestoreConnected } = useAuth();
@@ -41,9 +43,7 @@ export const AppShell: React.FC = () => {
     updateAccount,
     toggleKillSwitch,
     armEngine,
-    disarmEngine,
     togglePauseNewRisk,
-    toggleRecoveryOnly,
     expandGrid,
     enterRecovery,
     closeBasket,
@@ -63,7 +63,6 @@ export const AppShell: React.FC = () => {
   const [copilotOpen, setCopilotOpen] = useState<boolean>(false);
   const [alertsOpen, setAlertsOpen] = useState<boolean>(false);
   const [dismissedAlerts, setDismissedAlerts] = useState<Set<string>>(new Set());
-  const [pauseNewRisk, setPauseNewRisk] = useState<boolean>(false);
 
   // Modals
   const [showBinanceModal, setShowBinanceModal] = useState<boolean>(false);
@@ -71,6 +70,10 @@ export const AppShell: React.FC = () => {
   const [showGoogleCloudModal, setShowGoogleCloudModal] = useState<boolean>(false);
   const [showWorkspaceModal, setShowWorkspaceModal] = useState<boolean>(false);
   const [showStartTradingWizard, setShowStartTradingWizard] = useState<boolean>(false);
+  const [showDisarmConfirm, setShowDisarmConfirm] = useState<boolean>(false);
+
+  // Safety-critical actions must never fail silently (e.g. 401 while signed out)
+  const [actionFeedback, setActionFeedback] = useState<ActionFeedback | null>(null);
 
   // Binance connection telemetry
   const [binanceStatus, setBinanceStatus] = useState<BinanceKeyStatus | null>(null);
@@ -119,6 +122,46 @@ export const AppShell: React.FC = () => {
   const killSwitchActive = systemState?.killSwitchActive || workerUnavailable;
   const engineState = workerUnavailable ? 'DEGRADED' : systemState.engineState;
 
+  const describeActionError = useCallback((err: unknown): string => {
+    if (err && typeof err === 'object' && 'status' in err) {
+      const status = (err as { status?: number }).status;
+      if (status === 401) {
+        return 'Sign-in required: authenticate with a Google account that has operator permissions before changing system state.';
+      }
+      if (status === 403) {
+        return 'Not authorized: your account does not have the required role for this action.';
+      }
+    }
+    return err instanceof Error ? err.message : 'Action failed due to an unexpected error.';
+  }, []);
+
+  // Wraps system mutations so failures surface as a visible toast instead of
+  // an unhandled rejection; returns whether the action succeeded.
+  const runSafeAction = useCallback(async (action: () => Promise<unknown>, successText?: string): Promise<boolean> => {
+    try {
+      await action();
+      if (successText) {
+        setActionFeedback({ type: 'success', text: successText });
+      }
+      return true;
+    } catch (err) {
+      console.warn('System action failed:', err);
+      setActionFeedback({ type: 'error', text: describeActionError(err) });
+      return false;
+    }
+  }, [describeActionError]);
+
+  const handleToggleKillSwitch = useCallback(() => {
+    void runSafeAction(() => toggleKillSwitch());
+  }, [runSafeAction, toggleKillSwitch]);
+
+  const handleTogglePauseNewRisk = useCallback((active: boolean) => {
+    void runSafeAction(
+      () => togglePauseNewRisk(active),
+      active ? 'New-risk pause enabled.' : 'New-risk pause lifted.'
+    );
+  }, [runSafeAction, togglePauseNewRisk]);
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
       {/* 1. Left Persistent Trading OS Sidebar */}
@@ -140,7 +183,7 @@ export const AppShell: React.FC = () => {
             engineState={engineState}
           riskState={account.risk_state}
           killSwitchActive={killSwitchActive}
-          onToggleKillSwitch={toggleKillSwitch}
+          onToggleKillSwitch={handleToggleKillSwitch}
           systemMode={systemMode}
           lastUpdated={lastUpdated}
           onRefresh={refresh}
@@ -149,7 +192,7 @@ export const AppShell: React.FC = () => {
           onOpenBinanceModal={() => setShowBinanceModal(true)}
           openBasketsCount={baskets.length}
           pauseNewRiskActive={pauseNewRiskActive}
-          onTogglePauseNewRisk={() => togglePauseNewRisk(!pauseNewRiskActive)}
+          onTogglePauseNewRisk={handleTogglePauseNewRisk}
           onOpenStartTradingWizard={() => setShowStartTradingWizard(true)}
         />
 
@@ -162,7 +205,7 @@ export const AppShell: React.FC = () => {
             </div>
             <button
               type="button"
-              onClick={toggleKillSwitch}
+              onClick={() => setShowDisarmConfirm(true)}
               className="px-2.5 py-1 bg-rose-800 hover:bg-rose-700 text-white rounded text-[11px] font-bold cursor-pointer"
             >
               DISARM KILL SWITCH
@@ -187,7 +230,7 @@ export const AppShell: React.FC = () => {
               metaAllocations={metaAllocations}
               exposureRecovery={exposureRecovery}
               killSwitchActive={killSwitchActive}
-              onToggleKillSwitch={toggleKillSwitch}
+              onToggleKillSwitch={handleToggleKillSwitch}
               correlationBtcEth={correlationBtcEth}
               cryptoBetaExposurePct={cryptoBetaExposurePct}
               liquidationDistancePct={liquidationDistancePct}
@@ -257,12 +300,41 @@ export const AppShell: React.FC = () => {
       {showStartTradingWizard && (
         <StartTradingWizard
           onComplete={async (params) => {
-            await armEngine(params);
-            setShowStartTradingWizard(false);
+            const armed = await runSafeAction(() => armEngine(params), 'Trading engine armed.');
+            if (armed) {
+              setShowStartTradingWizard(false);
+            }
           }}
           onCancel={() => setShowStartTradingWizard(false)}
         />
       )}
+
+      {/* Disarm Kill Switch Confirmation */}
+      <ConfirmationModal
+        isOpen={showDisarmConfirm}
+        title="CONFIRM KILL SWITCH DISARM"
+        message={
+          <div className="space-y-3">
+            <p>Disarming will resume normal operation:</p>
+            <ul className="list-disc pl-4 space-y-1 text-zinc-400">
+              <li>Restart strategy order generation loops</li>
+              <li>Lift the veto on all incoming orders</li>
+              <li>Allow grid expansion on {baskets.length} basket(s)</li>
+            </ul>
+            <p className="text-amber-300">Only disarm after verifying that positions and market state are safe.</p>
+          </div>
+        }
+        confirmText="DISARM KILL SWITCH"
+        isDestructive={false}
+        onConfirm={() => {
+          setShowDisarmConfirm(false);
+          void runSafeAction(() => toggleKillSwitch());
+        }}
+        onCancel={() => setShowDisarmConfirm(false)}
+      />
+
+      {/* Global action feedback (never fail silently) */}
+      <ActionToast feedback={actionFeedback} onDismiss={() => setActionFeedback(null)} />
     </div>
   );
 };

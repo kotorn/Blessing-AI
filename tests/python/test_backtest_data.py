@@ -322,7 +322,7 @@ def test_evaluate_trades_rejects_duplicate_research_trade_ids():
     with pytest.raises(ValueError, match="duplicate research trade_id"):
         evaluate_trades(
             [first, duplicate],
-            initial_capital=Decimal("1000"),
+            initial_capital=Decimal(1000),
             cost_model=EconomicCostModel(
                 maker_fee_rate=Decimal("0.0002"),
                 taker_fee_rate=Decimal("0.0005"),
@@ -350,8 +350,8 @@ def test_walk_forward_evidence_requires_net_oos_regimes_and_parameter_plateau():
         ParameterVariantResult(
             variant_id=f"variant-{index}",
             oos_net_return_pct=Decimal(value),
-            oos_average_net_pnl=Decimal("1"),
-            max_drawdown_pct=Decimal("2"),
+            oos_average_net_pnl=Decimal(1),
+            max_drawdown_pct=Decimal(2),
             oos_trade_count=10,
             evaluated_oos_fold_indices=(0, 1, 2),
         )
@@ -389,7 +389,7 @@ def test_walk_forward_evidence_requires_net_oos_regimes_and_parameter_plateau():
             purge_size=1,
             embargo_size=1,
         ),
-        initial_capital=Decimal("1000"),
+        initial_capital=Decimal(1000),
         cost_model=EconomicCostModel(
             maker_fee_rate=Decimal("0.0002"),
             taker_fee_rate=Decimal("0.0005"),
@@ -415,7 +415,7 @@ def test_walk_forward_evidence_fails_quality_without_plateau_or_regime_coverage(
     evidence = evaluate_walk_forward_evidence(
         trades,
         config=WalkForwardConfig(train_size=2, test_size=2, purge_size=1, embargo_size=1),
-        initial_capital=Decimal("1000"),
+        initial_capital=Decimal(1000),
         cost_model=EconomicCostModel(
             maker_fee_rate=Decimal("0.0002"),
             taker_fee_rate=Decimal("0.0005"),
@@ -448,9 +448,9 @@ def test_unknown_oos_regime_blocks_quality_even_when_required_regime_is_present(
     variants = [
         ParameterVariantResult(
             variant_id=f"variant-{index}",
-            oos_net_return_pct=Decimal("1"),
-            oos_average_net_pnl=Decimal("1"),
-            max_drawdown_pct=Decimal("2"),
+            oos_net_return_pct=Decimal(1),
+            oos_average_net_pnl=Decimal(1),
+            max_drawdown_pct=Decimal(2),
             oos_trade_count=10,
         )
         for index in range(3)
@@ -459,7 +459,7 @@ def test_unknown_oos_regime_blocks_quality_even_when_required_regime_is_present(
     evidence = evaluate_walk_forward_evidence(
         trades,
         config=WalkForwardConfig(train_size=2, test_size=2, purge_size=1, embargo_size=1),
-        initial_capital=Decimal("1000"),
+        initial_capital=Decimal(1000),
         cost_model=EconomicCostModel(
             maker_fee_rate=Decimal("0.0002"),
             taker_fee_rate=Decimal("0.0005"),
@@ -481,9 +481,9 @@ def test_walk_forward_quality_requires_train_only_selection_and_complete_oos_bin
     variants = [
         ParameterVariantResult(
             variant_id=f"variant-{index}",
-            oos_net_return_pct=Decimal("1"),
-            oos_average_net_pnl=Decimal("1"),
-            max_drawdown_pct=Decimal("2"),
+            oos_net_return_pct=Decimal(1),
+            oos_average_net_pnl=Decimal(1),
+            max_drawdown_pct=Decimal(2),
             oos_trade_count=10,
         )
         for index in range(3)
@@ -492,7 +492,7 @@ def test_walk_forward_quality_requires_train_only_selection_and_complete_oos_bin
     evidence = evaluate_walk_forward_evidence(
         trades,
         config=WalkForwardConfig(train_size=2, test_size=2, purge_size=1, embargo_size=1),
-        initial_capital=Decimal("1000"),
+        initial_capital=Decimal(1000),
         cost_model=EconomicCostModel(
             maker_fee_rate=Decimal("0.0002"),
             taker_fee_rate=Decimal("0.0005"),
@@ -514,9 +514,9 @@ def test_selection_evidence_must_bind_the_actual_train_window():
     variants = [
         ParameterVariantResult(
             variant_id=f"variant-{index}",
-            oos_net_return_pct=Decimal("1"),
-            oos_average_net_pnl=Decimal("1"),
-            max_drawdown_pct=Decimal("2"),
+            oos_net_return_pct=Decimal(1),
+            oos_average_net_pnl=Decimal(1),
+            max_drawdown_pct=Decimal(2),
             oos_trade_count=10,
             evaluated_oos_fold_indices=(0, 1, 2),
         )
@@ -536,7 +536,7 @@ def test_selection_evidence_must_bind_the_actual_train_window():
     evidence = evaluate_walk_forward_evidence(
         trades,
         config=WalkForwardConfig(train_size=2, test_size=2, purge_size=1, embargo_size=1),
-        initial_capital=Decimal("1000"),
+        initial_capital=Decimal(1000),
         cost_model=EconomicCostModel(
             maker_fee_rate=Decimal("0.0002"),
             taker_fee_rate=Decimal("0.0005"),

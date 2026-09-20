@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldCheck, ShieldAlert, CheckCircle2, AlertTriangle, XCircle, Activity, Lock } from 'lucide-react';
+import {   CheckCircle2, AlertTriangle, XCircle,  Lock } from 'lucide-react';
 import { RiskRuleItem, RiskState } from '../types';
 
 interface RiskGovernorMonitorProps {

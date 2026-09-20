@@ -14,7 +14,6 @@ import {
 } from 'recharts';
 import {
   Wallet,
-  TrendingUp,
   Scale,
   Coins,
   Bot,
@@ -26,15 +25,10 @@ import {
   Layers,
   CheckCircle2,
   AlertTriangle,
-  Maximize2,
-  Minimize2,
   X,
-  ShieldCheck,
   Search,
-  ChevronRight,
   Database,
   Lock,
-  Sparkles,
 } from 'lucide-react';
 import { AccountData, SubWalletSummary, TwoLayerAsset } from '../types';
 import { apiClient } from '../api/client';
@@ -473,7 +467,7 @@ export const BalanceAllocation: React.FC<BalanceAllocationProps> = ({
                   <Legend
                     verticalAlign="bottom"
                     height={36}
-                    formatter={(value, entry: any) => {
+                    formatter={(value, _entry: any) => {
                       const item = pieChartData.find((p) => p.name === value);
                       return (
                         <span className="text-xs text-zinc-300 font-medium">

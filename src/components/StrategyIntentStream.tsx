@@ -1,16 +1,6 @@
 import React from 'react';
 import {
   Cpu,
-  Layers,
-  ArrowRight,
-  TrendingUp,
-  TrendingDown,
-  Clock,
-  Zap,
-  Info,
-  ShieldCheck,
-  Compass,
-  DollarSign,
 } from 'lucide-react';
 import { StrategyIntentItem } from '../types/strategy';
 import { BasketItem, InstrumentData } from '../types';
@@ -22,8 +12,6 @@ interface StrategyIntentStreamProps {
 }
 
 export const StrategyIntentStream: React.FC<StrategyIntentStreamProps> = ({
-  baskets,
-  instruments,
   intentsData,
 }) => {
   // Strategy intents are authoritative only when supplied by the Python

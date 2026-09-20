@@ -15,7 +15,6 @@ import {
   Bot,
   ChevronLeft,
   ChevronRight,
-  ShieldAlert,
   Zap,
 } from 'lucide-react';
 import { AppRoute, SystemMode } from '../contracts/system';

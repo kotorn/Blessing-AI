@@ -12,7 +12,7 @@ and must leave the Worker `DISARMED` when evidence is missing or stale.
 - SQL: `blessing-sql-primary` / `blessing_trading`
 - Initial release policy: `STAGED_FIRST_ORDER`
 - Continuation policy: `AUTONOMOUS_AFTER_REVIEW`
-- Collateral: at most 100 USDC
+- Collateral: at most 250 USDC
 - Gross exposure: at most 1,000 USDC
 - First order: at most 50 USDC notional
 - Daily loss: at most 5 USDC

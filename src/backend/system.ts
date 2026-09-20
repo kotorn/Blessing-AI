@@ -1,4 +1,4 @@
-import { TradingSystemState, PreflightResult, EngineState, ExecutionMode, ExecutionCapabilities, ActiveTradingConfiguration, ActionRiskClass } from './types';
+import { TradingSystemState, PreflightResult, EngineState, ExecutionMode, ExecutionCapabilities,  ActionRiskClass } from './types';
 
 // The Control Plane acts as a UI gateway for the Python Worker's state.
 export const EXECUTION_CAPABILITIES: ExecutionCapabilities = {
@@ -123,7 +123,7 @@ export function evaluatePreflight(state: TradingSystemState, requestedConfigurat
   return { executionMode, canArm: checks.every((check) => check.status === 'PASS'), checks };
 }
 
-export function validateStateTransition(currentState: EngineState, nextState: EngineState): boolean {
+export function validateStateTransition(_currentState: EngineState, _nextState: EngineState): boolean {
   return true; // Validated via worker
 }
 

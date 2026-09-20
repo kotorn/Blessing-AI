@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, {  } from 'react';
 import { AccountData, RiskRuleItem, RiskState, BasketItem } from '../types';
-import { ShieldCheck, Lock, LifeBuoy, ShieldAlert, Info, AlertTriangle, Power } from 'lucide-react';
+import { ShieldCheck, Lock,   Info,  Power } from 'lucide-react';
 import { HardRiskBoundsCard } from '../components/HardRiskBoundsCard';
 import { ExposureRecoveryEngineCard } from '../components/ExposureRecoveryEngineCard';
 import { FailClosedSafeguardsCard } from '../components/FailClosedSafeguardsCard';

@@ -1,16 +1,7 @@
 import React from 'react';
 import {
   Cpu,
-  Layers,
-  Boxes,
-  GitMerge,
-  Gauge,
   Info,
-  CheckCircle2,
-  ShieldCheck,
-  TrendingUp,
-  Zap,
-  Clock,
 } from 'lucide-react';
 import { BasketItem, InstrumentData, AccountData } from '../types';
 import { StrategyIntentStream } from '../components/StrategyIntentStream';
@@ -27,7 +18,6 @@ interface StrategiesPageProps {
 export const StrategiesPage: React.FC<StrategiesPageProps> = ({
   baskets = [],
   instruments = {},
-  account,
   strategyIntents,
   metaAllocations,
 }) => {

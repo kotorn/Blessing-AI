@@ -17,7 +17,6 @@ import pytest
 from apps.release_gate import gate as gate_module
 from apps.release_gate.gate import run_gate
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -42,7 +41,7 @@ def _cloud_evidence(
     checks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a valid cloud evidence dict with generated_at set to `age_sec` ago."""
-    ts = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=age_sec)
+    ts = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=age_sec)
     if checks is None:
         checks = [
             {

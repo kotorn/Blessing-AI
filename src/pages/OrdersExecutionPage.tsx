@@ -1,13 +1,6 @@
 import React, { useState } from 'react';
 import {
   Layers,
-  ArrowRight,
-  Clock,
-  AlertCircle,
-  Cpu,
-  ShieldCheck,
-  Zap,
-  CheckCircle2,
 } from 'lucide-react';
 import { AccountData, TradingSystemState } from '../types';
 import { ExecutionOrder } from '../types/orders';

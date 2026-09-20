@@ -9,10 +9,10 @@ from apps.trading_worker.execution_lease import (
     InMemoryExecutionLeaseStore,
     LeaseLostError,
 )
-from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.config import BinanceEnvironment
+from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.models import ConnectionState
-from domain.enums import EconomicRiskClass, OrderSide, OrderType, PositionSide, TimeInForce
+from domain.enums import EconomicRiskClass, OrderSide, PositionSide, TimeInForce
 
 
 @pytest.mark.asyncio
@@ -77,8 +77,8 @@ async def test_lease_loss_is_checked_immediately_before_order_post(monkeypatch):
                 symbol="BTCUSDT",
                 order_type="LIMIT",
                 quantity=Decimal("0.001"),
-                price=Decimal("100"),
-                estimated_price=Decimal("100"),
+                price=Decimal(100),
+                estimated_price=Decimal(100),
                 notional=Decimal("0.1"),
             ),
         )
@@ -157,8 +157,8 @@ async def test_risk_increasing_order_posts_only_after_durable_outbox_barrier():
                 symbol="BTCUSDT",
                 order_type="LIMIT",
                 quantity=Decimal("0.001"),
-                price=Decimal("100"),
-                estimated_price=Decimal("100"),
+                price=Decimal(100),
+                estimated_price=Decimal(100),
                 notional=Decimal("0.1"),
             ),
         )

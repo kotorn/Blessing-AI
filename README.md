@@ -1,5 +1,7 @@
 # Blessing AI v0.1
 
+[![Blessing AI CI](https://github.com/kotorn/Blessing-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/kotorn/Blessing-AI/actions/workflows/ci.yml)
+
 **Adaptive Basket Grid Trading System, Market Regime Engine, AI Grid Safety Score, and Portfolio Risk Governor for Binance Spot & USDⓈ-M Futures**
 
 Blessing AI transforms the legacy MT4 Blessing EA basket-recovery philosophy into an institutionally robust, event-driven quantitative trading architecture. It replaces aggressive Martingale doubling with bounded deterministic grid guardrails, dynamic ATR volatility spacing, probabilistic regime classification, research-only safety scoring, and a deterministic fail-closed Risk Governor. Research or AI diagnostics never have live order authority.
@@ -29,11 +31,13 @@ execution costs.
 # 1. Clone repository and setup environment
 cp .env.example .env
 
-# 2. Start NATS, PostgreSQL, Redis, and Traders
+# 2. Start NATS, PostgreSQL, Redis, the market-data collector, and the trading worker
 docker compose up -d
 
-# 3. Access Interactive Control Cockpit
-# Open http://localhost:3000 in your browser
+# 3. Access the services
+# Worker control API:  http://localhost:8000  (health/state endpoints)
+# Control Plane cockpit: http://localhost:3000 (requires Firebase credentials
+# and ADC for full functionality; for active development prefer `npm run dev`)
 ```
 
 ---

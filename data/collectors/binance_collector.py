@@ -6,9 +6,8 @@ Ingests Trades, Orderbook, Mark Price, Funding Rate, and Open Interest.
 
 import asyncio
 import json
-import time
-from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Any, Dict, List
+
 import aiohttp
 import structlog
 

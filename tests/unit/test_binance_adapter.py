@@ -7,11 +7,11 @@ import unittest
 from decimal import Decimal
 
 from domain.models import (
-    OrderIntent,
     MarketType,
+    OrderIntent,
     OrderSide,
-    PositionSide,
     OrderType,
+    PositionSide,
     TimeInForce,
 )
 from venues.binance.client import BinanceFuturesClient

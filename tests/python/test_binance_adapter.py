@@ -2,8 +2,6 @@ from decimal import Decimal
 
 import pytest
 
-from domain.enums import EconomicRiskClass, OrderSide, OrderType, PositionSide, TimeInForce
-from domain.models import ExecutionDecision, OrderIntent, MarketType, utc_now
 from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
@@ -13,6 +11,8 @@ from apps.trading_worker.venues.binance.models import (
     ConnectionState,
     ExchangeAccountSnapshot,
 )
+from domain.enums import EconomicRiskClass, OrderSide, OrderType, PositionSide, TimeInForce
+from domain.models import ExecutionDecision, MarketType, OrderIntent, utc_now
 
 pytestmark = pytest.mark.asyncio
 
@@ -75,24 +75,24 @@ def adapter():
     rules.step_size = Decimal("0.001")
     rules.tick_size = Decimal("0.1")
     rules.min_qty = Decimal("0.001")
-    rules.max_qty = Decimal("100")
-    rules.min_notional = Decimal("5")
+    rules.max_qty = Decimal(100)
+    rules.min_notional = Decimal(5)
     ada.capabilities.symbol_rules["BTCUSDT"] = rules
     ada.last_market_event_at["BTCUSDT"] = utc_now()
     ada.last_market_event_source["BTCUSDT"] = "BINANCE_TESTNET_WS"
     ada.last_market_event_venue["BTCUSDT"] = "BINANCE_TESTNET"
     ada.last_market_event_market_type["BTCUSDT"] = "USDM_FUTURES"
     ledger.account_snapshot = ExchangeAccountSnapshot(
-        wallet_balance=Decimal("100"),
-        margin_balance=Decimal("100"),
-        available_balance=Decimal("90"),
-        unrealized_pnl=Decimal("0"),
-        total_initial_margin=Decimal("10"),
-        total_maint_margin=Decimal("5"),
-        position_initial_margin=Decimal("10"),
-        total_position_notional=Decimal("0"),
-        effective_leverage=Decimal("0"),
-        margin_utilization_pct=Decimal("10"),
+        wallet_balance=Decimal(100),
+        margin_balance=Decimal(100),
+        available_balance=Decimal(90),
+        unrealized_pnl=Decimal(0),
+        total_initial_margin=Decimal(10),
+        total_maint_margin=Decimal(5),
+        position_initial_margin=Decimal(10),
+        total_position_notional=Decimal(0),
+        effective_leverage=Decimal(0),
+        margin_utilization_pct=Decimal(10),
         liquidation_safety="KNOWN",
         exchange_environment="BINANCE_TESTNET",
         valid=True,

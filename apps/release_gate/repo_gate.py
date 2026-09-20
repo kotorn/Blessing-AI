@@ -294,7 +294,7 @@ def run_repo_gate(repo_root: pathlib.Path) -> dict[str, Any]:
     return {
         "checks": checks,
         "overall_passed": overall_passed,
-        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
 
 

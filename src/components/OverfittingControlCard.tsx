@@ -1,14 +1,7 @@
 import React from 'react';
 import {
-  ShieldAlert,
   CheckCircle2,
-  AlertTriangle,
-  Flame,
   Award,
-  BarChart3,
-  Layers,
-  Info,
-  Calendar,
 } from 'lucide-react';
 import { OverfittingMetrics, PurgedCVFold } from '../types/research';
 import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';

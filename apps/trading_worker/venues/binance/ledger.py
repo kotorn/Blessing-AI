@@ -63,6 +63,9 @@ class InMemoryLedger:
         self.fills: list[ExchangeFill] = []
         self._fill_keys: set[str] = set()
         self.positions: list[ExchangePosition] = []
+        # Monotonic counter bumped on every orders/fills/positions mutation so
+        # callers can cheaply detect state changes without re-scanning.
+        self.version: int = 0
         self._initialized = False
         self.wallet_balance: Decimal = Decimal("0")
         self.margin_balance: Decimal = Decimal("0")
@@ -141,6 +144,7 @@ class InMemoryLedger:
             ),
         )
         self.orders[client_oid] = order
+        self.version += 1
         if self.on_order_update:
             self.on_order_update(order)
 
@@ -168,10 +172,16 @@ class InMemoryLedger:
             return
         self._fill_keys.add(key)
         self.fills.append(fill)
+        self.version += 1
         if self.on_fill_update:
             self.on_fill_update(fill)
         
     async def has_fill(self, deduplication_key: str) -> bool:
+        # O(1) fast path: append_fill and the durable load path index every
+        # fill under its canonical venue:symbol:trade_id key, so an exact hit
+        # is authoritative. Non-canonical key shapes fall through to the scan.
+        if deduplication_key in self._fill_keys:
+            return True
         parts = deduplication_key.split(":", 2)
         if len(parts) == 3:
             source, symbol, trade_id = parts
@@ -343,11 +353,13 @@ class InMemoryLedger:
             if p.symbol == norm_pos.symbol and p.position_side == norm_pos.position_side:
                 old_amount = p.quantity
                 self.positions[i] = norm_pos
+                self.version += 1
                 if self.on_position_update:
                     if norm_pos.quantity != Decimal("0") or old_amount != Decimal("0"):
                         self.on_position_update(norm_pos)
                 return
         self.positions.append(norm_pos)
+        self.version += 1
         if self.on_position_update:
             if norm_pos.quantity != Decimal("0"):
                 self.on_position_update(norm_pos)
@@ -370,3 +382,4 @@ class InMemoryLedger:
             position for position in self.positions
             if str(position.symbol).upper() != normalized
         ]
+        self.version += 1

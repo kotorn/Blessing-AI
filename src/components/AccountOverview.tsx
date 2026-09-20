@@ -13,10 +13,8 @@ import {
   Layers,
   Bot,
   PieChart,
-  Lock,
   Search,
   ArrowRight,
-  ShieldCheck,
 } from 'lucide-react';
 import { AccountData, TwoLayerAsset, SubWalletSummary } from '../types';
 import { apiClient } from '../api/client';
@@ -56,9 +54,6 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
   const freeMargin = account?.free_margin ?? 0;
   const usedMargin = account?.used_margin ?? 0;
   const source = account?.source ?? 'SIMULATED';
-  const spotBalance = account?.spot_balance ?? 0;
-  const futuresWallet = account?.futures_wallet_balance ?? 0;
-  const futuresUnrealized = account?.futures_unrealized_pnl ?? 0;
   const lastSyncTime = account?.last_sync_time;
   const rawTwoLayerAssets = account?.two_layer_assets ?? [];
   const rawSubWallets = account?.sub_wallets ?? [];

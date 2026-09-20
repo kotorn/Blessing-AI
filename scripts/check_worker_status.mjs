@@ -1,6 +1,6 @@
 import { getTradingAdminIdToken } from './mint_trading_admin_token.mjs';
 
-const CONTROL_PLANE_URL = 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
+const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
 
 async function main() {
   const { idToken, decoded } = await getTradingAdminIdToken();

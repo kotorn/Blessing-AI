@@ -1,6 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Activity, Zap, TrendingUp, TrendingDown, ArrowRightLeft } from 'lucide-react';
-import { InstrumentData } from '../types';
+import { Activity,  TrendingUp, TrendingDown, ArrowRightLeft } from 'lucide-react';
 
 interface MicrostructureMonitorProps {
   symbol: string;
@@ -99,7 +98,7 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
             setImbalance((bidVol / totalVol) * 100);
           }
         }
-      } catch (err) {}
+      } catch  {}
     };
 
     // 2. Aggregate Trades WebSocket (for CVD and Last Price)
@@ -135,7 +134,7 @@ export const MicrostructureMonitor: React.FC<MicrostructureMonitorProps> = ({ sy
             return newCvd * 0.999;
           });
         }
-      } catch (err) {}
+      } catch  {}
     };
 
     const watchdog = window.setInterval(updateStreamHealth, 1000);

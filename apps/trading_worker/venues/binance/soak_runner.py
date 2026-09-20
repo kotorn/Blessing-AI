@@ -26,7 +26,7 @@ from apps.trading_worker.venues.binance.manual_testnet import (
 )
 from apps.trading_worker.venues.binance.models import ConnectionState
 from domain.models import utc_now
-from venues.binance.public_ws import BinancePublicWebSocket
+from apps.trading_worker.venues.binance.public_ws import BinancePublicWebSocket
 
 
 logger = logging.getLogger("soak_runner")

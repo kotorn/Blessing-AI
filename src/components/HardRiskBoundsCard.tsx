@@ -1,14 +1,9 @@
 import React from 'react';
 import {
   Lock,
-  ShieldCheck,
   AlertTriangle,
   XCircle,
   CheckCircle2,
-  Percent,
-  TrendingDown,
-  Activity,
-  Layers,
 } from 'lucide-react';
 import { AccountData, RiskState, RiskRuleItem } from '../types';
 
@@ -21,7 +16,6 @@ interface HardRiskBoundsCardProps {
 
 export const HardRiskBoundsCard: React.FC<HardRiskBoundsCardProps> = ({
   account,
-  riskState,
   rules,
   liquidationDistancePct,
 }) => {

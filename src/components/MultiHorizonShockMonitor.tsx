@@ -1,16 +1,9 @@
 import React from 'react';
 import {
   Zap,
-  Activity,
-  AlertTriangle,
-  Flame,
-  ArrowUpRight,
-  ArrowDownRight,
-  ShieldAlert,
-  CheckCircle2,
   Info,
 } from 'lucide-react';
-import { HorizonShockData, ShockHorizon, ShockState } from '../types/market';
+import { HorizonShockData,  ShockState } from '../types/market';
 import { InstrumentData } from '../types';
 
 interface MultiHorizonShockMonitorProps {

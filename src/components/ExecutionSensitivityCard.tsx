@@ -2,13 +2,8 @@ import React from 'react';
 import {
   Zap,
   TrendingDown,
-  AlertTriangle,
-  Scale,
-  DollarSign,
-  Activity,
   CheckCircle2,
   XCircle,
-  Info,
 } from 'lucide-react';
 import { ExecutionFrictionAnalysis } from '../types/research';
 import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';

@@ -1,13 +1,10 @@
 import React from 'react';
 import {
   Layers,
-  ArrowRight,
   ShieldCheck,
   CheckCircle2,
   AlertTriangle,
   Info,
-  ExternalLink,
-  Clock,
   Zap,
   Check,
   Cpu,

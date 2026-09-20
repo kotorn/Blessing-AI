@@ -9,7 +9,6 @@ import pytest
 
 from apps.trading_worker.venues.binance.manual_testnet import manual_testnet_workflow
 
-
 pytestmark = [pytest.mark.asyncio, pytest.mark.contract_mutating]
 
 

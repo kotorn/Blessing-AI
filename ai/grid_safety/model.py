@@ -5,8 +5,9 @@ Core risk intelligence model answering:
 Replaces simplistic BUY/SELL models with strategy-embedded risk predictions.
 """
 
-from typing import Dict, Any
 from datetime import datetime, timezone
+from typing import Any, Dict
+
 from core.basket.models import GridSafetyPrediction, MarketRegime
 
 

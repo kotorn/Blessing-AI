@@ -1,6 +1,8 @@
 import asyncio
 import os
+
 import asyncpg
+
 
 async def main():
     host = os.environ.get("POSTGRES_HOST")

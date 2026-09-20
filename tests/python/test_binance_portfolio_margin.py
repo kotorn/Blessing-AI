@@ -1,21 +1,20 @@
-import os
-import pytest
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from apps.trading_worker.venues.binance.capabilities import BinanceCapabilities
 from apps.trading_worker.venues.binance.config import (
-    BinanceEnvironment,
-    PAPI_REST_URL,
     PAPI_WS_URL,
+    BinanceEnvironment,
     is_portfolio_margin_enabled,
 )
-from apps.trading_worker.venues.binance.rest_client import BinanceRestClient
-from apps.trading_worker.venues.binance.capabilities import BinanceCapabilities
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.reconciliation import (
     BinanceReconciliation,
     build_account_snapshot,
 )
+from apps.trading_worker.venues.binance.rest_client import BinanceRestClient
 from apps.trading_worker.venues.binance.user_stream import BinanceUserStream
 
 
@@ -34,8 +33,8 @@ def test_is_portfolio_margin_enabled_env(monkeypatch):
 
 
 from apps.trading_worker.venues.binance.rest_client import (
-    BinanceRestClient,
     _ALLOWED_REQUEST_METHODS,
+    BinanceRestClient,
 )
 
 
@@ -212,7 +211,7 @@ async def test_reconciliation_snapshot_portfolio_margin():
         account,
         positions,
         environment="BINANCE_MAINNET",
-        daily_realized_pnl=Decimal("0"),
+        daily_realized_pnl=Decimal(0),
         daily_loss_known=True,
         daily_loss_asset="USDC",
         daily_pnl_includes_fees=True,
@@ -223,7 +222,7 @@ async def test_reconciliation_snapshot_portfolio_margin():
     assert snapshot.collateral_asset == "USDC"
     assert snapshot.margin_balance == Decimal("50.88337369")
     assert snapshot.available_balance == Decimal("50.88337369")
-    assert snapshot.configured_leverage == Decimal("2")
+    assert snapshot.configured_leverage == Decimal(2)
     assert snapshot.configured_leverage_known is True
 
 
@@ -264,7 +263,7 @@ def test_build_account_snapshot_portfolio_margin_liquidation_distance():
         account,
         positions,
         environment="BINANCE_MAINNET",
-        daily_realized_pnl=Decimal("0"),
+        daily_realized_pnl=Decimal(0),
         daily_loss_known=True,
         daily_loss_asset="USDC",
         daily_pnl_includes_fees=True,
@@ -274,7 +273,7 @@ def test_build_account_snapshot_portfolio_margin_liquidation_distance():
     assert snapshot.min_liquidation_distance_pct is not None
     assert snapshot.min_liquidation_distance_pct > 0
     # Headroom = 50 - 1 = 49. Notional = 0.007 * 2450 = 17.15. Distance = min(100, (49 / 17.15) * 100) = 100
-    assert snapshot.min_liquidation_distance_pct == Decimal("100")
+    assert snapshot.min_liquidation_distance_pct == Decimal(100)
 
 
 def test_build_account_snapshot_portfolio_margin_zero_headroom_floors_at_zero():
@@ -315,14 +314,14 @@ def test_build_account_snapshot_portfolio_margin_zero_headroom_floors_at_zero():
         account,
         positions,
         environment="BINANCE_MAINNET",
-        daily_realized_pnl=Decimal("0"),
+        daily_realized_pnl=Decimal(0),
         daily_loss_known=True,
         daily_loss_asset="USDC",
         daily_pnl_includes_fees=True,
         daily_pnl_includes_funding=True,
     )
     # Headroom is max(0, 10.0 - 10.0) = 0. Distance must be exactly 0 (floored at 0, not 0.01).
-    assert snapshot.min_liquidation_distance_pct == Decimal("0")
+    assert snapshot.min_liquidation_distance_pct == Decimal(0)
 
 
 @pytest.mark.asyncio

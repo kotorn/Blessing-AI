@@ -19,18 +19,17 @@ from apps.trading_worker.backtest.replay import (
 )
 from domain.enums import MarketType
 
-
 START = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _config(*, force_close_at_end: bool = True) -> ReplayExecutionConfig:
     return ReplayExecutionConfig(
-        initial_capital=Decimal("1000"),
+        initial_capital=Decimal(1000),
         cost_model=EconomicCostModel(
             maker_fee_rate=Decimal("0.0002"),
             taker_fee_rate=Decimal("0.0005"),
         ),
-        market_slippage_bps=Decimal("2"),
+        market_slippage_bps=Decimal(2),
         funding_interval_sec=3600,
         enabled_strategies=("shock",),
         symbol_rules=(
@@ -39,7 +38,7 @@ def _config(*, force_close_at_end: bool = True) -> ReplayExecutionConfig:
                 tick_size=Decimal("0.1"),
                 step_size=Decimal("0.001"),
                 min_quantity=Decimal("0.001"),
-                min_notional=Decimal("5"),
+                min_notional=Decimal(5),
             ),
         ),
         force_close_at_end=force_close_at_end,
@@ -70,7 +69,7 @@ def _event(
         high=close_price,
         low=close_price,
         close=close_price,
-        volume=Decimal("10"),
+        volume=Decimal(10),
         trade_count=10,
         best_bid=close_price - Decimal("0.1"),
         best_ask=close_price + Decimal("0.1"),
@@ -108,17 +107,17 @@ def test_historical_event_requires_quotes_depth_and_valid_ohlc():
             symbol="BTCUSDT",
             venue="BINANCE_TESTNET",
             market_type=MarketType.USDM_FUTURES,
-            open=Decimal("100"),
-            high=Decimal("99"),
-            low=Decimal("98"),
-            close=Decimal("100"),
-            volume=Decimal("1"),
+            open=Decimal(100),
+            high=Decimal(99),
+            low=Decimal(98),
+            close=Decimal(100),
+            volume=Decimal(1),
             trade_count=1,
-            best_bid=Decimal("99"),
-            best_ask=Decimal("101"),
-            bid_qty=Decimal("1"),
-            ask_qty=Decimal("1"),
-            mark_price=Decimal("100"),
+            best_bid=Decimal(99),
+            best_ask=Decimal(101),
+            bid_qty=Decimal(1),
+            ask_qty=Decimal(1),
+            mark_price=Decimal(100),
             data_source="BINANCE_PUBLIC_TESTNET_READ_ONLY",
         )
 
@@ -138,8 +137,8 @@ def test_replay_runs_existing_pipeline_and_accounts_explicit_costs_and_funding()
     assert len(result.equity_curve) == result.event_count
     assert all(fill.decision_id for fill in result.fills)
     assert all(fill.target_exposure_id is not None for fill in result.fills)
-    assert result.final_position_qty == Decimal("0")
-    assert result.open_position_at_end == Decimal("0")
+    assert result.final_position_qty == Decimal(0)
+    assert result.open_position_at_end == Decimal(0)
     assert result.economic_result is not None
     assert result.economic_result.funding_pnl < 0
     assert result.economic_result.trading_fees > 0
@@ -251,7 +250,7 @@ def test_walk_forward_replay_selects_on_train_and_evaluates_untouched_oos():
     baseline = ReplayParameterVariant(variant_id="baseline", config=_config())
     higher_slippage = ReplayParameterVariant(
         variant_id="higher-slippage",
-        config=_config().model_copy(update={"market_slippage_bps": Decimal("4")}),
+        config=_config().model_copy(update={"market_slippage_bps": Decimal(4)}),
     )
 
     result = run_walk_forward_replay(

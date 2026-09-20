@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Layers, ArrowUpRight, ArrowDownRight, RefreshCw, XCircle, Shield, PlusCircle, FileSpreadsheet, ExternalLink } from 'lucide-react';
+import { Layers, ArrowUpRight, ArrowDownRight,  XCircle, Shield, PlusCircle, FileSpreadsheet, ExternalLink } from 'lucide-react';
 import { BasketItem, BasketState } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { ConfirmationModal } from './ConfirmationModal';

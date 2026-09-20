@@ -165,11 +165,11 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
 
   const disarmEngine = useCallback(async () => {
     setIsActionLoading(true);
-    if (auditLogger) {
-      auditLogger('ENGINE_DISARMED', 'SYSTEM', 'Engine successfully disarmed');
-    }
     try {
       await quantApi.disarm();
+      if (auditLogger) {
+        auditLogger('ENGINE_DISARMED', 'SYSTEM', 'Engine successfully disarmed');
+      }
       await fetchState();
     } finally {
       setIsActionLoading(false);
@@ -178,11 +178,11 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
 
   const togglePauseNewRisk = useCallback(async (active: boolean) => {
     setIsActionLoading(true);
-    if (auditLogger) {
-      auditLogger('PAUSE_NEW_RISK_CHANGED', 'SYSTEM', 'Pause new risk state: ' + active);
-    }
     try {
       await quantApi.pauseNewRisk(active);
+      if (auditLogger) {
+        auditLogger('PAUSE_NEW_RISK_CHANGED', 'SYSTEM', 'Pause new risk state: ' + active);
+      }
       await fetchState();
     } finally {
       setIsActionLoading(false);
@@ -205,13 +205,6 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
   const toggleKillSwitch = useCallback(async () => {
     const nextState = !account.kill_switch_active;
     setIsActionLoading(true);
-    if (auditLogger) {
-      auditLogger(
-        'KILL_SWITCH_TRIGGERED',
-        'SYSTEM',
-        `Kill switch state changed to: ${nextState ? 'ENGAGED' : 'DISARMED'}`
-      );
-    }
     try {
       const resp = await quantApi.toggleKillSwitch(nextState);
       if (typeof resp?.kill_switch_active === 'boolean') {
@@ -221,9 +214,14 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
           risk_state: resp.kill_switch_active ? 'EMERGENCY' : 'UNKNOWN',
         }));
       }
+      if (auditLogger) {
+        auditLogger(
+          'KILL_SWITCH_TRIGGERED',
+          'SYSTEM',
+          `Kill switch state changed to: ${nextState ? 'ENGAGED' : 'DISARMED'}`
+        );
+      }
       await fetchState();
-    } catch (e) {
-      console.warn('Kill switch action failed or deferred:', e);
     } finally {
       setIsActionLoading(false);
     }

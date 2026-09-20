@@ -1,9 +1,41 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone, UTC
 from decimal import Decimal
 
 import pytest
 
+from apps.trading_worker.main import (
+    EXECUTABLE_ENGINE_STATES,
+    ArmRequest,
+    TradingWorkerApp,
+    WorkerEngineState,
+    WorkerExecutionMode,
+)
+from apps.trading_worker.venues.binance.config import BinanceEnvironment, environment_label
+from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
+from apps.trading_worker.venues.binance.gates import OrderExecutionGate
+from apps.trading_worker.venues.binance.ledger import InMemoryLedger
+from apps.trading_worker.venues.binance.manual_testnet import (
+    _cleanup_trial_open_orders,
+    _passive_order,
+    _require_current_readonly_evidence,
+)
+from apps.trading_worker.venues.binance.models import (
+    BinanceAuthenticationError,
+    BinanceDefinitiveRejection,
+    BinanceTransportAmbiguity,
+    ConnectionState,
+    ExchangeAccountSnapshot,
+)
+from apps.trading_worker.venues.binance.models import (
+    TestnetSafetyLimits as SafetyLimits,
+)
+from apps.trading_worker.venues.binance.reconciliation import (
+    BinanceReconciliation,
+    build_account_snapshot,
+)
+from apps.trading_worker.venues.binance.soak_runner import run_supervised_soak
+from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
 from domain.enums import (
     EconomicRiskClass,
     MarketType,
@@ -22,36 +54,6 @@ from domain.models import (
     OrderIntent,
     utc_now,
 )
-from apps.trading_worker.main import (
-    ArmRequest,
-    EXECUTABLE_ENGINE_STATES,
-    TradingWorkerApp,
-    WorkerEngineState,
-    WorkerExecutionMode,
-)
-from apps.trading_worker.venues.binance.config import BinanceEnvironment, environment_label
-from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
-from apps.trading_worker.venues.binance.gates import OrderExecutionGate
-from apps.trading_worker.venues.binance.ledger import InMemoryLedger
-from apps.trading_worker.venues.binance.manual_testnet import (
-    _cleanup_trial_open_orders,
-    _passive_order,
-    _require_current_readonly_evidence,
-)
-from apps.trading_worker.venues.binance.models import (
-    BinanceDefinitiveRejection,
-    BinanceAuthenticationError,
-    BinanceTransportAmbiguity,
-    ConnectionState,
-    ExchangeAccountSnapshot,
-    TestnetSafetyLimits as SafetyLimits,
-)
-from apps.trading_worker.venues.binance.reconciliation import (
-    BinanceReconciliation,
-    build_account_snapshot,
-)
-from apps.trading_worker.venues.binance.soak_runner import run_supervised_soak
-from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
 from venues.binance_global.usdm import BinanceGlobalUSDMAdapter
 
 
@@ -123,26 +125,26 @@ def make_rules(symbol: str = "BTCUSDT") -> SymbolTradingRules:
     rules.tick_size = Decimal("0.1")
     rules.step_size = Decimal("0.001")
     rules.min_qty = Decimal("0.001")
-    rules.max_qty = Decimal("100")
+    rules.max_qty = Decimal(100)
     rules.market_step_size = Decimal("0.001")
     rules.market_min_qty = Decimal("0.001")
-    rules.market_max_qty = Decimal("100")
-    rules.min_notional = Decimal("5")
+    rules.market_max_qty = Decimal(100)
+    rules.min_notional = Decimal(5)
     return rules
 
 
 def make_snapshot(*, age_seconds: float = 0, liquidation_safety: str = "KNOWN"):
     return ExchangeAccountSnapshot(
-        wallet_balance=Decimal("100"),
-        margin_balance=Decimal("100"),
-        available_balance=Decimal("90"),
-        unrealized_pnl=Decimal("0"),
-        total_initial_margin=Decimal("10"),
-        total_maint_margin=Decimal("5"),
-        position_initial_margin=Decimal("10"),
-        total_position_notional=Decimal("0"),
-        effective_leverage=Decimal("0"),
-        margin_utilization_pct=Decimal("10"),
+        wallet_balance=Decimal(100),
+        margin_balance=Decimal(100),
+        available_balance=Decimal(90),
+        unrealized_pnl=Decimal(0),
+        total_initial_margin=Decimal(10),
+        total_maint_margin=Decimal(5),
+        position_initial_margin=Decimal(10),
+        total_position_notional=Decimal(0),
+        effective_leverage=Decimal(0),
+        margin_utilization_pct=Decimal(10),
         min_liquidation_distance_pct=None,
         liquidation_safety=liquidation_safety,
         exchange_environment="BINANCE_TESTNET",
@@ -268,15 +270,15 @@ def mainnet_account_payload():
 
 
 def test_mainnet_snapshot_uses_explicit_usdc_and_separate_leverage_observation():
-    window_start = utc_now().astimezone(timezone.utc).replace(
+    window_start = utc_now().astimezone(UTC).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    window_end = utc_now().astimezone(timezone.utc)
+    window_end = utc_now().astimezone(UTC)
     snapshot = build_account_snapshot(
         mainnet_account_payload(),
         [{"symbol": "ETHUSDC", "positionAmt": "0", "leverage": "10"}],
         environment=environment_label(BinanceEnvironment.MAINNET),
-        daily_realized_pnl=Decimal("-4"),
+        daily_realized_pnl=Decimal(-4),
         daily_loss_known=True,
         daily_loss_asset="USDC",
         daily_pnl_includes_fees=True,
@@ -287,7 +289,7 @@ def test_mainnet_snapshot_uses_explicit_usdc_and_separate_leverage_observation()
 
     assert snapshot.collateral_asset == "USDC"
     assert snapshot.risk_currency == "USDC"
-    assert snapshot.configured_leverage == Decimal("10")
+    assert snapshot.configured_leverage == Decimal(10)
     assert snapshot.configured_leverage_known is True
     assert snapshot.margin_mode == "SINGLE_ASSET_CROSS"
     assert snapshot.margin_mode_known is True
@@ -300,7 +302,7 @@ def test_mainnet_multi_asset_mode_is_not_accepted_as_single_asset_cross():
         payload,
         [{"symbol": "ETHUSDC", "positionAmt": "0", "leverage": "10", "marginType": "cross"}],
         environment=environment_label(BinanceEnvironment.MAINNET),
-        daily_realized_pnl=Decimal("0"),
+        daily_realized_pnl=Decimal(0),
         daily_loss_known=True,
         daily_loss_asset="USDC",
         daily_pnl_includes_fees=True,
@@ -379,21 +381,21 @@ async def test_mainnet_order_gate_blocks_daily_loss_at_five_usdc(monkeypatch):
     adapter.last_market_event_venue["ETHUSDC"] = "BINANCE_MAINNET"
     adapter.last_market_event_market_type["ETHUSDC"] = MarketType.USDM_FUTURES.value
     now = utc_now()
-    window_start = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     adapter.ledger.account_snapshot = ExchangeAccountSnapshot(
-        wallet_balance=Decimal("100"),
-        margin_balance=Decimal("100"),
-        available_balance=Decimal("90"),
-        unrealized_pnl=Decimal("0"),
-        total_initial_margin=Decimal("10"),
-        total_maint_margin=Decimal("5"),
-        position_initial_margin=Decimal("10"),
-        total_position_notional=Decimal("0"),
-        effective_leverage=Decimal("0"),
-        margin_utilization_pct=Decimal("10"),
+        wallet_balance=Decimal(100),
+        margin_balance=Decimal(100),
+        available_balance=Decimal(90),
+        unrealized_pnl=Decimal(0),
+        total_initial_margin=Decimal(10),
+        total_maint_margin=Decimal(5),
+        position_initial_margin=Decimal(10),
+        total_position_notional=Decimal(0),
+        effective_leverage=Decimal(0),
+        margin_utilization_pct=Decimal(10),
         liquidation_safety="KNOWN",
         exchange_environment=environment_label(BinanceEnvironment.MAINNET),
-        daily_realized_pnl=Decimal("-5"),
+        daily_realized_pnl=Decimal(-5),
         daily_loss_known=True,
         collateral_asset="USDC",
         risk_currency="USDC",
@@ -402,7 +404,7 @@ async def test_mainnet_order_gate_blocks_daily_loss_at_five_usdc(monkeypatch):
         daily_pnl_includes_funding=True,
         daily_loss_window_start=window_start,
         daily_loss_window_end=window_start + timedelta(days=1),
-        configured_leverage=Decimal("10"),
+        configured_leverage=Decimal(10),
         configured_leverage_known=True,
         margin_mode="SINGLE_ASSET_CROSS",
         margin_mode_known=True,
@@ -541,10 +543,10 @@ async def test_decision_gate_fails_closed_on_restricted_state_flag_mismatch(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("available_balance", Decimal("0")),
-        ("effective_leverage", Decimal("2")),
-        ("margin_utilization_pct", Decimal("70")),
-        ("total_position_notional", Decimal("100")),
+        ("available_balance", Decimal(0)),
+        ("effective_leverage", Decimal(2)),
+        ("margin_utilization_pct", Decimal(70)),
+        ("total_position_notional", Decimal(100)),
     ],
 )
 def test_testnet_risk_state_blocks_unsafe_account_metrics(monkeypatch, field, value):
@@ -553,7 +555,7 @@ def test_testnet_risk_state_blocks_unsafe_account_metrics(monkeypatch, field, va
     setattr(snapshot, field, value)
 
     assert (
-        worker._derive_testnet_risk_state(snapshot, Decimal("0"))
+        worker._derive_testnet_risk_state(snapshot, Decimal(0))
         == RiskState.NO_NEW_RISK
     )
 
@@ -562,12 +564,12 @@ def test_testnet_risk_state_blocks_drawdown_and_unknown_liquidation(monkeypatch)
     worker = TradingWorkerApp(symbols=["BTCUSDT"])
 
     assert (
-        worker._derive_testnet_risk_state(make_snapshot(), Decimal("6"))
+        worker._derive_testnet_risk_state(make_snapshot(), Decimal(6))
         == RiskState.NO_NEW_RISK
     )
     assert (
         worker._derive_testnet_risk_state(
-            make_snapshot(liquidation_safety="UNKNOWN"), Decimal("0")
+            make_snapshot(liquidation_safety="UNKNOWN"), Decimal(0)
         )
         == RiskState.NO_NEW_RISK
     )
@@ -577,7 +579,7 @@ def test_flat_testnet_account_with_known_liquidation_state_is_normal(monkeypatch
     worker = TradingWorkerApp(symbols=["BTCUSDT"])
 
     assert (
-        worker._derive_testnet_risk_state(make_snapshot(), Decimal("0"))
+        worker._derive_testnet_risk_state(make_snapshot(), Decimal(0))
         == RiskState.NORMAL
     )
 
@@ -707,7 +709,7 @@ def test_testnet_limits_have_bounded_defaults_and_safe_invalid_overrides(monkeyp
 
     monkeypatch.setenv("TESTNET_LIMITS_OVERRIDE_APPROVED", "true")
     approved = SafetyLimits.from_environment()
-    assert approved.max_single_order_notional == Decimal("1000000")
+    assert approved.max_single_order_notional == Decimal(1000000)
     assert approved.allowed_symbols == {"BTCUSDT", "ETHUSDT"}
 
 
@@ -807,7 +809,7 @@ async def test_stale_account_snapshot_blocks_risk_increase(monkeypatch):
 @pytest.mark.asyncio
 async def test_non_positive_available_balance_blocks_risk_increase(monkeypatch):
     worker = await make_ready_worker(monkeypatch)
-    worker.execution_adapter.ledger.account_snapshot.available_balance = Decimal("0")
+    worker.execution_adapter.ledger.account_snapshot.available_balance = Decimal(0)
     decision = make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
 
     decision_result = worker.decision_execution_gate.check(decision)
@@ -824,7 +826,7 @@ async def test_non_positive_available_balance_blocks_risk_increase(monkeypatch):
 @pytest.mark.asyncio
 async def test_high_margin_utilization_blocks_risk_increase(monkeypatch):
     worker = await make_ready_worker(monkeypatch)
-    worker.execution_adapter.ledger.account_snapshot.margin_utilization_pct = Decimal("70")
+    worker.execution_adapter.ledger.account_snapshot.margin_utilization_pct = Decimal(70)
     decision = make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
 
     decision_result = worker.decision_execution_gate.check(decision)
@@ -904,7 +906,7 @@ async def test_failed_continuation_resets_leverage_cap_to_paper_default():
     worker.engine_state = WorkerEngineState.ARMING
     # Simulate the Mainnet leverage cap _ensure_live_runtime_for_continuation
     # applies before a later step in the continuation attempt can fail.
-    worker.risk_governor.max_leverage = Decimal("10")
+    worker.risk_governor.max_leverage = Decimal(10)
 
     await worker._reset_after_failed_continuation()
 
@@ -963,7 +965,7 @@ async def test_unknown_liquidation_safety_blocks_risk_increase(monkeypatch):
 @pytest.mark.asyncio
 async def test_active_position_without_liquidation_distance_fails_closed(monkeypatch):
     snapshot = make_snapshot()
-    snapshot.total_position_notional = Decimal("100")
+    snapshot.total_position_notional = Decimal(100)
     worker = await make_ready_worker(monkeypatch, snapshot=snapshot)
     decision = make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
 
@@ -976,7 +978,7 @@ async def test_active_position_without_liquidation_distance_fails_closed(monkeyp
 @pytest.mark.asyncio
 async def test_zero_liquidation_distance_blocks_risk_increase(monkeypatch):
     worker = await make_ready_worker(monkeypatch)
-    worker.execution_adapter.ledger.account_snapshot.min_liquidation_distance_pct = Decimal("0")
+    worker.execution_adapter.ledger.account_snapshot.min_liquidation_distance_pct = Decimal(0)
     decision = make_decision(EconomicRiskClass.INCREASE_RISK, make_limit_intent())
 
     result = worker.decision_execution_gate.check(decision)
@@ -1087,8 +1089,8 @@ async def test_reduce_only_side_must_reduce_signed_position():
             symbol="BTCUSDT",
             position_side=PositionSide.BOTH,
             quantity=Decimal("0.001"),
-            entry_price=Decimal("10000"),
-            mark_price=Decimal("10000"),
+            entry_price=Decimal(10000),
+            mark_price=Decimal(10000),
         )
     )
     intent = make_limit_intent(reduce_only=True).model_copy(
@@ -1201,7 +1203,7 @@ async def test_market_order_uses_executable_ask_and_respects_single_order_cap():
         raise AssertionError(f"Unexpected REST call: {method} {path}")
 
     adapter = await make_adapter(rest=ScriptedRest(handler))
-    adapter.safety_limits.max_total_open_notional = Decimal("200")
+    adapter.safety_limits.max_total_open_notional = Decimal(200)
     intent = OrderIntent(
         client_order_id="MARKET-ASK-CAP",
         symbol="BTCUSDT",
@@ -1269,10 +1271,10 @@ async def test_market_order_does_not_require_limit_percent_price_reference():
             ],
         }
     )
-    adapter.last_market_bid["BTCUSDT"] = Decimal("10000")
-    adapter.last_market_ask["BTCUSDT"] = Decimal("10001")
-    adapter.last_market_bid_qty["BTCUSDT"] = Decimal("1")
-    adapter.last_market_ask_qty["BTCUSDT"] = Decimal("1")
+    adapter.last_market_bid["BTCUSDT"] = Decimal(10000)
+    adapter.last_market_ask["BTCUSDT"] = Decimal(10001)
+    adapter.last_market_bid_qty["BTCUSDT"] = Decimal(1)
+    adapter.last_market_ask_qty["BTCUSDT"] = Decimal(1)
 
     intent = OrderIntent(
         client_order_id="MARKET-PERCENT-FILTER",
@@ -1375,7 +1377,7 @@ def test_market_event_from_non_testnet_venue_is_not_authoritative():
         symbol="ETHUSDT",
         venue="BINANCE_MAINNET",
         market_type=MarketType.USDM_FUTURES,
-        last_price=Decimal("100"),
+        last_price=Decimal(100),
         best_bid=Decimal("99.9"),
         best_ask=Decimal("100.1"),
     )
@@ -1392,9 +1394,9 @@ def test_percent_price_reference_uses_mark_not_book_or_midpoint():
         symbol="BTCUSDT",
         venue="BINANCE_TESTNET",
         market_type=MarketType.USDM_FUTURES,
-        last_price=Decimal("9999"),
-        best_bid=Decimal("9999"),
-        best_ask=Decimal("10001"),
+        last_price=Decimal(9999),
+        best_bid=Decimal(9999),
+        best_ask=Decimal(10001),
     )
 
     assert adapter.record_market_event(book_event) is True
@@ -1404,26 +1406,26 @@ def test_percent_price_reference_uses_mark_not_book_or_midpoint():
         update={
             "event_id": "MARK-1",
             "event_time": utc_now(),
-            "last_price": Decimal("10000"),
-            "best_bid": Decimal("10000"),
-            "best_ask": Decimal("10000"),
-            "mark_price": Decimal("10000"),
+            "last_price": Decimal(10000),
+            "best_bid": Decimal(10000),
+            "best_ask": Decimal(10000),
+            "mark_price": Decimal(10000),
         }
     )
     assert adapter.record_market_event(mark_event) is True
-    assert adapter.get_market_reference_price("BTCUSDT") == Decimal("10000")
+    assert adapter.get_market_reference_price("BTCUSDT") == Decimal(10000)
 
     later_book_event = book_event.model_copy(
         update={
             "event_id": "BOOK-2",
             "event_time": utc_now(),
-            "last_price": Decimal("9998"),
-            "best_bid": Decimal("9998"),
-            "best_ask": Decimal("10000"),
+            "last_price": Decimal(9998),
+            "best_bid": Decimal(9998),
+            "best_ask": Decimal(10000),
         }
     )
     assert adapter.record_market_event(later_book_event) is True
-    assert adapter.get_market_reference_price("BTCUSDT") == Decimal("10000")
+    assert adapter.get_market_reference_price("BTCUSDT") == Decimal(10000)
 
 
 @pytest.mark.asyncio
@@ -1451,7 +1453,7 @@ async def test_stale_mark_is_refreshed_even_when_book_sample_is_fresh(monkeypatc
             ],
         }
     )
-    adapter.last_market_reference_price["BTCUSDT"] = Decimal("9000")
+    adapter.last_market_reference_price["BTCUSDT"] = Decimal(9000)
     adapter.last_market_reference_at["BTCUSDT"] = utc_now() - timedelta(seconds=30)
 
     result = await adapter.order_gate.check(
@@ -1459,7 +1461,7 @@ async def test_stale_mark_is_refreshed_even_when_book_sample_is_fresh(monkeypatc
     )
 
     assert result.allowed is True
-    assert adapter.last_market_reference_price["BTCUSDT"] == Decimal("10000")
+    assert adapter.last_market_reference_price["BTCUSDT"] == Decimal(10000)
 
 
 @pytest.mark.asyncio
@@ -1503,7 +1505,7 @@ async def test_post_only_limit_serializes_to_binance_gtx(monkeypatch):
 @pytest.mark.asyncio
 async def test_testnet_single_order_cap_is_enforced(monkeypatch):
     adapter = await make_adapter()
-    adapter.safety_limits.max_total_open_notional = Decimal("200")
+    adapter.safety_limits.max_total_open_notional = Decimal(200)
     result = await adapter.order_gate.check(
         make_limit_intent(quantity="0.004", price="26000"),
         EconomicRiskClass.NEW_RISK,
@@ -1659,7 +1661,7 @@ async def test_order_amendment_that_increases_notional_is_capped():
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             order_type="LIMIT",
             client_order_id="AMEND-1",
             status="NEW",
@@ -1670,7 +1672,7 @@ async def test_order_amendment_that_increases_notional_is_capped():
     authority = GateAuthority()
     adapter.bind_worker_authority(authority)
     amended = await adapter.modify_order(
-        "BTCUSDT", "AMEND-1", Decimal("10000"), Decimal("0.011"), "BUY", authority=authority
+        "BTCUSDT", "AMEND-1", Decimal(10000), Decimal("0.011"), "BUY", authority=authority
     )
 
     assert amended is None
@@ -1700,7 +1702,7 @@ async def test_lower_notional_entry_amendment_preserves_entry_semantics():
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             order_type="LIMIT",
             client_order_id="AMEND-2",
             status="NEW",
@@ -1712,11 +1714,11 @@ async def test_lower_notional_entry_amendment_preserves_entry_semantics():
     authority = GateAuthority()
     adapter.bind_worker_authority(authority)
     amended = await adapter.modify_order(
-        "BTCUSDT", "AMEND-2", Decimal("9000"), Decimal("0.001"), "BUY", authority=authority
+        "BTCUSDT", "AMEND-2", Decimal(9000), Decimal("0.001"), "BUY", authority=authority
     )
 
     assert amended is not None
-    assert amended.price == Decimal("9000")
+    assert amended.price == Decimal(9000)
     assert amended.quantity == Decimal("0.001")
     assert amended.reduce_only is False
     assert put_calls and "reduceOnly" not in put_calls[0]
@@ -1738,7 +1740,7 @@ async def test_order_amendment_cannot_bypass_worker_decision_gate():
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             order_type="LIMIT",
             client_order_id="AMEND-BLOCKED",
             status="NEW",
@@ -1751,7 +1753,7 @@ async def test_order_amendment_cannot_bypass_worker_decision_gate():
     amended = await adapter.modify_order(
         "BTCUSDT",
         "AMEND-BLOCKED",
-        Decimal("9000"),
+        Decimal(9000),
         Decimal("0.001"),
         "BUY",
         authority=authority,
@@ -1837,7 +1839,7 @@ async def test_cancel_ambiguity_returns_success_only_after_query_and_reconciliat
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             order_type="LIMIT",
             client_order_id="UNIT-1",
             status="NEW",
@@ -1887,8 +1889,8 @@ async def test_total_open_notional_cap_includes_existing_position():
             symbol="BTCUSDT",
             position_side=PositionSide.BOTH,
             quantity=Decimal("0.0041"),
-            entry_price=Decimal("20000"),
-            mark_price=Decimal("20000"),
+            entry_price=Decimal(20000),
+            mark_price=Decimal(20000),
         )
     )
 
@@ -2111,10 +2113,10 @@ def test_account_snapshot_uses_position_risk_and_real_liquidation_distance():
         ],
     )
 
-    assert snapshot.total_position_notional == Decimal("300")
-    assert snapshot.effective_leverage == Decimal("3")
-    assert snapshot.margin_utilization_pct == Decimal("10")
-    assert snapshot.min_liquidation_distance_pct == Decimal("10")
+    assert snapshot.total_position_notional == Decimal(300)
+    assert snapshot.effective_leverage == Decimal(3)
+    assert snapshot.margin_utilization_pct == Decimal(10)
+    assert snapshot.min_liquidation_distance_pct == Decimal(10)
     assert snapshot.liquidation_safety == "KNOWN"
 
 
@@ -2238,15 +2240,15 @@ def test_exchange_symbol_rules_preserve_notional_and_percent_price_filters():
 
     assert rules.is_ready_for("LIMIT") is True
     assert rules.is_ready_for("MARKET") is True
-    assert rules.min_notional_for("LIMIT") == Decimal("5")
-    assert rules.min_notional_for("MARKET") == Decimal("0")
-    assert rules.max_notional_for("LIMIT") == Decimal("20")
-    assert rules.max_notional_for("MARKET") == Decimal("20")
+    assert rules.min_notional_for("LIMIT") == Decimal(5)
+    assert rules.min_notional_for("MARKET") == Decimal(0)
+    assert rules.max_notional_for("LIMIT") == Decimal(20)
+    assert rules.max_notional_for("MARKET") == Decimal(20)
     assert rules.validate_percent_price(
-        Decimal("10400"), "BUY", Decimal("10000")
+        Decimal(10400), "BUY", Decimal(10000)
     ) == (True, "")
     allowed, reason = rules.validate_percent_price(
-        Decimal("10600"), "BUY", Decimal("10000")
+        Decimal(10600), "BUY", Decimal(10000)
     )
     assert allowed is False
     assert "outside" in reason
@@ -2272,16 +2274,16 @@ def test_exchange_symbol_rules_preserve_notional_and_percent_price_filters():
         }
     )
     assert by_side.is_ready_for("LIMIT") is True
-    assert by_side.validate_percent_price(Decimal("102"), "BUY", Decimal("100")) == (
+    assert by_side.validate_percent_price(Decimal(102), "BUY", Decimal(100)) == (
         True,
         "",
     )
-    assert by_side.validate_percent_price(Decimal("103"), "BUY", Decimal("100"))[0] is False
-    assert by_side.validate_percent_price(Decimal("97"), "SELL", Decimal("100")) == (
+    assert by_side.validate_percent_price(Decimal(103), "BUY", Decimal(100))[0] is False
+    assert by_side.validate_percent_price(Decimal(97), "SELL", Decimal(100)) == (
         True,
         "",
     )
-    assert by_side.validate_percent_price(Decimal("96"), "SELL", Decimal("100"))[0] is False
+    assert by_side.validate_percent_price(Decimal(96), "SELL", Decimal(100))[0] is False
 
 
 @pytest.mark.asyncio
@@ -2302,7 +2304,7 @@ async def test_order_gate_enforces_exchange_max_notional_and_percent_price():
             ],
         }
     )
-    adapter.last_market_reference_price["BTCUSDT"] = Decimal("10000")
+    adapter.last_market_reference_price["BTCUSDT"] = Decimal(10000)
     adapter.last_market_reference_at["BTCUSDT"] = utc_now()
 
     too_large = await adapter.order_gate.check(
@@ -2321,23 +2323,23 @@ async def test_order_gate_enforces_exchange_max_notional_and_percent_price():
 @pytest.mark.asyncio
 async def test_manual_trial_honors_explicit_lower_cap_against_exchange_minimum():
     adapter = await make_adapter()
-    adapter.symbol_rules["BTCUSDT"].min_notional = Decimal("50")
-    adapter.safety_limits.max_single_order_notional = Decimal("25")
+    adapter.symbol_rules["BTCUSDT"].min_notional = Decimal(50)
+    adapter.safety_limits.max_single_order_notional = Decimal(25)
 
     with pytest.raises(RuntimeError, match="25 USDT Testnet cap"):
-        _passive_order(adapter, "BTCUSDT", Decimal("10000"), Decimal("10001"))
+        _passive_order(adapter, "BTCUSDT", Decimal(10000), Decimal(10001))
 
 
 @pytest.mark.asyncio
 async def test_manual_trial_allows_approved_override_for_exchange_minimum():
     adapter = await make_adapter()
-    adapter.symbol_rules["BTCUSDT"].min_notional = Decimal("50")
-    adapter.safety_limits.max_single_order_notional = Decimal("60")
+    adapter.symbol_rules["BTCUSDT"].min_notional = Decimal(50)
+    adapter.safety_limits.max_single_order_notional = Decimal(60)
 
-    price, qty = _passive_order(adapter, "BTCUSDT", Decimal("10000"), Decimal("10001"))
+    price, qty = _passive_order(adapter, "BTCUSDT", Decimal(10000), Decimal(10001))
     assert price == Decimal("9999.9")
-    assert qty * price >= Decimal("50")
-    assert qty * price <= Decimal("60")
+    assert qty * price >= Decimal(50)
+    assert qty * price <= Decimal(60)
 
 
 @pytest.mark.asyncio
@@ -2371,7 +2373,7 @@ async def test_filled_order_recovery_recovers_canonical_fill_and_reaches_in_sync
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             order_type="LIMIT",
             client_order_id="LOCAL-1",
             status="NEW",
@@ -2421,7 +2423,7 @@ async def test_terminal_filled_order_is_queried_and_fill_recovered_before_in_syn
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             order_type="LIMIT",
             client_order_id="LOCAL-1",
             status="FILLED",
@@ -2462,7 +2464,7 @@ async def test_terminal_filled_order_without_recovered_trade_cannot_be_in_sync()
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             order_type="LIMIT",
             client_order_id="LOCAL-1",
             status="FILLED",
@@ -2579,7 +2581,7 @@ async def test_recent_trade_recovery_falls_back_to_client_order_id_for_lineage()
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             client_order_id="LOCAL-1",
             status="FILLED",
             exchange_order_id=None,
@@ -2619,7 +2621,7 @@ async def test_fill_recovery_failure_prevents_in_sync():
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             client_order_id="LOCAL-1",
             status="NEW",
             exchange_order_id="7",
@@ -2695,8 +2697,8 @@ async def test_bootstrap_detects_existing_local_position_mismatch_before_sync():
                 symbol="BTCUSDT",
                 position_side=PositionSide.BOTH,
                 quantity=Decimal("0.001"),
-                entry_price=Decimal("10000"),
-                mark_price=Decimal("10000"),
+                entry_price=Decimal(10000),
+                mark_price=Decimal(10000),
             )
         ],
         mark_initialized=False,
@@ -2744,7 +2746,7 @@ async def test_bootstrap_does_not_adopt_exchange_open_order_over_terminal_local_
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             client_order_id="LOCAL-TERMINAL",
             exchange_order_id="7",
             status="CANCELED",
@@ -2791,7 +2793,7 @@ async def test_reconciliation_detects_open_order_economic_quantity_mismatch():
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.001"),
-            price=Decimal("10000"),
+            price=Decimal(10000),
             client_order_id="LOCAL-OPEN",
             exchange_order_id="8",
             status="NEW",

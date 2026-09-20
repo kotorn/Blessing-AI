@@ -1,17 +1,13 @@
 import React from 'react';
 import {
-  TrendingUp,
-  TrendingDown,
   Layers,
   Shield,
   Activity,
-  CheckCircle2,
   AlertTriangle,
   Compass,
-  ArrowRight,
 } from 'lucide-react';
 import { InstrumentData } from '../types';
-import { MarketStructureState, StructuralLevel } from '../types/market';
+import {  StructuralLevel } from '../types/market';
 
 interface MarketStructureCardProps {
   instrument: InstrumentData | undefined;

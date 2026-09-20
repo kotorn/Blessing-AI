@@ -1,4 +1,4 @@
-import { RiskState, RiskRuleItem } from '../types';
+import { RiskState,  } from '../types';
 
 export interface FailClosedSafeguard {
   id: string;

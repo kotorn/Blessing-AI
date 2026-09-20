@@ -8,7 +8,6 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   signOut,
-  onAuthStateChanged,
   User,
 } from 'firebase/auth';
 import {
@@ -16,15 +15,6 @@ import {
   doc,
   getDocFromServer,
   setDoc,
-  getDoc,
-  collection,
-  getDocs,
-  onSnapshot,
-  query,
-  orderBy,
-  limit,
-  serverTimestamp,
-  deleteDoc,
 } from 'firebase/firestore';
 
 // Import client configuration

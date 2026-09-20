@@ -4,7 +4,7 @@ import { MicrostructureMonitor } from './MicrostructureMonitor';
 import { MarketStructureCard } from './MarketStructureCard';
 import { BasisFundingCarryMonitor } from './BasisFundingCarryMonitor';
 import { InstrumentData } from '../types';
-import { Activity, Focus, LineChart } from 'lucide-react';
+import {  Focus, LineChart } from 'lucide-react';
 
 interface InstrumentWorkspaceProps {
   instrument: InstrumentData | undefined;

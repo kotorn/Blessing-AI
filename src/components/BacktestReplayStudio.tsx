@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Play, RotateCcw, AlertTriangle, CheckCircle2, BarChart2, ShieldAlert, Sliders, DollarSign, Activity } from 'lucide-react';
+import { Play, RotateCcw, AlertTriangle,  BarChart2,     } from 'lucide-react';
 import { BacktestMetrics } from '../types';
 import { apiClient } from '../api/client';
 
@@ -10,9 +10,9 @@ interface BacktestResponse extends Partial<BacktestMetrics> {
 export const BacktestReplayStudio: React.FC = () => {
   const [selectedScenario, setSelectedScenario] = useState<'covid_2020' | 'luna_2022' | 'ftx_2022' | 'bull_2024'>('covid_2020');
   const [isRunning, setIsRunning] = useState(false);
-  const [initialCapital, setInitialCapital] = useState<number>(100000);
-  const [maxGridLevels, setMaxGridLevels] = useState<number>(5);
-  const [simulatedLatencyMs, setSimulatedLatencyMs] = useState<number>(50);
+  const [initialCapital, ] = useState<number>(100000);
+  const [maxGridLevels, ] = useState<number>(5);
+  const [simulatedLatencyMs, ] = useState<number>(50);
   const [results, setResults] = useState<BacktestMetrics | null>(null);
 
   const runScenario = async (scenario: string) => {

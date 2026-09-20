@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Worker runtime dependencies are exact-pinned in requirements-worker.txt;
+  # the dev/extra dependency set lives in pyproject.toml.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
