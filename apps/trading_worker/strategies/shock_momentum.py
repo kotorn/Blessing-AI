@@ -5,7 +5,7 @@ RESEARCH_ONLY = True
 import logging
 from decimal import Decimal
 from typing import Optional
-from domain.models import MarketState, StrategyIntent, PositionSide, MarketType, RegimeType
+from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType, RegimeType
 from apps.trading_worker.strategies.base import BaseAlphaEngine
 import uuid
 
@@ -22,7 +22,13 @@ class ShockMomentumEngine(BaseAlphaEngine):
         super().__init__(strategy_id, symbol)
         self.max_virtual_position = Decimal("0.3") # Small initial risk
 
-    def evaluate(self, state: MarketState, current_position: Decimal) -> Optional[StrategyIntent]:
+    def evaluate(
+        self,
+        state: MarketState,
+        current_position: Decimal,
+        *,
+        pa_state: Optional[PriceActionState] = None,
+    ) -> Optional[StrategyIntent]:
         if state.symbol != self.symbol:
             return None
 
@@ -55,6 +61,7 @@ class ShockMomentumEngine(BaseAlphaEngine):
             direction=PositionSide.SHORT if target_delta < 0 else PositionSide.LONG,
             desired_delta_qty=target_delta,
             opportunity_score=score,
-            confidence=Decimal("0.5") # Shocks have high variance
+            confidence=Decimal("0.5"), # Shocks have high variance
+            expected_holding_horizon_sec=300,
         )
         return intent
