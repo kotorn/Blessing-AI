@@ -17,6 +17,12 @@ import {
   unavailablePortfolioMarginObservation,
 } from './portfolio-margin.js';
 
+/**
+ * Binance capability probes are read-only REST calls; bound them so a hung
+ * response cannot stall the control-plane route that invoked the probe.
+ */
+const BINANCE_PROBE_TIMEOUT_MS = 15_000;
+
 export async function verifyBinanceCredentialsInternal(apiKey: string, apiSecret: string, isTestnet: boolean) {
   const environment = isTestnet ? 'TESTNET' : 'MAINNET';
   if (!apiKey || !apiSecret) {
@@ -56,6 +62,7 @@ export async function verifyBinanceCredentialsInternal(apiKey: string, apiSecret
     const spotSig = sign(apiSecret, spotQuery);
     const spotResp = await fetch(`${spotBase}/api/v3/account?${spotQuery}&signature=${spotSig}`, {
       headers: { 'X-MBX-APIKEY': apiKey },
+      signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
     });
     const spotData: any = await spotResp.json();
     if (spotResp.ok) {
@@ -73,6 +80,7 @@ export async function verifyBinanceCredentialsInternal(apiKey: string, apiSecret
     const fSig = sign(apiSecret, fQuery);
     const fResp = await fetch(`${futuresBase}/fapi/v1/positionSide/dual?${fQuery}&signature=${fSig}`, {
       headers: { 'X-MBX-APIKEY': apiKey },
+      signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
     });
     const fData: any = await fResp.json();
     if (fResp.ok) {
@@ -91,6 +99,7 @@ export async function verifyBinanceCredentialsInternal(apiKey: string, apiSecret
       const marginSig = sign(apiSecret, marginQuery);
       const cmResp = await fetch(`${spotBase}/sapi/v1/margin/account?${marginQuery}&signature=${marginSig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       });
       if (cmResp.ok) {
         const cmData: any = await cmResp.json();
@@ -102,6 +111,7 @@ export async function verifyBinanceCredentialsInternal(apiKey: string, apiSecret
       } else {
         const pmResp = await fetch(`${spotBase}/sapi/v1/portfolio/account?${marginQuery}&signature=${marginSig}`, {
           headers: { 'X-MBX-APIKEY': apiKey },
+          signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
         });
         if (pmResp.ok) {
           results.margin.authenticated = true;
@@ -174,34 +184,44 @@ export async function fetchBinanceLiveBalancesInternal(apiKey: string, apiSecret
     ] = await Promise.all([
       fetch(`${spotBase}/api/v3/account?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch((e) => ({ ok: false, status: 500, json: async () => ({ msg: e.message }) })),
-      fetch(`${spotBase}/api/v3/ticker/price`).catch(() => null),
+      fetch(`${spotBase}/api/v3/ticker/price`, { signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS) }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/asset/wallet/balance?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/margin/account?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/margin/isolated/account?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/portfolio/balance?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/portfolio/account?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch(() => null),
       fetch(`${papiBase}/papi/v1/balance?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/simple-earn/flexible/position?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch(() => null),
       fetch(`${spotBase}/sapi/v1/simple-earn/locked/position?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch(() => null),
       fetch(`${futuresBase}/fapi/v2/account?${query}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': apiKey },
+        signal: AbortSignal.timeout(BINANCE_PROBE_TIMEOUT_MS),
       }).catch(() => null),
     ]);
 

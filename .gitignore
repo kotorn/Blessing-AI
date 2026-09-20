@@ -46,3 +46,6 @@ evidence/
 # Python coverage output
 .coverage
 htmlcov/
+
+# Local GUI test screenshots (scratch artifacts)
+gui-test-screenshots/
