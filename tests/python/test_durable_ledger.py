@@ -11,7 +11,6 @@ from apps.trading_worker.venues.binance.ledger import InMemoryLedger
 from domain.enums import OrderSide, PositionSide
 from domain.models import ExchangeFill
 
-
 STAMP = datetime(2026, 9, 16, 1, 2, 3, tzinfo=UTC)
 
 
@@ -31,7 +30,7 @@ class LedgerDatabase:
                     "venue": "BINANCE_MAINNET",
                     "side": "BUY",
                     "order_type": "LIMIT",
-                    "price": Decimal("2500"),
+                    "price": Decimal(2500),
                     "quantity": Decimal("0.01"),
                     "status": "NEW",
                     "time_in_force": "GTC",
@@ -50,7 +49,7 @@ class LedgerDatabase:
                 "venue": "BINANCE_MAINNET",
                 "side": "BUY",
                 "position_side": "LONG",
-                "price": Decimal("2500"),
+                "price": Decimal(2500),
                 "quantity": Decimal("0.01"),
                 "fee": Decimal("0.01"),
                 "fee_asset": "USDC",
@@ -65,11 +64,11 @@ class LedgerDatabase:
                     "symbol": "ETHUSDC",
                     "position_side": "LONG",
                     "quantity": Decimal("0.01"),
-                    "entry_price": Decimal("2500"),
-                    "mark_price": Decimal("2501"),
+                    "entry_price": Decimal(2500),
+                    "mark_price": Decimal(2501),
                     "liquidation_price": None,
                     "unrealized_pnl": Decimal("0.01"),
-                    "leverage": Decimal("5"),
+                    "leverage": Decimal(5),
                     "margin_type": "CROSS",
                     "updated_at": STAMP,
                 }
@@ -128,10 +127,10 @@ async def test_in_memory_fill_identity_is_environment_scoped() -> None:
             side=OrderSide.BUY,
             position_side=PositionSide.BOTH,
             quantity=Decimal("0.01"),
-            price=Decimal("2500"),
+            price=Decimal(2500),
             commission=Decimal("0.01"),
             commission_asset="USDC",
-            realized_pnl=Decimal("0"),
+            realized_pnl=Decimal(0),
             maker=False,
             event_time=STAMP,
             transaction_time=STAMP,
@@ -157,7 +156,7 @@ async def _foreign_scope_fetch(
             "venue": "BINANCE_TESTNET",
             "side": OrderSide.BUY.value,
             "order_type": "LIMIT",
-            "price": Decimal("2500"),
+            "price": Decimal(2500),
             "quantity": Decimal("0.01"),
             "status": "NEW",
             "time_in_force": "GTC",

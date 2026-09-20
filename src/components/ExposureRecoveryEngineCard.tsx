@@ -2,13 +2,7 @@ import React from 'react';
 import {
   LifeBuoy,
   Scale,
-  TrendingDown,
-  ShieldCheck,
-  CheckCircle2,
-  AlertTriangle,
-  ArrowRight,
   Info,
-  DollarSign,
   Scissors,
 } from 'lucide-react';
 import { ExposureRecoveryAssessment } from '../types/risk';
@@ -22,7 +16,6 @@ interface ExposureRecoveryEngineCardProps {
 
 export const ExposureRecoveryEngineCard: React.FC<ExposureRecoveryEngineCardProps> = ({
   account,
-  baskets,
   recoveryData,
 }) => {
   const hasVerifiedAccount = account.verified === true && (account.source === 'BINANCE_TESTNET' || account.source === 'BINANCE_MAINNET');

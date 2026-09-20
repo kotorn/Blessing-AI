@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
-import textwrap
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from apps.release_gate.repo_gate import _check_vite_cutover, _is_cutover_true, run_repo_gate
-
 
 # ---------------------------------------------------------------------------
 # Helpers

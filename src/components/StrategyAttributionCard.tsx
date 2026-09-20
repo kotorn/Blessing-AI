@@ -1,17 +1,7 @@
 import React, { useState } from 'react';
 import {
-  TrendingUp,
-  TrendingDown,
-  Layers,
-  Zap,
-  Percent,
-  DollarSign,
   PieChart,
   ArrowRightLeft,
-  ShieldCheck,
-  CheckCircle2,
-  Info,
-  Calendar,
 } from 'lucide-react';
 import { StrategyAttribution } from '../types/analytics';
 import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';

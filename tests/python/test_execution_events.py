@@ -5,7 +5,7 @@ import pytest
 from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
-from domain.models import ExecutionOrder, ExchangePosition, OrderSide, PositionSide
+from domain.models import ExchangePosition, ExecutionOrder, OrderSide, PositionSide
 
 pytestmark = pytest.mark.asyncio
 
@@ -21,7 +21,7 @@ async def _seed_local_order(
             symbol="BTCUSDT",
             side=OrderSide.BUY,
             quantity=Decimal("0.1"),
-            price=Decimal("30000"),
+            price=Decimal(30000),
             client_order_id=client_order_id,
             status="NEW",
             position_side=position_side,
@@ -200,10 +200,10 @@ async def test_account_update_merges_delta_into_authoritative_position():
             symbol="BTCUSDT",
             position_side=PositionSide.LONG,
             quantity=Decimal("1.0"),
-            entry_price=Decimal("29000"),
-            mark_price=Decimal("30000"),
-            unrealized_pnl=Decimal("100"),
-            leverage=Decimal("2"),
+            entry_price=Decimal(29000),
+            mark_price=Decimal(30000),
+            unrealized_pnl=Decimal(100),
+            leverage=Decimal(2),
             margin_type="cross",
         )
     )
@@ -229,8 +229,8 @@ async def test_account_update_merges_delta_into_authoritative_position():
 
     assert len(ledger.positions) == 1
     assert ledger.positions[0]["positionAmt"] == "1.5"
-    assert ledger.positions[0].mark_price == Decimal("30000")
-    assert ledger.positions[0].leverage == Decimal("2")
+    assert ledger.positions[0].mark_price == Decimal(30000)
+    assert ledger.positions[0].leverage == Decimal(2)
 
 
 async def test_ledger_rejects_active_raw_position_without_mark_price():
@@ -253,8 +253,8 @@ async def test_ledger_rejects_active_raw_position_without_mark_price():
 async def test_account_update_does_not_treat_per_asset_balance_as_aggregate():
     ledger = InMemoryLedger()
     adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET, ledger=ledger)
-    ledger.wallet_balance = Decimal("100")
-    ledger.margin_balance = Decimal("100")
+    ledger.wallet_balance = Decimal(100)
+    ledger.margin_balance = Decimal(100)
 
     await adapter._on_ws_event(
         {
@@ -266,7 +266,7 @@ async def test_account_update_does_not_treat_per_asset_balance_as_aggregate():
         }
     )
 
-    assert await ledger.get_balances() == (Decimal("100"), Decimal("100"))
+    assert await ledger.get_balances() == (Decimal(100), Decimal(100))
     assert ledger.account_snapshot is None
     assert adapter.reconciliation.last_status == "UNKNOWN"
     assert adapter.reconciliation.last_diffs == []

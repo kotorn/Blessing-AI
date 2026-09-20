@@ -4,14 +4,11 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
-  Server,
   Activity,
-  ArrowRight,
   ShieldAlert,
-  ChevronRight,
   Play,
 } from 'lucide-react';
-import { PreflightResult, PreflightCheck } from '../types';
+import { PreflightResult,  } from '../types';
 import { quantApi } from '../api/quant';
 
 interface StartTradingWizardProps {
@@ -53,7 +50,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
     try {
       const result = await quantApi.preflight(executionMode);
       setPreflightResult(result);
-    } catch (err) {
+    } catch  {
       setError('Failed to run system preflight checks.');
     } finally {
       setLoading(false);

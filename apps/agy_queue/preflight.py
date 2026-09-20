@@ -11,7 +11,6 @@ from typing import Any
 
 from .models import JobRecord
 
-
 _CANONICAL_SERVICE_URL = re.compile(
     r"^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])*$"
 )

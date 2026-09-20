@@ -9,7 +9,6 @@ import pytest
 
 from apps.trading_worker.venues.binance.soak_runner import run_supervised_soak
 
-
 pytestmark = [pytest.mark.asyncio, pytest.mark.contract_soak]
 
 

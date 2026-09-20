@@ -1,5 +1,5 @@
 import React from 'react';
-import { History, Award, Zap, BarChart2, Info, Compass, ShieldCheck } from 'lucide-react';
+import { History,    Info,   } from 'lucide-react';
 import { BacktestReplayStudio } from '../components/BacktestReplayStudio';
 import { OverfittingControlCard } from '../components/OverfittingControlCard';
 import { ExecutionSensitivityCard } from '../components/ExecutionSensitivityCard';

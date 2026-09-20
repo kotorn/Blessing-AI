@@ -4,11 +4,6 @@ import {
   CheckCircle2,
   AlertTriangle,
   XCircle,
-  Radio,
-  Clock,
-  Zap,
-  Info,
-  Power,
 } from 'lucide-react';
 import { FailClosedSafeguard } from '../types/risk';
 
@@ -19,7 +14,6 @@ interface FailClosedSafeguardsCardProps {
 
 export const FailClosedSafeguardsCard: React.FC<FailClosedSafeguardsCardProps> = ({
   killSwitchActive,
-  onTriggerKillSwitch,
 }) => {
   const safeguards: FailClosedSafeguard[] = [
     {

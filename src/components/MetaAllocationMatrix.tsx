@@ -1,13 +1,7 @@
 import React from 'react';
 import {
   Boxes,
-  ShieldCheck,
-  TrendingUp,
-  Percent,
-  Sliders,
-  AlertTriangle,
   Info,
-  Layers,
 } from 'lucide-react';
 import { MetaAllocationWeight } from '../types/strategy';
 import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
@@ -114,7 +108,6 @@ export const MetaAllocationMatrix: React.FC<{ allocationsData?: MetaAllocationWe
           </thead>
           <tbody className="divide-y divide-zinc-800/60">
             {allocations.map((alloc) => {
-              const isScaledDown = alloc.status === 'SCALED_DOWN';
               return (
                 <tr key={alloc.engineId} className="hover:bg-zinc-800/30">
                   <td className="py-3 px-3 font-sans font-medium text-zinc-200">

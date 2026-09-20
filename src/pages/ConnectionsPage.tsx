@@ -3,13 +3,8 @@ import {
   Key,
   Cloud,
   FileSpreadsheet,
-  CheckCircle2,
-  AlertTriangle,
   ExternalLink,
-  ShieldCheck,
   Server,
-  Database,
-  Layers,
 } from 'lucide-react';
 import { BinanceKeyStatus } from '../api/binance';
 import { useAuth } from '../context/AuthContext';

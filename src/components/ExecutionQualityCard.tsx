@@ -1,13 +1,10 @@
 import React from 'react';
 import {
   ShieldCheck,
-  Zap,
   Activity,
   CheckCircle2,
   Percent,
   Clock,
-  Layers,
-  Info,
 } from 'lucide-react';
 import { RiskState } from '../types';
 import { AccountData } from '../types';

@@ -1,14 +1,6 @@
 import React from 'react';
 import {
   GitMerge,
-  ArrowRight,
-  ShieldCheck,
-  Zap,
-  CheckCircle2,
-  DollarSign,
-  TrendingUp,
-  Percent,
-  Layers,
   Info,
 } from 'lucide-react';
 import { StrategyConflictResolution } from '../types/strategy';

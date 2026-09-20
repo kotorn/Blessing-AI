@@ -1,11 +1,9 @@
 """Durable staged and autonomous launch-session tests."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 import pytest
 
-from apps.trading_worker.persistence import PersistenceConfig, PersistenceManager, PersistenceMode
-from apps.trading_worker.persistence.postgres.repositories import PersistenceRepository
 from apps.trading_worker.main import (
     MAINNET_LAUNCH_AUTONOMOUS,
     MAINNET_LAUNCH_STAGED,
@@ -13,7 +11,8 @@ from apps.trading_worker.main import (
     WorkerEngineState,
     WorkerExecutionMode,
 )
-
+from apps.trading_worker.persistence import PersistenceConfig, PersistenceManager, PersistenceMode
+from apps.trading_worker.persistence.postgres.repositories import PersistenceRepository
 
 IMAGE = "asia-southeast1-docker.pkg.dev/demo/trading-worker@sha256:" + "a" * 64
 
@@ -338,7 +337,7 @@ async def test_autonomous_transition_is_atomic_and_restart_requires_reauthorizat
     activated = await repository.activate_mainnet_autonomous(
         launch_id="launch-approval-autonomous",
         continuation_approval_id="continuation-first",
-        first_order_verified_at=datetime.now(timezone.utc),
+        first_order_verified_at=datetime.now(UTC),
         image_digest=IMAGE,
     )
     assert activated is not None
@@ -362,7 +361,7 @@ async def test_autonomous_transition_is_atomic_and_restart_requires_reauthorizat
     reauthorized = await repository.activate_mainnet_autonomous(
         launch_id="launch-approval-autonomous",
         continuation_approval_id="continuation-after-restart",
-        first_order_verified_at=datetime.now(timezone.utc),
+        first_order_verified_at=datetime.now(UTC),
         image_digest=IMAGE,
     )
     assert reauthorized is not None

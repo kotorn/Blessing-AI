@@ -3,11 +3,8 @@ import {
   DollarSign,
   TrendingUp,
   Percent,
-  Clock,
   ShieldAlert,
   CheckCircle2,
-  Info,
-  ArrowRight,
 } from 'lucide-react';
 import { InstrumentData } from '../types';
 

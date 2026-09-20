@@ -58,7 +58,7 @@ def _synthetic_fail(reason: str) -> dict[str, Any]:
             }
         ],
         "overall_passed": False,
-        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
 
 
@@ -70,7 +70,7 @@ def _parse_utc(ts: str) -> datetime.datetime:
         ts_clean = ts_clean[:-1] + "+00:00"
     dt = datetime.datetime.fromisoformat(ts_clean)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=datetime.timezone.utc)
+        dt = dt.replace(tzinfo=datetime.UTC)
     return dt
 
 
@@ -134,7 +134,7 @@ def _load_cloud_evidence(
             f"'{data['generated_at']}' in {best_path.name}. Error: {exc}"
         )
 
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     age_sec = (now - generated_at).total_seconds()
     if age_sec > max_cloud_evidence_age_sec:
         return _synthetic_fail(
@@ -186,7 +186,7 @@ def run_gate(
         "repo_tier": repo_tier,
         "cloud_tier": cloud_tier,
         "overall_passed": overall_passed,
-        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
 
 

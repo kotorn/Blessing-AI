@@ -3,7 +3,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   Activity,
-  Terminal,
   Power,
   Cloud,
   LogIn,
@@ -24,7 +23,6 @@ import {
   Layers,
   FileSpreadsheet,
   PieChart,
-  Wallet,
 } from 'lucide-react';
 import { RiskState } from '../types';
 import { useAuth } from '../context/AuthContext';

@@ -6,10 +6,7 @@ import {
   ShieldAlert,
   Layers,
   Boxes,
-  ArrowRight,
   CheckCircle2,
-  AlertTriangle,
-  Flame,
   Activity,
   ChevronRight,
 } from 'lucide-react';

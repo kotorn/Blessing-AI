@@ -32,7 +32,6 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
 }) => {
   const {
     user,
-    accessToken,
     signIn,
     exportToGoogleSheet,
     fetchDriveFiles,

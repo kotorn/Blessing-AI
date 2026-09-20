@@ -3,10 +3,8 @@ NATS JetStream Client Wrapper for Blessing AI v0.2
 Provides resilient async publishing and subscription with reconnect handling.
 """
 
-import asyncio
 import logging
-from typing import Callable, Coroutine, Any, Optional
-import json
+from typing import Any, Optional
 
 from domain.events import DomainEvent
 

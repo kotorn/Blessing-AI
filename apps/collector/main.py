@@ -13,7 +13,7 @@ from domain.events import DomainEvent, EventSubjectBuilder
 from domain.models import MarketEvent
 from infrastructure.nats_client import NatsBus
 from venues.binance.capabilities import BinanceCapabilityDiscovery
-from venues.binance.public_ws import BinancePublicWebSocket
+from apps.trading_worker.venues.binance.public_ws import BinancePublicWebSocket
 
 logging.basicConfig(
     level=logging.INFO,

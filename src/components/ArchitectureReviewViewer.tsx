@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText, CheckCircle2, Code, Shield, GitBranch, Layers, Cpu, Server } from 'lucide-react';
+import {      Layers,   } from 'lucide-react';
 
 export const ArchitectureReviewViewer: React.FC = () => {
   const [selectedStep, setSelectedStep] = useState<number>(1);

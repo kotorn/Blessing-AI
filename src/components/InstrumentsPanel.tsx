@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldCheck, BarChart3, TrendingUp, Zap, Gauge, AlertCircle } from 'lucide-react';
+import {  BarChart3,     } from 'lucide-react';
 import { InstrumentData, MarketRegimeType } from '../types';
 
 interface InstrumentsPanelProps {

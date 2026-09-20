@@ -7,7 +7,7 @@ import { BasketManager } from '../components/BasketManager';
 import { RiskGovernorMonitor } from '../components/RiskGovernorMonitor';
 import { AccountData, BasketItem, InstrumentData, RiskRuleItem, TradingSystemState } from '../types';
 import { AppRoute } from '../contracts/system';
-import { AlertCircle, ArrowUpRight, Flame } from 'lucide-react';
+import { AlertCircle, ArrowUpRight,  } from 'lucide-react';
 
 interface CommandCenterPageProps {
   account: AccountData;

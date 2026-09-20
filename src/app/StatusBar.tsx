@@ -5,14 +5,10 @@ import {
   Power,
   Key,
   RefreshCw,
-  AlertTriangle,
-  User as UserIcon,
   LogIn,
   LogOut,
   Bell,
   Cloud,
-  CheckCircle2,
-  X,
   PauseCircle,
 } from 'lucide-react';
 import { RiskState } from '../types';
@@ -54,7 +50,6 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   isRefreshing,
   binanceStatus,
   onOpenBinanceModal,
-  onNavigateToAlerts,
   openBasketsCount = 0,
   pauseNewRiskActive = false,
   onTogglePauseNewRisk,
@@ -62,12 +57,16 @@ export const StatusBar: React.FC<StatusBarProps> = ({
 }) => {
   const { user, signIn, signOut, firestoreConnected } = useAuth();
   const [showKillSwitchConfirm, setShowKillSwitchConfirm] = useState(false);
-
-  const isEmergency = riskState === 'EMERGENCY' || killSwitchActive;
+  const [showDisarmConfirm, setShowDisarmConfirm] = useState(false);
 
   const handleConfirmKillSwitch = () => {
     onToggleKillSwitch();
     setShowKillSwitchConfirm(false);
+  };
+
+  const handleConfirmDisarm = () => {
+    onToggleKillSwitch();
+    setShowDisarmConfirm(false);
   };
 
   const getModeBadgeClass = () => {
@@ -173,7 +172,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
           {onTogglePauseNewRisk && (
             <button
               type="button"
-              onClick={onTogglePauseNewRisk}
+              onClick={() => onTogglePauseNewRisk(!pauseNewRiskActive)}
               className={`hidden sm:flex items-center space-x-1 px-2.5 py-1 rounded text-xs border font-medium transition-colors cursor-pointer ${
                 pauseNewRiskActive
                   ? 'bg-amber-950 text-amber-300 border-amber-700'
@@ -208,7 +207,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
               if (!killSwitchActive) {
                 setShowKillSwitchConfirm(true);
               } else {
-                onToggleKillSwitch();
+                setShowDisarmConfirm(true);
               }
             }}
             className={`flex items-center space-x-1.5 px-3 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
@@ -310,6 +309,27 @@ export const StatusBar: React.FC<StatusBarProps> = ({
         requireTypedConfirmation={systemMode === 'LIVE' ? 'KILL' : undefined}
         onConfirm={handleConfirmKillSwitch}
         onCancel={() => setShowKillSwitchConfirm(false)}
+      />
+
+      {/* Disarm Confirmation Modal (from the KILL ENGAGED banner button) */}
+      <ConfirmationModal
+        isOpen={showDisarmConfirm}
+        title="CONFIRM KILL SWITCH DISARM"
+        message={
+          <div className="space-y-3">
+            <p>Disarming will resume normal operation:</p>
+            <ul className="list-disc pl-4 space-y-1 text-zinc-400">
+              <li>Restart strategy order generation loops</li>
+              <li>Lift the veto on all incoming orders</li>
+              <li>Allow grid expansion on {openBasketsCount} basket(s)</li>
+            </ul>
+            <p className="text-amber-300">Only disarm after verifying that positions and market state are safe.</p>
+          </div>
+        }
+        confirmText="DISARM KILL SWITCH"
+        isDestructive={false}
+        onConfirm={handleConfirmDisarm}
+        onCancel={() => setShowDisarmConfirm(false)}
       />
     </>
   );

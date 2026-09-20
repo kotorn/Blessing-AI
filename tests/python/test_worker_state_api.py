@@ -1,26 +1,28 @@
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone, UTC
 from decimal import Decimal
 from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
+
 from apps.trading_worker.main import (
-    app,
-    set_worker_engine,
-    WorkerExecutionMode,
-    WorkerEngineState,
-    WorkerRuntimeState,
     TradingWorkerApp,
-    get_default_state,
+    WorkerEngineState,
+    WorkerExecutionMode,
+    WorkerRuntimeState,
     _global_heartbeat_loop,
+    app,
+    get_default_state,
+    set_worker_engine,
 )
-from apps.trading_worker.venues.binance.config import BinanceEnvironment, environment_label
-from apps.trading_worker.venues.binance.models import ConnectionState
 from apps.trading_worker.persistence import (
     PersistenceConfig,
     PersistenceManager,
     PersistenceMode,
 )
+from apps.trading_worker.venues.binance.config import BinanceEnvironment, environment_label
+from apps.trading_worker.venues.binance.models import ConnectionState
 
 client = TestClient(app)
 
@@ -101,22 +103,22 @@ async def test_mainnet_read_only_preflight_never_arms_worker_or_submits_orders(m
         worker.active_configuration,
     )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     snapshot = SimpleNamespace(
         valid=True,
         timestamp=now,
         exchange_environment=environment_label(BinanceEnvironment.MAINNET),
-        wallet_balance=Decimal("100"),
-        margin_balance=Decimal("100"),
-        available_balance=Decimal("100"),
-        unrealized_pnl=Decimal("0"),
-        total_initial_margin=Decimal("0"),
-        total_maint_margin=Decimal("0"),
-        position_initial_margin=Decimal("0"),
-        total_position_notional=Decimal("0"),
-        effective_leverage=Decimal("0"),
-        margin_utilization_pct=Decimal("0"),
+        wallet_balance=Decimal(100),
+        margin_balance=Decimal(100),
+        available_balance=Decimal(100),
+        unrealized_pnl=Decimal(0),
+        total_initial_margin=Decimal(0),
+        total_maint_margin=Decimal(0),
+        position_initial_margin=Decimal(0),
+        total_position_notional=Decimal(0),
+        effective_leverage=Decimal(0),
+        margin_utilization_pct=Decimal(0),
         liquidation_safety="KNOWN",
         min_liquidation_distance_pct=None,
         collateral_asset="USDC",
@@ -125,10 +127,10 @@ async def test_mainnet_read_only_preflight_never_arms_worker_or_submits_orders(m
         daily_pnl_includes_fees=True,
         daily_pnl_includes_funding=True,
         daily_loss_known=True,
-        daily_realized_pnl=Decimal("0"),
+        daily_realized_pnl=Decimal(0),
         daily_loss_window_start=window_start,
         daily_loss_window_end=window_start + timedelta(days=1),
-        configured_leverage=Decimal("5"),
+        configured_leverage=Decimal(5),
         configured_leverage_known=True,
         margin_mode="SINGLE_ASSET_CROSS",
         margin_mode_known=True,

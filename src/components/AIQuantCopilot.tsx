@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Bot, Sparkles, Send, ShieldAlert, CheckCircle, Cpu } from 'lucide-react';
+import { Bot, Sparkles, Send, ShieldAlert,  Cpu } from 'lucide-react';
 import { apiClient } from '../api/client';
 
 interface ResearchResponse {

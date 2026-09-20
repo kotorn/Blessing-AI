@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Bell, ShieldAlert, Activity, DollarSign, Clock, Trash2, Filter, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { X, Bell, ShieldAlert, Activity, DollarSign,  Trash2, Filter, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { SystemAlert } from '../types';
 
 interface AlertsDrawerProps {

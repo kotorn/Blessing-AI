@@ -4,25 +4,17 @@ Validates Decimal precision, immutable data structures, signed desired deltas, a
 """
 
 import unittest
+from datetime import datetime, timezone, UTC
 from decimal import Decimal
-from datetime import datetime, timezone
 
 from domain.models import (
-    Instrument,
-    MarketEvent,
+    Basket,
+    BasketState,
+    GridLevel,
+    MarketType,
+    PositionSide,
     StrategyIntent,
     TargetExposure,
-    Basket,
-    GridLevel,
-    OrderIntent,
-    RiskSnapshot,
-    MarketType,
-    OrderSide,
-    PositionSide,
-    OrderType,
-    TimeInForce,
-    RiskState,
-    BasketState,
 )
 
 
@@ -54,7 +46,7 @@ class TestDomainModels(unittest.TestCase):
 
     def test_target_exposure_strategy_attribution(self):
         """Verify target exposure attributes virtual positions correctly."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         target = TargetExposure(
             symbol="BTCUSDT",
             market_type=MarketType.USDM_FUTURES,

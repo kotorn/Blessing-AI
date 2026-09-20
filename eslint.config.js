@@ -5,7 +5,8 @@ import tseslint from 'typescript-eslint';
 export default tseslint.config(
   {
     // Generated SDK, build output, and pytest scratch dirs are not reviewable source.
-    ignores: ['dist/', 'node_modules/', 'src/dataconnect-generated/', '.pytest_temp*/', '.pytest-tmp*/'],
+    // .zcode/ holds tool-generated workflow-run artifacts (same class as dist/), not reviewable source.
+    ignores: ['dist/', 'node_modules/', 'src/dataconnect-generated/', '.pytest_temp*/', '.pytest-tmp*/', '.zcode/'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

@@ -1,21 +1,8 @@
 import React, { useState } from 'react';
 import {
-  ShieldAlert,
-  AlertTriangle,
-  CheckCircle2,
-  XCircle,
-  Activity,
   Sliders,
-  TrendingDown,
-  TrendingUp,
-  BarChart3,
-  HelpCircle,
-  Eye,
-  Percent,
-  Clock,
-  Info,
 } from 'lucide-react';
-import { ConservatismMetrics, FilterEfficacyItem, MissedMoveItem } from '../types/analytics';
+import { ConservatismMetrics,   } from '../types/analytics';
 import { IllustrativeEvidenceBanner } from './IllustrativeEvidenceBanner';
 
 export const ConservatismControlCard: React.FC = () => {

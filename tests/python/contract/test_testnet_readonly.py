@@ -6,7 +6,6 @@ import pytest
 
 from apps.trading_worker.main import ArmRequest, TradingWorkerApp
 
-
 pytestmark = [pytest.mark.asyncio, pytest.mark.contract_readonly]
 
 

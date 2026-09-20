@@ -18,10 +18,10 @@ from apps.trading_worker.persistence.postgres.client import (
 )
 from apps.trading_worker.persistence.postgres.repositories import (
     FillRepository,
-    PersistenceRepository,
-    PositionRepository,
     InstrumentRulesUnavailable,
     OrderRepository,
+    PersistenceRepository,
+    PositionRepository,
 )
 from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
 from domain.enums import MarketType, OrderSide, PositionSide, RiskState, TimeInForce
@@ -33,20 +33,19 @@ from domain.models import (
     RiskSnapshot,
 )
 
-
 PERSISTED_AT = datetime(2026, 1, 2, 3, 4, 5, 678000, tzinfo=timezone(timedelta(hours=7)))
 
 
 def _risk_snapshot(timestamp: datetime = PERSISTED_AT) -> RiskSnapshot:
     return RiskSnapshot(
         timestamp=timestamp,
-        portfolio_equity=Decimal("1000"),
-        unrealized_pnl=Decimal("0"),
-        realized_pnl_24h=Decimal("0"),
-        margin_utilization_pct=Decimal("5"),
+        portfolio_equity=Decimal(1000),
+        unrealized_pnl=Decimal(0),
+        realized_pnl_24h=Decimal(0),
+        margin_utilization_pct=Decimal(5),
         effective_leverage=Decimal("0.5"),
-        current_drawdown_pct=Decimal("0"),
-        liquidation_distance_pct=Decimal("50"),
+        current_drawdown_pct=Decimal(0),
+        liquidation_distance_pct=Decimal(50),
         risk_state=RiskState.NORMAL,
     )
 
@@ -356,7 +355,7 @@ async def test_order_submission_barrier_acknowledges_outbox_before_returning():
         symbol="BTCUSDT",
         side=OrderSide.BUY,
         quantity=Decimal("0.1"),
-        price=Decimal("50000"),
+        price=Decimal(50000),
         client_order_id="pre-submit-1",
         status="PENDING",
         timestamp=PERSISTED_AT,
@@ -438,7 +437,7 @@ def test_repositories_use_exchange_rules_and_hedge_position_identity():
         symbol="BTCUSDT",
         side=OrderSide.BUY,
         quantity=Decimal("0.1"),
-        price=Decimal("50000"),
+        price=Decimal(50000),
         client_order_id="order-1",
         status="NEW",
         position_side=PositionSide.LONG,
@@ -453,10 +452,10 @@ def test_repositories_use_exchange_rules_and_hedge_position_identity():
         side=OrderSide.BUY,
         position_side=PositionSide.LONG,
         quantity=Decimal("0.1"),
-        price=Decimal("50000"),
+        price=Decimal(50000),
         commission=Decimal("0.01"),
         commission_asset="USDT",
-        realized_pnl=Decimal("0"),
+        realized_pnl=Decimal(0),
         maker=True,
         event_time=PERSISTED_AT,
         transaction_time=PERSISTED_AT,
@@ -472,9 +471,9 @@ def test_repositories_use_exchange_rules_and_hedge_position_identity():
             ExchangePosition(
                 symbol="BTCUSDT",
                 position_side=PositionSide.LONG,
-                quantity=Decimal("1"),
-                entry_price=Decimal("50000"),
-                mark_price=Decimal("50010"),
+                quantity=Decimal(1),
+                entry_price=Decimal(50000),
+                mark_price=Decimal(50010),
                 event_time=PERSISTED_AT,
             ),
             instrument,
@@ -484,9 +483,9 @@ def test_repositories_use_exchange_rules_and_hedge_position_identity():
             ExchangePosition(
                 symbol="BTCUSDT",
                 position_side=PositionSide.SHORT,
-                quantity=Decimal("-2"),
-                entry_price=Decimal("50100"),
-                mark_price=Decimal("50010"),
+                quantity=Decimal(-2),
+                entry_price=Decimal(50100),
+                mark_price=Decimal(50010),
                 event_time=PERSISTED_AT,
             ),
             instrument,
@@ -568,9 +567,9 @@ def test_small_live_requires_required_persistence_mode():
 
 
 def test_incomplete_exchange_rules_are_rejected_before_durable_write():
-    instrument = _instrument().model_copy(update={"tick_size": Decimal("0")})
+    instrument = _instrument().model_copy(update={"tick_size": Decimal(0)})
     connection = RecordingConnection()
-    position = ExchangePosition(symbol="BTCUSDT", quantity=Decimal("1"))
+    position = ExchangePosition(symbol="BTCUSDT", quantity=Decimal(1))
 
     import asyncio
 
@@ -595,7 +594,7 @@ def test_rest_refreshed_position_reuses_instrument_venue_not_unknown():
     # dict (emergency flatten, reconciliation) that never carried a "source"
     # key -- unlike WebSocket ACCOUNT_UPDATE-derived positions, which tag it
     # with the live environment label.
-    position = ExchangePosition(symbol="BTCUSDT", quantity=Decimal("1"), source="UNKNOWN")
+    position = ExchangePosition(symbol="BTCUSDT", quantity=Decimal(1), source="UNKNOWN")
 
     assert manager.enqueue_position(position) is True
     event = manager._write_queue.get_nowait()

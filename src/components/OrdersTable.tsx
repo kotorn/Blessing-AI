@@ -1,15 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import {
   Search,
-  Filter,
-  ArrowUpDown,
-  ExternalLink,
   CheckCircle2,
   Clock,
-  Layers,
-  ArrowRight,
-  TrendingUp,
-  ShieldAlert,
 } from 'lucide-react';
 
 import { ExecutionOrder, OrderStatus, OrderVenue } from '../types/orders';

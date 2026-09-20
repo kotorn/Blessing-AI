@@ -1,11 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Terminal, ShieldAlert, CheckCircle2, Filter, RefreshCw, Loader2, AlertCircle } from 'lucide-react';
+import { Terminal, ShieldAlert, CheckCircle2,  RefreshCw, Loader2, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 export const AuditLogPage: React.FC = () => {
   const { user, firestoreConnected, fetchAuditLogs } = useAuth();
-  const [filterSeverity, setFilterSeverity] = useState<string>('ALL');
-  const [filterSource, setFilterSource] = useState<string>('ALL');
   
   const [logs, setLogs] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -17,7 +15,7 @@ export const AuditLogPage: React.FC = () => {
     try {
       const fetchedLogs = await fetchAuditLogs();
       setLogs(fetchedLogs);
-    } catch (err) {
+    } catch  {
       setError('Failed to fetch audit logs.');
     } finally {
       setIsLoading(false);
@@ -32,7 +30,7 @@ export const AuditLogPage: React.FC = () => {
     }
   }, [firestoreConnected, user]);
 
-  const filteredLogs = logs.filter((log) => {
+  const filteredLogs = logs.filter((_log) => {
     // If we wanted to parse severity from action string or details, we could.
     // By default, let's say ALL severity means show all.
     // Same for source. We'll implement basic text matching if needed.

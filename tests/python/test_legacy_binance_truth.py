@@ -99,7 +99,7 @@ def test_capability_parser_keeps_leverage_unknown_and_uses_exchange_rules():
 
     assert instrument.tick_size == Decimal("0.10")
     assert instrument.step_size == Decimal("0.0001")
-    assert instrument.min_notional == Decimal("50")
+    assert instrument.min_notional == Decimal(50)
     assert instrument.max_leverage is None
 
 
@@ -111,7 +111,7 @@ async def test_legacy_symbol_info_has_no_hardcoded_rule_or_leverage_fallback():
 
     assert info.tick_size == Decimal("0.10")
     assert info.step_size == Decimal("0.0001")
-    assert info.min_notional == Decimal("50")
+    assert info.min_notional == Decimal(50)
     assert info.max_leverage is None
 
 
@@ -119,8 +119,8 @@ async def test_legacy_symbol_info_has_no_hardcoded_rule_or_leverage_fallback():
 @pytest.mark.parametrize(
     ("amount", "liquidation_price", "expected_distance"),
     [
-        ("1", "90", Decimal("10")),
-        ("-1", "110", Decimal("10")),
+        ("1", "90", Decimal(10)),
+        ("-1", "110", Decimal(10)),
         ("1", "110", None),
         ("-1", "90", None),
     ],

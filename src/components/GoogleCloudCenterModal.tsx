@@ -15,7 +15,6 @@ import {
   Copy,
   Check,
   Server,
-  Terminal,
   Zap,
 } from 'lucide-react';
 import { GOOGLE_PRODUCTS, GoogleProductConfig, GCP_PROJECT_ID, GCP_REGION, USER_EMAIL } from '../lib/googleCloud';

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { BarChart3, PieChart, Sliders, Database, Info, Layers, Award } from 'lucide-react';
+import { BarChart3, PieChart, Sliders, Database, Info, Layers,  } from 'lucide-react';
 import { StrategyAttributionCard } from '../components/StrategyAttributionCard';
 import { ConservatismControlCard } from '../components/ConservatismControlCard';
 import { BigQueryLakehouse } from '../components/BigQueryLakehouse';

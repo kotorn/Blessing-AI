@@ -14,23 +14,15 @@ Verifies:
 """
 
 from decimal import Decimal
+
 import pytest
 
-from domain.enums import (
-    EconomicRiskClass,
-    OrderSide,
-    OrderType,
-    PositionSide,
-    TimeInForce,
-    MarketType,
-    RegimeType,
+from apps.trading_worker.engines.funding_carry import (
+    FundingCarryEngine,
 )
-from domain.models import (
-    ExecutionDecision,
-    OrderIntent,
-    MarketEvent,
-    MarketState,
-    utc_now,
+from apps.trading_worker.research.binance_cli import (
+    BinanceCliPolicyError,
+    build_read_only_command,
 )
 from apps.trading_worker.venues.binance.config import (
     BinanceEnvironment,
@@ -38,28 +30,38 @@ from apps.trading_worker.venues.binance.config import (
     get_ws_url,
     parse_environment,
 )
-from apps.trading_worker.venues.binance.models import (
-    TestnetSafetyLimits as SafetyLimits,
-    ConnectionState,
-    BinanceTransportAmbiguity,
-    ExchangeAccountSnapshot,
-)
+from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.gates import (
     DecisionExecutionGate,
     OrderExecutionGate,
-    GateResult,
 )
-from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
+from apps.trading_worker.venues.binance.models import (
+    BinanceTransportAmbiguity,
+    ConnectionState,
+    ExchangeAccountSnapshot,
+)
+from apps.trading_worker.venues.binance.models import (
+    TestnetSafetyLimits as SafetyLimits,
+)
 from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
-from apps.trading_worker.research.binance_cli import (
-    BinanceCliPolicyError,
-    build_read_only_command,
+from domain.enums import (
+    EconomicRiskClass,
+    MarketType,
+    OrderSide,
+    OrderType,
+    PositionSide,
+    RegimeType,
+    TimeInForce,
 )
-from apps.trading_worker.engines.funding_carry import (
-    FundingCarryCostInputs,
-    FundingCarryEngine,
+from domain.models import (
+    ExecutionDecision,
+    MarketEvent,
+    MarketState,
+    OrderIntent,
+    utc_now,
 )
+from datetime import UTC
 
 
 def test_mainnet_testnet_route_isolation():
@@ -143,7 +145,7 @@ async def test_read_only_mainnet_adapter_bypasses_approval_but_blocks_mutations(
         await adapter.modify_order(
             "ETHUSDC",
             "client-id",
-            Decimal("100"),
+            Decimal(100),
             Decimal("0.001"),
             "BUY",
             authority=authority,
@@ -407,8 +409,8 @@ async def test_disarmed_worker_ignores_market_event_without_pausing_risk():
     """Verify that incoming market events while DISARMED in LIVE mode do not trigger risk pause."""
     from apps.trading_worker.main import (
         TradingWorkerApp,
-        WorkerExecutionMode,
         WorkerEngineState,
+        WorkerExecutionMode,
     )
 
     worker = TradingWorkerApp(symbols=["ETHUSDC"])
@@ -445,7 +447,6 @@ def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
     from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
     from domain.models import (
         ExecutionDecision,
-        MarketState,
         OrderIntent,
         OrderSide,
         OrderType,
@@ -459,13 +460,13 @@ def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
     pa_state = PriceActionState(
         symbol="ETHUSDC",
         timestamp=now,
-        swing_high=Decimal("2550"),
-        swing_low=Decimal("2450"),
-        prior_24h_high=Decimal("2550"),
-        prior_24h_low=Decimal("2450"),
-        displacement_velocity_pct=Decimal("0"),
-        displacement_acceleration=Decimal("0"),
-        range_expansion_ratio=Decimal("0"),
+        swing_high=Decimal(2550),
+        swing_low=Decimal(2450),
+        prior_24h_high=Decimal(2550),
+        prior_24h_low=Decimal(2450),
+        displacement_velocity_pct=Decimal(0),
+        displacement_acceleration=Decimal(0),
+        range_expansion_ratio=Decimal(0),
         is_reclaiming=True,
     )
     market_state = type(
@@ -476,8 +477,8 @@ def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
             "timestamp": now,
             "primary_regime": RegimeType.R1_RANGE,
             "regime_probabilities": {},
-            "atr_1h": Decimal("20"),
-            "volatility_zscore": Decimal("0"),
+            "atr_1h": Decimal(20),
+            "volatility_zscore": Decimal(0),
             "shock_active": False,
         },
     )()
@@ -539,19 +540,20 @@ def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
 
 
 def test_clamp_order_notional_bumps_undersized_order_to_satisfy_min_notional():
+    from datetime import datetime, timezone
+
     from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
     from apps.trading_worker.venues.binance.models import TestnetSafetyLimits
     from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
     from domain.models import (
         ExecutionDecision,
+        MarketType,
         OrderIntent,
         OrderSide,
         OrderType,
         PositionSide,
         TimeInForce,
-        MarketType,
     )
-    from datetime import datetime, timezone
 
     worker = TradingWorkerApp(symbols=["ETHUSDC"])
     worker.execution_mode = WorkerExecutionMode.LIVE
@@ -572,7 +574,7 @@ def test_clamp_order_notional_bumps_undersized_order_to_satisfy_min_notional():
 
     worker.execution_adapter = MockLimitsAdapter()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     undersized_order = OrderIntent(
         client_order_id="B-SYS-TEST-MIN-NOTIONAL",
         symbol="ETHUSDC",

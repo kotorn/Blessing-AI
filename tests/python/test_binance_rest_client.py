@@ -147,7 +147,7 @@ async def test_rate_limit_records_retry_after_without_resubmission():
 
 @pytest.mark.asyncio
 async def test_transport_timeout_is_ambiguous_and_not_retried():
-    client, session, _ = make_client([asyncio.TimeoutError()])
+    client, session, _ = make_client([TimeoutError()])
 
     with pytest.raises(BinanceTransportAmbiguity):
         await client.request("DELETE", "/fapi/v1/order", signed=True)
