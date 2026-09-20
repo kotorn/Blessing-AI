@@ -36,6 +36,9 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
     exportToGoogleSheet,
     fetchDriveFiles,
     deleteDriveFile,
+    isSigningIn,
+    authError,
+    clearAuthError,
   } = useAuth();
 
   const [activeTab, setActiveTab] = useState<'export' | 'drive'>('export');
@@ -178,13 +181,37 @@ export const GoogleWorkspaceModal: React.FC<GoogleWorkspaceModalProps> = ({
           </div>
 
           {!user && (
-            <button
-              type="button"
-              onClick={signIn}
-              className="flex items-center space-x-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 rounded-lg text-xs font-medium transition-colors"
-            >
-              <span>Sign in with Google</span>
-            </button>
+            <div className="flex items-center space-x-2">
+              <button
+                type="button"
+                onClick={signIn}
+                disabled={isSigningIn}
+                className="flex items-center space-x-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-200 border border-zinc-700 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+              >
+                {isSigningIn ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                    <span>Connecting...</span>
+                  </>
+                ) : (
+                  <span>Sign in with Google</span>
+                )}
+              </button>
+              {authError && (
+                <div className="flex items-center space-x-1 bg-amber-950/80 border border-amber-700/50 text-amber-300 text-xs px-2.5 py-1 rounded-lg">
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="truncate max-w-[200px]" title={authError}>{authError}</span>
+                  <button
+                    type="button"
+                    onClick={clearAuthError}
+                    className="hover:text-amber-100 ml-1"
+                    title="Dismiss"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+            </div>
           )}
         </div>
 

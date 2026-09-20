@@ -38,6 +38,7 @@ export const googleProvider = new GoogleAuthProvider();
 googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
 googleProvider.addScope('https://www.googleapis.com/auth/spreadsheets');
 googleProvider.addScope('https://www.googleapis.com/auth/drive.readonly');
+googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 // In-memory token cache (never stored in localStorage)
 let cachedAccessToken: string | null = null;
@@ -119,42 +120,64 @@ export async function testFirestoreConnection(): Promise<boolean> {
   }
 }
 
+// In-flight promise to deduplicate concurrent popup requests
+let activeSignInPromise: Promise<User | null> | null = null;
+
 /**
- * Sign In with Google popup
+ * Sign In with Google popup with concurrent request deduplication and graceful cancellation handling
  */
-export async function signInWithGoogle(): Promise<User> {
-  try {
-    const result = await signInWithPopup(auth, googleProvider);
-    // Capture OAuth access token for Google Drive & Google Sheets API calls
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (credential?.accessToken) {
-      cachedAccessToken = credential.accessToken;
-    }
-    // Sync/create user profile in Firestore
-    if (result.user) {
-      const userRef = doc(db, 'users', result.user.uid);
-      try {
-        await setDoc(
-          userRef,
-          {
-            uid: result.user.uid,
-            email: result.user.email || '',
-            displayName: result.user.displayName || 'Quant Trader',
-            photoURL: result.user.photoURL || '',
-            preferredVenue: 'binance_global',
-            updatedAt: new Date().toISOString(),
-          },
-          { merge: true }
-        );
-      } catch (err) {
-        console.warn('Could not save user profile (rules might restrict if new):', err);
-      }
-    }
-    return result.user;
-  } catch (error: any) {
-    console.error('Google Sign-in failed:', error);
-    throw error;
+export async function signInWithGoogle(): Promise<User | null> {
+  if (activeSignInPromise) {
+    return activeSignInPromise;
   }
+
+  activeSignInPromise = (async () => {
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      // Capture OAuth access token for Google Drive & Google Sheets API calls
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      if (credential?.accessToken) {
+        cachedAccessToken = credential.accessToken;
+      }
+      // Sync/create user profile in Firestore
+      if (result.user) {
+        const userRef = doc(db, 'users', result.user.uid);
+        try {
+          await setDoc(
+            userRef,
+            {
+              uid: result.user.uid,
+              email: result.user.email || '',
+              displayName: result.user.displayName || 'Quant Trader',
+              photoURL: result.user.photoURL || '',
+              preferredVenue: 'binance_global',
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        } catch (err) {
+          console.warn('Could not save user profile (rules might restrict if new):', err);
+        }
+      }
+      return result.user;
+    } catch (error: any) {
+      const errorCode = error?.code || '';
+      // Gracefully handle cancelled or closed popup requests without polluting console.error
+      if (
+        errorCode === 'auth/cancelled-popup-request' ||
+        errorCode === 'auth/popup-closed-by-user'
+      ) {
+        console.info('Google Sign-in popup cancelled or closed by user.');
+        return null;
+      }
+      console.warn('Google Sign-in did not complete:', error?.message || error);
+      throw error;
+    } finally {
+      activeSignInPromise = null;
+    }
+  })();
+
+  return activeSignInPromise;
 }
 
 /**

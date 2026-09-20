@@ -72,7 +72,7 @@ export const Header: React.FC<HeaderProps> = ({
   baskets = [],
   portfolioState = {},
 }) => {
-  const { user, signIn, signOut, firestoreConnected } = useAuth();
+  const { user, signIn, signOut, firestoreConnected, isSigningIn } = useAuth();
   const [binanceStatus, setBinanceStatus] = useState<BinanceStatus | null>(null);
   const [isVerifyingKey, setIsVerifyingKey] = useState<boolean>(false);
   const [showKeyModal, setShowKeyModal] = useState<boolean>(false);
@@ -450,12 +450,23 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           ) : (
             <button
+              id="header-google-signin-btn"
               onClick={signIn}
-              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors"
+              disabled={isSigningIn}
+              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-200 border border-zinc-700 transition-colors cursor-pointer"
               title="Sign in with Google to sync baskets and audit logs"
             >
-              <LogIn className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Sign In</span>
+              {isSigningIn ? (
+                <>
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                  <span className="hidden sm:inline">Signing In...</span>
+                </>
+              ) : (
+                <>
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Sign In</span>
+                </>
+              )}
             </button>
           )}
         </div>

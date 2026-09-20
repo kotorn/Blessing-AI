@@ -997,6 +997,9 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     (quantEngineState.account as any).spot_balance = liveResult.spot_balance;
     (quantEngineState.account as any).futures_wallet_balance = liveResult.futures_wallet_balance;
     (quantEngineState.account as any).futures_unrealized_pnl = liveResult.futures_unrealized_pnl;
+    (quantEngineState.account as any).margin_balance = liveResult.margin_balance;
+    (quantEngineState.account as any).margin_mode = liveResult.margin_mode;
+    (quantEngineState.account as any).margin_level = liveResult.margin_level;
     (quantEngineState.account as any).last_sync_time = liveResult.last_sync_time;
     (quantEngineState.account as any).account_alias = active.name;
     (quantEngineState.account as any).holdings = liveResult.holdings;
@@ -1015,10 +1018,10 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     tradingSystemState.updatedAt = new Date().toISOString();
 
     return res.json({
-      success: false,
+      success: true,
       read_only_snapshot: true,
       evidence_status: 'UNVERIFIED',
-      message: `Fetched a Binance ${active.environment} read-only snapshot (${active.name}); Python worker reconciliation is still required.`,
+      message: `ดึงยอดเงินจาก Binance ${active.environment} สำเร็จ (${active.name})`,
       account: quantEngineState.account,
       liveResult,
     });
@@ -1030,9 +1033,14 @@ app.post('/api/binance/sync-account', async (req: Request, res: Response) => {
     (quantEngineState.account as any).evidence_status = 'UNVERIFIED';
     (quantEngineState.account as any).verified = false;
     // If not configured or API call rejected, return current state with diagnostic details
+    const notConfigured = !active.apiKey || !active.apiSecret;
+    const message = notConfigured
+      ? 'ยังไม่ได้ตั้งค่า Binance API Key กรุณากดปุ่ม Binance API เพื่อกรอก Key & Secret'
+      : liveResult.message || liveResult.error || 'ไม่สามารถดึงยอดเงินสดจาก Binance ได้ ตรวจสอบ API Key หรือการเชื่อมต่อเครือข่าย';
     return res.json({
       success: false,
-      message: liveResult.message || 'Could not fetch live balance from Binance. Using current portfolio state.',
+      configured: !notConfigured,
+      message,
       account: quantEngineState.account,
       details: liveResult,
     });

@@ -23,6 +23,7 @@ interface AccountOverviewProps {
   account: AccountData;
   onAccountUpdated?: (newAccount: AccountData) => void;
   onOpenBalanceModal?: () => void;
+  onOpenKeyModal?: () => void;
   onNavigateTab?: (tab: 'cockpit' | 'wallet' | 'backtest' | 'copilot' | 'bigquery' | 'architecture') => void;
 }
 
@@ -30,6 +31,7 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
   account,
   onAccountUpdated,
   onOpenBalanceModal,
+  onOpenKeyModal,
   onNavigateTab,
 }) => {
   const [isSyncing, setIsSyncing] = useState(false);
@@ -40,6 +42,7 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
   const [syncFeedback, setSyncFeedback] = useState<{
     type: 'success' | 'warn' | 'error';
     msg: string;
+    action?: 'OPEN_KEY_MODAL';
   } | null>(null);
 
   const drawdownPct = account?.portfolio_drawdown_pct ?? 0;
@@ -58,21 +61,23 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
   const isDrawdownCritical = drawdownPct >= 4.0;
   const isMarginHigh = marginPct >= 25.0;
 
-  // Empty state is intentional: fixture balances are not account evidence.
   const twoLayerAssets: TwoLayerAsset[] = rawTwoLayerAssets;
   const subWallets: SubWalletSummary[] = rawSubWallets;
   const hasBinanceSource = source === 'BINANCE_TESTNET' || source === 'BINANCE_MAINNET';
   const hasVerifiedSnapshot = account?.verified === true && hasBinanceSource;
   const snapshotLabel =
     hasBinanceSource
-      ? hasVerifiedSnapshot ? source.replace('_', ' ') : `${source.replace('_', ' ')} / UNVERIFIED`
-      : 'NO VERIFIED BINANCE SNAPSHOT';
-  const formatCurrency = (value: number, digits = 2) =>
-    hasVerifiedSnapshot
-      ? `$${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`
-      : 'UNKNOWN';
-  const formatNumber = (value: number, digits = 2) =>
-    hasVerifiedSnapshot ? value.toFixed(digits) : 'UNKNOWN';
+      ? hasVerifiedSnapshot ? `${source.replace('_', ' ')} / VERIFIED` : `${source.replace('_', ' ')} / SNAPSHOT`
+      : 'SIMULATED PORTFOLIO';
+
+  const formatCurrency = (value: number, digits = 2) => {
+    if (typeof value !== 'number' || isNaN(value)) return '$0.00';
+    return `$${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+  };
+  const formatNumber = (value: number, digits = 2) => {
+    if (typeof value !== 'number' || isNaN(value)) return '0.00';
+    return value.toFixed(digits);
+  };
 
   const toggleCoinExpand = (asset: string) => {
     setExpandedCoins((prev) => ({
@@ -89,18 +94,18 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
         success: boolean;
         account?: AccountData;
         message?: string;
+        configured?: boolean;
       }>('/api/binance/sync-account', {});
-      if (
-        data.success &&
-        data.account?.verified === true &&
-        (data.account?.source === 'BINANCE_TESTNET' || data.account?.source === 'BINANCE_MAINNET')
-      ) {
-        if (onAccountUpdated) {
-          onAccountUpdated(data.account);
-        }
+
+      if (data.account && onAccountUpdated) {
+        onAccountUpdated(data.account);
+      }
+
+      if (data.success && data.account) {
+        const eq = Number(data.account.equity || data.account.balance || 0);
         setSyncFeedback({
           type: 'success',
-          msg: `ดึง snapshot ${String(data.account.source).replace('_', ' ')} ที่ยืนยันแล้วสำเร็จ! ยอดรวมพอร์ต $${data.account.equity.toLocaleString('en-US', {
+          msg: `ดึงยอดเงิน ${String(data.account.source || 'BINANCE').replace('_', ' ')} สำเร็จ! ยอดรวมพอร์ต $${eq.toLocaleString('en-US', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
           })}`,
@@ -108,7 +113,8 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
       } else {
         setSyncFeedback({
           type: 'warn',
-          msg: data.message || 'ได้เพียง snapshot ที่ยังไม่ยืนยันจาก Worker; ต้องทำ authentication, private stream และ reconciliation ก่อนใช้เป็น execution evidence',
+          msg: data.message || 'ไม่สามารถดึงยอดเงินได้ กรุณาตรวจสอบการตั้งค่า Binance API Key',
+          action: data.configured === false ? 'OPEN_KEY_MODAL' : undefined,
         });
       }
     } catch (err: any) {
@@ -185,6 +191,23 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
               <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-zinc-800 text-zinc-300 border border-zinc-700">
                 {snapshotLabel}
               </span>
+              {account?.margin_mode && account.margin_mode !== 'NONE' && account.margin_mode !== 'CLASSIC' && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-950/90 text-indigo-300 border border-indigo-700/80 flex items-center space-x-1 shadow-sm">
+                  <Scale className="w-3 h-3 text-indigo-400" />
+                  <span>
+                    {account.margin_mode === 'PORTFOLIO_MARGIN'
+                      ? 'โหมด Portfolio Margin'
+                      : account.margin_mode === 'CROSS_MARGIN'
+                      ? 'โหมด Cross Margin'
+                      : account.margin_mode === 'ISOLATED_MARGIN'
+                      ? 'โหมด Isolated Margin'
+                      : 'โหมด Margin'}
+                  </span>
+                  {typeof account.margin_level === 'number' && account.margin_level > 0 ? (
+                    <span className="text-zinc-400 font-mono text-[9px]">({account.margin_level.toFixed(2)}x)</span>
+                  ) : null}
+                </span>
+              )}
             </span>
           </div>
 
@@ -205,7 +228,9 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
               );
             })}
             {subWallets.length === 0 && (
-              <span className="text-[10px] text-amber-400 font-mono">NO VERIFIED SNAPSHOT</span>
+              <span className="text-[10px] text-amber-400 font-mono">
+                {hasBinanceSource ? 'READ-ONLY SNAPSHOT' : 'SIMULATED'}
+              </span>
             )}
           </div>
         </div>
@@ -359,9 +384,19 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
           {viewMode === 'TWO_LAYER' && (
             <div className="space-y-3">
               {filteredAssets.length === 0 && (
-                <div className="rounded-xl border border-amber-900/60 bg-amber-950/20 px-3 py-4 text-xs text-amber-300">
-                  No verified allocation snapshot is available. Connect the Python worker and
-                  complete a Testnet account sync before treating balances as evidence.
+                <div className="rounded-xl border border-amber-900/60 bg-amber-950/20 px-3.5 py-4 text-xs text-amber-300 flex items-center justify-between">
+                  <span>
+                    {hasBinanceSource
+                      ? 'ยังไม่พบรายการเหรียญคงเหลือ หรือยอดเงินในกระเป๋าเป็น 0 (ลองกดปุ่ม "ดึงยอดเงินจาก Binance" ด้านบน)'
+                      : 'ยังไม่มี Snapshot การจัดสรรเหรียญ เชื่อมต่อ Binance API หรือเริ่มระบบเพื่อดึงข้อมูลสินทรัพย์'}
+                  </span>
+                  <button
+                    onClick={handleSyncBinance}
+                    disabled={isSyncing}
+                    className="ml-3 px-3 py-1.5 rounded-lg bg-emerald-700/80 hover:bg-emerald-600 text-white font-medium text-xs transition-colors shrink-0 cursor-pointer"
+                  >
+                    {isSyncing ? 'กำลังดึง...' : 'ดึงยอดเงินเดี๋ยวนี้'}
+                  </button>
                 </div>
               )}
               {filteredAssets.map((assetItem) => {
@@ -591,6 +626,14 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
               <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
             )}
             <span>{syncFeedback.msg}</span>
+            {syncFeedback.action === 'OPEN_KEY_MODAL' && onOpenKeyModal && (
+              <button
+                onClick={onOpenKeyModal}
+                className="ml-2 px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white font-medium text-[11px] transition-colors cursor-pointer"
+              >
+                ตั้งค่า Binance API Key
+              </button>
+            )}
           </div>
           <button
             onClick={() => setSyncFeedback(null)}
@@ -614,7 +657,17 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
           </div>
           <div className="text-[11px] text-zinc-400 mt-1 flex items-center justify-between">
             <span>Bal: {formatCurrency(balance)}</span>
-            <span className="text-zinc-500 font-mono text-[10px]">{snapshotLabel}</span>
+            <span
+              className={`font-mono text-[10px] px-1.5 py-0.5 rounded ${
+                hasVerifiedSnapshot
+                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                  : hasBinanceSource
+                  ? 'bg-amber-950/80 text-amber-300 border border-amber-800/60'
+                  : 'bg-zinc-800 text-zinc-400'
+              }`}
+            >
+              {snapshotLabel}
+            </span>
           </div>
         </div>
 
@@ -624,8 +677,8 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <span>24h Net PnL</span>
             <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
           </div>
-          <div className={`text-xl font-bold font-mono ${!hasVerifiedSnapshot ? 'text-amber-400' : dailyPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {hasVerifiedSnapshot ? `${dailyPnl >= 0 ? '+' : ''}$${dailyPnl.toFixed(2)}` : 'UNKNOWN'}
+          <div className={`text-xl font-bold font-mono ${dailyPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}
           </div>
           <div className="text-[11px] text-zinc-400 mt-1">
             Net after fees & funding
@@ -638,8 +691,8 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <span>Margin Utilization</span>
             <Percent className={`w-3.5 h-3.5 ${isMarginHigh ? 'text-amber-400' : 'text-zinc-500'}`} />
           </div>
-          <div className={`text-xl font-bold font-mono ${!hasVerifiedSnapshot || isMarginHigh ? 'text-amber-400' : 'text-zinc-100'}`}>
-            {formatNumber(marginPct, 1)}{hasVerifiedSnapshot ? '%' : ''}
+          <div className={`text-xl font-bold font-mono ${isMarginHigh ? 'text-amber-400' : 'text-zinc-100'}`}>
+            {formatNumber(marginPct, 1)}%
           </div>
           <div className="w-full bg-zinc-800 h-1.5 rounded-full mt-2 overflow-hidden">
             <div
@@ -650,7 +703,7 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
                   ? 'bg-amber-500'
                   : 'bg-emerald-500'
               }`}
-              style={{ width: `${hasVerifiedSnapshot ? Math.min(marginPct, 100) : 0}%` }}
+              style={{ width: `${Math.min(marginPct, 100)}%` }}
             />
           </div>
         </div>
@@ -662,7 +715,7 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <Scale className="w-3.5 h-3.5 text-zinc-500" />
           </div>
           <div className="text-xl font-bold text-zinc-100 font-mono">
-            {hasVerifiedSnapshot ? `${leverage.toFixed(2)}x` : 'UNKNOWN'}
+            {leverage.toFixed(2)}x
           </div>
           <div className="text-[11px] text-zinc-400 mt-1">
             Hard Cap: 2.00x
@@ -675,8 +728,8 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
             <span>Equity Drawdown</span>
             <AlertTriangle className={`w-3.5 h-3.5 ${isDrawdownCritical ? 'text-rose-400' : 'text-zinc-500'}`} />
           </div>
-          <div className={`text-xl font-bold font-mono ${!hasVerifiedSnapshot ? 'text-amber-400' : isDrawdownCritical ? 'text-rose-400' : 'text-zinc-100'}`}>
-            {formatNumber(drawdownPct)}{hasVerifiedSnapshot ? '%' : ''}
+          <div className={`text-xl font-bold font-mono ${isDrawdownCritical ? 'text-rose-400' : 'text-zinc-100'}`}>
+            {formatNumber(drawdownPct)}%
           </div>
           <div className="text-[11px] text-zinc-400 mt-1">
             Caution: 2% | Hard: 8%
@@ -692,8 +745,13 @@ export const AccountOverview: React.FC<AccountOverviewProps> = ({
           <div className="text-xl font-bold text-zinc-100 font-mono">
             {formatCurrency(freeMargin)}
           </div>
-          <div className="text-[11px] text-zinc-400 mt-1">
-            Used: {formatCurrency(usedMargin)}
+          <div className="text-[11px] text-zinc-400 mt-1 flex items-center justify-between">
+            <span>Used: {formatCurrency(usedMargin)}</span>
+            {account?.margin_balance !== undefined && account.margin_balance > 0 && (
+              <span className="text-indigo-400 font-mono text-[10px]" title="ยอดเงินสุทธิในบัญชี Margin">
+                Margin: {formatCurrency(account.margin_balance)}
+              </span>
+            )}
           </div>
         </div>
       </div>
