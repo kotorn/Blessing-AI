@@ -2396,6 +2396,14 @@ app.post('/api/system/pause-new-risk', async (req, res) => {
     if (active === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
     tradingSystemState.pauseNewRisk = active;
     tradingSystemState.engineState = active ? 'PAUSED_NEW_RISK' : (tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED');
+
+    await auditRepository.logEvent({
+      eventType: active ? 'PAUSE_NEW_RISK_ENGAGED' : 'PAUSE_NEW_RISK_RELEASED',
+      newState: tradingSystemState.engineState,
+      executionMode: tradingSystemState.executionMode,
+      reason: active ? 'Pause new risk requested and worker accepted' : 'Resume new risk requested and worker accepted'
+    });
+
     res.json(forwarded.data);
   } catch  {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
@@ -2416,6 +2424,14 @@ app.post('/api/system/recovery-only', async (req, res) => {
     if (active === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
     tradingSystemState.recoveryOnly = active;
     tradingSystemState.engineState = active ? 'RECOVERY_ONLY' : (tradingSystemState.activeConfiguration ? 'ARMED' : 'DISARMED');
+
+    await auditRepository.logEvent({
+      eventType: active ? 'RECOVERY_ONLY_ENGAGED' : 'RECOVERY_ONLY_RELEASED',
+      newState: tradingSystemState.engineState,
+      executionMode: tradingSystemState.executionMode,
+      reason: active ? 'Recovery-only mode requested and worker accepted' : 'Recovery-only mode released and worker accepted'
+    });
+
     res.json(forwarded.data);
   } catch  {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
@@ -2437,9 +2453,19 @@ app.post('/api/system/kill-switch', async (req, res) => {
     }
     const isActive = requireWorkerBoolean(forwarded.data, 'kill_switch_active');
     if (isActive === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    const previousState = tradingSystemState.engineState;
     tradingSystemState.killSwitchActive = isActive;
     if (isActive) tradingSystemState.engineState = 'EMERGENCY';
     else if (forwarded.data.status === 'CONFIRMED') tradingSystemState.engineState = 'DISARMED';
+
+    await auditRepository.logEvent({
+      eventType: isActive ? 'KILL_SWITCH_ENGAGED' : 'KILL_SWITCH_RELEASED',
+      previousState,
+      newState: tradingSystemState.engineState,
+      executionMode: tradingSystemState.executionMode,
+      reason: isActive ? 'Kill switch engaged via /api/system/kill-switch' : 'Kill switch release verified by worker'
+    });
+
     res.json(forwarded.data);
   } catch  {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
@@ -2747,12 +2773,22 @@ app.post('/api/quant/risk/kill-switch', async (req: Request, res: Response) => {
     }
     const actualActive = requireWorkerBoolean(forwarded.data, 'kill_switch_active');
     if (actualActive === null) return res.status(502).json({ error: 'INVALID_WORKER_RESPONSE', detail: forwarded.data });
+    const previousState = tradingSystemState.engineState;
     tradingSystemState.killSwitchActive = actualActive;
     if (actualActive) tradingSystemState.engineState = 'EMERGENCY';
     else if (forwarded.data.status === 'CONFIRMED') tradingSystemState.engineState = 'DISARMED';
     tradingSystemState.updatedAt = new Date().toISOString();
     quantEngineState.account.kill_switch_active = actualActive;
     quantEngineState.account.risk_state = actualActive ? 'EMERGENCY' : 'NORMAL';
+
+    await auditRepository.logEvent({
+      eventType: actualActive ? 'KILL_SWITCH_ENGAGED' : 'KILL_SWITCH_RELEASED',
+      previousState,
+      newState: tradingSystemState.engineState,
+      executionMode: tradingSystemState.executionMode,
+      reason: actualActive ? 'Kill switch engaged via /api/quant/risk/kill-switch' : 'Kill switch release verified by worker'
+    });
+
     return res.json({ ...forwarded.data, risk_state: quantEngineState.account.risk_state });
   } catch  {
     return res.status(503).json({ error: 'WORKER_UNREACHABLE' });
