@@ -24,7 +24,7 @@
     "express": "^4.21.2",
     "firebase": "^12.19.0",
     "firebase-admin": "14.4.0",
-    "google-auth-library": "10.9.1",
+    "google-auth-library": "11.1.0",
     "lucide-react": "^0.546.0",
     "motion": "^13.4.0",
     "react": "^19.0.1",
