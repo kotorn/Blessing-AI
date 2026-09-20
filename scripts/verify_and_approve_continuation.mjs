@@ -1,9 +1,13 @@
 import { execSync } from 'node:child_process';
 import { getTradingAdminIdToken } from './mint_trading_admin_token.mjs';
 
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
-const CANDIDATE_ID = process.env.CANDIDATE_ID || 'rc-4761d427-d8a3-4dd8-9468-4464fd264015';
-const LAUNCH_ID = process.env.LAUNCH_ID || 'launch-approval-ee805cdf-1005-41a5-9a55-48734a418ec8';
+const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL;
+const CANDIDATE_ID = process.env.CANDIDATE_ID;
+const LAUNCH_ID = process.env.LAUNCH_ID;
+if (!CONTROL_PLANE_URL || !CANDIDATE_ID || !LAUNCH_ID) {
+  console.error('Missing required environment: CONTROL_PLANE_URL, CANDIDATE_ID and LAUNCH_ID must be set explicitly. No silent fallbacks — continuation against a stale candidate/launch ID or URL must fail loudly.');
+  process.exit(1);
+}
 
 async function getReleaseControllerIdToken() {
   const token = execSync('gcloud auth print-access-token', { encoding: 'utf-8' }).trim();
@@ -73,8 +77,8 @@ async function main() {
   if (readiness.executionMode !== 'LIVE') {
     throw new Error(`Execution mode must be LIVE: ${readiness.executionMode}`);
   }
-  if (!['PAUSED_NEW_RISK', 'DISARMED'].includes(readiness.engineState)) {
-    throw new Error(`Engine state must be PAUSED_NEW_RISK or DISARMED: ${readiness.engineState}`);
+  if (!['PAUSED_NEW_RISK', 'REAUTH_REQUIRED'].includes(readiness.engineState)) {
+    throw new Error(`Engine state must be PAUSED_NEW_RISK or REAUTH_REQUIRED (per runbook Gate 6): ${readiness.engineState}`);
   }
   if (Number(readiness.submittedOrders) < 1) {
     throw new Error(`Submitted orders must be >= 1 for continuation: ${readiness.submittedOrders}`);

@@ -1,7 +1,11 @@
 import { getTradingAdminIdToken } from './mint_trading_admin_token.mjs';
 
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
-const APPROVAL_ID = process.env.APPROVAL_ID || 'approval-ee805cdf-1005-41a5-9a55-48734a418ec8';
+const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL;
+const APPROVAL_ID = process.env.APPROVAL_ID;
+if (!CONTROL_PLANE_URL || !APPROVAL_ID) {
+  console.error('Missing required environment: CONTROL_PLANE_URL and APPROVAL_ID must be set explicitly. No silent fallbacks — arming against a stale approval ID or URL must fail loudly.');
+  process.exit(1);
+}
 
 async function main() {
   console.log('--- Minting verified trading_admin Firebase token ---');

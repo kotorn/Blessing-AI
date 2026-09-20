@@ -1,7 +1,11 @@
 import { getTradingAdminIdToken } from './mint_trading_admin_token.mjs';
 
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
-const candidateId = process.argv[2] || process.env.CANDIDATE_ID || 'rc-4c2542f0-1108-4294-b779-d1d7246f642f';
+const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL;
+const candidateId = process.argv[2] || process.env.CANDIDATE_ID;
+if (!CONTROL_PLANE_URL || !candidateId) {
+  console.error('Missing required input: CONTROL_PLANE_URL env and candidateId (argv[2] or CANDIDATE_ID env) must be set explicitly. No silent fallbacks — firing at a stale candidate ID or URL must fail loudly.');
+  process.exit(1);
+}
 
 async function approve() {
   console.log(`Minting trading_admin ID token...`);

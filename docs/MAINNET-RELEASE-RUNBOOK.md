@@ -50,6 +50,16 @@ this repository. Secret Manager values are injected only into the Worker.
      -ProjectId gen-lang-client-0730128480 `
      -BillingAccount '<BILLING_ACCOUNT_ID>'
    ```
+4. Apply the durable database schema to Cloud SQL before any Worker
+   deployment that requires persistence. Use `infra/postgres/init_schema.sql`
+   for a fresh install, or `infra/postgres/migrations/001..006` in filename
+   order for an upgrade, executed through the Cloud SQL Auth Proxy against
+   `blessing-sql-primary` / database `blessing_trading`. Record the applied
+   file list and timestamp as evidence. There is no automated applier in this
+   repository on purpose: this step is manual and audited. The Worker
+   fail-closes at `/ready` when the schema is absent, and the Release
+   Controller rejects a candidate whose persistence is not durable, so a
+   missed schema surfaces as a stop condition — never as a degraded trade.
 
 ## Gate 2 — Control Plane authentication
 

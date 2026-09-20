@@ -1,6 +1,10 @@
 import { getTradingAdminIdToken } from './mint_trading_admin_token.mjs';
 
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL || 'https://blessing-control-plane-hrybwxl4ra-as.a.run.app';
+const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL;
+if (!CONTROL_PLANE_URL) {
+  console.error('Missing required environment: CONTROL_PLANE_URL must be set explicitly. No silent fallbacks — a kill switch aimed at a stale URL must fail loudly.');
+  process.exit(1);
+}
 
 async function main() {
   console.log('--- Minting trading_admin token ---');
