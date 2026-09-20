@@ -105,6 +105,10 @@ class PriceActionState(BaseModel):
     range_expansion_ratio: Decimal      # Current bar range / EMA(ATR, 100)
     liquidity_swept: bool = False
     is_reclaiming: bool = False
+    # Research-derived hint: which side to fade toward when a liquidity sweep
+    # is observed. None means no signal is available. Not populated by any
+    # production code path today.
+    sweep_side: Optional[PositionSide] = None
 
 
 class MarketState(BaseModel):

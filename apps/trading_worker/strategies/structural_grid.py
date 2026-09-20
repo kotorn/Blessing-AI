@@ -5,7 +5,7 @@ RESEARCH_ONLY = True
 import logging
 from decimal import Decimal
 from typing import Optional
-from domain.models import MarketState, StrategyIntent, PositionSide, MarketType, RegimeType
+from domain.models import MarketState, PriceActionState, StrategyIntent, PositionSide, MarketType, RegimeType
 from apps.trading_worker.strategies.base import BaseAlphaEngine
 import uuid
 
@@ -23,7 +23,13 @@ class StructuralGridEngine(BaseAlphaEngine):
         self.base_spacing_atr = base_spacing_atr
         self.max_virtual_position = Decimal("1.0") # Configurable max gross
 
-    def evaluate(self, state: MarketState, current_position: Decimal) -> Optional[StrategyIntent]:
+    def evaluate(
+        self,
+        state: MarketState,
+        current_position: Decimal,
+        *,
+        pa_state: Optional[PriceActionState] = None,
+    ) -> Optional[StrategyIntent]:
         if state.symbol != self.symbol:
             return None
 
@@ -62,6 +68,7 @@ class StructuralGridEngine(BaseAlphaEngine):
             direction=direction,
             desired_delta_qty=target_delta,
             opportunity_score=score,
-            confidence=Decimal("0.6")
+            confidence=Decimal("0.6"),
+            expected_holding_horizon_sec=7200,
         )
         return intent
