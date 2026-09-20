@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -42,6 +43,36 @@ from apps.agy_queue.storage import (
 from apps.agy_queue.worker import QueueWorker
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def make_worker_repo(tmp_path: Path, *, branch: str = "feature/queue-change") -> Path:
+    """Create a throwaway git repo on a writable branch for REPO_CHANGE tests.
+
+    REPO_CHANGE jobs are rejected while the target checkout sits on
+    main/master (a fail-closed guard in QueueService), so these tests must
+    not point at the real checkout: its branch name differs between local
+    runs and CI (PR merge refs vs ``main``), which made the suite red only
+    on pushes to ``main``.
+    """
+    repo_dir = tmp_path / "worker-repo"
+    repo_dir.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo_dir), *args],
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-b", branch)
+    git("config", "user.email", "agy-queue-test@example.invalid")
+    git("config", "user.name", "AGY Queue Tests")
+    (repo_dir / "README.md").write_text(
+        "throwaway repo for queue tests\n", encoding="utf-8"
+    )
+    git("add", ".")
+    git("commit", "-m", "initial commit")
+    return repo_dir
 
 
 def make_service(tmp_path: Path, *, backend: str = "sqlite") -> QueueService:
@@ -375,11 +406,12 @@ def test_submit_rejects_explicit_effort_conflicting_with_model_suffix(tmp_path: 
 
 def test_submit_repo_change_requires_tests_passed_schema(tmp_path: Path) -> None:
     service = make_service(tmp_path)
+    repo_dir = make_worker_repo(tmp_path)
     with pytest.raises(QueuePolicyError):
         service.submit(
             JobRequest(
                 prompt="Make a trivial edit.",
-                repo=str(REPOSITORY_ROOT),
+                repo=str(repo_dir),
                 kind=JobKind.REPO_CHANGE,
                 authorization_ref="user-approved:test",
             )
@@ -387,7 +419,7 @@ def test_submit_repo_change_requires_tests_passed_schema(tmp_path: Path) -> None
     job = service.submit(
         JobRequest(
             prompt="Make a trivial edit.",
-            repo=str(REPOSITORY_ROOT),
+            repo=str(repo_dir),
             kind=JobKind.REPO_CHANGE,
             authorization_ref="user-approved:test",
             expected_output_schema={
