@@ -1,47 +1,76 @@
 # Blessing AI v0.2 — implementation report
 
-- **Branch:** `zcode/finish-blessing-v0.2`
-- **Release posture:** `PR_READY_WITH_OPEN_OPERATOR_GATES`
-- **Safety posture:** `READY_FOR_OPERATOR_APPROVAL — NOT ARMED` is not asserted
-  until the remaining evidence gates below are complete.
+## Completion
 
-## Implemented in this PR
+- **Branch:** `codex/plan4-complete`
+- **Base:** `origin/main` at the merged v0.2 implementation
+- **Overall:** repository implementation is ready for review; remote operator
+  gates remain open and are not inferred from local tests
+- **CI:** GitHub Actions PR #39 run `35750129769` passed all jobs for commit
+  `94f4369263b24548bd4e31d56b4c35259d5343bc`
+- **Staging:** read-only live smoke passed HTTP transport checks, but the
+  deployed Control Plane still reports v0.1 and does not match the repository
+  runtime profile; staging UAT is not green
 
-- Server-timestamp evidence labels: VERIFIED, SIMULATED, STALE, UNAVAILABLE.
+## Completed in repository
+
+- Server-timestamp evidence labels: `VERIFIED`, `SIMULATED`, `STALE`, and
+  `UNAVAILABLE`.
 - Start Trading Wizard authentication, role, worker-heartbeat and persistence
-  readiness rows.
+  readiness rows with fail-closed ARM behavior.
 - Bounded Control Plane runtime profiles and profile read-back checks.
-- Read-only Artifact Registry audit and protected-digest verification tooling.
-- Measured cost baseline, Data Connect deferral ADR, backlog and named UAT.
-- Monitoring parser fix and completion audit retained as relevant existing work.
-- Express 5-compatible API/SPA fallback routes, with a clean-install regression
-  test and lockfile alignment for the Vite/esbuild toolchain.
+- Read-only Artifact Registry inventory and protected-digest verification
+  tooling with an untagged-only cleanup policy.
+- Measured live infrastructure metadata, Data Connect v0.3 deferral ADR,
+  detailed backlog, named UAT, and release evidence documents.
+- Express 5-compatible API/SPA fallback routes and lockfile alignment.
+- `/api/health` identity corrected to `Blessing AI v0.2`, with a regression
+  test so deployed smoke evidence cannot silently identify the old release.
 
-## Gates that remain open
+## Verification completed locally
 
-- PR review and merge approval; current-SHA GitHub CI is green.
+- `npm.cmd run lint` passed.
+- Vitest passed **14 files / 90 tests**; the health identity regression is
+  included.
+- `npm.cmd run build` passed, including the server bundle.
+- Ruff error-level rules passed.
+- Python CI-equivalent suite passed **471 / 471 selected tests**, with 3
+  contract tests deselected and **68.92% coverage** against the 65% floor.
+- Read-only GCP inspection confirmed project `gen-lang-client-0730128480`,
+  region `asia-southeast1`, Worker min/max 1/1, and the older Control Plane
+  revision/profile described in `docs/COST-BASELINE-LIVE.md`.
+- Read-only `verify-live-disarmed.ps1` passed Worker IAM, immutable digest,
+  disarmed state, durable persistence, and zero order-submission attempts.
+  Control Plane profile verification correctly remains open because live
+  `minScale=0,maxScale=20` and CPU throttling is off.
+- Read-only HTTP smoke returned `/` = 200 and `/api/health` = 200, but the
+  current remote body reported `system: Blessing AI v0.1`; the repository fix
+  is intentionally not claimed as deployed.
+- GitHub Actions PR #39 run `35750129769` passed `npm ci`, generated SDK drift,
+  TypeScript lint/tests/build, Python lint/tests/coverage, and hygiene.
+
+## Deferred / operator gates
+
 - Authenticated viewer/operator/trading_admin browser UAT.
-- Any staging restart/reconciliation fault-injection evidence.
-- Separate operator approval before applying a Cloud Run profile or cleanup
-  policy to a remote service.
+- Staging restart, reconciliation-mismatch, kill-switch, and cold/warm fault
+  evidence.
+- Separately approved Cloud Run profile rollout and destination read-back.
+- Artifact Registry dry-run review and any separately approved cleanup.
+- Billing invoice/credit totals and rollback execution evidence.
+- An authentic content-addressed walk-forward/OOS research artifact; the replay
+  chain is implemented and tested, but no approved dataset artifact is present
+  in this checkout.
 
-## Verification completed on this branch
+## Safety status
 
-- Clean `npm ci --no-audit --no-fund` completed successfully; the only runtime
-  warning was the existing `superstatic` Node engine range warning.
-- `npm run dataconnect:generate` produced no tracked SDK drift.
-- `npm run lint` passed; Vitest passed **13 files / 88 tests**; the production
-  build passed with Vite 8.3.0 and the server bundle built successfully.
-- Python CI-equivalent checks passed: Ruff error-level rules, **471 passed / 3
-  deselected**, and **68.92% coverage** against the 65% floor.
-- GitHub Actions current-SHA run **35718992114** passed every job, including
-  cross-platform `npm ci` and repository hygiene.
-- Local rendered QA passed after the clean install: v0.2 title, explicit
-  evidence badge, readiness rows for Authentication/Role/Worker heartbeat/
-  Persistence, and disabled `ARM ENGINE` in the unauthenticated unavailable
-  state. The expected auth-required warning was the only browser warning.
-- Artifact Registry image inventory and protected-digest checks were executed
-  read-only; no cleanup policy was applied.
+- **Execution mode:** PAPER/default in repository release configuration.
+- **Mainnet armed:** No evidence of arming; no ARM operation performed.
+- **Kill switch:** No remote mutation performed.
+- **Reconciliation/persistence:** Covered by existing worker implementation and
+  local tests; live operational evidence remains open.
+- **Release state:** `READY_FOR_OPERATOR_APPROVAL — NOT ARMED` is the intended
+  target, but is not asserted as fully released until the open evidence gates
+  are completed.
 
 ## Explicit non-actions
 
