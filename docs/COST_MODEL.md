@@ -2,6 +2,12 @@
 
 This document outlines the projected operational cost model for **Blessing AI v0.2** across its key lifecycle stages. The goal during Months 1–6 is to test whether the trading strategies produce a sustainable edge with minimal infrastructure overhead.
 
+> These are projections, not billing evidence. The timestamped read-only
+> resource baseline in [`docs/COST-BASELINE-LIVE.md`](COST-BASELINE-LIVE.md) is
+> the source for current runtime configuration and available billing metadata.
+> It does not authorize changing billing, Cloud Run profiles, databases,
+> secrets, or Artifact Registry retention.
+
 ---
 
 ## 1. Services in Scope

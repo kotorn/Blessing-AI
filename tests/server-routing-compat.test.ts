@@ -16,4 +16,10 @@ describe('Express fallback route compatibility', () => {
     expect(() => app.all('/api/{*splat}', (_req, res) => res.status(404).end())).not.toThrow();
     expect(() => app.get('/{*splat}', (_req, res) => res.status(200).end())).not.toThrow();
   });
+
+  it('keeps the health identity aligned with the v0.2 release', () => {
+    expect(server).toContain("system: 'Blessing AI v0.2'");
+    expect(server).not.toContain("system: 'Blessing AI v0.1'");
+    expect(server).not.toContain('Architect for Blessing AI v0.1');
+  });
 });

@@ -6,6 +6,13 @@
 > **Primary Strategy**: Multi-Strategy Quantitative Platform (Structural Grid, Trend Breakout, Shock Momentum, Basis/Funding Carry)  
 > **Infrastructure Model**: Google SaaS-First (Cloud SQL PostgreSQL, Firebase Auth & Hosting, Firebase Data Connect, Cloud Run Worker, BigQuery, Google Cloud Storage, Secret Manager, Cloud Logging/Monitoring)
 
+> **v0.2 implementation note (2026-09-22):** Data Connect remains generated
+> and validation-tested but is not the active UI writer. Firestore remains the
+> UI authority and Cloud SQL remains the Worker operational authority until the
+> v0.3 cutover criteria in `docs/ADR-2026-09-22-dataconnect-deferral-v0.3.md`
+> are met. The live system must remain PAPER/disarmed unless a separately
+> approved release consumes the required gates.
+
 ---
 
 ## 1. Executive Summary & Core Objective

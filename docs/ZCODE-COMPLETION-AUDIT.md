@@ -1,5 +1,36 @@
 # ZCODE-COMPLETION-AUDIT — Blessing-AI v0.2 (Lane A: Audit/Architecture)
 
+> The original audit table below is retained as historical implementation
+> context. The current re-audit supersedes its earlier "missing" statements;
+> repository state, live read-back, and test results below are authoritative for
+> the current `codex/plan4-complete` work.
+
+## Current re-audit — 2026-09-22
+
+- **Branch:** `codex/plan4-complete`, based on the merged `origin/main`
+  implementation.
+- **Local gates:** `npm.cmd run lint`, 14 Vitest files / 90 tests, build,
+  Ruff error-level rules, and 471 Python tests / 3 deselected / 68.92% coverage
+  passed.
+- **Remote read-only:** project `gen-lang-client-0730128480`, region
+  `asia-southeast1`; root and `/api/health` both returned HTTP 200. The live
+  health body still reports `Blessing AI v0.1`, while the repository patch now
+  reports v0.2.
+- **Live profile drift:** Control Plane revision
+  `blessing-control-plane-00027-h5d` has `minScale=0`, `maxScale=20` and CPU
+  throttling off;
+  Worker revision `blessing-trading-worker-00038-nk7` remains min/max 1/1 with
+  CPU throttling off. No remote rollout was performed.
+- **Disarmed verification:** read-only `verify-live-disarmed.ps1` passed for the
+  Worker: IAM, immutable digest, `LIVE` plus `MAINNET_LIVE_APPROVED=false`,
+  DISARMED, durable REQUIRED persistence, and zero order-submission attempts.
+  The Control Plane profile verifier correctly failed on the observed
+  `min=0,max=20` drift.
+- **Current classification:** repository implementation is **PARTIAL / review
+  ready**; remote deployment identity, authenticated staging UAT, fault
+  injection, rollback execution, billing totals, and any Artifact Registry
+  cleanup remain **OPEN**. No Mainnet order or ARM action occurred.
+
 - วันที่ตรวจ: 2026-09-22
 - Branch: `zcode/finish-blessing-v0.2` | HEAD: `49d540ce78a693caac2ffb72b28eb04f1bc0ccec` (ตรวจด้วย `git rev-parse HEAD`)
 - อ้างอิง: `Plan(4).md` (§1 safety rules, §3 Definition of Done, §13 readiness list, §6 cost workstream, §17 DataConnect decision)

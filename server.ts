@@ -750,7 +750,7 @@ const quantEngineState = {
 app.get('/api/health', (req: Request, res: Response) => {
   res.json({
     status: 'ok',
-    system: 'Blessing AI v0.1',
+    system: 'Blessing AI v0.2',
     timestamp: new Date().toISOString(),
     mode: 'deterministic_engine',
   });
@@ -3130,7 +3130,7 @@ app.post('/api/quant/ai/research', async (req: Request, res: Response) => {
   }
 
   try {
-    const prompt = `You are the Principal Quant Research Advisor and Algorithmic Trading Architect for Blessing AI v0.1.
+    const prompt = `You are the Principal Quant Research Advisor and Algorithmic Trading Architect for Blessing AI v0.2.
 Adhere strictly to Section 33 of the specification:
 - LLMs help with: research, strategy analysis, parameter sensitivity, backtest diagnostics, anomaly investigation, log diagnosis, and risk governance evaluations.
 - ABSOLUTE MANDATE: You CANNOT place live orders or override deterministic Risk Governor rules.

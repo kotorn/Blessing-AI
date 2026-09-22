@@ -1,5 +1,13 @@
 # Core Module Migration Matrix
 
+## Current v0.2 authority boundary
+
+The migration matrix describes code lineage, not permission to cut over live
+writers. For v0.2, Firestore is the UI authority, Cloud SQL is the Worker
+operational authority, and Firebase Data Connect remains disabled. See
+`docs/ADR-2026-09-22-dataconnect-deferral-v0.3.md` for the entry criteria for
+any future cutover.
+
 The repository recently migrated core strategy/risk components from older architecture to the authoritative `apps/trading_worker/engines` Python pipeline.
 
 | Old Module | New Module | Behavior Preserved? | Tests Needed |

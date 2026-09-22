@@ -2,6 +2,15 @@
 
 > **Note**: This file mirrors `Blessing-AI-v0.2-Plan.md` as the primary architectural plan for the project.
 
+> **Current implementation boundary (2026-09-22):** The repository uses
+> Firestore as the UI authority and Cloud SQL as the Worker operational
+> authority for v0.2. `VITE_DATA_CONNECT_CUTOVER=false` is enforced; Data
+> Connect cutover is deferred to v0.3 by
+> [`docs/ADR-2026-09-22-dataconnect-deferral-v0.3.md`](docs/ADR-2026-09-22-dataconnect-deferral-v0.3.md).
+> PAPER/default and fail-closed execution remain mandatory. This architecture
+> document does not authorize deployment, Mainnet arming, order submission,
+> secret rotation, billing changes, or database migration.
+
 Please refer to [`Blessing-AI-v0.2-Plan.md`](./Blessing-AI-v0.2-Plan.md) for the complete, authoritative specification.
 
 ## Core Summary

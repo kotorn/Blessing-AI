@@ -6,17 +6,31 @@
 - **Region:** `asia-southeast1`
 - **Status:** measured metadata only; this is not a billing invoice or a cost authorization
 
+The same read-only session returned HTTP 200 for the Control Plane root and
+`/api/health`. The deployed health body still identified `Blessing AI v0.1`,
+so this baseline is also a deployment-drift record: repository v0.2 changes
+must not be treated as live until an approved rollout and destination read-back
+confirm them.
+
 ## Resource read-back
 
 | Resource | Observed state |
 |---|---|
-| Control Plane | Cloud Run `blessing-control-plane`, ready revision `blessing-control-plane-00027-h5d`, 100% traffic, concurrency 1, 1 vCPU, 1 GiB, max scale 20, CPU throttling currently false; this does not match the repository's new bounded runtime profiles until separately deployed |
+| Control Plane | Cloud Run `blessing-control-plane`, ready revision `blessing-control-plane-00027-h5d`, 100% traffic, concurrency 1, 1 vCPU, 1 GiB, min/max scale 0/20, CPU throttling currently false; this does not match the repository's new bounded runtime profiles until separately deployed |
 | Worker | Cloud Run `blessing-trading-worker`, ready revision `blessing-trading-worker-00038-nk7`, min/max scale 1/1, concurrency 1, 1 vCPU, 1 GiB, CPU throttling false, Cloud SQL attached |
 | Cloud SQL | `blessing-sql-primary`, PostgreSQL 17, `db-f1-micro`, 10 GB, backups enabled, RUNNABLE |
 | Artifact Registry | `blessing-repo`, Docker Standard; 29 tagged image entries observed: 7 Control Plane and 22 Worker entries |
 | Logging/Monitoring | 18 log-based metrics and 14 alert policies observed, including readiness, persistence, reconciliation, private-stream, kill-switch and staged-launch alerts |
 | Secret Manager | 3 secret names observed; values were not read: two Binance Mainnet names and one Cloud SQL password name |
 | Billing | Billing enabled; account metadata read-only. No invoice total or credit balance was available in this read-back |
+
+## Repository-to-live drift
+
+| Check | Repository expectation | Live observation | Status |
+|---|---|---|---|
+| Release identity | `Blessing AI v0.2` | `/api/health` reports `Blessing AI v0.1` | OPEN — approved rollout/read-back required |
+| Control Plane profile | Bounded profile with request-based CPU throttling | `maxScale=20`, CPU throttling `false` | OPEN — no remote mutation performed |
+| Worker continuity | min/max 1/1, continuous CPU | min/max 1/1, CPU throttling `false` | MATCHED |
 
 ## Budget observations
 
