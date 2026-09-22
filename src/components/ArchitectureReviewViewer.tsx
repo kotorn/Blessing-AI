@@ -28,7 +28,7 @@ export const ArchitectureReviewViewer: React.FC = () => {
         <div>
           <h2 className="text-lg font-bold text-zinc-100 flex items-center space-x-2">
             <Layers className="w-5 h-5 text-indigo-400" />
-            <span>Blessing AI v0.1 — 15-Step Quant Implementation Architecture</span>
+            <span>Blessing AI v0.2 — 15-Step Quant Implementation Architecture</span>
           </h2>
           <p className="text-xs text-zinc-400 mt-1">
             Senior Algorithmic Trading Architect & Quant Engineer Specifications (Steps 1 through 15)
@@ -58,7 +58,7 @@ export const ArchitectureReviewViewer: React.FC = () => {
         {selectedStep === 1 && (
           <div className="space-y-4 text-xs leading-relaxed text-zinc-300">
             <h3 className="text-base font-bold text-zinc-100 border-b border-zinc-800 pb-2">
-              Step 1: In-Depth Architecture Review of Blessing AI v0.1
+              Step 1: In-Depth Architecture Review of Blessing AI v0.2
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-zinc-950/50 p-4 rounded-lg border border-zinc-800 space-y-2">

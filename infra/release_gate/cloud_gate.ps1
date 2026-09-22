@@ -27,7 +27,9 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$WorkerBaseUrl,
   [string]$BillingAccount            = "",
-  [string]$CandidateId                = ""
+  [string]$CandidateId                = "",
+  [ValidateSet("DEV_PAPER_UI", "MAINNET_OPERATOR_UI")]
+  [string]$RuntimeProfile            = "MAINNET_OPERATOR_UI"
 )
 
 $ErrorActionPreference = "Stop"
@@ -168,7 +170,8 @@ try {
     -ExpectedImageDigest $ControlPlaneImageDigest `
     -ControlPlaneUrl $ControlPlaneBaseUrl `
     -WorkerUrl $WorkerBaseUrl `
-    -ReleaseControllerServiceAccount $ReleaseControllerServiceAccount
+    -ReleaseControllerServiceAccount $ReleaseControllerServiceAccount `
+    -RuntimeProfile $RuntimeProfile
   $checks.Add((New-Check "cloud_control_plane" "Control Plane deployment" "PASS" "OK"))
 } catch {
   $checks.Add((New-Check "cloud_control_plane" "Control Plane deployment" "FAIL" $_.Exception.Message))

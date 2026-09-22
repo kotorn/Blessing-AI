@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { RiskState } from '../types';
 import { SystemMode } from '../contracts/system';
+import { EvidenceStatus, evidenceStatusLabel } from '../lib/evidence';
 import { useAuth } from '../context/AuthContext';
 import { BinanceKeyStatus } from '../api/binance';
 import { ConfirmationModal } from '../components/ConfirmationModal';
@@ -26,6 +27,7 @@ interface StatusBarProps {
   killSwitchActive: boolean;
   onToggleKillSwitch: () => void;
   systemMode: SystemMode;
+  evidenceStatus: EvidenceStatus;
   engineState?: string;
   lastUpdated: Date | null;
   onRefresh: () => void;
@@ -46,6 +48,7 @@ export const StatusBar: React.FC<StatusBarProps> = ({
   killSwitchActive,
   onToggleKillSwitch,
   systemMode,
+  evidenceStatus,
   engineState,
   lastUpdated,
   onRefresh,
@@ -101,6 +104,19 @@ export const StatusBar: React.FC<StatusBarProps> = ({
     }
   };
 
+  const getEvidenceBadgeClass = () => {
+    switch (evidenceStatus) {
+      case 'VERIFIED':
+        return 'bg-emerald-950/80 text-emerald-300 border-emerald-800/80';
+      case 'SIMULATED':
+        return 'bg-indigo-950/80 text-indigo-300 border-indigo-800/80';
+      case 'STALE':
+        return 'bg-amber-950/80 text-amber-300 border-amber-800/80';
+      default:
+        return 'bg-rose-950/80 text-rose-300 border-rose-800/80';
+    }
+  };
+
   return (
     <>
       <header className="h-13 bg-zinc-950/95 border-b border-zinc-800/90 px-3 sm:px-4 flex items-center justify-between gap-2 shrink-0 z-30 select-none">
@@ -112,6 +128,13 @@ export const StatusBar: React.FC<StatusBarProps> = ({
             title={`Current Execution Mode: ${systemMode}`}
           >
             {systemMode}
+          </div>
+          <div
+            className={`px-2 py-0.5 rounded text-[10px] tracking-wider uppercase border font-bold ${getEvidenceBadgeClass()}`}
+            title="Evidence provenance derived from the authoritative server timestamp and worker heartbeat"
+            aria-label={`Evidence status: ${evidenceStatusLabel(evidenceStatus)}`}
+          >
+            {evidenceStatusLabel(evidenceStatus)}
           </div>
           {engineState && (
             <div className={`px-2 py-0.5 rounded text-[10px] tracking-wider font-bold uppercase border ${engineState === "ARMED" ? "bg-emerald-950 text-emerald-400 border-emerald-800" : engineState === "DISARMED" ? "bg-zinc-800 text-zinc-400 border-zinc-700" : engineState === "PAUSED_NEW_RISK" ? "bg-amber-950 text-amber-400 border-amber-800" : "bg-rose-950 text-rose-400 border-rose-800"}`}>

@@ -1,4 +1,4 @@
-# Blessing AI v0.1
+# Blessing AI v0.2
 
 [![Blessing AI CI](https://github.com/kotorn/Blessing-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/kotorn/Blessing-AI/actions/workflows/ci.yml)
 

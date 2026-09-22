@@ -16,6 +16,7 @@ import { ConfirmationModal } from '../components/ConfirmationModal';
 import { ActionFeedback, ActionToast } from '../components/ActionToast';
 import { binanceApi, BinanceKeyStatus } from '../api/binance';
 import { Power } from 'lucide-react';
+import { deriveEvidenceStatus } from '../lib/evidence';
 
 export const AppShell: React.FC = () => {
   const { cloudAudit, firestoreConnected } = useAuth();
@@ -118,6 +119,11 @@ export const AppShell: React.FC = () => {
   // Authoritative system execution mode
   const workerUnavailable = !systemState || Boolean(error) || systemState.workerResponsive === false;
   const systemMode: SystemMode = workerUnavailable ? 'UNKNOWN' : systemState.executionMode;
+  const evidenceStatus = deriveEvidenceStatus({
+    dataSource: systemState?.dataSource,
+    workerResponsive: systemState?.workerResponsive,
+    updatedAt: systemState?.updatedAt,
+  });
   const pauseNewRiskActive = systemState?.pauseNewRisk || false;
   const killSwitchActive = systemState?.killSwitchActive || workerUnavailable;
   const engineState = workerUnavailable ? 'DEGRADED' : systemState.engineState;
@@ -185,6 +191,7 @@ export const AppShell: React.FC = () => {
           killSwitchActive={killSwitchActive}
           onToggleKillSwitch={handleToggleKillSwitch}
           systemMode={systemMode}
+          evidenceStatus={evidenceStatus}
           lastUpdated={lastUpdated}
           onRefresh={refresh}
           isRefreshing={isLoading}
@@ -299,6 +306,8 @@ export const AppShell: React.FC = () => {
 
       {showStartTradingWizard && (
         <StartTradingWizard
+          systemState={systemState}
+          evidenceStatus={evidenceStatus}
           onComplete={async (params) => {
             const armed = await runSafeAction(() => armEngine(params), 'Trading engine armed.');
             if (armed) {

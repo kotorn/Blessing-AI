@@ -23,7 +23,9 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$WorkerImageDigest,
   [Parameter(Mandatory = $true)]
-  [string]$WorkerRevision
+  [string]$WorkerRevision,
+  [ValidateSet("DEV_PAPER_UI", "MAINNET_OPERATOR_UI")]
+  [string]$RuntimeProfile = "MAINNET_OPERATOR_UI"
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +44,15 @@ if ($ControlPlaneServiceAccount -notmatch '^[^@\s]+@[^@\s]+\.iam\.gserviceaccoun
 }
 if ($ReleaseControllerServiceAccount -notmatch '^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$') {
   throw "ReleaseControllerServiceAccount must be a service-account email"
+}
+
+$profileSettings = switch ($RuntimeProfile) {
+  "DEV_PAPER_UI" {
+    @{ min = 0; max = 1 }
+  }
+  "MAINNET_OPERATOR_UI" {
+    @{ min = 1; max = 1 }
+  }
 }
 
 function Invoke-GCloud {
@@ -85,12 +96,12 @@ $bootstrapDeployArgs = @(
   "--platform=managed",
   "--image=$ImageUri",
   "--service-account=$ControlPlaneServiceAccount",
-  "--min=1",
-  "--max=1",
+  "--min=$($profileSettings.min)",
+  "--max=$($profileSettings.max)",
   "--concurrency=1",
   "--cpu=1",
   "--memory=1Gi",
-  "--no-cpu-throttling",
+  "--cpu-throttling",
   "--set-env-vars=$bootstrapEnv",
   "--no-allow-unauthenticated"
 )
@@ -121,10 +132,11 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
   -ControlPlaneServiceAccount $ControlPlaneServiceAccount `
   -ReleaseControllerServiceAccount $ReleaseControllerServiceAccount `
   -WorkerImageDigest $WorkerImageDigest `
-  -WorkerRevision $WorkerRevision
+  -WorkerRevision $WorkerRevision `
+  -RuntimeProfile $RuntimeProfile
 if ($LASTEXITCODE -ne 0) {
   throw "Final Control Plane deployment failed"
 }
 
-Write-Output "Control Plane two-pass deployment verified: $controlPlaneUrl"
+Write-Output "Control Plane two-pass deployment verified: $controlPlaneUrl ($RuntimeProfile)"
 Write-Output "Bootstrap used no secrets and routed no traffic"
