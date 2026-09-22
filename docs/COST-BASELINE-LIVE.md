@@ -16,7 +16,7 @@ confirm them.
 
 | Resource | Observed state |
 |---|---|
-| Control Plane | Cloud Run `blessing-control-plane`, ready revision `blessing-control-plane-00027-h5d`, 100% traffic, concurrency 1, 1 vCPU, 1 GiB, min/max scale 0/20, CPU throttling currently false; this does not match the repository's new bounded runtime profiles until separately deployed |
+| Control Plane | Cloud Run `blessing-control-plane`, ready revision `blessing-control-plane-00027-h5d`, 100% traffic, concurrency 1, 1 vCPU, 1 GiB; service-level min/max scale is 1/1, revision-level max scale is 20, and CPU throttling is currently false |
 | Worker | Cloud Run `blessing-trading-worker`, ready revision `blessing-trading-worker-00038-nk7`, min/max scale 1/1, concurrency 1, 1 vCPU, 1 GiB, CPU throttling false, Cloud SQL attached |
 | Cloud SQL | `blessing-sql-primary`, PostgreSQL 17, `db-f1-micro`, 10 GB, backups enabled, RUNNABLE |
 | Artifact Registry | `blessing-repo`, Docker Standard; 29 tagged image entries observed: 7 Control Plane and 22 Worker entries |
@@ -29,7 +29,7 @@ confirm them.
 | Check | Repository expectation | Live observation | Status |
 |---|---|---|---|
 | Release identity | `Blessing AI v0.2` | `/api/health` reports `Blessing AI v0.1` | OPEN — approved rollout/read-back required |
-| Control Plane profile | Bounded profile with request-based CPU throttling | `maxScale=20`, CPU throttling `false` | OPEN — no remote mutation performed |
+| Control Plane profile | Service-level min/max 1/1 plus revision request-based CPU throttling | service min/max `1/1`; revision max `20`; CPU throttling `false` | OPEN — CPU profile and v0.2 image still require approved rollout/read-back |
 | Worker continuity | min/max 1/1, continuous CPU | min/max 1/1, CPU throttling `false` | MATCHED |
 
 ## Budget observations

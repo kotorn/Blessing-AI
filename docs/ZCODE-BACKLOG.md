@@ -99,8 +99,10 @@ files, acceptance criteria, tests, dependencies, risk, and status.
 - **Problem:** repository profiles and live Control Plane settings diverge.
 - **Evidence:** `infra/cloudrun/deploy-control-plane.ps1` and
   `verify-control-plane.ps1` support `DEV_PAPER_UI` and
-  `MAINNET_OPERATOR_UI`; read-only verification observed live `minScale=0`,
-  `maxScale=20`, throttling off and failed closed as expected.
+  `MAINNET_OPERATOR_UI`; the verifier now reads service-level `minScale` and
+  `maxScale`, checks request-based CPU throttling on the revision, and requires
+  100% traffic to the latest Ready revision. Read-only live metadata observed
+  service min/max `1/1`, revision max `20`, and throttling off.
 - **Files:** `infra/cloudrun/deploy-control-plane*.ps1`,
   `infra/release_gate/cloud_gate.ps1`, `docs/COST-BASELINE-LIVE.md`
 - **Acceptance criteria:** approved deployment followed by destination
