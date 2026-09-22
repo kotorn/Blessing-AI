@@ -1,6 +1,7 @@
 from domain.enums import RiskState
 
 from apps.trading_worker.autonomy import (
+    AdvisoryAction,
     AutonomyAction,
     AutonomyObservation,
     AutonomySupervisor,
@@ -78,7 +79,7 @@ def test_mainnet_needs_release_and_execution_lease() -> None:
 def test_advisory_can_downgrade_allow_to_pause() -> None:
     decision = AutonomySupervisor().step(
         _observation(),
-        advisory_action=AutonomyAction.PAUSE_NEW_RISK,
+        advisory_action=AdvisoryAction.PAUSE_NEW_RISK,
         advisory_source="laya-shadow",
     )
 
@@ -86,12 +87,45 @@ def test_advisory_can_downgrade_allow_to_pause() -> None:
     assert "ADVISORY_DOWNGRADE" in decision.reason_codes
 
 
-def test_advisory_cannot_upgrade_recovery_to_allow() -> None:
+def test_advisory_can_downgrade_allow_to_observe_only() -> None:
+    decision = AutonomySupervisor().step(
+        _observation(),
+        advisory_action=AdvisoryAction.OBSERVE_ONLY,
+        advisory_source="laya-shadow",
+    )
+
+    assert decision.action == AutonomyAction.OBSERVE_ONLY
+    assert "ADVISORY_DOWNGRADE" in decision.reason_codes
+
+
+def test_advisory_continue_cannot_upgrade_recovery_to_allow() -> None:
     decision = AutonomySupervisor().step(
         _observation(reconciliation_status="MISMATCH"),
-        advisory_action=AutonomyAction.ALLOW_PIPELINE,
+        advisory_action=AdvisoryAction.CONTINUE,
         advisory_source="laya-shadow",
     )
 
     assert decision.action == AutonomyAction.RECOVERY_ONLY
-    assert "ADVISORY_UPGRADE_IGNORED" in decision.reason_codes
+    assert "ADVISORY_NO_EFFECT_ON_HARD_STATE" in decision.reason_codes
+
+
+def test_advisory_pause_cannot_upgrade_observe_only() -> None:
+    decision = AutonomySupervisor().step(
+        _observation(engine_state="DISARMED"),
+        advisory_action=AdvisoryAction.PAUSE_NEW_RISK,
+        advisory_source="laya-shadow",
+    )
+
+    assert decision.action == AutonomyAction.OBSERVE_ONLY
+    assert "ADVISORY_NO_EFFECT" in decision.reason_codes
+
+
+def test_advisory_cannot_override_emergency() -> None:
+    decision = AutonomySupervisor().step(
+        _observation(kill_switch_active=True),
+        advisory_action=AdvisoryAction.CONTINUE,
+        advisory_source="laya-shadow",
+    )
+
+    assert decision.action == AutonomyAction.EMERGENCY
+    assert "ADVISORY_NO_EFFECT_ON_HARD_STATE" in decision.reason_codes
