@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canExecuteAction, evaluatePreflight, isWorkerTradingConnectionHealthy } from '../src/backend/system';
+import { canExecuteAction, evaluatePreflight, isWorkerTradingConnectionHealthy, SUPPORTED_SYMBOLS_BY_MODE } from '../src/backend/system';
 import { TradingSystemState } from '../src/backend/types';
 import {
   parsePortfolioMarginResponse,
@@ -137,5 +137,43 @@ describe('System Preflight Execution Enforcements', () => {
     expect(observation.status).toBe('INVALID_RESPONSE');
     expect(observation.balances).toEqual([]);
     expect(unavailablePortfolioMarginObservation().includedInWorkerCollateral).toBe(false);
+  });
+
+  it('supports expanded instruments universe across PAPER, TESTNET, and LIVE', () => {
+    expect(SUPPORTED_SYMBOLS_BY_MODE.PAPER).toContain('SOLUSDT');
+    expect(SUPPORTED_SYMBOLS_BY_MODE.PAPER).toContain('BNBUSDT');
+    expect(SUPPORTED_SYMBOLS_BY_MODE.PAPER).toContain('ETHUSDC');
+    expect(SUPPORTED_SYMBOLS_BY_MODE.TESTNET).toContain('SOLUSDT');
+    expect(SUPPORTED_SYMBOLS_BY_MODE.TESTNET).toContain('ETHUSDT');
+    expect(SUPPORTED_SYMBOLS_BY_MODE.LIVE).toContain('ETHUSDC');
+    expect(SUPPORTED_SYMBOLS_BY_MODE.LIVE).toContain('BTCUSDT');
+
+    const paperState: TradingSystemState = {
+      dataSource: 'SIMULATED',
+      exchangeEnvironment: 'NONE',
+      executionMode: 'PAPER',
+      engineState: 'DISARMED',
+      accountSynchronized: true,
+      marketDataHealthy: true,
+      privateStreamHealthy: true,
+      tradingConnectionHealthy: true,
+      reconciliationStatus: 'IN_SYNC',
+      killSwitchActive: false,
+      pauseNewRisk: false,
+      recoveryOnly: false,
+      configVersion: '1',
+      updatedAt: 'now',
+    };
+
+    const paperResult = evaluatePreflight(paperState, {
+      executionMode: 'PAPER',
+      instruments: ['BTCUSDT', 'SOLUSDT', 'BNBUSDT'],
+      strategies: { grid: true },
+      riskProfile: 'BALANCED',
+    });
+
+    const instCheck = paperResult.checks.find((c) => c.id === 'CHK-INSTRUMENTS');
+    expect(instCheck?.status).toBe('PASS');
+    expect(paperResult.canArm).toBe(true);
   });
 });

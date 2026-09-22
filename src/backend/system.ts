@@ -47,6 +47,22 @@ export const RISK_PROFILES = {
   }
 };
 
+export const SUPPORTED_SYMBOLS_BY_MODE = {
+  PAPER: [
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
+    'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'SUIUSDT', 'NEARUSDT',
+    'LINKUSDT', 'ETHUSDC', 'BTCUSDC',
+  ],
+  TESTNET: [
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
+    'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'SUIUSDT', 'NEARUSDT',
+    'LINKUSDT', 'ETHUSDC', 'BTCUSDC',
+  ],
+  LIVE: [
+    'ETHUSDC', 'BTCUSDC', 'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT',
+  ],
+} as const;
+
 export function evaluatePreflight(state: TradingSystemState, requestedConfiguration: any): PreflightResult {
   const requestedMode = requestedConfiguration?.executionMode;
   const executionMode: ExecutionMode = ['PAPER', 'TESTNET', 'LIVE'].includes(requestedMode)
@@ -70,11 +86,7 @@ export function evaluatePreflight(state: TradingSystemState, requestedConfigurat
   const strategyEnabled = strategies && typeof strategies === 'object'
     ? Object.values(strategies).some((enabled) => enabled === true)
     : false;
-  const supportedSymbols = executionMode === 'TESTNET'
-    ? new Set(['BTCUSDT'])
-    : executionMode === 'LIVE'
-      ? new Set(['ETHUSDC'])
-      : new Set(['BTCUSDT', 'ETHUSDT', 'ETHUSDC']);
+  const supportedSymbols = new Set<string>(SUPPORTED_SYMBOLS_BY_MODE[executionMode] || SUPPORTED_SYMBOLS_BY_MODE.PAPER);
   const unsupported = instruments.filter((symbol: string) => !supportedSymbols.has(symbol));
   const riskProfile = requestedConfiguration?.riskProfile;
 
