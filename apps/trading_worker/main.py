@@ -2372,11 +2372,23 @@ class TradingWorkerApp:
         if not any(req.strategies.model_dump().values()):
             return "ARM requires at least one enabled strategy."
         if req.executionMode == "TESTNET":
-            supported = TestnetSafetyLimits.from_environment(BinanceEnvironment.TESTNET).allowed_symbols
+            limits_symbols = TestnetSafetyLimits.from_environment(BinanceEnvironment.TESTNET).allowed_symbols
+            supported = limits_symbols | {
+                "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+                "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "SUIUSDT", "NEARUSDT",
+                "LINKUSDT", "ETHUSDC", "BTCUSDC",
+            }
         elif req.executionMode == "LIVE":
-            supported = TestnetSafetyLimits.from_environment(BinanceEnvironment.MAINNET).allowed_symbols
+            limits_symbols = TestnetSafetyLimits.from_environment(BinanceEnvironment.MAINNET).allowed_symbols
+            supported = limits_symbols | {
+                "ETHUSDC", "BTCUSDC", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
+            }
         else:
-            supported = {"BTCUSDT", "ETHUSDT", "ETHUSDC"}
+            supported = {
+                "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+                "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "SUIUSDT", "NEARUSDT",
+                "LINKUSDT", "ETHUSDC", "BTCUSDC",
+            }
         unsupported = sorted(set(req.instruments) - set(supported))
         if unsupported:
             return f"Unsupported instruments: {', '.join(unsupported)}"

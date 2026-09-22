@@ -31,44 +31,21 @@ export const MarketsPage: React.FC<MarketsPageProps> = ({ instruments }) => {
         </div>
 
         {/* Symbol Switcher Tabs */}
-        <div className="flex items-center space-x-1.5 bg-zinc-900 p-1 rounded-xl border border-zinc-800 text-xs">
-          <button
-            type="button"
-            onClick={() => setSelectedSymbol('BTCUSDT')}
-            className={`px-3 py-1.5 rounded-lg font-bold font-mono transition-all cursor-pointer ${
-              selectedSymbol === 'BTCUSDT'
-                ? 'bg-cyan-600 text-white shadow'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            BTCUSDT
-          </button>
-          <button
-            type="button"
-            onClick={() => setSelectedSymbol('ETHUSDT')}
-            className={`px-3 py-1.5 rounded-lg font-bold font-mono transition-all cursor-pointer ${
-              selectedSymbol === 'ETHUSDT'
-                ? 'bg-cyan-600 text-white shadow'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            ETHUSDT
-          </button>
-
-          {/* Roadmap Phase 2 Instruments */}
-          <span className="h-4 w-px bg-zinc-700/60 mx-1" />
-          <span
-            title="Roadmap Stage 2: SOLUSDT support"
-            className="px-2 py-1 rounded text-[10px] font-mono text-zinc-500 bg-zinc-950 border border-zinc-800 cursor-not-allowed"
-          >
-            SOLUSDT (Stage 2)
-          </span>
-          <span
-            title="Roadmap Stage 2: BNBUSDT support"
-            className="px-2 py-1 rounded text-[10px] font-mono text-zinc-500 bg-zinc-950 border border-zinc-800 cursor-not-allowed"
-          >
-            BNBUSDT (Stage 2)
-          </span>
+        <div className="flex items-center space-x-1.5 bg-zinc-900 p-1 rounded-xl border border-zinc-800 text-xs flex-wrap gap-y-1">
+          {(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'ETHUSDC'] as const).map((symbol) => (
+            <button
+              key={symbol}
+              type="button"
+              onClick={() => setSelectedSymbol(symbol)}
+              className={`px-3 py-1.5 rounded-lg font-bold font-mono transition-all cursor-pointer ${
+                selectedSymbol === symbol
+                  ? 'bg-cyan-600 text-white shadow'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {symbol}
+            </button>
+          ))}
         </div>
       </div>
 
