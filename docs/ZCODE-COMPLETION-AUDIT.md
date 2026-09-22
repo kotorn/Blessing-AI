@@ -1,40 +1,39 @@
 # ZCODE-COMPLETION-AUDIT — Blessing-AI v0.2 (Lane A: Audit/Architecture)
 
 > The original audit table below is retained as historical implementation
-> context. The current re-audit supersedes its earlier "missing" statements;
-> repository state, live read-back, and test results below are authoritative for
-> the current `codex/plan4-complete` work.
+> context. The post-release re-audit supersedes its earlier pre-rollout
+> statements; repository state, live read-back, and test results below are
+> authoritative for the v0.2 disarmed release.
 
-## Current re-audit — 2026-09-22
+## Post-release re-audit — 2026-09-22
 
-- **Branch:** `codex/plan4-complete`, based on the merged `origin/main`
-  implementation.
-- **Local gates:** `npm.cmd run lint`, 14 Vitest files / 90 tests, build,
-  Ruff error-level rules, and 471 Python tests / 3 deselected / 68.92% coverage
-  passed.
-- **Remote read-only:** project `gen-lang-client-0730128480`, region
-  `asia-southeast1`; root and `/api/health` both returned HTTP 200. The live
-  health body still reports `Blessing AI v0.1`, while the repository patch now
-  reports v0.2.
-- **Live profile drift:** Control Plane service
-  `blessing-control-plane-00027-h5d` has service-level min/max `1/1`, a
-  revision-level max annotation of `20`, and CPU throttling off;
-  Worker revision `blessing-trading-worker-00038-nk7` remains min/max 1/1 with
-  CPU throttling off. No remote rollout was performed.
-- **Disarmed verification:** read-only `verify-live-disarmed.ps1` passed for the
-  Worker: IAM, immutable digest, `LIVE` plus `MAINNET_LIVE_APPROVED=false`,
-  DISARMED, durable REQUIRED persistence, and zero order-submission attempts.
-  The Control Plane profile verifier correctly failed on the observed CPU
-  throttling mismatch; its scale read-back is now aligned with Cloud Run's
-  service-level `--min/--max` contract and it also requires 100% traffic to the
-  latest Ready revision.
-- **Exact-SHA CI:** PR #39 workflow run `35750653344` passed all jobs for
-  commit `f6367864ea7201fdee56a25456a16ba7aac720bf`; PR #39 was then merged
-  as `01cf813eb83c0d63b409a3ae5ae19226279959ec`.
-- **Current classification:** repository implementation is **PARTIAL / review
-  ready**; remote deployment identity, authenticated staging UAT, fault
-  injection, rollback execution, billing totals, and any Artifact Registry
-  cleanup remain **OPEN**. No Mainnet order or ARM action occurred.
+- **Main:** `origin/main` at `f96073c9a5480bf4131dfbf9d238cc13dfd07147`.
+- **Merged review chain:** PR #39 implementation, PR #40 Cloud Run verifier
+  scope/traffic fix, and PR #41 analytics-route regression fix are merged.
+- **Authoritative CI:** main workflow run `35755162638` passed for the exact
+  merge SHA; PR #41 run `35754854225` also passed. The fresh Python gate
+  reported 471 passed, 3 deselected, 2 warnings, and 69.64% coverage.
+- **Cloud Run read-back:** Control Plane revision
+  `blessing-control-plane-00029-c4m` serves the immutable image
+  `sha256:24a93d0e0e6041f3211c71d402eb50f3be2f948c9a06f9f22b1fc81274474209`
+  with `MAINNET_OPERATOR_UI`, service min/max `1/1`, request-based CPU
+  throttling enabled, and 100% traffic to the latest Ready revision.
+- **HTTP/browser evidence:** root and `/api/health` returned 200 with v0.2
+  health identity; 12/12 primary routes rendered. A fresh Analytics load
+  rendered both expected headings with no console errors after PR #41. The
+  unauthenticated wizard showed auth, role, heartbeat, and persistence blockers
+  and kept ARM disabled.
+- **Worker safety:** read-only disarmed verification passed for Worker
+  revision `blessing-trading-worker-00038-nk7`: immutable digest, LIVE mode,
+  `MAINNET_LIVE_APPROVED=false`, DISARMED, durable persistence, and zero order
+  submissions.
+- **Current classification:** disarmed v0.2 Control Plane release is deployed
+  and verified; authenticated staging UAT, fault injection/restart/recovery,
+  rollback execution, authentic research artifact, billing totals, and any
+  Artifact Registry cleanup remain **OPEN**. No Mainnet order or ARM action
+  occurred.
+
+## Historical implementation audit (pre-rollout)
 
 - วันที่ตรวจ: 2026-09-22
 - Branch: `zcode/finish-blessing-v0.2` | HEAD: `49d540ce78a693caac2ffb72b28eb04f1bc0ccec` (ตรวจด้วย `git rev-parse HEAD`)

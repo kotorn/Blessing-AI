@@ -1,79 +1,86 @@
-# Blessing AI v0.2 — implementation report
+# Blessing AI v0.2 — final implementation and disarmed release report
 
-## Completion
+## Release outcome
 
-- **Branch:** `codex/plan4-complete`
-- **Base:** `origin/main` at the merged v0.2 implementation
-- **Overall:** repository implementation is ready for review; remote operator
-  gates remain open and are not inferred from local tests
-- **CI:** GitHub Actions PR #39 run `35750129769` passed all jobs for commit
-  `94f4369263b24548bd4e31d56b4c35259d5343bc`
-- **Staging:** read-only live smoke passed HTTP transport checks, but the
-  deployed Control Plane still reports v0.1 and does not match the repository
-  runtime profile; staging UAT is not green
+- **Main:** `origin/main` at `f96073c9a5480bf4131dfbf9d238cc13dfd07147`
+- **Merged PRs:** [#39](https://github.com/kotorn/Blessing-AI/pull/39),
+  [#40](https://github.com/kotorn/Blessing-AI/pull/40), and
+  [#41](https://github.com/kotorn/Blessing-AI/pull/41)
+- **Main CI:** workflow run `35755162638` passed for the exact merge SHA;
+  PR #41 run `35754854225` also passed
+- **Release state:** `READY_FOR_OPERATOR_APPROVAL — NOT ARMED`
+- **Overall:** the disarmed v0.2 Control Plane release is deployed and
+  destination-verified. This is not a claim that authenticated UAT, live
+  trading readiness, or every Plan(4) evidence gate is complete.
 
-## Completed in repository
+## Deployed release evidence
 
-- Server-timestamp evidence labels: `VERIFIED`, `SIMULATED`, `STALE`, and
-  `UNAVAILABLE`.
-- Start Trading Wizard authentication, role, worker-heartbeat and persistence
-  readiness rows with fail-closed ARM behavior.
-- Bounded Control Plane runtime profiles and profile read-back checks.
-- Read-only Artifact Registry inventory and protected-digest verification
-  tooling with an untagged-only cleanup policy.
-- Measured live infrastructure metadata, Data Connect v0.3 deferral ADR,
-  detailed backlog, named UAT, and release evidence documents.
-- Express 5-compatible API/SPA fallback routes and lockfile alignment.
-- `/api/health` identity corrected to `Blessing AI v0.2`, with a regression
-  test so deployed smoke evidence cannot silently identify the old release.
+- **Cloud Build:** `fad2e478-9e94-448e-8376-3b0b6cce0e04`
+- **Control Plane:** revision `blessing-control-plane-00029-c4m`
+- **Image:** `asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/control-plane@sha256:24a93d0e0e6041f3211c71d402eb50f3be2f948c9a06f9f22b1fc81274474209`
+- **Profile:** `MAINNET_OPERATOR_UI`; service min/max scale `1/1`; request-based
+  CPU throttling enabled; 100% traffic to the latest Ready revision
+- **HTTP:** `/` and `/api/health` returned 200; health reported
+  `status: ok`, `system: Blessing AI v0.2`, and `mode: deterministic_engine`
+- **Worker continuity:** revision `blessing-trading-worker-00038-nk7` remained
+  unchanged and passed read-only disarmed verification
+- **Rollback references:** previous v0.2 Control Plane revision
+  `blessing-control-plane-00028-jvw` and its immutable digest remain retained;
+  the older v0.1 revision is also retained
 
-## Verification completed locally
+## Implementation completed
 
-- `npm.cmd run lint` passed.
-- Vitest passed **14 files / 90 tests**; the health identity regression is
-  included.
-- `npm.cmd run build` passed, including the server bundle.
-- Ruff error-level rules passed.
-- Python CI-equivalent suite passed **471 / 471 selected tests**, with 3
-  contract tests deselected and **68.92% coverage** against the 65% floor.
-- Read-only GCP inspection confirmed project `gen-lang-client-0730128480`,
-  region `asia-southeast1`, Worker min/max 1/1, and the older Control Plane
-  revision/profile described in `docs/COST-BASELINE-LIVE.md`.
-- Read-only `verify-live-disarmed.ps1` passed Worker IAM, immutable digest,
-  disarmed state, durable persistence, and zero order-submission attempts.
-  Control Plane profile verification correctly remains open because live
-  `minScale=0,maxScale=20` and CPU throttling is off.
-- Read-only HTTP smoke returned `/` = 200 and `/api/health` = 200, but the
-  current remote body reported `system: Blessing AI v0.1`; the repository fix
-  is intentionally not claimed as deployed.
-- GitHub Actions PR #39 run `35750129769` passed `npm ci`, generated SDK drift,
-  TypeScript lint/tests/build, Python lint/tests/coverage, and hygiene.
+- Explicit `VERIFIED`, `SIMULATED`, `STALE`, and `UNAVAILABLE` evidence labels.
+- Start Trading Wizard authentication, role, worker-heartbeat, persistence,
+  and server preflight blockers with fail-closed ARM behavior.
+- Bounded Cloud Run deployment profiles and verifier checks for service-level
+  scale, request-based CPU, immutable image, and 100% latest traffic.
+- Read-only Artifact Registry inventory and protected-digest verification with
+  a conservative untagged-only cleanup policy.
+- Analytics route crash fixed by restoring the callable loading-state setter;
+  a static regression test prevents the bad state tuple from returning.
+- Data Connect cutover remains explicitly deferred to v0.3.
 
-## Deferred / operator gates
+## Verification completed
+
+- Fresh GitHub CI on the exact main merge SHA passed. The authoritative Python
+  gate reported **471 passed, 3 deselected, 2 warnings, and 69.64% coverage**.
+- Earlier local baseline also passed lint, build, generated Data Connect drift,
+  Vitest (14 files / 90 tests), Ruff error-level checks, and the Python suite.
+  The current local dependency tree is not treated as authoritative after a
+  later interrupted reinstall; fresh CI is the release test authority.
+- Browser route smoke passed **12/12** primary routes on the deployed v0.2
+  Control Plane.
+- A fresh direct Analytics load rendered both expected headings with no console
+  errors after PR #41.
+- Unauthenticated Start Trading Wizard showed Authentication, Role, Worker
+  heartbeat, and Persistence blockers; `ARM ENGINE (PAPER)` remained disabled.
+- `verify-control-plane.ps1`, `verify-control-plane-auth.ps1`,
+  `verify-live-disarmed.ps1`, monitoring verification, identity verification,
+  Artifact Registry audit, and protected-digest verification completed without
+  authorizing a trade or reading a secret.
+
+## Open gates
 
 - Authenticated viewer/operator/trading_admin browser UAT.
-- Staging restart, reconciliation-mismatch, kill-switch, and cold/warm fault
-  evidence.
-- Separately approved Cloud Run profile rollout and destination read-back.
-- Artifact Registry dry-run review and any separately approved cleanup.
-- Billing invoice/credit totals and rollback execution evidence.
-- An authentic content-addressed walk-forward/OOS research artifact; the replay
-  chain is implemented and tested, but no approved dataset artifact is present
-  in this checkout.
+- Remote restart, reconciliation-mismatch, kill-switch, and rollback/fault
+  injection evidence.
+- Authentic content-addressed historical dataset research artifact with source
+  and code fingerprints, chronological OOS folds, costs, and weak-result
+  handling.
+- Billing invoice/credit totals; current cost data is resource metadata only.
+- Artifact Registry cleanup dry-run review and separately approved operator
+  apply. No cleanup was applied.
+- `ZC-009` Testnet evidence remains **waived by decision**, not a pass.
 
-## Safety status
+## Safety and explicit non-actions
 
-- **Execution mode:** PAPER/default in repository release configuration.
-- **Mainnet armed:** No evidence of arming; no ARM operation performed.
-- **Kill switch:** No remote mutation performed.
-- **Reconciliation/persistence:** Covered by existing worker implementation and
-  local tests; live operational evidence remains open.
-- **Release state:** `READY_FOR_OPERATOR_APPROVAL — NOT ARMED` is the intended
-  target, but is not asserted as fully released until the open evidence gates
-  are completed.
+Worker read-back showed `LIVE` execution mode with
+`MAINNET_LIVE_APPROVED=false`, `DISARMED`, durable persistence required, and
+zero order-submission attempts. No Mainnet ARM, order, kill-switch mutation,
+secret read/rotation, billing change, IAM change, database migration, Data
+Connect cutover, or Artifact Registry deletion was performed. The only remote
+mutation in this release was the approved disarmed Control Plane deployment.
 
-## Explicit non-actions
-
-No Mainnet order, ARM, kill-switch mutation, secret read/rotation, billing
-change, database migration, Data Connect cutover, Artifact Registry deletion,
-or production deployment was performed.
+The attached local `Plan(4).md` remains intentionally untracked and was not
+included in the repository commits.
