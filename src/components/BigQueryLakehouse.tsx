@@ -32,7 +32,7 @@ export const BigQueryLakehouse: React.FC = () => {
   const { user, cloudAudit } = useAuth();
 
   const [config, setConfig] = useState<any>(null);
-  const [ setLoadingConfig] = useState<boolean>(true);
+  const [, setLoadingConfig] = useState<boolean>(true);
   const [activeQueryId, setActiveQueryId] = useState<string>(PRESET_BIGQUERY_QUERIES[0].id);
   const [sqlQuery, setSqlQuery] = useState<string>(PRESET_BIGQUERY_QUERIES[0].sql);
 
