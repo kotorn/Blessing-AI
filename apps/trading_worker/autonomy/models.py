@@ -18,13 +18,26 @@ from domain.models import utc_now
 
 
 class AutonomyAction(StrEnum):
-    """Permission level emitted by the supervisor, ordered from safe to risky."""
+    """Deterministic Worker control action emitted by the supervisor."""
 
     EMERGENCY = "EMERGENCY"
     RECOVERY_ONLY = "RECOVERY_ONLY"
     PAUSE_NEW_RISK = "PAUSE_NEW_RISK"
     OBSERVE_ONLY = "OBSERVE_ONLY"
     ALLOW_PIPELINE = "ALLOW_PIPELINE"
+
+
+class AdvisoryAction(StrEnum):
+    """Restricted vocabulary accepted from Laya/JEV/LLM shadow advisers.
+
+    Advisers cannot request RECOVERY or EMERGENCY because those paths may cause
+    mutable risk-reduction actions.  Only authoritative deterministic Worker
+    facts may select those states.
+    """
+
+    CONTINUE = "CONTINUE"
+    PAUSE_NEW_RISK = "PAUSE_NEW_RISK"
+    OBSERVE_ONLY = "OBSERVE_ONLY"
 
 
 class AutonomyObservation(BaseModel):
@@ -56,7 +69,7 @@ class AutonomyDecision(BaseModel):
     action: AutonomyAction
     reason_codes: tuple[str, ...]
     observed_at: datetime
-    advisory_action: AutonomyAction | None = None
+    advisory_action: AdvisoryAction | None = None
     advisory_source: str | None = None
 
     @property
