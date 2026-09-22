@@ -2,19 +2,8 @@
 
 from __future__ import annotations
 
-from .models import AutonomyAction, AutonomyDecision, AutonomyObservation
+from .models import AdvisoryAction, AutonomyAction, AutonomyDecision, AutonomyObservation
 from .policy import DeterministicAutonomyPolicy
-
-
-# Lower is safer/more restrictive.  An advisory model may only move the
-# supervisor toward a safer action; it can never grant more execution authority.
-_ACTION_SAFETY_RANK: dict[AutonomyAction, int] = {
-    AutonomyAction.EMERGENCY: 0,
-    AutonomyAction.RECOVERY_ONLY: 1,
-    AutonomyAction.PAUSE_NEW_RISK: 2,
-    AutonomyAction.OBSERVE_ONLY: 3,
-    AutonomyAction.ALLOW_PIPELINE: 4,
-}
 
 
 class AutonomySupervisor:
@@ -27,14 +16,16 @@ class AutonomySupervisor:
         self,
         observation: AutonomyObservation,
         *,
-        advisory_action: AutonomyAction | None = None,
+        advisory_action: AdvisoryAction | None = None,
         advisory_source: str | None = None,
     ) -> AutonomyDecision:
         """Return the effective pipeline permission for one observation.
 
-        Laya/JEV/LLM output is intentionally advisory.  It can downgrade a
-        deterministic permission (for example ALLOW -> PAUSE), but it cannot
-        upgrade PAUSE/RECOVERY/EMERGENCY into ALLOW.
+        Laya/JEV/LLM output is intentionally non-authorizing.  It may pause new
+        risk or request observation-only when the deterministic policy would
+        otherwise allow more activity.  It can never select recovery/emergency,
+        override those hard states, or turn a restrictive hard decision into a
+        more permissive one.
         """
 
         deterministic = self.policy.evaluate(observation)
@@ -43,13 +34,37 @@ class AutonomySupervisor:
 
         effective = deterministic.action
         reasons = list(deterministic.reason_codes)
-        if _ACTION_SAFETY_RANK[advisory_action] < _ACTION_SAFETY_RANK[effective]:
-            effective = advisory_action
-            reasons.append("ADVISORY_DOWNGRADE")
-        elif advisory_action != effective:
-            reasons.append("ADVISORY_UPGRADE_IGNORED")
-        else:
-            reasons.append("ADVISORY_AGREED")
+
+        # Hard recovery/emergency paths are authoritative and cannot be altered
+        # by an AI adviser in either direction.
+        if deterministic.action in {
+            AutonomyAction.EMERGENCY,
+            AutonomyAction.RECOVERY_ONLY,
+        }:
+            reasons.append("ADVISORY_NO_EFFECT_ON_HARD_STATE")
+        elif advisory_action == AdvisoryAction.CONTINUE:
+            if deterministic.action == AutonomyAction.ALLOW_PIPELINE:
+                reasons.append("ADVISORY_AGREED")
+            else:
+                reasons.append("ADVISORY_CONTINUE_IGNORED")
+        elif advisory_action == AdvisoryAction.PAUSE_NEW_RISK:
+            if deterministic.action == AutonomyAction.ALLOW_PIPELINE:
+                effective = AutonomyAction.PAUSE_NEW_RISK
+                reasons.append("ADVISORY_DOWNGRADE")
+            elif deterministic.action == AutonomyAction.PAUSE_NEW_RISK:
+                reasons.append("ADVISORY_AGREED")
+            else:
+                # OBSERVE_ONLY is already more restrictive than PAUSE.
+                reasons.append("ADVISORY_NO_EFFECT")
+        elif advisory_action == AdvisoryAction.OBSERVE_ONLY:
+            if deterministic.action in {
+                AutonomyAction.ALLOW_PIPELINE,
+                AutonomyAction.PAUSE_NEW_RISK,
+            }:
+                effective = AutonomyAction.OBSERVE_ONLY
+                reasons.append("ADVISORY_DOWNGRADE")
+            else:
+                reasons.append("ADVISORY_AGREED")
 
         return AutonomyDecision(
             action=effective,
