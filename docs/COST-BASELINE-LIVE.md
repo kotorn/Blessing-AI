@@ -1,5 +1,25 @@
 # Blessing AI — measured live infrastructure baseline
 
+## Post-rollout update — 2026-09-22
+
+The approved disarmed Control Plane rollout was completed and read back from
+Cloud Run. This update supersedes the older pre-rollout observations below;
+the historical drift record is retained for auditability.
+
+| Resource | Post-rollout observation |
+|---|---|
+| Control Plane | Cloud Run `blessing-control-plane-00029-c4m`, 100% traffic to the latest Ready revision, exact image `control-plane@sha256:24a93d0e0e6041f3211c71d402eb50f3be2f948c9a06f9f22b1fc81274474209` |
+| Control Plane profile | `MAINNET_OPERATOR_UI`; service-level min/max scale `1/1`; revision request-based CPU throttling `true`; revision-level max annotation remains `20` and is a different Cloud Run scope |
+| Health | `/` and `/api/health` returned HTTP 200; health identified `Blessing AI v0.2` with `status: ok` and `mode: deterministic_engine` |
+| Worker | Unchanged at `blessing-trading-worker-00038-nk7`, exact image `trading-worker@sha256:fe19d33714e8b869ae13a7593fd1c6354eb89e4051b1b8a43252e48064fc474e`; read-only disarmed verification passed with zero order submissions |
+| Rollback references | Previous v0.2 Control Plane `blessing-control-plane-00028-jvw`, digest `sha256:9fb1a350647cd32e759cee737325d9ef4080014f3eb043a73b7e23bca31ee52a`; prior v0.1 revision `blessing-control-plane-00027-h5d` retained |
+| Artifact Registry | Read-only audit observed 32 image entries; protected digest verification passed for the current Control Plane, Worker, and previous Control Plane digests; no cleanup was applied |
+
+The rollout did not read or rotate secrets, change billing, mutate IAM or the
+database, or arm Mainnet. Billing invoice/credit totals remain unavailable.
+
+## Pre-rollout snapshot (historical)
+
 - **Observed:** 2026-09-22 (Asia/Bangkok)
 - **Method:** read-only `gcloud` metadata and resource-list read-back
 - **Project:** `gen-lang-client-0730128480`

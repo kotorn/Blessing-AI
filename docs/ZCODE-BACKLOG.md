@@ -6,22 +6,24 @@ must not be converted to `PASS` from configuration or CI alone.
 | ID | Priority | Workstream | Acceptance evidence | Status |
 |---|---|---|---|---|
 | ZC-001 | P0 | Artifact Registry retention | Read-only image audit, protected digest verification, conservative policy reviewed; no deletion applied by this PR | IMPLEMENTED / OPERATOR APPLY OPEN |
-| ZC-002 | P0 | Live cost baseline | Timestamped Cloud Run, SQL, registry, budget, monitoring and secret-name read-back; billing totals remain unavailable unless exported | IMPLEMENTED |
-| ZC-003 | P1 | Evidence provenance UI | Fresh server timestamp, worker heartbeat, and explicit VERIFIED/SIMULATED/STALE/UNAVAILABLE labels | IMPLEMENTED / UAT OPEN |
-| ZC-004 | P1 | Start Trading Wizard | Authentication, role, worker heartbeat, persistence and server preflight checks visibly block unsafe ARM | IMPLEMENTED / AUTH UAT OPEN |
-| ZC-005 | P1 | Runtime profiles | Control Plane deploy/verify scripts support bounded DEV_PAPER_UI and MAINNET_OPERATOR_UI profiles | IMPLEMENTED / REMOTE ROLLOUT OPEN |
-| ZC-006 | P1 | Staging UAT | Named URL baseline, browser evidence, and explicit NOT_RUN reasons for unavailable roles/fault injection | OPEN UNTIL UAT EVIDENCE |
+| ZC-002 | P0 | Live cost baseline | Timestamped Cloud Run, SQL, registry, budget, monitoring and secret-name read-back; billing totals remain unavailable unless exported | IMPLEMENTED / BILLING TOTALS UNKNOWN |
+| ZC-003 | P1 | Evidence provenance UI | Fresh server timestamp, worker heartbeat, and explicit VERIFIED/SIMULATED/STALE/UNAVAILABLE labels | IMPLEMENTED / READ-ONLY UAT + ROUTE SMOKE PASS / AUTH UAT OPEN |
+| ZC-004 | P1 | Start Trading Wizard | Authentication, role, worker heartbeat, persistence and server preflight checks visibly block unsafe ARM | IMPLEMENTED / UNAUTH UAT PASS / AUTH UAT OPEN |
+| ZC-005 | P1 | Runtime profiles | Control Plane deploy/verify scripts support bounded DEV_PAPER_UI and MAINNET_OPERATOR_UI profiles | IMPLEMENTED / DEPLOYED + READ-BACK PASS |
+| ZC-006 | P1 | Staging UAT | Named URL baseline, browser evidence, and explicit NOT_RUN reasons for unavailable roles/fault injection | PARTIAL / ROOT+HEALTH+ROUTE+UNAUTH PASS / AUTH+FAULT UAT OPEN |
 | ZC-007 | P1 | Data Connect decision | ADR records Firestore authority and v0.3 deferral with cutover=false | IMPLEMENTED |
-| ZC-008 | P1 | Release report | Full local gates, current-SHA CI, UAT evidence, and remaining operator gates are recorded truthfully | IMPLEMENTED / PR CI PASSED / REVIEW OPEN |
+| ZC-008 | P1 | Release report | Full local gates, current-SHA CI, UAT evidence, and remaining operator gates are recorded truthfully | IMPLEMENTED / PR CI PASSED / MAIN DEPLOYED / OPEN GATES REMAIN |
 | ZC-009 | P2 | Testnet evidence | Existing waiver remains in force; no new Testnet contract/soak claim is made by this PR | WAIVED BY DECISION |
+| ZC-010 | P1 | Health identity drift | HTTP GET /api/health returned 200 with Blessing AI v0.2 | DEPLOYED v0.2 / READ-BACK PASS |
+| ZC-011 | P1 | Research evidence artifact | Reproducible replay artifact docs/research/evidence_artifact_btcusdt.json generated and cryptographically verified | IMPLEMENTED / ARTIFACT VERIFIED |
 
-## Non-goals for this PR
+## Safety boundaries for this release
 
 - No Mainnet arming, order submission, kill-switch mutation, secret rotation,
   billing change, database migration, or Artifact Registry cleanup.
 - No Data Connect cutover or Firestore-to-SQL backfill.
-- No claim that the current Cloud Run URL has received this branch until a
-  separately approved deployment and destination read-back exist.
+- The approved disarmed Control Plane deployment was performed and destination
+  read-back is recorded below; this does not authorize Mainnet ARM or orders.
 
 ## Detailed records
 
@@ -36,7 +38,8 @@ files, acceptance criteria, tests, dependencies, risk, and status.
   reviewable policy.
 - **Evidence:** `infra/artifact-registry/audit-images.ps1`,
   `verify-protected-digests.ps1`, and `cleanup-policy.json` are read-only or
-  conservative by design; 29 tagged image entries were observed remotely.
+  conservative by design; 32 image entries were observed remotely and the
+  current, Worker, and previous Control Plane digests were protected.
 - **Files:** `infra/artifact-registry/*`, `docs/COST-BASELINE-LIVE.md`
 - **Acceptance criteria:** inventory and protected-digest verification pass;
   untagged-only policy is reviewed; no protected digest is deleted.
@@ -75,7 +78,7 @@ files, acceptance criteria, tests, dependencies, risk, and status.
 - **Tests:** Vitest evidence tests and local rendered QA.
 - **Dependencies:** authoritative server timestamp and worker responsiveness.
 - **Risk:** a false fresh label could permit unsafe operator interpretation.
-- **Status:** IMPLEMENTED / STAGING UAT OPEN
+- **Status:** IMPLEMENTED / READ-ONLY UAT + ROUTE SMOKE PASS / AUTH UAT OPEN
 
 ### ZC-004 — Start Trading Wizard
 
@@ -91,7 +94,7 @@ files, acceptance criteria, tests, dependencies, risk, and status.
 - **Tests:** Vitest plus local unauthenticated rendered QA.
 - **Dependencies:** authenticated role sessions for viewer/operator/admin UAT.
 - **Risk:** UI-only readiness cannot replace server authorization.
-- **Status:** IMPLEMENTED / AUTHENTICATED UAT OPEN
+- **Status:** IMPLEMENTED / UNAUTH UAT PASS / AUTHENTICATED UAT OPEN
 
 ### ZC-005 — Runtime profiles
 
@@ -99,10 +102,11 @@ files, acceptance criteria, tests, dependencies, risk, and status.
 - **Problem:** repository profiles and live Control Plane settings diverge.
 - **Evidence:** `infra/cloudrun/deploy-control-plane.ps1` and
   `verify-control-plane.ps1` support `DEV_PAPER_UI` and
-  `MAINNET_OPERATOR_UI`; the verifier now reads service-level `minScale` and
+  `MAINNET_OPERATOR_UI`; the verifier reads service-level `minScale` and
   `maxScale`, checks request-based CPU throttling on the revision, and requires
-  100% traffic to the latest Ready revision. Read-only live metadata observed
-  service min/max `1/1`, revision max `20`, and throttling off.
+  100% traffic to the latest Ready revision. Final read-back is Control Plane
+  revision `blessing-control-plane-00029-c4m`, service min/max `1/1`, revision
+  max annotation `20`, request-based CPU enabled, and 100% latest traffic.
 - **Files:** `infra/cloudrun/deploy-control-plane*.ps1`,
   `infra/release_gate/cloud_gate.ps1`, `docs/COST-BASELINE-LIVE.md`
 - **Acceptance criteria:** approved deployment followed by destination
@@ -110,15 +114,16 @@ files, acceptance criteria, tests, dependencies, risk, and status.
 - **Tests:** local PowerShell validation and post-deploy read-back.
 - **Dependencies:** explicit operator approval for Cloud Run mutation.
 - **Risk:** profile rollout can affect operator reachability or cost.
-- **Status:** IMPLEMENTED / REMOTE ROLLOUT OPEN
+- **Status:** IMPLEMENTED / DEPLOYED + READ-BACK PASS
 
 ### ZC-006 — Staging UAT
 
 - **Priority / subsystem:** P1 / Release verification
 - **Problem:** local QA cannot prove authenticated staging roles or remote fault
   recovery.
-- **Evidence:** `docs/ZCODE-STAGING-UAT.md` records HTTP/browser baseline and
-  explicit NOT_RUN rows; live `/api/health` still reports v0.1.
+- **Evidence:** `docs/ZCODE-STAGING-UAT.md` records deployed v0.2 HTTP/browser
+  evidence, 12/12 route smoke, fresh Analytics console health, and explicit
+  NOT_RUN rows for authorized roles and remote faults.
 - **Files:** `docs/ZCODE-STAGING-UAT.md`, `docs/MAINNET-RELEASE-RUNBOOK.md`
 - **Acceptance criteria:** v0.2 deployment read-back, viewer/operator/admin
   sessions, stale/unavailable, restart, reconciliation mismatch, kill-switch,
@@ -127,7 +132,7 @@ files, acceptance criteria, tests, dependencies, risk, and status.
   no order or ARM action.
 - **Dependencies:** approved staging deployment and authorized test accounts.
 - **Risk:** declaring UAT green from an unauthenticated or stale deployment.
-- **Status:** OPEN — DEPLOYMENT AND AUTH UAT REQUIRED
+- **Status:** PARTIAL — DEPLOYMENT/ROUTE/UNAUTH PASS; AUTH + FAULT UAT OPEN
 
 ### ZC-007 — Data Connect decision
 
@@ -157,7 +162,7 @@ files, acceptance criteria, tests, dependencies, risk, and status.
   smoke output.
 - **Dependencies:** exact-SHA GitHub CI after commit/push.
 - **Risk:** stale documentation can cause an unsafe release decision.
-- **Status:** IMPLEMENTED / PR CI PASSED / REVIEW OPEN
+- **Status:** IMPLEMENTED / PR CI PASSED / MAIN DEPLOYED / OPEN GATES REMAIN
 
 ### ZC-009 — Testnet evidence waiver
 
@@ -178,15 +183,16 @@ files, acceptance criteria, tests, dependencies, risk, and status.
 - **Priority / subsystem:** P1 / Control Plane and observability
 - **Problem:** the deployed health endpoint still identified v0.1 while the
   repository and UI identified v0.2.
-- **Evidence:** read-only HTTP smoke on 2026-09-22 returned HTTP 200 with
-  `system: Blessing AI v0.1`; the repository patch changes it to v0.2.
+- **Evidence:** post-rollout HTTP smoke on 2026-09-22 returned HTTP 200 with
+  `system: Blessing AI v0.2` from Control Plane revision
+  `blessing-control-plane-00029-c4m`.
 - **Files:** `server.ts`, `tests/server-routing-compat.test.ts`
 - **Acceptance criteria:** local and deployed `/api/health` identify v0.2 only
   after an approved rollout and destination read-back.
 - **Tests:** targeted Vitest regression plus post-deploy GET smoke.
 - **Dependencies:** commit/push, CI, approved deployment.
 - **Risk:** operators may mistake an old revision for current release evidence.
-- **Status:** CODE FIXED / REMOTE ROLLOUT OPEN
+- **Status:** DEPLOYED v0.2 / READ-BACK PASS
 
 ### ZC-011 — Reproducible research evidence artifact
 
@@ -196,16 +202,18 @@ files, acceptance criteria, tests, dependencies, risk, and status.
   checkout for a genuine walk-forward/OOS result.
 - **Evidence:** `apps/trading_worker/backtest/evidence_artifact.py`,
   `run_research_replay.py`, and the research test suite validate the chain;
-  no committed dataset or generated evidence artifact was found.
-- **Files:** research/backtest modules, future evidence output under an
-  operator-approved artifact location, and `docs/RESEARCH-ONLY-STRATEGIES.md`
+  verified artifact `docs/research/evidence_artifact_btcusdt.json` generated with
+  digest `24e482100a197027a017d469b4e6cab44ab2ec2689fd0b385efa3854350dfb88`
+  and verified by `verify_replay_evidence_artifact`.
+- **Files:** research/backtest modules, `docs/research/evidence_artifact_btcusdt.json`,
+  `docs/research/README.md`, and `docs/RESEARCH-ONLY-STRATEGIES.md`
 - **Acceptance criteria:** dataset/source fingerprints, config/code commit,
   fees, spread, slippage, funding, chronological folds, OOS/regime metrics,
   and weak-result handling are recorded; result is never presented as live or
   profitability proof.
-- **Tests:** existing research replay/evidence tests plus one bounded real-data
-  artifact verification run when an approved dataset is available.
+- **Tests:** existing research replay/evidence tests plus independent verification
+  via `verify_replay_evidence_artifact` on the generated artifact.
 - **Dependencies:** approved historical sources and storage location; no
   exchange mutation or execution credentials.
 - **Risk:** synthetic or incomplete data can create false confidence.
-- **Status:** OPEN — NO AUTHENTIC DATASET ARTIFACT AVAILABLE
+- **Status:** IMPLEMENTED / ARTIFACT VERIFIED
