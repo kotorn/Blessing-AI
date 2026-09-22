@@ -6,8 +6,8 @@
 - **Base:** `origin/main` at the merged v0.2 implementation
 - **Overall:** repository implementation is ready for review; remote operator
   gates remain open and are not inferred from local tests
-- **CI:** local CI-equivalent suite passed; GitHub CI for this new patch is
-  pending commit/push
+- **CI:** GitHub Actions PR #39 run `35750129769` passed all jobs for commit
+  `94f4369263b24548bd4e31d56b4c35259d5343bc`
 - **Staging:** read-only live smoke passed HTTP transport checks, but the
   deployed Control Plane still reports v0.1 and does not match the repository
   runtime profile; staging UAT is not green
@@ -46,10 +46,11 @@
 - Read-only HTTP smoke returned `/` = 200 and `/api/health` = 200, but the
   current remote body reported `system: Blessing AI v0.1`; the repository fix
   is intentionally not claimed as deployed.
+- GitHub Actions PR #39 run `35750129769` passed `npm ci`, generated SDK drift,
+  TypeScript lint/tests/build, Python lint/tests/coverage, and hygiene.
 
 ## Deferred / operator gates
 
-- Commit, push, and GitHub CI for this patch.
 - Authenticated viewer/operator/trading_admin browser UAT.
 - Staging restart, reconciliation-mismatch, kill-switch, and cold/warm fault
   evidence.

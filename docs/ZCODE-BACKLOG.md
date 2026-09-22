@@ -12,7 +12,7 @@ must not be converted to `PASS` from configuration or CI alone.
 | ZC-005 | P1 | Runtime profiles | Control Plane deploy/verify scripts support bounded DEV_PAPER_UI and MAINNET_OPERATOR_UI profiles | IMPLEMENTED / REMOTE ROLLOUT OPEN |
 | ZC-006 | P1 | Staging UAT | Named URL baseline, browser evidence, and explicit NOT_RUN reasons for unavailable roles/fault injection | OPEN UNTIL UAT EVIDENCE |
 | ZC-007 | P1 | Data Connect decision | ADR records Firestore authority and v0.3 deferral with cutover=false | IMPLEMENTED |
-| ZC-008 | P1 | Release report | Full local gates, current-SHA CI, UAT evidence, and remaining operator gates are recorded truthfully | IMPLEMENTED / PR REVIEW OPEN |
+| ZC-008 | P1 | Release report | Full local gates, current-SHA CI, UAT evidence, and remaining operator gates are recorded truthfully | IMPLEMENTED / PR CI PASSED / REVIEW OPEN |
 | ZC-009 | P2 | Testnet evidence | Existing waiver remains in force; no new Testnet contract/soak claim is made by this PR | WAIVED BY DECISION |
 
 ## Non-goals for this PR
@@ -155,7 +155,7 @@ files, acceptance criteria, tests, dependencies, risk, and status.
   smoke output.
 - **Dependencies:** exact-SHA GitHub CI after commit/push.
 - **Risk:** stale documentation can cause an unsafe release decision.
-- **Status:** IMPLEMENTED / PATCH CI OPEN
+- **Status:** IMPLEMENTED / PR CI PASSED / REVIEW OPEN
 
 ### ZC-009 — Testnet evidence waiver
 

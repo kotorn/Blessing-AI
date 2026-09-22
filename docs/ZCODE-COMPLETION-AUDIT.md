@@ -26,6 +26,8 @@
   DISARMED, durable REQUIRED persistence, and zero order-submission attempts.
   The Control Plane profile verifier correctly failed on the observed
   `min=0,max=20` drift.
+- **Exact-SHA CI:** PR #39 workflow run `35750129769` passed all jobs for
+  commit `94f4369263b24548bd4e31d56b4c35259d5343bc`.
 - **Current classification:** repository implementation is **PARTIAL / review
   ready**; remote deployment identity, authenticated staging UAT, fault
   injection, rollback execution, billing totals, and any Artifact Registry
