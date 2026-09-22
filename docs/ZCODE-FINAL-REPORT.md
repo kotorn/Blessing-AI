@@ -19,7 +19,7 @@
 
 ## Gates that remain open
 
-- Current-SHA GitHub CI and PR review.
+- PR review and merge approval; current-SHA GitHub CI is green.
 - Authenticated viewer/operator/trading_admin browser UAT.
 - Any staging restart/reconciliation fault-injection evidence.
 - Separate operator approval before applying a Cloud Run profile or cleanup
@@ -34,6 +34,8 @@
   build passed with Vite 8.3.0 and the server bundle built successfully.
 - Python CI-equivalent checks passed: Ruff error-level rules, **471 passed / 3
   deselected**, and **68.92% coverage** against the 65% floor.
+- GitHub Actions current-SHA run **35718992114** passed every job, including
+  cross-platform `npm ci` and repository hygiene.
 - Local rendered QA passed after the clean install: v0.2 title, explicit
   evidence badge, readiness rows for Authentication/Role/Worker heartbeat/
   Persistence, and disabled `ARM ENGINE` in the unauthenticated unavailable
