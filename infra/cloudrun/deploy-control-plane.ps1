@@ -23,7 +23,9 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$WorkerImageDigest,
   [Parameter(Mandatory = $true)]
-  [string]$WorkerRevision
+  [string]$WorkerRevision,
+  [ValidateSet("DEV_PAPER_UI", "MAINNET_OPERATOR_UI")]
+  [string]$RuntimeProfile = "MAINNET_OPERATOR_UI"
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +44,15 @@ if ($ControlPlaneServiceAccount -notmatch '^[^@\s]+@[^@\s]+\.iam\.gserviceaccoun
 }
 if ($ReleaseControllerServiceAccount -notmatch '^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$') {
   throw "ReleaseControllerServiceAccount must be a service-account email"
+}
+
+$profileSettings = switch ($RuntimeProfile) {
+  "DEV_PAPER_UI" {
+    @{ min = 0; max = 1 }
+  }
+  "MAINNET_OPERATOR_UI" {
+    @{ min = 1; max = 1 }
+  }
 }
 
 function Invoke-GCloud {
@@ -76,12 +87,12 @@ Invoke-GCloud @(
   "--platform=managed",
   "--image=$ImageUri",
   "--service-account=$ControlPlaneServiceAccount",
-  "--min=1",
-  "--max=1",
+  "--min=$($profileSettings.min)",
+  "--max=$($profileSettings.max)",
   "--concurrency=1",
   "--cpu=1",
   "--memory=1Gi",
-  "--no-cpu-throttling",
+  "--cpu-throttling",
   "--set-env-vars=$envVars"
 )
 
@@ -96,6 +107,18 @@ if ($actualImage -ne $ImageUri) { throw "Control Plane image digest read-back do
 if ($actualServiceAccount -ne $ControlPlaneServiceAccount) { throw "Control Plane service account read-back does not match" }
 if ($ready.Count -eq 0) { throw "Control Plane latest revision is not Ready" }
 
+$annotations = $service.spec.template.metadata.annotations
+$actualMin = if ($null -eq $annotations.'autoscaling.knative.dev/minScale') { 0 } else { [int]$annotations.'autoscaling.knative.dev/minScale' }
+$actualMax = if ($null -eq $annotations.'autoscaling.knative.dev/maxScale') { 0 } else { [int]$annotations.'autoscaling.knative.dev/maxScale' }
+$cpuThrottling = [string]$annotations.'run.googleapis.com/cpu-throttling'
+if ($actualMin -ne [int]$profileSettings.min -or $actualMax -ne [int]$profileSettings.max) {
+  throw "Control Plane runtime profile $RuntimeProfile expects min=$($profileSettings.min), max=$($profileSettings.max); got min=$actualMin, max=$actualMax"
+}
+if ($cpuThrottling.ToLowerInvariant() -ne "true") {
+  throw "Control Plane runtime profile $RuntimeProfile requires request-based CPU throttling"
+}
+
 Write-Output "Control Plane deployed and verified: $ServiceName"
 Write-Output "Immutable image verified: $actualImage"
+Write-Output "Runtime profile verified: $RuntimeProfile (min=$actualMin, max=$actualMax, request-based CPU)"
 Write-Output "No Binance or SQL secrets were supplied to the Control Plane deployment"

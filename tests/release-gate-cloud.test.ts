@@ -26,6 +26,30 @@ const budgetVerification = readFileSync(
   resolve(process.cwd(), 'infra/monitoring/verify-budget.ps1'),
   'utf8',
 );
+const controlPlaneDeployment = readFileSync(
+  resolve(process.cwd(), 'infra/cloudrun/deploy-control-plane.ps1'),
+  'utf8',
+);
+const controlPlaneBootstrap = readFileSync(
+  resolve(process.cwd(), 'infra/cloudrun/deploy-control-plane-bootstrap.ps1'),
+  'utf8',
+);
+const controlPlaneVerification = readFileSync(
+  resolve(process.cwd(), 'infra/cloudrun/verify-control-plane.ps1'),
+  'utf8',
+);
+const artifactAudit = readFileSync(
+  resolve(process.cwd(), 'infra/artifact-registry/audit-images.ps1'),
+  'utf8',
+);
+const protectedDigestVerification = readFileSync(
+  resolve(process.cwd(), 'infra/artifact-registry/verify-protected-digests.ps1'),
+  'utf8',
+);
+const cleanupPolicy = JSON.parse(readFileSync(
+  resolve(process.cwd(), 'infra/artifact-registry/cleanup-policy.json'),
+  'utf8',
+)) as Array<Record<string, unknown>>;
 const gitignore = readFileSync(resolve(process.cwd(), '.gitignore'), 'utf8');
 
 describe('cloud release gate static assertions', () => {
@@ -65,6 +89,19 @@ describe('cloud release gate static assertions', () => {
     expect(cloudGate).toMatch(/ExpectedExecutionMode\s*=\s*["']PAPER["']/);
   });
 
+  it('pins Control Plane runtime profiles to request-based CPU and bounded scaling', () => {
+    for (const script of [cloudGate, controlPlaneDeployment, controlPlaneBootstrap, controlPlaneVerification]) {
+      expect(script).toContain('DEV_PAPER_UI');
+      expect(script).toContain('MAINNET_OPERATOR_UI');
+      expect(script).toContain('RuntimeProfile');
+    }
+    expect(controlPlaneDeployment).toContain('"--cpu-throttling"');
+    expect(controlPlaneDeployment).not.toContain('"--no-cpu-throttling"');
+    expect(controlPlaneVerification).toContain('run.googleapis.com/cpu-throttling');
+    expect(controlPlaneVerification).toContain('autoscaling.knative.dev/minScale');
+    expect(controlPlaneVerification).toContain('autoscaling.knative.dev/maxScale');
+  });
+
   it('cloud_gate.ps1 uses the cloud-gate- evidence file naming pattern', () => {
     expect(cloudGate).toContain('cloud-gate-');
   });
@@ -94,5 +131,17 @@ describe('cloud release gate static assertions', () => {
 
   it('.gitignore contains an entry for the evidence/ directory', () => {
     expect(gitignore).toContain('evidence/');
+  });
+
+  it('keeps Artifact Registry inventory and protected-digest checks read-only', () => {
+    expect(artifactAudit).toContain('artifacts docker images list');
+    expect(artifactAudit).toContain('destructive_action = $false');
+    expect(artifactAudit).not.toMatch(/artifacts\s+docker\s+images\s+delete/i);
+    expect(protectedDigestVerification).toContain('include-tags');
+    expect(protectedDigestVerification).toContain('Protected image digests are missing');
+    expect(protectedDigestVerification).not.toMatch(/gcloud\s+artifacts[\s\S]{0,120}\b(delete|remove)\b/i);
+    expect(protectedDigestVerification).not.toContain('set-cleanup-policies');
+    expect(cleanupPolicy.some((policy) => JSON.stringify(policy).includes('untagged'))).toBe(true);
+    expect(cleanupPolicy.some((policy) => JSON.stringify(policy).includes('90d'))).toBe(true);
   });
 });

@@ -102,7 +102,8 @@ export function useQuantState(auditLogger?: (action: string, entityId: string, d
         setLiquidationDistancePct(data.liquidation_distance_pct);
       }
 
-      setLastUpdated(new Date());
+      const serverUpdatedAt = Date.parse(sysState.updatedAt);
+      setLastUpdated(Number.isFinite(serverUpdatedAt) ? new Date(serverUpdatedAt) : null);
       setError(null);
     } catch (err: any) {
       if (!isMountedRef.current) return;

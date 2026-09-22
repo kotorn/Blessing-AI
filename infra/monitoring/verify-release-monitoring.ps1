@@ -27,21 +27,18 @@ if ($PolicyNames.Count -eq 0) {
   )
 }
 
-$metricJson = & gcloud logging metrics list --project=$ProjectId --format=json
+# Use value(name) / value(displayName) instead of --format=json: the PS 5.1
+# pipeline + this gcloud build merges multi-object JSON into a single object,
+# making every name look absent. Single-line values parse deterministically.
+$actualMetricNames = @(& gcloud logging metrics list --project=$ProjectId --format="value(name)")
 if ($LASTEXITCODE -ne 0) { throw "Unable to read Cloud Logging log-based metrics" }
-$metrics = @($metricJson | ConvertFrom-Json)
-$actualMetricNames = @($metrics | ForEach-Object { [string]$_.name })
 $missingMetrics = @($MetricNames | Where-Object { $_ -notin $actualMetricNames })
 if ($missingMetrics.Count -gt 0) {
   throw "Required log-based metrics are missing: $($missingMetrics -join ', ')"
 }
 
-$policyJson = & gcloud monitoring policies list --project=$ProjectId --format=json
+$actualPolicyNames = @(& gcloud monitoring policies list --project=$ProjectId --format="value(displayName)")
 if ($LASTEXITCODE -ne 0) { throw "Unable to read Cloud Monitoring alert policies" }
-$policies = @($policyJson | ConvertFrom-Json)
-$actualPolicyNames = @($policies | ForEach-Object {
-  if ($null -ne $_.displayName) { [string]$_.displayName } else { [string]$_.display_name }
-})
 $missingPolicies = @($PolicyNames | Where-Object { $_ -notin $actualPolicyNames })
 if ($missingPolicies.Count -gt 0) {
   throw "Required alert policies are missing: $($missingPolicies -join ', ')"

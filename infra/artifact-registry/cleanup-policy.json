@@ -1,0 +1,21 @@
+[
+  {
+    "name": "delete-old-untagged-only",
+    "action": {
+      "type": "Delete"
+    },
+    "condition": {
+      "tagState": "untagged",
+      "olderThan": "90d"
+    }
+  },
+  {
+    "name": "keep-recent-release-versions",
+    "action": {
+      "type": "Keep"
+    },
+    "mostRecentVersions": {
+      "keepCount": 30
+    }
+  }
+]

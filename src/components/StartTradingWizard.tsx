@@ -8,18 +8,31 @@ import {
   ShieldAlert,
   Play,
 } from 'lucide-react';
-import { PreflightResult,  } from '../types';
+import { PreflightCheck, PreflightResult, TradingSystemState } from '../types';
 import { quantApi } from '../api/quant';
+import { useAuth } from '../context/AuthContext';
+import { EvidenceStatus } from '../lib/evidence';
+import {
+  ControlPlaneRole,
+  requiredRoleForExecutionMode,
+  resolveControlPlaneRole,
+  roleSatisfies,
+} from '../lib/control-plane-role';
 
 interface StartTradingWizardProps {
   onComplete: (params: any) => Promise<void>;
   onCancel: () => void;
+  systemState: TradingSystemState | null;
+  evidenceStatus: EvidenceStatus;
 }
 
 export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
   onComplete,
   onCancel,
+  systemState,
+  evidenceStatus,
 }) => {
+  const { user } = useAuth();
   const [step, setStep] = useState<number>(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +50,22 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
 
   // Preflight State
   const [preflightResult, setPreflightResult] = useState<PreflightResult | null>(null);
+  const [controlPlaneRole, setControlPlaneRole] = useState<ControlPlaneRole>('unknown');
+  const [roleLoading, setRoleLoading] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setRoleLoading(Boolean(user));
+    void resolveControlPlaneRole(user).then((role) => {
+      if (active) {
+        setControlPlaneRole(role);
+        setRoleLoading(false);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [user]);
 
   useEffect(() => {
     if (step === 3) {
@@ -58,7 +87,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
   };
 
   const handleArm = async () => {
-    if (!preflightResult?.canArm) return;
+    if (!preflightResult?.canArm || !localReadinessChecks.every((check) => !check.required || check.status === 'PASS')) return;
     setLoading(true);
     try {
       await onComplete({
@@ -72,6 +101,57 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
       setError(err.message || 'Failed to arm engine.');
       setLoading(false);
     }
+  };
+
+  const persistenceCheck = preflightResult?.checks.find((check) =>
+    check.id.toUpperCase().includes('PERSISTENCE') || check.name.toUpperCase().includes('PERSISTENCE'),
+  );
+  const requiredRole = requiredRoleForExecutionMode(executionMode);
+  const localReadinessChecks: PreflightCheck[] = [
+    {
+      id: 'CHK-AUTHENTICATION',
+      name: 'Authentication',
+      required: true,
+      status: user ? 'PASS' : 'FAIL',
+      message: user ? `Signed in as ${user.email || user.uid}` : 'Sign in is required before changing system state',
+    },
+    {
+      id: 'CHK-ROLE',
+      name: 'Role',
+      required: true,
+      status: roleLoading ? 'UNKNOWN' : roleSatisfies(controlPlaneRole, requiredRole) ? 'PASS' : 'FAIL',
+      message: roleLoading
+        ? 'Reading verified Firebase custom claims'
+        : controlPlaneRole === 'unknown'
+          ? `A verified ${requiredRole} role is required`
+          : `${controlPlaneRole} role; ${requiredRole} is required for ${executionMode}`,
+    },
+    {
+      id: 'CHK-WORKER-READINESS',
+      name: 'Worker heartbeat',
+      required: true,
+      status: systemState?.workerResponsive === true && evidenceStatus !== 'STALE' && evidenceStatus !== 'UNAVAILABLE'
+        ? 'PASS'
+        : 'FAIL',
+      message: systemState?.workerResponsive === true && evidenceStatus !== 'STALE' && evidenceStatus !== 'UNAVAILABLE'
+        ? `Fresh authoritative worker state (${evidenceStatus})`
+        : 'Worker state is unavailable or stale; execution is blocked',
+    },
+    {
+      id: 'CHK-PERSISTENCE-UI',
+      name: 'Persistence',
+      required: persistenceCheck ? persistenceCheck.required : true,
+      status: persistenceCheck?.status || 'UNKNOWN',
+      message: persistenceCheck?.message || 'Worker did not expose a persistence check; execution is blocked',
+    },
+  ];
+
+  const combinedChecks = [...localReadinessChecks, ...(preflightResult?.checks || [])];
+
+  const renderCheckIcon = (status: PreflightCheck['status']) => {
+    if (status === 'PASS') return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
+    if (status === 'WARN' || status === 'UNKNOWN') return <AlertTriangle className="w-4 h-4 text-amber-400" />;
+    return <XCircle className="w-4 h-4 text-rose-400" />;
   };
 
   const renderStep1 = () => (
@@ -222,19 +302,11 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
         <p className="text-[11px] text-zinc-400">Verifying system capabilities for {executionMode} mode.</p>
       </div>
 
-      <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-3 space-y-2">
-        {preflightResult?.checks.map((check) => (
+      <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-3 space-y-2" aria-label="Operator readiness checks">
+        {combinedChecks.map((check) => (
           <div key={check.id} className="flex items-start gap-3 p-2 border-b border-zinc-800/50 last:border-0">
             <div className="mt-0.5">
-              {check.status === 'PASS' ? (
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              ) : check.status === 'WARN' ? (
-                <AlertTriangle className="w-4 h-4 text-amber-400" />
-              ) : check.status === 'UNKNOWN' ? (
-                <AlertTriangle className="w-4 h-4 text-zinc-600" />
-              ) : (
-                <XCircle className="w-4 h-4 text-rose-400" />
-              )}
+              {renderCheckIcon(check.status)}
             </div>
             <div>
               <div className="text-xs font-bold text-zinc-200">{check.name}</div>
@@ -250,7 +322,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
         </div>
       )}
 
-      {preflightResult?.canArm === false && (
+      {(!preflightResult?.canArm || !localReadinessChecks.every((check) => !check.required || check.status === 'PASS')) && (
         <div className="p-3 bg-amber-950/30 border border-amber-900 rounded-lg flex gap-3">
           <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
           <div className="text-xs text-amber-300">

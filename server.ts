@@ -3476,7 +3476,7 @@ app.post('/api/bigquery/sync-telemetry', async (req: Request, res: Response) => 
 });
 
 // Explicit 404 catch-all for /api routes to prevent falling through to Vite HTML fallback
-app.all('/api/*', (req: Request, res: Response) => {
+app.all('/api/{*splat}', (req: Request, res: Response) => {
   res.status(404).json({
     error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
     status: 404,
@@ -3494,13 +3494,13 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req: Request, res: Response) => {
+    app.get('/{*splat}', (req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Blessing AI v0.1 Server listening on http://0.0.0.0:${PORT}`);
+    console.log(`Blessing AI v0.2 Server listening on http://0.0.0.0:${PORT}`);
 
     // Initial background sync from Binance
     const active = getActiveBinanceCredentials();
