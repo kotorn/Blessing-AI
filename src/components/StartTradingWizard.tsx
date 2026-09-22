@@ -87,7 +87,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
   };
 
   const handleArm = async () => {
-    if (!preflightResult?.canArm || !localReadinessChecks.every((check) => !check.required || check.status === 'PASS')) return;
+    if (!canArm) return;
     setLoading(true);
     try {
       await onComplete({
@@ -147,6 +147,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
   ];
 
   const combinedChecks = [...localReadinessChecks, ...(preflightResult?.checks || [])];
+  const canArm = Boolean(preflightResult?.canArm) && localReadinessChecks.every((check) => !check.required || check.status === 'PASS');
 
   const renderCheckIcon = (status: PreflightCheck['status']) => {
     if (status === 'PASS') return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
@@ -322,7 +323,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
         </div>
       )}
 
-      {(!preflightResult?.canArm || !localReadinessChecks.every((check) => !check.required || check.status === 'PASS')) && (
+      {!canArm && (
         <div className="p-3 bg-amber-950/30 border border-amber-900 rounded-lg flex gap-3">
           <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0" />
           <div className="text-xs text-amber-300">
@@ -340,7 +341,7 @@ export const StartTradingWizard: React.FC<StartTradingWizardProps> = ({
         </button>
         <button
           onClick={handleArm}
-          disabled={loading || !preflightResult?.canArm}
+          disabled={loading || !canArm}
           className="flex items-center space-x-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors"
         >
           <Play className="w-4 h-4" />
