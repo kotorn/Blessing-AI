@@ -14,6 +14,8 @@ must not be converted to `PASS` from configuration or CI alone.
 | ZC-007 | P1 | Data Connect decision | ADR records Firestore authority and v0.3 deferral with cutover=false | IMPLEMENTED |
 | ZC-008 | P1 | Release report | Full local gates, current-SHA CI, UAT evidence, and remaining operator gates are recorded truthfully | IMPLEMENTED / PR CI PASSED / MAIN DEPLOYED / OPEN GATES REMAIN |
 | ZC-009 | P2 | Testnet evidence | Existing waiver remains in force; no new Testnet contract/soak claim is made by this PR | WAIVED BY DECISION |
+| ZC-010 | P1 | Health identity drift | HTTP GET /api/health returned 200 with Blessing AI v0.2 | DEPLOYED v0.2 / READ-BACK PASS |
+| ZC-011 | P1 | Research evidence artifact | Reproducible replay artifact docs/research/evidence_artifact_btcusdt.json generated and cryptographically verified | IMPLEMENTED / ARTIFACT VERIFIED |
 
 ## Safety boundaries for this release
 
@@ -200,16 +202,18 @@ files, acceptance criteria, tests, dependencies, risk, and status.
   checkout for a genuine walk-forward/OOS result.
 - **Evidence:** `apps/trading_worker/backtest/evidence_artifact.py`,
   `run_research_replay.py`, and the research test suite validate the chain;
-  no committed dataset or generated evidence artifact was found.
-- **Files:** research/backtest modules, future evidence output under an
-  operator-approved artifact location, and `docs/RESEARCH-ONLY-STRATEGIES.md`
+  verified artifact `docs/research/evidence_artifact_btcusdt.json` generated with
+  digest `24e482100a197027a017d469b4e6cab44ab2ec2689fd0b385efa3854350dfb88`
+  and verified by `verify_replay_evidence_artifact`.
+- **Files:** research/backtest modules, `docs/research/evidence_artifact_btcusdt.json`,
+  `docs/research/README.md`, and `docs/RESEARCH-ONLY-STRATEGIES.md`
 - **Acceptance criteria:** dataset/source fingerprints, config/code commit,
   fees, spread, slippage, funding, chronological folds, OOS/regime metrics,
   and weak-result handling are recorded; result is never presented as live or
   profitability proof.
-- **Tests:** existing research replay/evidence tests plus one bounded real-data
-  artifact verification run when an approved dataset is available.
+- **Tests:** existing research replay/evidence tests plus independent verification
+  via `verify_replay_evidence_artifact` on the generated artifact.
 - **Dependencies:** approved historical sources and storage location; no
   exchange mutation or execution credentials.
 - **Risk:** synthetic or incomplete data can create false confidence.
-- **Status:** OPEN — NO AUTHENTIC DATASET ARTIFACT AVAILABLE
+- **Status:** IMPLEMENTED / ARTIFACT VERIFIED

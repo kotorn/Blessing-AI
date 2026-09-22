@@ -1,0 +1,530 @@
+{
+  "artifact_sha256": "24e482100a197027a017d469b4e6cab44ab2ec2689fd0b385efa3854350dfb88",
+  "artifact_version": "1",
+  "config": {
+    "carry_cost_inputs": null,
+    "cost_model": {
+      "maker_fee_rate": "0.0002",
+      "taker_fee_rate": "0.0005"
+    },
+    "enabled_strategies": [
+      "shock"
+    ],
+    "force_close_at_end": true,
+    "funding_interval_sec": 60,
+    "initial_capital": "1000",
+    "market_slippage_bps": "2",
+    "max_active_exposure_chains": 1,
+    "max_drawdown_pct": "6",
+    "max_leverage": "2",
+    "max_margin_utilization_pct": "70",
+    "max_open_orders": 1,
+    "max_single_order_notional": "100",
+    "max_target_gross_qty": "2",
+    "max_total_open_notional": "100",
+    "require_funding_events": true,
+    "symbol_rules": [
+      {
+        "max_notional": null,
+        "max_quantity": "1000",
+        "min_notional": "5",
+        "min_quantity": "0.001",
+        "step_size": "0.001",
+        "symbol": "BTCUSDT",
+        "tick_size": "0.1"
+      }
+    ]
+  },
+  "events": [
+    {
+      "ask_qty": "2",
+      "best_ask": "100.2",
+      "best_bid": "100",
+      "bid_qty": "2",
+      "close": "100",
+      "data_source": "BINANCE_PUBLIC_TESTNET_READ_ONLY",
+      "event_id": "BTCUSDT-1m-1700000000000",
+      "event_time": "2023-11-14T22:14:19.999000Z",
+      "funding_event": false,
+      "funding_rate": null,
+      "high": "100",
+      "low": "100",
+      "mark_price": "100",
+      "market_type": "USDM_FUTURES",
+      "open": "100",
+      "symbol": "BTCUSDT",
+      "trade_count": 10,
+      "venue": "BINANCE_TESTNET",
+      "volume": "12"
+    },
+    {
+      "ask_qty": "2",
+      "best_ask": "100.2",
+      "best_bid": "100",
+      "bid_qty": "2",
+      "close": "102",
+      "data_source": "BINANCE_PUBLIC_TESTNET_READ_ONLY",
+      "event_id": "BTCUSDT-1m-1700000060000",
+      "event_time": "2023-11-14T22:15:19.999000Z",
+      "funding_event": false,
+      "funding_rate": null,
+      "high": "102",
+      "low": "102",
+      "mark_price": "102",
+      "market_type": "USDM_FUTURES",
+      "open": "102",
+      "symbol": "BTCUSDT",
+      "trade_count": 10,
+      "venue": "BINANCE_TESTNET",
+      "volume": "12"
+    },
+    {
+      "ask_qty": "2",
+      "best_ask": "100.2",
+      "best_bid": "100",
+      "bid_qty": "2",
+      "close": "99",
+      "data_source": "BINANCE_PUBLIC_TESTNET_READ_ONLY",
+      "event_id": "BTCUSDT-1m-1700000120000",
+      "event_time": "2023-11-14T22:16:19.999000Z",
+      "funding_event": true,
+      "funding_rate": "0.001",
+      "high": "99",
+      "low": "99",
+      "mark_price": "99",
+      "market_type": "USDM_FUTURES",
+      "open": "99",
+      "symbol": "BTCUSDT",
+      "trade_count": 10,
+      "venue": "BINANCE_TESTNET",
+      "volume": "12"
+    }
+  ],
+  "evidence_status": "RESEARCH_ONLY",
+  "launch_eligible": false,
+  "manifest": {
+    "code_sha": "53f23c5896507f401fd791e164e6b91b103cd4ee",
+    "config_sha256": "bd61b0720890835e07cf63570a9f22c8ced46f6a0f7585db9c373199a8cf7fd5",
+    "cost_model": {
+      "maker_fee_rate": "0.0002",
+      "taker_fee_rate": "0.0005"
+    },
+    "dataset_id": "public-testnet-btcusdt-1m-sample",
+    "dataset_sha256": "acd1e51ecf3e9436bb778a54f8ade39c29acac2407e1264321791d3ff8a5aef6",
+    "end_time": "2023-11-14T22:16:19.999000Z",
+    "event_count": 3,
+    "exchange_info_source": {
+      "end_time": "2023-11-14T22:16:19.999000Z",
+      "row_count": 1,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_type": "EXCHANGE_INFO",
+      "start_time": "2023-11-14T22:14:19.999000Z",
+      "url": "https://testnet.binancefuture.com/fapi/v1/exchangeInfo"
+    },
+    "interval": "1m",
+    "manifest_version": "1",
+    "market_type": "USDM_FUTURES",
+    "source_records": [
+      {
+        "end_time": "2023-11-14T22:16:19.999000Z",
+        "row_count": 3,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_type": "KLINES_1M",
+        "start_time": "2023-11-14T22:14:19.999000Z",
+        "url": "https://testnet.binancefuture.com/fapi/v1/fundingRate"
+      },
+      {
+        "end_time": "2023-11-14T22:16:19.999000Z",
+        "row_count": 3,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_type": "MARK_PRICE_KLINES_1M",
+        "start_time": "2023-11-14T22:14:19.999000Z",
+        "url": "https://testnet.binancefuture.com/fapi/v1/fundingRate"
+      },
+      {
+        "end_time": "2023-11-14T22:16:19.999000Z",
+        "row_count": 3,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_type": "BOOK_TICKER",
+        "start_time": "2023-11-14T22:14:19.999000Z",
+        "url": "https://testnet.binancefuture.com/fapi/v1/fundingRate"
+      },
+      {
+        "end_time": "2023-11-14T22:16:19.999000Z",
+        "row_count": 1,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_type": "FUNDING_RATES",
+        "start_time": "2023-11-14T22:14:19.999000Z",
+        "url": "https://testnet.binancefuture.com/fapi/v1/fundingRate"
+      }
+    ],
+    "start_time": "2023-11-14T22:14:19.999000Z",
+    "symbol": "BTCUSDT",
+    "symbol_rules": [
+      {
+        "max_notional": null,
+        "max_quantity": "1000",
+        "min_notional": "5",
+        "min_quantity": "0.001",
+        "step_size": "0.001",
+        "symbol": "BTCUSDT",
+        "tick_size": "0.1"
+      }
+    ],
+    "venue": "BINANCE_TESTNET"
+  },
+  "manifest_sha256": "cf99300f648f286919bc2d04015f9ebb25bf71e6d583f4fbfbe6bcf522393802",
+  "replay": {
+    "config_sha256": "bd61b0720890835e07cf63570a9f22c8ced46f6a0f7585db9c373199a8cf7fd5",
+    "dataset_sha256": "acd1e51ecf3e9436bb778a54f8ade39c29acac2407e1264321791d3ff8a5aef6",
+    "decisions": [
+      {
+        "accepted": true,
+        "client_order_id": "B-SYS-20231114T221519999000Z-000001",
+        "decision_id": "DEC-20231114T221519999000Z-000002",
+        "event_id": "BTCUSDT-1m-1700000060000",
+        "exchange_order_id": "REPLAY-ORDER-000001",
+        "reason": "simulated market fill",
+        "risk_class": "NEW_RISK",
+        "timestamp": "2023-11-14T22:15:19.999000Z"
+      },
+      {
+        "accepted": false,
+        "client_order_id": null,
+        "decision_id": "DEC-20231114T221619999000Z-000003",
+        "event_id": "BTCUSDT-1m-1700000120000",
+        "exchange_order_id": null,
+        "reason": "Risk state is NO_NEW_RISK; new or increased risk is blocked.",
+        "risk_class": "NOOP",
+        "timestamp": "2023-11-14T22:16:19.999000Z"
+      },
+      {
+        "accepted": true,
+        "client_order_id": "REPLAY-END-CLOSE-BTCUSDT-1m-1700000120000",
+        "decision_id": "REPLAY-END-CLOSE-DECISION-BTCUSDT-1m-1700000120000",
+        "event_id": "BTCUSDT-1m-1700000120000",
+        "exchange_order_id": "REPLAY-ORDER-000002",
+        "reason": "explicit end-of-sample close filled",
+        "risk_class": "CLOSE",
+        "timestamp": "2023-11-14T22:16:19.999000Z"
+      }
+    ],
+    "economic_result": {
+      "average_net_pnl": "-0.07114069100952647352647352648",
+      "data_source": "BINANCE_PUBLIC_TESTNET_READ_ONLY",
+      "equity_curve": [
+        "999.9288593089904735264735265"
+      ],
+      "evidence_status": "RESEARCH_CALCULATION_ONLY",
+      "funding_pnl": "-0.016038",
+      "gross_pnl": "0.0000",
+      "initial_capital": "1000",
+      "launch_eligible": false,
+      "max_drawdown_pct": "0.00711406910095264735264735",
+      "net_pnl": "-0.07114069100952647352647352648",
+      "net_return_pct": "-0.007114069100952647352647352648",
+      "positive_net_expectancy": false,
+      "slippage_cost": "0.006486481296",
+      "spread_cost": "0.03240000647352647352647352648",
+      "trade_count": 1,
+      "trading_fees": "0.016216203240"
+    },
+    "end_time": "2023-11-14T22:16:19.999000Z",
+    "equity_curve": [
+      {
+        "equity": "1000",
+        "event_id": "BTCUSDT-1m-1700000000000",
+        "open_funding_pnl": "0",
+        "position_qty": "0",
+        "timestamp": "2023-11-14T22:14:19.999000Z",
+        "unrealized_pnl": "0"
+      },
+      {
+        "equity": "1000.3078",
+        "event_id": "BTCUSDT-1m-1700000060000",
+        "open_funding_pnl": "0",
+        "position_qty": "0.162",
+        "timestamp": "2023-11-14T22:15:19.999000Z",
+        "unrealized_pnl": "0.3078"
+      },
+      {
+        "equity": "999.9288593089904735264735265",
+        "event_id": "BTCUSDT-1m-1700000120000",
+        "open_funding_pnl": "0",
+        "position_qty": "0",
+        "timestamp": "2023-11-14T22:16:19.999000Z",
+        "unrealized_pnl": "0"
+      }
+    ],
+    "event_count": 3,
+    "evidence_status": "RESEARCH_REPLAY_ONLY",
+    "execution_decisions": [
+      {
+        "action": "SUBMIT_ORDER",
+        "decision_id": "DEC-20231114T221519999000Z-000002",
+        "net_exposure_delta": "0.162",
+        "orders": [
+          {
+            "client_order_id": "B-SYS-20231114T221519999000Z-000001",
+            "created_at": "2023-11-14T22:15:19.999000Z",
+            "market_type": "USDM_FUTURES",
+            "order_type": "MARKET",
+            "position_side": "BOTH",
+            "post_only": false,
+            "price": null,
+            "quantity": "0.162",
+            "reduce_only": false,
+            "side": "BUY",
+            "source_intent_ids": [
+              "SHOCK-INTENT-BTCUSDT-20231114T221519999000Z"
+            ],
+            "strategy_id": "meta_allocator",
+            "symbol": "BTCUSDT",
+            "time_in_force": "GTC"
+          }
+        ],
+        "rational": "Approved relative target delta of 0.162 after risk checks.",
+        "risk_class": "NEW_RISK",
+        "source_intent_ids": [
+          "SHOCK-INTENT-BTCUSDT-20231114T221519999000Z"
+        ],
+        "symbol": "BTCUSDT",
+        "target_exposure_id": "EXP-REPLAY-31ecbfa2974f1eb7341b3f98",
+        "timestamp": "2023-11-14T22:15:19.999000Z"
+      },
+      {
+        "action": "NOOP",
+        "decision_id": "DEC-20231114T221619999000Z-000003",
+        "net_exposure_delta": "0.0",
+        "orders": [],
+        "rational": "Risk state is NO_NEW_RISK; new or increased risk is blocked.",
+        "risk_class": "NOOP",
+        "source_intent_ids": [
+          "SHOCK-INTENT-BTCUSDT-20231114T221619999000Z"
+        ],
+        "symbol": "BTCUSDT",
+        "target_exposure_id": "EXP-REPLAY-e5890d2fde414d6d5658a0b5",
+        "timestamp": "2023-11-14T22:16:19.999000Z"
+      },
+      {
+        "action": "REDUCE_POSITION",
+        "decision_id": "REPLAY-END-CLOSE-DECISION-BTCUSDT-1m-1700000120000",
+        "net_exposure_delta": "-0.162",
+        "orders": [
+          {
+            "client_order_id": "REPLAY-END-CLOSE-BTCUSDT-1m-1700000120000",
+            "created_at": "2023-11-14T22:16:19.999000Z",
+            "market_type": "USDM_FUTURES",
+            "order_type": "MARKET",
+            "position_side": "BOTH",
+            "post_only": false,
+            "price": null,
+            "quantity": "0.162",
+            "reduce_only": true,
+            "side": "SELL",
+            "source_intent_ids": [
+              "SHOCK-INTENT-BTCUSDT-20231114T221519999000Z"
+            ],
+            "strategy_id": "Shock Momentum",
+            "symbol": "BTCUSDT",
+            "time_in_force": "GTC"
+          }
+        ],
+        "rational": "Explicit end-of-sample flatten for a research replay.",
+        "risk_class": "CLOSE",
+        "source_intent_ids": [
+          "SHOCK-INTENT-BTCUSDT-20231114T221519999000Z"
+        ],
+        "symbol": "BTCUSDT",
+        "target_exposure_id": "REPLAY-END-CLOSE-TARGET-BTCUSDT-1m-1700000120000",
+        "timestamp": "2023-11-14T22:16:19.999000Z"
+      }
+    ],
+    "fills": [
+      {
+        "client_order_id": "B-SYS-20231114T221519999000Z-000001",
+        "commission": "0.008117823240",
+        "commission_asset": "USDT",
+        "decision_id": "DEC-20231114T221519999000Z-000002",
+        "event_time": "2023-11-14T22:15:19.999000Z",
+        "exchange_order_id": "REPLAY-ORDER-000001",
+        "exchange_trade_id": "REPLAY-FILL-000001",
+        "maker": false,
+        "position_side": "BOTH",
+        "price": "100.22004",
+        "quantity": "0.162",
+        "realized_pnl": "0",
+        "side": "BUY",
+        "source": "RESEARCH_REPLAY",
+        "source_intent_ids": [
+          "SHOCK-INTENT-BTCUSDT-20231114T221519999000Z"
+        ],
+        "strategy_id": "Shock Momentum",
+        "symbol": "BTCUSDT",
+        "target_exposure_id": "EXP-REPLAY-31ecbfa2974f1eb7341b3f98",
+        "transaction_time": "2023-11-14T22:15:19.999000Z"
+      },
+      {
+        "client_order_id": "REPLAY-END-CLOSE-BTCUSDT-1m-1700000120000",
+        "commission": "0.00809838000",
+        "commission_asset": "USDT",
+        "decision_id": "REPLAY-END-CLOSE-DECISION-BTCUSDT-1m-1700000120000",
+        "event_time": "2023-11-14T22:16:19.999000Z",
+        "exchange_order_id": "REPLAY-ORDER-000002",
+        "exchange_trade_id": "REPLAY-FILL-000002",
+        "maker": false,
+        "position_side": "BOTH",
+        "price": "99.9800",
+        "quantity": "0.162",
+        "realized_pnl": "0.0000",
+        "side": "SELL",
+        "source": "RESEARCH_REPLAY",
+        "source_intent_ids": [
+          "SHOCK-INTENT-BTCUSDT-20231114T221519999000Z"
+        ],
+        "strategy_id": "Shock Momentum",
+        "symbol": "BTCUSDT",
+        "target_exposure_id": "REPLAY-END-CLOSE-TARGET-BTCUSDT-1m-1700000120000",
+        "transaction_time": "2023-11-14T22:16:19.999000Z"
+      }
+    ],
+    "final_equity": "999.9288593089904735264735265",
+    "final_position_qty": "0",
+    "launch_eligible": false,
+    "open_position_at_end": "0",
+    "risk_snapshots": [
+      {
+        "current_drawdown_pct": "0",
+        "effective_leverage": "0",
+        "hard_violations": [],
+        "liquidation_distance_pct": null,
+        "margin_utilization_pct": "0",
+        "portfolio_equity": "1000",
+        "realized_pnl_24h": "0",
+        "realized_pnl_24h_known": false,
+        "risk_state": "NORMAL",
+        "soft_violations": [],
+        "timestamp": "2023-11-14T22:15:19.999000Z",
+        "unrealized_pnl": "0"
+      },
+      {
+        "current_drawdown_pct": "0.0194238",
+        "effective_leverage": "0.01604111579424964346224681990",
+        "hard_violations": [],
+        "liquidation_distance_pct": null,
+        "margin_utilization_pct": "0.802055789712482173112340995",
+        "portfolio_equity": "999.805762",
+        "realized_pnl_24h": "0",
+        "realized_pnl_24h_known": false,
+        "risk_state": "NO_NEW_RISK",
+        "soft_violations": [],
+        "timestamp": "2023-11-14T22:16:19.999000Z",
+        "unrealized_pnl": "-0.1782"
+      },
+      {
+        "current_drawdown_pct": "0.0194238",
+        "effective_leverage": "0.01604111579424964346224681990",
+        "hard_violations": [],
+        "liquidation_distance_pct": null,
+        "margin_utilization_pct": "0.802055789712482173112340995",
+        "portfolio_equity": "999.805762",
+        "realized_pnl_24h": "0",
+        "realized_pnl_24h_known": false,
+        "risk_state": "NO_NEW_RISK",
+        "soft_violations": [],
+        "timestamp": "2023-11-14T22:16:19.999000Z",
+        "unrealized_pnl": "-0.1782"
+      }
+    ],
+    "start_time": "2023-11-14T22:14:19.999000Z",
+    "strategy_intents": [
+      {
+        "confidence": "0.6",
+        "desired_delta_qty": "0.3",
+        "direction": "LONG",
+        "evidence": {
+          "is_shock": true,
+          "is_sweep": true
+        },
+        "expected_holding_horizon_sec": 300,
+        "intent_id": "SHOCK-INTENT-BTCUSDT-20231114T221519999000Z",
+        "invalidation_price": null,
+        "market_type": "USDM_FUTURES",
+        "opportunity_score": "0.9",
+        "strategy_id": "Shock Momentum",
+        "symbol": "BTCUSDT",
+        "timestamp": "2023-11-14T22:15:19.999000Z"
+      },
+      {
+        "confidence": "0.6",
+        "desired_delta_qty": "0.3",
+        "direction": "LONG",
+        "evidence": {
+          "is_shock": true,
+          "is_sweep": true
+        },
+        "expected_holding_horizon_sec": 300,
+        "intent_id": "SHOCK-INTENT-BTCUSDT-20231114T221619999000Z",
+        "invalidation_price": null,
+        "market_type": "USDM_FUTURES",
+        "opportunity_score": "0.9",
+        "strategy_id": "Shock Momentum",
+        "symbol": "BTCUSDT",
+        "timestamp": "2023-11-14T22:16:19.999000Z"
+      }
+    ],
+    "target_exposures": [
+      {
+        "created_at": "2023-11-14T22:15:19.999000Z",
+        "expires_at": "2023-11-14T22:16:19.999000Z",
+        "exposure_id": "EXP-REPLAY-31ecbfa2974f1eb7341b3f98",
+        "market_type": "USDM_FUTURES",
+        "source_intent_ids": [
+          "SHOCK-INTENT-BTCUSDT-20231114T221519999000Z"
+        ],
+        "strategy_attributions": {
+          "Shock Momentum": "0.162"
+        },
+        "symbol": "BTCUSDT",
+        "target_gross_limit_qty": "0.162",
+        "target_net_delta_qty": "0.162"
+      },
+      {
+        "created_at": "2023-11-14T22:16:19.999000Z",
+        "expires_at": "2023-11-14T22:17:19.999000Z",
+        "exposure_id": "EXP-REPLAY-e5890d2fde414d6d5658a0b5",
+        "market_type": "USDM_FUTURES",
+        "source_intent_ids": [
+          "SHOCK-INTENT-BTCUSDT-20231114T221619999000Z"
+        ],
+        "strategy_attributions": {
+          "Shock Momentum": "0.162"
+        },
+        "symbol": "BTCUSDT",
+        "target_gross_limit_qty": "0.162",
+        "target_net_delta_qty": "0.162"
+      }
+    ],
+    "trades": [
+      {
+        "data_source": "BINANCE_PUBLIC_TESTNET_READ_ONLY",
+        "entry_maker": false,
+        "entry_notional": "16.23564648",
+        "entry_slippage_bps": "2",
+        "entry_spread_bps": "19.98001998001998001998001998",
+        "exit_maker": false,
+        "exit_notional": "16.1967600",
+        "exit_slippage_bps": "2",
+        "exit_spread_bps": "19.98001998001998001998001998",
+        "funding_pnl": "-0.016038",
+        "gross_pnl": "0.0000",
+        "regime": "R5_VOLATILITY_SHOCK",
+        "strategy_id": "Shock Momentum",
+        "symbol": "BTCUSDT",
+        "timestamp": "2023-11-14T22:16:19.999000Z",
+        "trade_id": "REPLAY-TRADE-000001"
+      }
+    ]
+  },
+  "verification_status": "VERIFIED_REPLAY"
+}

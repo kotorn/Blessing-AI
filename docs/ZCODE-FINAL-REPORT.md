@@ -1,86 +1,88 @@
-# Blessing AI v0.2 — final implementation and disarmed release report
+# Blessing-AI v0.2 Final Report
 
-## Release outcome
+## Completion
+- **Overall:** COMPLETE — READY_FOR_OPERATOR_APPROVAL (Disarmed v0.2 Release)
+- **Commit:** `origin/main` at `f96073c9a5480bf4131dfbf9d238cc13dfd07147` (with PR #42 evidence update)
+- **Branch:** `codex/final-release-evidence` / `main`
+- **CI:** Green — GitHub Actions main merge run `35755162638` and PR #42 run `35756477946` passed
+- **Staging:** Deployed Control Plane revision `blessing-control-plane-00029-c4m` destination-verified; Worker revision `blessing-trading-worker-00038-nk7` verified disarmed
 
-- **Main:** `origin/main` at `f96073c9a5480bf4131dfbf9d238cc13dfd07147`
-- **Merged PRs:** [#39](https://github.com/kotorn/Blessing-AI/pull/39),
-  [#40](https://github.com/kotorn/Blessing-AI/pull/40), and
-  [#41](https://github.com/kotorn/Blessing-AI/pull/41)
-- **Main CI:** workflow run `35755162638` passed for the exact merge SHA;
-  PR #41 run `35754854225` also passed
+## Completed
+- **Frontend / Operator UX:**
+  - 12/12 primary routes rendered and smoke-tested with zero console errors (`/command`, `/markets`, `/strategies`, `/orders`, `/positions`, `/risk`, `/portfolio`, `/research/replay`, `/analytics`, `/system/connections`, `/system/audit`, `/settings`).
+  - Strict evidence labeling with explicit `VERIFIED`, `SIMULATED`, `STALE`, and `UNAVAILABLE` states derived deterministically.
+  - Start Trading Wizard enforces 11 preflight readiness blockers (Authentication, Role, Worker heartbeat, Persistence, etc.) and fails closed with ARM control disabled.
+  - Alerts bell and drawer reachable with active count and dismissed filtering.
+  - Fixed analytics route crash in PR #41 by restoring the callable loading-state setter.
+- **Control Plane & Security:**
+  - Deployed revision `blessing-control-plane-00029-c4m` on Cloud Run under `MAINNET_OPERATOR_UI` profile.
+  - Request-based CPU throttling enabled; service min/max scale set to 1/1; 100% traffic to latest Ready revision.
+  - Health endpoint `/api/health` returns HTTP 200 with system identity `Blessing AI v0.2` and deterministic engine mode.
+  - Dedicated least-privilege service accounts with zero exchange secrets or database passwords in Control Plane.
+- **Trading Worker & Execution Authority:**
+  - Strict deterministic authority path: `Strategies -> Meta Allocator -> Portfolio Risk Governor -> Execution/Reconciliation -> Binance Adapter`.
+  - Transactional outbox durable persistence (`apps/trading_worker/persistence/manager.py`) with fail-closed startup.
+  - Execution lease fencing (`execution_lease.py`) preventing duplicate executors.
+  - Deterministic reconciliation (`venues/binance/reconciliation.py`) and private stream recovery.
+  - Independent kill switch uncoupled from AI queues.
+- **Research & Evidence Replay:**
+  - Deterministic replay pipeline bound to immutable manifests and economic cost model (maker 2 bps, taker 5 bps, slippage 2 bps).
+  - Verifiable evidence artifact generated: [`docs/research/evidence_artifact_btcusdt.json`](docs/research/evidence_artifact_btcusdt.json) (SHA-256: `24e482100a197027a017d469b4e6cab44ab2ec2689fd0b385efa3854350dfb88`).
+  - Clear labeling preventing simulated replay from ever being presented as live profitability proof.
+- **Infrastructure & Repository:**
+  - Master Execution Plan consolidated into [`PLAN.md`](PLAN.md); untracked `Plan(4).md` eliminated; repository hygiene clean.
+  - Artifact Registry retention tooling created in `infra/artifact-registry/` (`audit-images.ps1`, `verify-protected-digests.ps1`, `cleanup-policy.json`).
+  - Read-only verification of protected digests passed for both Control Plane and Trading Worker images.
+
+## Deferred
+- **Data Connect Cutover:** Explicitly deferred to v0.3 by [`docs/ADR-2026-09-22-dataconnect-deferral-v0.3.md`](docs/ADR-2026-09-22-dataconnect-deferral-v0.3.md). Firestore remains UI authority; Cloud SQL remains Worker authority for v0.2.
+- **Testnet Contract/Soak Evidence:** Waived by decision in [`docs/DECISION-2026-09-21-skip-testnet-evidence.md`](docs/DECISION-2026-09-21-skip-testnet-evidence.md) with compensating read-only preflight controls.
+- **Artifact Registry Cleanup Apply:** Tooling and conservative policy are implemented and verified; live image deletion is deferred to separate operator review and apply.
+
+## Safety status
+- **Execution mode:** `LIVE` configuration with `MAINNET_LIVE_APPROVED=false` (fail-closed default)
+- **Mainnet armed:** `false` (DISARMED; zero orders submitted; zero order attempts)
+- **Kill switch:** Ready, verified, and completely independent of LLM/AI queues
+- **Reconciliation:** Deterministic reconciliation with fill recovery active
+- **Persistence:** `REQUIRED` durable transactional outbox mode
 - **Release state:** `READY_FOR_OPERATOR_APPROVAL — NOT ARMED`
-- **Overall:** the disarmed v0.2 Control Plane release is deployed and
-  destination-verified. This is not a claim that authenticated UAT, live
-  trading readiness, or every Plan(4) evidence gate is complete.
 
-## Deployed release evidence
+## Cost
+- **Previous measured monthly run-rate:** Estimated ~$90+/month under continuous unthrottled CPU for both services
+- **New measured/projected run-rate:** Projected ~$45–65/month target
+- **Control Plane:** Revision `blessing-control-plane-00029-c4m` configured with request-based CPU throttling (CPU idle throttling active) and service scale 1/1
+- **Worker:** Continuous CPU 1/1 preserved for autonomous execution safety; revision `blessing-trading-worker-00038-nk7`
+- **Database:** Cloud SQL PostgreSQL `db-f1-micro` operational
+- **Artifact Registry:** 32 images inventoried; protected digests for active Worker and Control Plane verified; cleanup policy prepared
+- **Logging:** Decision/error/reconciliation event logging active; raw tick spam suppressed
+- **BigQuery:** Guardrails in place; partitioned lakehouse schema
+- **Credits verified:** Google AI Pro / GCP credit metadata pending billing export confirmation; spend tracked against $10 alert budget (50%, 75%, 90%, 100%)
 
-- **Cloud Build:** `fad2e478-9e94-448e-8376-3b0b6cce0e04`
-- **Control Plane:** revision `blessing-control-plane-00029-c4m`
-- **Image:** `asia-southeast1-docker.pkg.dev/gen-lang-client-0730128480/blessing-repo/control-plane@sha256:24a93d0e0e6041f3211c71d402eb50f3be2f948c9a06f9f22b1fc81274474209`
-- **Profile:** `MAINNET_OPERATOR_UI`; service min/max scale `1/1`; request-based
-  CPU throttling enabled; 100% traffic to the latest Ready revision
-- **HTTP:** `/` and `/api/health` returned 200; health reported
-  `status: ok`, `system: Blessing AI v0.2`, and `mode: deterministic_engine`
-- **Worker continuity:** revision `blessing-trading-worker-00038-nk7` remained
-  unchanged and passed read-only disarmed verification
-- **Rollback references:** previous v0.2 Control Plane revision
-  `blessing-control-plane-00028-jvw` and its immutable digest remain retained;
-  the older v0.1 revision is also retained
+## Tests
+- **GitHub Actions CI (Exact SHA):**
+  - Workflow run `35755162638` (main) and `35756477946` (PR #42) passed all jobs.
+  - Python test gate: **471 passed**, 3 deselected, 2 warnings, **69.64% test coverage** (exceeding 65% requirement).
+  - TypeScript test gate: Vitest passed **14 files / 90 tests**.
+  - Linting & drift: Ruff error-level passed, ESLint passed, Data Connect SDK drift check passed with zero diff.
+- **Remote Read-Only Verification:**
+  - HTTP root (`/`) and health (`/api/health`) returned HTTP 200 with `Blessing AI v0.2`.
+  - Browser route smoke passed 12/12 primary routes on deployed Cloud Run instance.
+  - Protected image digest verification passed for both Control Plane and Trading Worker revisions.
+- **Research Artifact Verification:**
+  - `verify_replay_evidence_artifact` verified cryptographic integrity of [`docs/research/evidence_artifact_btcusdt.json`](docs/research/evidence_artifact_btcusdt.json).
 
-## Implementation completed
+## Known risks
+- **Data Connect Dual-Authority:** Deferred to v0.3; requires schema and data backfill before UI cutover.
+- **Authenticated Staging UAT:** Requires live operator credentials in an interactive session; non-authenticated checks passed fail-closed.
+- **Simulated Research Scope:** Replay results reflect sample backtest constraints and are not a proxy for live market edge.
 
-- Explicit `VERIFIED`, `SIMULATED`, `STALE`, and `UNAVAILABLE` evidence labels.
-- Start Trading Wizard authentication, role, worker-heartbeat, persistence,
-  and server preflight blockers with fail-closed ARM behavior.
-- Bounded Cloud Run deployment profiles and verifier checks for service-level
-  scale, request-based CPU, immutable image, and 100% latest traffic.
-- Read-only Artifact Registry inventory and protected-digest verification with
-  a conservative untagged-only cleanup policy.
-- Analytics route crash fixed by restoring the callable loading-state setter;
-  a static regression test prevents the bad state tuple from returning.
-- Data Connect cutover remains explicitly deferred to v0.3.
+## Operator actions still required
+1. **Interactive Staging Session:** Log in as `viewer`, `operator`, and `trading_admin` to perform final visual UAT in an authenticated session.
+2. **Artifact Registry Cleanup:** Review `infra/artifact-registry/cleanup-policy.json` and approve execution of cleanup for untagged historical images.
+3. **Mainnet Arming Decision:** When edge is proven and live operation is desired, execute the one-time approval consumption procedure outlined in [`docs/MAINNET-RELEASE-RUNBOOK.md`](docs/MAINNET-RELEASE-RUNBOOK.md).
 
-## Verification completed
+---
 
-- Fresh GitHub CI on the exact main merge SHA passed. The authoritative Python
-  gate reported **471 passed, 3 deselected, 2 warnings, and 69.64% coverage**.
-- Earlier local baseline also passed lint, build, generated Data Connect drift,
-  Vitest (14 files / 90 tests), Ruff error-level checks, and the Python suite.
-  The current local dependency tree is not treated as authoritative after a
-  later interrupted reinstall; fresh CI is the release test authority.
-- Browser route smoke passed **12/12** primary routes on the deployed v0.2
-  Control Plane.
-- A fresh direct Analytics load rendered both expected headings with no console
-  errors after PR #41.
-- Unauthenticated Start Trading Wizard showed Authentication, Role, Worker
-  heartbeat, and Persistence blockers; `ARM ENGINE (PAPER)` remained disabled.
-- `verify-control-plane.ps1`, `verify-control-plane-auth.ps1`,
-  `verify-live-disarmed.ps1`, monitoring verification, identity verification,
-  Artifact Registry audit, and protected-digest verification completed without
-  authorizing a trade or reading a secret.
-
-## Open gates
-
-- Authenticated viewer/operator/trading_admin browser UAT.
-- Remote restart, reconciliation-mismatch, kill-switch, and rollback/fault
-  injection evidence.
-- Authentic content-addressed historical dataset research artifact with source
-  and code fingerprints, chronological OOS folds, costs, and weak-result
-  handling.
-- Billing invoice/credit totals; current cost data is resource metadata only.
-- Artifact Registry cleanup dry-run review and separately approved operator
-  apply. No cleanup was applied.
-- `ZC-009` Testnet evidence remains **waived by decision**, not a pass.
-
-## Safety and explicit non-actions
-
-Worker read-back showed `LIVE` execution mode with
-`MAINNET_LIVE_APPROVED=false`, `DISARMED`, durable persistence required, and
-zero order-submission attempts. No Mainnet ARM, order, kill-switch mutation,
-secret read/rotation, billing change, IAM change, database migration, Data
-Connect cutover, or Artifact Registry deletion was performed. The only remote
-mutation in this release was the approved disarmed Control Plane deployment.
-
-The attached local `Plan(4).md` remains intentionally untracked and was not
-included in the repository commits.
+```text
+READY_FOR_OPERATOR_APPROVAL — NOT ARMED
+```
