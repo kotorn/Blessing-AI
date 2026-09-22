@@ -69,10 +69,13 @@ $profileSettings = switch ($RuntimeProfile) {
   "DEV_PAPER_UI" { @{ min = 0; max = 1 } }
   "MAINNET_OPERATOR_UI" { @{ min = 1; max = 1 } }
 }
-$annotations = $service.spec.template.metadata.annotations
-$actualMin = if ($null -eq $annotations.'autoscaling.knative.dev/minScale') { 0 } else { [int]$annotations.'autoscaling.knative.dev/minScale' }
-$actualMax = if ($null -eq $annotations.'autoscaling.knative.dev/maxScale') { 0 } else { [int]$annotations.'autoscaling.knative.dev/maxScale' }
-$cpuThrottling = [string]$annotations.'run.googleapis.com/cpu-throttling'
+# --min/--max are service-level limits. Revision-level autoscaling annotations
+# describe a different contract and must not be used to verify this profile.
+$serviceAnnotations = $service.metadata.annotations
+$revisionAnnotations = $service.spec.template.metadata.annotations
+$actualMin = if ($null -eq $serviceAnnotations.'run.googleapis.com/minScale') { 0 } else { [int]$serviceAnnotations.'run.googleapis.com/minScale' }
+$actualMax = if ($null -eq $serviceAnnotations.'run.googleapis.com/maxScale') { 0 } else { [int]$serviceAnnotations.'run.googleapis.com/maxScale' }
+$cpuThrottling = [string]$revisionAnnotations.'run.googleapis.com/cpu-throttling'
 if ($actualMin -ne [int]$profileSettings.min -or $actualMax -ne [int]$profileSettings.max) {
   throw "Control Plane runtime profile $RuntimeProfile expects min=$($profileSettings.min), max=$($profileSettings.max); got min=$actualMin, max=$actualMax"
 }
@@ -80,4 +83,10 @@ if ($cpuThrottling.ToLowerInvariant() -ne "true") {
   throw "Control Plane runtime profile $RuntimeProfile requires request-based CPU throttling"
 }
 
-Write-Output "Control Plane verified: immutable image, dedicated service account, worker URL, cutover=false, profile=$RuntimeProfile"
+$trafficToReady = @($service.status.traffic) |
+  Where-Object { $_.revisionName -eq $service.status.latestReadyRevisionName -and [int]$_.percent -eq 100 }
+if ($trafficToReady.Count -eq 0) {
+  throw "Control Plane latest Ready revision does not receive 100% traffic"
+}
+
+Write-Output "Control Plane verified: immutable image, dedicated service account, worker URL, cutover=false, profile=$RuntimeProfile, traffic=100% latest Ready revision"

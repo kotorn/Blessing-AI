@@ -98,8 +98,12 @@ describe('cloud release gate static assertions', () => {
     expect(controlPlaneDeployment).toContain('"--cpu-throttling"');
     expect(controlPlaneDeployment).not.toContain('"--no-cpu-throttling"');
     expect(controlPlaneVerification).toContain('run.googleapis.com/cpu-throttling');
-    expect(controlPlaneVerification).toContain('autoscaling.knative.dev/minScale');
-    expect(controlPlaneVerification).toContain('autoscaling.knative.dev/maxScale');
+    expect(controlPlaneDeployment).toContain('run.googleapis.com/minScale');
+    expect(controlPlaneDeployment).toContain('run.googleapis.com/maxScale');
+    expect(controlPlaneVerification).toContain('run.googleapis.com/minScale');
+    expect(controlPlaneVerification).toContain('run.googleapis.com/maxScale');
+    expect(controlPlaneDeployment).toContain('latest Ready revision does not receive 100% traffic');
+    expect(controlPlaneVerification).toContain('latest Ready revision does not receive 100% traffic');
   });
 
   it('cloud_gate.ps1 uses the cloud-gate- evidence file naming pattern', () => {

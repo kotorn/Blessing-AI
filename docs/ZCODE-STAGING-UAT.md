@@ -16,17 +16,19 @@ is therefore evidence that the deployed revision is older than the current
 branch, not evidence that this branch has been deployed. No authenticated
 session, credential, order, or mutating endpoint was used.
 
-The live read-back also shows Control Plane revision
-`blessing-control-plane-00027-h5d` with `minScale=0`, `maxScale=20`, and CPU throttling off,
-while the repository runtime profile requires a separately approved bounded
-profile. The Worker read-back remains min/max 1/1 with continuous CPU.
+The live read-back also shows Control Plane service
+`blessing-control-plane-00027-h5d` with service-level min/max `1/1`, a
+revision-level max annotation of `20`, and CPU throttling off, while the
+repository runtime profile requires request-based CPU throttling. The Worker
+read-back remains min/max 1/1 with continuous CPU.
 
 The read-only `verify-live-disarmed.ps1` contract passed for Worker revision
 `blessing-trading-worker-00038-nk7`: immutable digest, IAM, `LIVE` execution
 mode with `MAINNET_LIVE_APPROVED=false`, `DISARMED`, durable `REQUIRED`
 persistence, and zero order-submission attempts. The read-only Control Plane
-profile verifier correctly failed with `min=0,max=20` versus the required
-`MAINNET_OPERATOR_UI` `min=1,max=1`; this is an open rollout gate.
+profile verifier correctly failed on CPU throttling; the verifier now reads
+service-level scale settings and also requires 100% traffic to the latest Ready
+revision. This remains an open rollout gate.
 
 ## Baseline observation
 

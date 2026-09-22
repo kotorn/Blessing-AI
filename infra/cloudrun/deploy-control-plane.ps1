@@ -107,10 +107,13 @@ if ($actualImage -ne $ImageUri) { throw "Control Plane image digest read-back do
 if ($actualServiceAccount -ne $ControlPlaneServiceAccount) { throw "Control Plane service account read-back does not match" }
 if ($ready.Count -eq 0) { throw "Control Plane latest revision is not Ready" }
 
-$annotations = $service.spec.template.metadata.annotations
-$actualMin = if ($null -eq $annotations.'autoscaling.knative.dev/minScale') { 0 } else { [int]$annotations.'autoscaling.knative.dev/minScale' }
-$actualMax = if ($null -eq $annotations.'autoscaling.knative.dev/maxScale') { 0 } else { [int]$annotations.'autoscaling.knative.dev/maxScale' }
-$cpuThrottling = [string]$annotations.'run.googleapis.com/cpu-throttling'
+# --min/--max are service-level limits. Revision-level autoscaling annotations
+# describe a different contract and must not be used to verify this profile.
+$serviceAnnotations = $service.metadata.annotations
+$revisionAnnotations = $service.spec.template.metadata.annotations
+$actualMin = if ($null -eq $serviceAnnotations.'run.googleapis.com/minScale') { 0 } else { [int]$serviceAnnotations.'run.googleapis.com/minScale' }
+$actualMax = if ($null -eq $serviceAnnotations.'run.googleapis.com/maxScale') { 0 } else { [int]$serviceAnnotations.'run.googleapis.com/maxScale' }
+$cpuThrottling = [string]$revisionAnnotations.'run.googleapis.com/cpu-throttling'
 if ($actualMin -ne [int]$profileSettings.min -or $actualMax -ne [int]$profileSettings.max) {
   throw "Control Plane runtime profile $RuntimeProfile expects min=$($profileSettings.min), max=$($profileSettings.max); got min=$actualMin, max=$actualMax"
 }
@@ -118,7 +121,14 @@ if ($cpuThrottling.ToLowerInvariant() -ne "true") {
   throw "Control Plane runtime profile $RuntimeProfile requires request-based CPU throttling"
 }
 
+$trafficToReady = @($service.status.traffic) |
+  Where-Object { $_.revisionName -eq $service.status.latestReadyRevisionName -and [int]$_.percent -eq 100 }
+if ($trafficToReady.Count -eq 0) {
+  throw "Control Plane latest Ready revision does not receive 100% traffic"
+}
+
 Write-Output "Control Plane deployed and verified: $ServiceName"
 Write-Output "Immutable image verified: $actualImage"
 Write-Output "Runtime profile verified: $RuntimeProfile (min=$actualMin, max=$actualMax, request-based CPU)"
+Write-Output "Traffic verified: 100% to latest Ready revision $($service.status.latestReadyRevisionName)"
 Write-Output "No Binance or SQL secrets were supplied to the Control Plane deployment"

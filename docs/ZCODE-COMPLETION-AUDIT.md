@@ -16,18 +16,21 @@
   `asia-southeast1`; root and `/api/health` both returned HTTP 200. The live
   health body still reports `Blessing AI v0.1`, while the repository patch now
   reports v0.2.
-- **Live profile drift:** Control Plane revision
-  `blessing-control-plane-00027-h5d` has `minScale=0`, `maxScale=20` and CPU
-  throttling off;
+- **Live profile drift:** Control Plane service
+  `blessing-control-plane-00027-h5d` has service-level min/max `1/1`, a
+  revision-level max annotation of `20`, and CPU throttling off;
   Worker revision `blessing-trading-worker-00038-nk7` remains min/max 1/1 with
   CPU throttling off. No remote rollout was performed.
 - **Disarmed verification:** read-only `verify-live-disarmed.ps1` passed for the
   Worker: IAM, immutable digest, `LIVE` plus `MAINNET_LIVE_APPROVED=false`,
   DISARMED, durable REQUIRED persistence, and zero order-submission attempts.
-  The Control Plane profile verifier correctly failed on the observed
-  `min=0,max=20` drift.
-- **Exact-SHA CI:** PR #39 workflow run `35750129769` passed all jobs for
-  commit `94f4369263b24548bd4e31d56b4c35259d5343bc`.
+  The Control Plane profile verifier correctly failed on the observed CPU
+  throttling mismatch; its scale read-back is now aligned with Cloud Run's
+  service-level `--min/--max` contract and it also requires 100% traffic to the
+  latest Ready revision.
+- **Exact-SHA CI:** PR #39 workflow run `35750653344` passed all jobs for
+  commit `f6367864ea7201fdee56a25456a16ba7aac720bf`; PR #39 was then merged
+  as `01cf813eb83c0d63b409a3ae5ae19226279959ec`.
 - **Current classification:** repository implementation is **PARTIAL / review
   ready**; remote deployment identity, authenticated staging UAT, fault
   injection, rollback execution, billing totals, and any Artifact Registry
@@ -106,9 +109,10 @@ The approved readiness gaps have now been implemented on this branch:
 - README, HTML title, and environment example v0.1 drift was corrected.
 
 The current Cloud Run Control Plane remains a separately deployed revision
-whose observed max scale and CPU policy do not yet match the new repository
-profile. This is an operator rollout/read-back gate, not an implementation
-failure, and no remote deployment was performed.
+whose CPU policy and image identity do not yet match the new repository
+release. The service-level scale is already 1/1; the revision-level max
+annotation is a different Cloud Run scope. This remains an operator
+rollout/read-back gate, and no remote deployment was performed.
 
 ## Final verification update — 2026-09-22
 
