@@ -60,6 +60,22 @@ from apps.trading_worker.venues.binance.models import (
 )
 from apps.trading_worker.persistence.manager import PersistenceManager
 from apps.trading_worker.venues.binance.public_ws import BinancePublicWebSocket
+from domain.wealth_metrics import (
+    DeploymentStage,
+    TradeRecord,
+    WealthPerformanceMetrics,
+    calculate_wealth_metrics,
+    evaluate_promotion_gate,
+)
+from domain.trade_lineage import TradeLineage, OutcomeGrade
+from domain.eight_d import EightDIncident, IncidentStatus, IncidentSeverity
+from apps.learning_engine import (
+    WealthEvaluator,
+    PDCAEvaluator,
+    WhyWhyAnalyzer,
+    EightDManager,
+    DynamicCapitalAllocator,
+)
 
 class StrategyEnablement(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -625,6 +641,47 @@ async def reconcile_endpoint():
     res = await WORKER_ENGINE.trigger_reconciliation()
     return {"status": res}
 
+@app.get("/wealth/metrics")
+def get_wealth_metrics_endpoint():
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    return WORKER_ENGINE.get_wealth_metrics()
+
+@app.get("/incidents/8d")
+def get_incidents_8d_endpoint(active_only: bool = False):
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    return WORKER_ENGINE.get_eight_d_incidents(active_only=active_only)
+
+class CloseIncidentRequest(BaseModel):
+    verification: str
+    prevention: str
+    lessons: str
+    signoff_agent: str = "ChiefRiskOfficerAgent"
+
+@app.post("/incidents/8d/{incident_id}/close")
+def close_incident_endpoint(incident_id: str, req: CloseIncidentRequest):
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    success = WORKER_ENGINE.close_eight_d_incident(
+        incident_id, req.verification, req.prevention, req.lessons, req.signoff_agent
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail="Incident not found or could not be closed")
+    return {"status": "CLOSED", "incident_id": incident_id}
+
+@app.get("/learning/lineages")
+def get_lineages_endpoint(limit: int = 50):
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    return WORKER_ENGINE.get_trade_lineages(limit=limit)
+
+@app.get("/learning/pdca")
+def get_pdca_endpoint():
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    return WORKER_ENGINE.get_pdca_status()
+
 class TradingWorkerApp:
     def __init__(self, symbols: Optional[List[str]] = None):
         configured_mode = str(os.getenv("EXECUTION_MODE", "PAPER")).strip().upper()
@@ -649,6 +706,10 @@ class TradingWorkerApp:
         self.risk_governor = RiskGovernor()
         self.scanner = MarketScannerEngine(top_n=8)
         self.scan_task = None
+        self.wealth_evaluator = WealthEvaluator(initial_capital=Decimal("1000.0"))
+        self.pdca_evaluator = PDCAEvaluator()
+        self.eight_d_manager = EightDManager()
+        self.capital_allocator = DynamicCapitalAllocator()
         
         self.ws_client = None
         self.execution_adapter: Optional[BinanceExecutionAdapter] = None
@@ -684,6 +745,107 @@ class TradingWorkerApp:
         self._mainnet_launch_id: Optional[str] = None
         self._mainnet_launch_session: Optional[dict[str, Any]] = None
         self._last_risk_snapshot_enqueued_at: float = 0.0
+
+    def get_wealth_metrics(self) -> Dict[str, Any]:
+        pm = self.wealth_evaluator.get_portfolio_metrics()
+        gate = self.wealth_evaluator.check_promotion_readiness()
+        return {
+            "portfolio": {
+                "total_trades": pm.total_trades,
+                "win_trades": pm.win_trades,
+                "loss_trades": pm.loss_trades,
+                "break_even_trades": pm.break_even_trades,
+                "win_rate_pct": float(pm.win_rate_pct),
+                "payoff_ratio": float(pm.payoff_ratio),
+                "profit_factor": float(pm.profit_factor),
+                "expectancy_usdt": float(pm.expectancy_usdt),
+                "gross_profit": float(pm.gross_profit),
+                "gross_loss": float(pm.gross_loss),
+                "net_pnl": float(pm.net_pnl),
+                "total_commission": float(pm.total_commission),
+                "total_funding": float(pm.total_funding),
+                "fee_drag_pct": float(pm.fee_drag_pct),
+                "max_drawdown_pct": float(pm.max_drawdown_pct),
+                "cagr_pct": float(pm.cagr_pct),
+                "sharpe_ratio": float(pm.sharpe_ratio),
+                "sortino_ratio": float(pm.sortino_ratio),
+                "calmar_ratio": float(pm.calmar_ratio),
+                "var_95_pct": float(pm.var_95_pct),
+                "cvar_95_pct": float(pm.cvar_95_pct),
+                "avg_slippage_bps": float(pm.avg_slippage_bps),
+                "unknown_risk_violations": pm.unknown_risk_violations,
+                "sustainable_growth_score": float(pm.sustainable_growth_score),
+                "is_capital_safe": pm.is_capital_safe,
+            },
+            "promotion_gate": {
+                "current_stage": gate.current_stage.value,
+                "target_stage": gate.target_stage.value,
+                "eligible": gate.eligible,
+                "passed_criteria": gate.passed_criteria,
+                "blocking_reasons": gate.blocking_reasons,
+            },
+            "strategies": {
+                name: {
+                    "total_trades": m.total_trades,
+                    "win_rate_pct": float(m.win_rate_pct),
+                    "net_pnl": float(m.net_pnl),
+                    "sharpe_ratio": float(m.sharpe_ratio),
+                    "max_drawdown_pct": float(m.max_drawdown_pct),
+                }
+                for name, m in self.wealth_evaluator.get_strategy_metrics().items()
+            },
+        }
+
+    def get_eight_d_incidents(self, active_only: bool = False) -> List[Dict[str, Any]]:
+        return [i.to_dict() for i in self.eight_d_manager.list_incidents(active_only=active_only)]
+
+    def close_eight_d_incident(
+        self,
+        incident_id: str,
+        verification: str,
+        prevention: str,
+        lessons: str,
+        signoff_agent: str = "ChiefRiskOfficerAgent",
+    ) -> bool:
+        return self.eight_d_manager.advance_and_close(
+            incident_id=incident_id,
+            verification_evidence=verification,
+            systemic_prevention=prevention,
+            closure_lessons=lessons,
+            signoff_agent=signoff_agent,
+        )
+
+    def get_trade_lineages(self, limit: int = 50) -> List[Dict[str, Any]]:
+        lineages = list(self.wealth_evaluator.lineages.values())
+        return [l.to_dict() for l in lineages[-limit:]]
+
+    def get_pdca_status(self) -> Dict[str, Any]:
+        strategies = ["trend_breakout", "range_fade", "shock_momentum", "structural_grid"]
+        results = {}
+        lineages = list(self.wealth_evaluator.lineages.values())
+        for strat in strategies:
+            check = self.pdca_evaluator.evaluate_strategy(strat, lineages)
+            results[strat] = {
+                "sample_size": check.sample_size,
+                "plan_win_rate_pct": float(check.plan_win_rate_pct),
+                "actual_win_rate_pct": float(check.actual_win_rate_pct),
+                "win_rate_gap_pct": float(check.win_rate_gap_pct),
+                "plan_edge_bps": float(check.plan_edge_bps),
+                "actual_edge_bps": float(check.actual_edge_bps),
+                "edge_decay_bps": float(check.edge_decay_bps),
+                "plan_slippage_bps": float(check.plan_slippage_bps),
+                "actual_slippage_bps": float(check.actual_slippage_bps),
+                "drift_detected": check.drift_detected,
+                "drift_severity": check.drift_severity,
+                "recommended_actions": check.recommended_actions,
+                "triggers_8d": check.triggers_8d,
+            }
+        return results
+
+    def record_closed_trade_lineage(self, lineage: TradeLineage) -> None:
+        self.wealth_evaluator.record_lineage(lineage)
+        if lineage.requires_8d:
+            self.eight_d_manager.create_incident_from_lineage(lineage)
 
     def _set_mainnet_launch_session(self, session: Optional[dict[str, Any]]) -> None:
         """Project durable launch identity into the process-local API state."""

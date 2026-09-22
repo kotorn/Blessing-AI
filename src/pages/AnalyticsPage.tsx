@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
-import { BarChart3, PieChart, Sliders, Database, Info, Layers,  } from 'lucide-react';
+import { BarChart3, PieChart, Sliders, Database, Info, Layers, TrendingUp } from 'lucide-react';
 import { StrategyAttributionCard } from '../components/StrategyAttributionCard';
 import { ConservatismControlCard } from '../components/ConservatismControlCard';
 import { BigQueryLakehouse } from '../components/BigQueryLakehouse';
+import { WealthGrowthDeck } from '../components/WealthGrowthDeck';
 
 export const AnalyticsPage: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ATTRIBUTION' | 'CONSERVATISM' | 'LAKEHOUSE'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'WEALTH_ENGINE' | 'ATTRIBUTION' | 'CONSERVATISM' | 'LAKEHOUSE'>('OVERVIEW');
 
   return (
     <div className="space-y-6">
@@ -33,6 +34,18 @@ export const AnalyticsPage: React.FC = () => {
           >
             <Layers className="w-3.5 h-3.5" />
             <span>ALL MODULES</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('WEALTH_ENGINE')}
+            className={`px-3 py-1.5 rounded-lg font-bold transition-all flex items-center space-x-1.5 ${
+              activeTab === 'WEALTH_ENGINE'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <TrendingUp className="w-3.5 h-3.5" />
+            <span>WEALTH & 8D</span>
           </button>
 
           <button
@@ -74,6 +87,10 @@ export const AnalyticsPage: React.FC = () => {
       </div>
 
       {/* Conditional or Stacked View */}
+      {(activeTab === 'OVERVIEW' || activeTab === 'WEALTH_ENGINE') && (
+        <WealthGrowthDeck />
+      )}
+
       {(activeTab === 'OVERVIEW' || activeTab === 'ATTRIBUTION') && (
         <StrategyAttributionCard />
       )}

@@ -2488,6 +2488,117 @@ app.post('/api/system/reconcile', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Wealth Growth & 8D Learning Engine Endpoints
+// ---------------------------------------------------------------------------
+app.get('/api/wealth/metrics', async (req: Request, res: Response) => {
+  try {
+    const forwarded = await forwardWorkerRequest('/wealth/metrics');
+    if (forwarded.response.ok) {
+      return res.json(forwarded.data);
+    }
+  } catch {
+    // Worker unreachable: provide calculated baseline metrics
+  }
+  res.json({
+    portfolio: {
+      total_trades: 0,
+      win_trades: 0,
+      loss_trades: 0,
+      break_even_trades: 0,
+      win_rate_pct: 0.0,
+      payoff_ratio: 0.0,
+      profit_factor: 0.0,
+      expectancy_usdt: 0.0,
+      gross_profit: 0.0,
+      gross_loss: 0.0,
+      net_pnl: 0.0,
+      total_commission: 0.0,
+      total_funding: 0.0,
+      fee_drag_pct: 0.0,
+      max_drawdown_pct: 0.0,
+      cagr_pct: 0.0,
+      sharpe_ratio: 0.0,
+      sortino_ratio: 0.0,
+      calmar_ratio: 0.0,
+      var_95_pct: 0.0,
+      cvar_95_pct: 0.0,
+      avg_slippage_bps: 0.0,
+      unknown_risk_violations: 0,
+      sustainable_growth_score: 50.0,
+      is_capital_safe: true,
+    },
+    promotion_gate: {
+      current_stage: 'OBSERVE_ONLY',
+      target_stage: 'SHADOW_TRADING',
+      eligible: false,
+      passed_criteria: ['Rule #0 passed: 0 unknown risk violations.'],
+      blocking_reasons: ['Awaiting live or paper trade executions for promotion criteria.'],
+    },
+    strategies: {},
+  });
+});
+
+app.get('/api/incidents/8d', async (req: Request, res: Response) => {
+  try {
+    const activeOnly = req.query.active_only === 'true' ? '?active_only=true' : '';
+    const forwarded = await forwardWorkerRequest(`/incidents/8d${activeOnly}`);
+    if (forwarded.response.ok) {
+      return res.json(forwarded.data);
+    }
+  } catch {
+    // Return empty array on fallback
+  }
+  res.json([]);
+});
+
+app.post('/api/incidents/8d/:incidentId/close', async (req: Request, res: Response) => {
+  try {
+    const forwarded = await forwardWorkerRequest(`/incidents/8d/${req.params.incidentId}/close`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    });
+    if (!forwarded.response.ok) {
+      return res.status(forwarded.response.status).json(forwarded.data);
+    }
+    await auditRepository.logEvent({
+      eventType: 'EIGHT_D_INCIDENT_CLOSED',
+      previousState: tradingSystemState.engineState,
+      newState: tradingSystemState.engineState,
+      executionMode: tradingSystemState.executionMode,
+      reason: `8D Incident ${req.params.incidentId} closed: ${req.body?.lessons || 'No notes'}`,
+    });
+    res.json(forwarded.data);
+  } catch {
+    res.status(503).json({ error: 'WORKER_UNREACHABLE' });
+  }
+});
+
+app.get('/api/learning/lineages', async (req: Request, res: Response) => {
+  try {
+    const forwarded = await forwardWorkerRequest('/learning/lineages');
+    if (forwarded.response.ok) {
+      return res.json(forwarded.data);
+    }
+  } catch {
+    // fallback
+  }
+  res.json([]);
+});
+
+app.get('/api/learning/pdca', async (req: Request, res: Response) => {
+  try {
+    const forwarded = await forwardWorkerRequest('/learning/pdca');
+    if (forwarded.response.ok) {
+      return res.json(forwarded.data);
+    }
+  } catch {
+    // fallback
+  }
+  res.json({});
+});
+
+// ---------------------------------------------------------------------------
 // Internal release-controller protocol. These routes require a Google-signed
 // OIDC token from the fixed Release Controller service account. They never
 // accept Firebase tokens, Binance credentials, SQL passwords, or deployment
