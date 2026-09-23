@@ -1,5 +1,7 @@
 # Blessing AI — measured live infrastructure baseline
 
+> **Superseding metadata read-back — 2026-09-23:** Control Plane `blessing-control-plane-00031-sl6` runs immutable digest `sha256:f9942921b138a807d8fdd59544a5abb1294b839276b869c0748a485386c2c79d`, min/max 1/1 and request-based CPU. Worker `blessing-trading-worker-00039-xkd` runs immutable digest `sha256:eb081c73da3c3a88541118ee13b72bf276a7739ddd009ff04a6c924ba60ec3fb`, min/max 1/1 and continuous CPU. Both had 100% traffic; protected private Worker invocation was read back. Artifact Registry inventory was 37 entries after the release builds; no cleanup was applied. Actual invoice and credit totals remain unavailable; cost projections below are **not measured spend**. Older entries are historical snapshots.
+
 ## Post-rollout update — 2026-09-22
 
 The approved disarmed Control Plane rollout was completed and read back from

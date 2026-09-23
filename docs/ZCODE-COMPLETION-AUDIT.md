@@ -1,5 +1,7 @@
 # ZCODE-COMPLETION-AUDIT — Blessing-AI v0.2 (Lane A: Audit/Architecture)
 
+> **Superseding re-audit — 2026-09-23:** PR #47 application source `4f43ff4f522cc3df9874afa065f24eb60fd9bd60` passed exact-SHA main CI `35831366218`. Disarmed Worker `00039-xkd` and Control Plane `00031-sl6` were deployed with immutable digest/configuration read-back; authenticated read-only runtime verification found `MAINNET_LIVE_APPROVED=false`, REQUIRED persistence and zero order attempts. Public health/browser and negative anonymous GET auth smoke passed. Overall plan remains **PARTIAL**: authoritative closed-trade lineage, authenticated role staging UAT, fault/restart and rollback exercise, research edge, billing totals, and Artifact Registry cleanup remain OPEN/NOT_RUN. Production must not be called staging. All older re-audit and historical rows below are preserved as dated observations, not current acceptance.
+
 > The original audit table below is retained as historical implementation
 > context. The post-release re-audit supersedes its earlier pre-rollout
 > statements; repository state, live read-back, and test results below are
