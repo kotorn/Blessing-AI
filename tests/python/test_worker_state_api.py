@@ -130,7 +130,7 @@ async def test_mainnet_read_only_preflight_never_arms_worker_or_submits_orders(m
         daily_realized_pnl=Decimal(0),
         daily_loss_window_start=window_start,
         daily_loss_window_end=window_start + timedelta(days=1),
-        configured_leverage=Decimal(5),
+        configured_leverage=Decimal(2),
         configured_leverage_known=True,
         margin_mode="SINGLE_ASSET_CROSS",
         margin_mode_known=True,

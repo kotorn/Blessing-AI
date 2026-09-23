@@ -151,7 +151,7 @@ def make_mainnet_snapshot(**overrides) -> ExchangeAccountSnapshot:
         daily_pnl_includes_funding=True,
         daily_loss_window_start=window_start,
         daily_loss_window_end=window_start + timedelta(days=1),
-        configured_leverage=Decimal(10),
+        configured_leverage=Decimal(2),
         configured_leverage_known=True,
         margin_mode="SINGLE_ASSET_CROSS",
         margin_mode_known=True,
@@ -517,7 +517,7 @@ async def test_mainnet_daily_loss_boundary_just_under_cap_passes_just_over_block
     adapter = await make_gate_adapter(
         env=BinanceEnvironment.MAINNET,
         snapshot=make_mainnet_snapshot(
-            daily_realized_pnl=Decimal(-4), unrealized_pnl=Decimal("-0.99")
+            daily_realized_pnl=Decimal(-24), unrealized_pnl=Decimal("-0.99")
         ),
     )
     intent = make_limit_intent(symbol="ETHUSDC", quantity="0.05", price="100")
@@ -528,7 +528,7 @@ async def test_mainnet_daily_loss_boundary_just_under_cap_passes_just_over_block
         assert "daily_loss_cap_breached" not in caplog.text
 
         adapter.ledger.account_snapshot = make_mainnet_snapshot(
-            daily_realized_pnl=Decimal(-4), unrealized_pnl=Decimal("-1.01")
+            daily_realized_pnl=Decimal(-24), unrealized_pnl=Decimal("-1.01")
         )
         over_result = await adapter.order_gate.check(intent, EconomicRiskClass.NEW_RISK)
         assert over_result.allowed is False
