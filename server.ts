@@ -24,6 +24,7 @@ import {
   syncTelemetry,
 } from './src/backend/bigquery.js';
 import {
+  isEightDIncidentId,
   requiredControlPlaneRole,
   authorizeInternalServiceRequest,
   type ControlPlaneRole,
@@ -173,7 +174,16 @@ app.use(express.json());
 // Binance profile/balance endpoints cannot bypass server-side Firebase RBAC.
 // The implementation is declared below as a function declaration and is
 // therefore available when Express starts handling requests.
-app.use(['/api/system', '/api/quant', '/api/binance', '/api/release', '/api/google'], (req, res, next) => {
+app.use([
+  '/api/system',
+  '/api/quant',
+  '/api/binance',
+  '/api/release',
+  '/api/google',
+  '/api/wealth',
+  '/api/incidents',
+  '/api/learning',
+], (req, res, next) => {
   void enforceOperatorAccess(req, res, next).catch(() => {
     if (res.headersSent) return;
     res.status(503).json({
@@ -2493,70 +2503,52 @@ app.post('/api/system/reconcile', async (req, res) => {
 app.get('/api/wealth/metrics', async (req: Request, res: Response) => {
   try {
     const forwarded = await forwardWorkerRequest('/wealth/metrics');
-    if (forwarded.response.ok) {
-      return res.json(forwarded.data);
+    if (!forwarded.response.ok) {
+      return res.status(503).json({ error: 'WEALTH_METRICS_UNAVAILABLE', evidence_status: 'UNAVAILABLE' });
     }
+    return res.json(forwarded.data);
   } catch {
-    // Worker unreachable: provide calculated baseline metrics
+    return res.status(503).json({ error: 'WEALTH_METRICS_UNAVAILABLE', evidence_status: 'UNAVAILABLE' });
   }
-  res.json({
-    portfolio: {
-      total_trades: 0,
-      win_trades: 0,
-      loss_trades: 0,
-      break_even_trades: 0,
-      win_rate_pct: 0.0,
-      payoff_ratio: 0.0,
-      profit_factor: 0.0,
-      expectancy_usdt: 0.0,
-      gross_profit: 0.0,
-      gross_loss: 0.0,
-      net_pnl: 0.0,
-      total_commission: 0.0,
-      total_funding: 0.0,
-      fee_drag_pct: 0.0,
-      max_drawdown_pct: 0.0,
-      cagr_pct: 0.0,
-      sharpe_ratio: 0.0,
-      sortino_ratio: 0.0,
-      calmar_ratio: 0.0,
-      var_95_pct: 0.0,
-      cvar_95_pct: 0.0,
-      avg_slippage_bps: 0.0,
-      unknown_risk_violations: 0,
-      sustainable_growth_score: 50.0,
-      is_capital_safe: true,
-    },
-    promotion_gate: {
-      current_stage: 'OBSERVE_ONLY',
-      target_stage: 'SHADOW_TRADING',
-      eligible: false,
-      passed_criteria: ['Rule #0 passed: 0 unknown risk violations.'],
-      blocking_reasons: ['Awaiting live or paper trade executions for promotion criteria.'],
-    },
-    strategies: {},
-  });
 });
 
 app.get('/api/incidents/8d', async (req: Request, res: Response) => {
   try {
     const activeOnly = req.query.active_only === 'true' ? '?active_only=true' : '';
     const forwarded = await forwardWorkerRequest(`/incidents/8d${activeOnly}`);
-    if (forwarded.response.ok) {
-      return res.json(forwarded.data);
+    if (!forwarded.response.ok) {
+      return res.status(503).json({ error: 'INCIDENTS_UNAVAILABLE', evidence_status: 'UNAVAILABLE' });
     }
+    return res.json(forwarded.data);
   } catch {
-    // Return empty array on fallback
+    return res.status(503).json({ error: 'INCIDENTS_UNAVAILABLE', evidence_status: 'UNAVAILABLE' });
   }
-  res.json([]);
 });
 
 app.post('/api/incidents/8d/:incidentId/close', async (req: Request, res: Response) => {
+  const incidentId = req.params.incidentId;
+  if (!isEightDIncidentId(incidentId)) {
+    return res.status(400).json({ error: 'INVALID_INCIDENT_ID' });
+  }
+  const signoffUserId = res.locals.firebaseUid;
+  if (typeof signoffUserId !== 'string' || !signoffUserId.trim()) {
+    return res.status(401).json({ error: 'CONTROL_PLANE_AUTH_REQUIRED' });
+  }
+  const evidence = req.body as { verification?: unknown; prevention?: unknown; lessons?: unknown } | undefined;
+  const fields = [evidence?.verification, evidence?.prevention, evidence?.lessons];
+  if (fields.some((value) => typeof value !== 'string' || !value.trim() || value.length > 4000)) {
+    return res.status(400).json({ error: 'CLOSURE_EVIDENCE_REQUIRED' });
+  }
   try {
-    const forwarded = await forwardWorkerRequest(`/incidents/8d/${req.params.incidentId}/close`, {
+    const forwarded = await forwardWorkerRequest(`/incidents/8d/${encodeURIComponent(incidentId)}/close`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body),
+      body: JSON.stringify({
+        verification: evidence?.verification,
+        prevention: evidence?.prevention,
+        lessons: evidence?.lessons,
+        signoff_user_id: signoffUserId,
+      }),
     });
     if (!forwarded.response.ok) {
       return res.status(forwarded.response.status).json(forwarded.data);
@@ -2577,25 +2569,25 @@ app.post('/api/incidents/8d/:incidentId/close', async (req: Request, res: Respon
 app.get('/api/learning/lineages', async (req: Request, res: Response) => {
   try {
     const forwarded = await forwardWorkerRequest('/learning/lineages');
-    if (forwarded.response.ok) {
-      return res.json(forwarded.data);
+    if (!forwarded.response.ok) {
+      return res.status(503).json({ error: 'LINEAGES_UNAVAILABLE', evidence_status: 'UNAVAILABLE' });
     }
+    return res.json(forwarded.data);
   } catch {
-    // fallback
+    return res.status(503).json({ error: 'LINEAGES_UNAVAILABLE', evidence_status: 'UNAVAILABLE' });
   }
-  res.json([]);
 });
 
 app.get('/api/learning/pdca', async (req: Request, res: Response) => {
   try {
     const forwarded = await forwardWorkerRequest('/learning/pdca');
-    if (forwarded.response.ok) {
-      return res.json(forwarded.data);
+    if (!forwarded.response.ok) {
+      return res.status(503).json({ error: 'PDCA_UNAVAILABLE', evidence_status: 'UNAVAILABLE' });
     }
+    return res.json(forwarded.data);
   } catch {
-    // fallback
+    return res.status(503).json({ error: 'PDCA_UNAVAILABLE', evidence_status: 'UNAVAILABLE' });
   }
-  res.json({});
 });
 
 // ---------------------------------------------------------------------------

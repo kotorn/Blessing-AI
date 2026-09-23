@@ -36,6 +36,7 @@ RUN pip install --no-cache-dir --requirement requirements-worker.txt
 COPY domain/ ./domain/
 COPY venues/ ./venues/
 COPY apps/trading_worker/ ./apps/trading_worker/
+COPY apps/learning_engine/ ./apps/learning_engine/
 
 # The worker starts its background loop and FastAPI health/control server in
 # one process. Cloud Run supplies PORT; defaults remain PAPER/DISARMED.

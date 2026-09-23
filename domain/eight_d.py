@@ -187,10 +187,10 @@ class EightDIncident:
         self.status = IncidentStatus.D7_PREVENTION_APPLIED
         self.updated_at = utc_now()
 
-    def close_incident(self, summary: str, signoff_agent: str = "ChiefRiskOfficerAgent") -> None:
+    def close_incident(self, summary: str, signoff_user_id: str) -> None:
         self.d8_closure = {
             "lessons_learned_summary": summary,
-            "signoff_agent": signoff_agent,
+            "signoff_user_id": signoff_user_id,
             "closed_at": utc_now().isoformat(),
         }
         self.status = IncidentStatus.D8_CLOSED

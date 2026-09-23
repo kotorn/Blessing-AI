@@ -141,18 +141,25 @@ class EightDManager:
         verification_evidence: str,
         systemic_prevention: str,
         closure_lessons: str,
-        signoff_agent: str = "ChiefRiskOfficerAgent",
+        signoff_user_id: str,
     ) -> bool:
         """
         Advances an incident through D6, D7, and closes it at D8.
         """
         incident = self.get_incident(incident_id)
-        if not incident:
+        if (
+            not incident
+            or incident.status != IncidentStatus.D5_PCA_CHOSEN
+            or incident.d4_root_cause is None
+            or not incident.d5_pca
+        ):
+            return False
+        if not all(value.strip() for value in (verification_evidence, systemic_prevention, closure_lessons, signoff_user_id)):
             return False
 
         incident.set_d6_verification(verification_evidence, verification_passed=True)
         incident.add_d7_prevention(systemic_prevention, scope="GLOBAL")
-        incident.close_incident(closure_lessons, signoff_agent=signoff_agent)
+        incident.close_incident(closure_lessons, signoff_user_id=signoff_user_id)
 
         # Clear active containment for this symbol if all incidents for it are closed
         if incident.symbol in self.active_containments:
