@@ -1,5 +1,7 @@
 # Blessing AI v0.2 — named staging UAT
 
+> **Superseding correction — 2026-09-23:** This document's named Cloud Run target is **production, not staging**. The new disarmed release uses Control Plane `blessing-control-plane-00031-sl6` and Worker `blessing-trading-worker-00039-xkd` from source SHA `4f43ff4f522cc3df9874afa065f24eb60fd9bd60`. Production root/health returned 200; anonymous system-state, wealth and PDCA GETs returned 401; the unsigned browser displayed `WEALTH_TELEMETRY_UNAVAILABLE` and no inferred safety/promotion status. Authenticated viewer/operator/trading-admin, responsive role UAT, remote fault injection, and rollback remain **NOT_RUN**. The historical observations below must not be read as a current staging-UAT pass. No ARM, order, or mutating auth POST probe was performed.
+
 ## Post-rollout verification — 2026-09-22
 
 The approved disarmed Control Plane rollout is now deployed and read back:

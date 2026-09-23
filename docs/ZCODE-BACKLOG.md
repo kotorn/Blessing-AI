@@ -1,5 +1,7 @@
 # Blessing AI v0.2 — ZCODE Backlog (Phase 1: Authoritative Backlog)
 
+> **Current status — 2026-09-23:** PR #46 and PR #47 are merged; disarmed release source `4f43ff4f522cc3df9874afa065f24eb60fd9bd60` passed main CI `35831366218` and was deployed as Worker `00039-xkd` / Control Plane `00031-sl6`. The table and item evidence below are a dated pre-release snapshot. P1 authoritative closed-trade lineage/durable replay is **OPEN**; wealth/PDCA process-local evidence is unverified and promotion locked. Authenticated role staging UAT, fault injection, rollback, broad OOS edge, actual billing totals and retention cleanup remain OPEN/NOT_RUN. No ARM or order occurred. The currently inspected Cloud Run URL is production, not staging. No image deletion was applied.
+
 - วันที่: 2026-09-23 | แหล่ง: `docs/ZCODE-COMPLETION-AUDIT.md` (audit 2026-09-23) + baseline gates ที่ orchestrator script รันให้ (branch `zcode/finish-blessing-v0.2`) + ผลตรวจ GCP read-only ของ script + คำสั่งที่ agent นี้รันเองรอบนี้
 - รูปแบบตาม `PLAN.md:647-680` (§11): ทุก item มี ID, priority, subsystem, problem, evidence, files, acceptance criteria, tests, dependencies, risk, status — ห้าม gap หายเพราะ GitHub ไม่มี issue (`PLAN.md:680`)
 - Priority: **P0** = safety/security/data-loss/release blocker, **P1** = จำเป็นต่อ v0.2, **P2** = quality/cost/observability/UX, **P3** = อนาคต (`PLAN.md:671-678`)
