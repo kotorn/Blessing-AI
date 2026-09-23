@@ -92,12 +92,36 @@ def test_eight_d_manager_incident_lifecycle():
         verification_evidence="Shadow tests verified 100% orders use POST_ONLY in thin depth.",
         systemic_prevention="Rolled out depth filter to all 13 supported USDⓈ-M instruments.",
         closure_lessons="Taker orders strictly prevented without level 2 depth confirmation.",
+        signoff_user_id="operator-test-uid",
     )
     assert success is True
     assert incident.status == IncidentStatus.D8_CLOSED
     assert incident.closed_at is not None
+    assert incident.d8_closure["signoff_user_id"] == "operator-test-uid"
     # Symbol active containment should be lifted
     assert lineage.symbol not in mgr.active_containments
+
+
+def test_eight_d_manager_rejects_closure_before_root_cause_and_pca():
+    mgr = EightDManager()
+    incident = mgr.create_incident_from_lineage(
+        _create_sample_lineage(OutcomeGrade.EXCESS_SLIPPAGE, slippage=Decimal("40.0"), pnl=Decimal("-30.0"))
+    )
+    incident.status = IncidentStatus.D3_CONTAINED
+    incident.d4_root_cause = None
+    incident.d5_pca = []
+
+    success = mgr.advance_and_close(
+        incident_id=incident.incident_id,
+        verification_evidence="Verification evidence",
+        systemic_prevention="Prevention evidence",
+        closure_lessons="Closure lessons",
+        signoff_user_id="operator-test-uid",
+    )
+
+    assert success is False
+    assert incident.status == IncidentStatus.D3_CONTAINED
+    assert incident.closed_at is None
 
 
 def test_pdca_evaluator_drift_detection():

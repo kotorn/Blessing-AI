@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiClient } from '../api/client';
 import {
   TrendingUp,
   ShieldAlert,
@@ -104,7 +105,7 @@ interface EightDIncident {
   }>;
   d8_closure?: {
     lessons_learned_summary?: string;
-    signoff_agent?: string;
+    signoff_user_id?: string;
     closed_at?: string;
   };
   created_at: string;
@@ -167,58 +168,105 @@ export const WealthGrowthDeck: React.FC = () => {
   const [selectedIncident, setSelectedIncident] = useState<EightDIncident | null>(null);
   const [activeDeckTab, setActiveDeckTab] = useState<'METRICS' | 'INCIDENTS_8D' | 'PDCA' | 'LINEAGE'>('METRICS');
   const [loading, setLoading] = useState(false);
+  const [telemetryState, setTelemetryState] = useState<'loading' | 'available' | 'unavailable'>('loading');
   const [closingIncident, setClosingIncident] = useState(false);
+  const [verificationEvidence, setVerificationEvidence] = useState('');
+  const [preventionEvidence, setPreventionEvidence] = useState('');
+  const [closureLessons, setClosureLessons] = useState('');
+  const [closureConfirmed, setClosureConfirmed] = useState(false);
+  const [closureError, setClosureError] = useState<string | null>(null);
 
   const fetchData = async () => {
     try {
       setLoading(true);
       const [mRes, iRes, pRes, lRes] = await Promise.all([
-        fetch('/api/wealth/metrics'),
-        fetch('/api/incidents/8d'),
-        fetch('/api/learning/pdca'),
-        fetch('/api/learning/lineages'),
+        apiClient.get<WealthMetrics>('/api/wealth/metrics'),
+        apiClient.get<EightDIncident[]>('/api/incidents/8d'),
+        apiClient.get<Record<string, PDCACheck>>('/api/learning/pdca'),
+        apiClient.get<TradeLineageItem[]>('/api/learning/lineages'),
       ]);
 
-      if (mRes.ok) setMetrics(await mRes.json());
-      if (iRes.ok) setIncidents(await iRes.json());
-      if (pRes.ok) setPdca(await pRes.json());
-      if (lRes.ok) setLineages(await lRes.json());
+      setMetrics(mRes);
+      setIncidents(iRes);
+      setPdca(pRes);
+      setLineages(lRes);
+      setTelemetryState('available');
     } catch (e) {
       console.error('Failed to load wealth engine telemetry:', e);
+      setMetrics(null);
+      setIncidents([]);
+      setPdca({});
+      setLineages([]);
+      setTelemetryState('unavailable');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
     const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
   }, []);
 
   const handleCloseIncident = async (incidentId: string) => {
+    if (!verificationEvidence.trim() || !preventionEvidence.trim() || !closureLessons.trim() || !closureConfirmed) {
+      setClosureError('Enter actual D6 verification, D7 prevention, D8 lessons, and confirm the evidence before signing off.');
+      return;
+    }
     try {
       setClosingIncident(true);
-      const res = await fetch(`/api/incidents/8d/${incidentId}/close`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          verification: 'Shadow test verified mitigation. No recurrence detected under test regime.',
-          prevention: 'Enforced stricter parameter bounds and level-2 depth filter across all pairs.',
-          lessons: 'Closed-loop 8D verified. Edge restored within expected risk envelope.',
-          signoff_agent: 'ChiefRiskOfficerAgent',
-        }),
+      setClosureError(null);
+      await apiClient.post(`/api/incidents/8d/${encodeURIComponent(incidentId)}/close`, {
+        verification: verificationEvidence.trim(),
+        prevention: preventionEvidence.trim(),
+        lessons: closureLessons.trim(),
       });
-      if (res.ok) {
-        await fetchData();
-        setSelectedIncident(null);
-      }
+      setVerificationEvidence('');
+      setPreventionEvidence('');
+      setClosureLessons('');
+      setClosureConfirmed(false);
+      await fetchData();
+      setSelectedIncident(null);
     } catch (e) {
-      console.error('Failed to close incident:', e);
+      setClosureError(e instanceof Error ? e.message : 'Incident closure failed.');
     } finally {
       setClosingIncident(false);
     }
   };
+
+  const selectIncident = (incident: EightDIncident) => {
+    setSelectedIncident(incident);
+    setVerificationEvidence('');
+    setPreventionEvidence('');
+    setClosureLessons('');
+    setClosureConfirmed(false);
+    setClosureError(null);
+  };
+
+  if (telemetryState !== 'available') {
+    return (
+      <div
+        role={telemetryState === 'unavailable' ? 'alert' : 'status'}
+        className="rounded-2xl border border-amber-800 bg-zinc-950 p-8 text-center space-y-3"
+      >
+        <ShieldAlert className="mx-auto h-8 w-8 text-amber-400" />
+        <h2 className="text-sm font-bold text-amber-200">
+          {telemetryState === 'loading' ? 'Loading Wealth Evidence' : 'WEALTH_TELEMETRY_UNAVAILABLE'}
+        </h2>
+        <p className="text-xs text-zinc-400">
+          Worker metrics and incident evidence could not be verified. Safety, promotion, and incident status are not inferred.
+        </p>
+        <button
+          onClick={() => void fetchData()}
+          disabled={loading}
+          className="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-200 disabled:opacity-50"
+        >
+          {loading ? 'Checking…' : 'Retry'}
+        </button>
+      </div>
+    );
+  }
 
   const p = metrics?.portfolio;
   const gate = metrics?.promotion_gate;
@@ -519,7 +567,7 @@ export const WealthGrowthDeck: React.FC = () => {
               {incidents.map((inc) => (
                 <div
                   key={inc.incident_id}
-                  onClick={() => setSelectedIncident(inc)}
+                  onClick={() => selectIncident(inc)}
                   className={`p-4 rounded-xl border cursor-pointer transition-all ${
                     selectedIncident?.incident_id === inc.incident_id
                       ? 'bg-zinc-900 border-indigo-500 shadow-lg shadow-indigo-950'
@@ -562,17 +610,77 @@ export const WealthGrowthDeck: React.FC = () => {
                   <span className="px-2 py-1 rounded bg-indigo-950 text-indigo-300 border border-indigo-800 text-xs font-mono">
                     {selectedIncident.status}
                   </span>
-                  {selectedIncident.status !== 'D8_CLOSED' && (
-                    <button
-                      onClick={() => handleCloseIncident(selectedIncident.incident_id)}
-                      disabled={closingIncident}
-                      className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold font-mono transition-all"
-                    >
-                      {closingIncident ? 'Closing...' : 'Close Incident (D8)'}
-                    </button>
-                  )}
                 </div>
               </div>
+
+              {selectedIncident.status === 'D5_PCA_CHOSEN' && (
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void handleCloseIncident(selectedIncident.incident_id);
+                  }}
+                  className="space-y-3 rounded-xl border border-zinc-700 bg-zinc-950 p-4"
+                >
+                  <div className="text-xs text-zinc-400">
+                    Record actual verification and prevention evidence. The authenticated operator identity is attached by the server.
+                  </div>
+                  <label className="block space-y-1 text-xs text-zinc-300">
+                    <span>D6 verification evidence</span>
+                    <textarea
+                      required
+                      maxLength={4000}
+                      value={verificationEvidence}
+                      onChange={(event) => setVerificationEvidence(event.target.value)}
+                      className="min-h-20 w-full rounded-lg border border-zinc-700 bg-zinc-900 p-2"
+                      placeholder="Test run, result, or evidence reference"
+                    />
+                  </label>
+                  <label className="block space-y-1 text-xs text-zinc-300">
+                    <span>D7 systemic prevention applied</span>
+                    <textarea
+                      required
+                      maxLength={4000}
+                      value={preventionEvidence}
+                      onChange={(event) => setPreventionEvidence(event.target.value)}
+                      className="min-h-20 w-full rounded-lg border border-zinc-700 bg-zinc-900 p-2"
+                      placeholder="Describe the change actually applied and its scope"
+                    />
+                  </label>
+                  <label className="block space-y-1 text-xs text-zinc-300">
+                    <span>D8 closure lessons</span>
+                    <textarea
+                      required
+                      maxLength={4000}
+                      value={closureLessons}
+                      onChange={(event) => setClosureLessons(event.target.value)}
+                      className="min-h-20 w-full rounded-lg border border-zinc-700 bg-zinc-900 p-2"
+                      placeholder="Record the verified outcome and lessons"
+                    />
+                  </label>
+                  <label className="flex items-start gap-2 text-xs text-zinc-300">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={closureConfirmed}
+                      onChange={(event) => setClosureConfirmed(event.target.checked)}
+                    />
+                    <span>I confirm these notes describe completed work and actual evidence for this incident.</span>
+                  </label>
+                  {closureError && <p role="alert" className="text-xs text-rose-300">{closureError}</p>}
+                  <button
+                    type="submit"
+                    disabled={closingIncident}
+                    className="rounded bg-emerald-600 px-3 py-2 text-xs font-bold text-white transition-all hover:bg-emerald-500 disabled:opacity-50"
+                  >
+                    {closingIncident ? 'Recording closure…' : 'Record D8 closure'}
+                  </button>
+                </form>
+              )}
+              {selectedIncident.status !== 'D5_PCA_CHOSEN' && selectedIncident.status !== 'D8_CLOSED' && (
+                <p className="rounded-lg border border-amber-900 bg-amber-950/30 p-3 text-xs text-amber-200">
+                  D8 closure is unavailable until D4 root cause and D5 corrective action are recorded.
+                </p>
+              )}
 
               {/* 8D Disciplines Grid */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs font-mono">

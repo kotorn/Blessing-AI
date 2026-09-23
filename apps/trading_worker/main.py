@@ -654,17 +654,30 @@ def get_incidents_8d_endpoint(active_only: bool = False):
     return WORKER_ENGINE.get_eight_d_incidents(active_only=active_only)
 
 class CloseIncidentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     verification: str
     prevention: str
     lessons: str
-    signoff_agent: str = "ChiefRiskOfficerAgent"
+    signoff_user_id: str = Field(min_length=1, max_length=128)
+
+    @field_validator("verification", "prevention", "lessons", "signoff_user_id")
+    @classmethod
+    def require_nonblank_closure_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Closure evidence and authenticated sign-off are required")
+        if len(normalized) > 4000:
+            raise ValueError("Closure evidence exceeds the maximum length")
+        return normalized
 
 @app.post("/incidents/8d/{incident_id}/close")
 def close_incident_endpoint(incident_id: str, req: CloseIncidentRequest):
     if not WORKER_ENGINE:
         raise HTTPException(status_code=503, detail="Worker not initialized")
+    if len(incident_id) != 18 or not re.fullmatch(r"8D-[0-9]{8}-[0-9A-F]{6}", incident_id):
+        raise HTTPException(status_code=400, detail="Invalid incident identifier")
     success = WORKER_ENGINE.close_eight_d_incident(
-        incident_id, req.verification, req.prevention, req.lessons, req.signoff_agent
+        incident_id, req.verification, req.prevention, req.lessons, req.signoff_user_id
     )
     if not success:
         raise HTTPException(status_code=404, detail="Incident not found or could not be closed")
@@ -805,14 +818,14 @@ class TradingWorkerApp:
         verification: str,
         prevention: str,
         lessons: str,
-        signoff_agent: str = "ChiefRiskOfficerAgent",
+        signoff_user_id: str,
     ) -> bool:
         return self.eight_d_manager.advance_and_close(
             incident_id=incident_id,
             verification_evidence=verification,
             systemic_prevention=prevention,
             closure_lessons=lessons,
-            signoff_agent=signoff_agent,
+            signoff_user_id=signoff_user_id,
         )
 
     def get_trade_lineages(self, limit: int = 50) -> List[Dict[str, Any]]:

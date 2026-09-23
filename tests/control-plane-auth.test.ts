@@ -28,10 +28,13 @@ import {
 import {
   controlPlaneRoles,
   hasControlPlaneRole,
+  isEightDIncidentId,
   requiredControlPlaneRole,
 } from '../src/backend/control-plane-auth.js';
 
 const server = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+const wealthGrowthDeck = readFileSync(resolve(process.cwd(), 'src/components/WealthGrowthDeck.tsx'), 'utf8');
+const workerDockerfile = readFileSync(resolve(process.cwd(), 'Dockerfile.worker'), 'utf8');
 const envExample = readFileSync(resolve(process.cwd(), '.env.example'), 'utf8');
 const iamVerification = readFileSync(resolve(process.cwd(), 'infra/cloudrun/verify-iam.ps1'), 'utf8');
 const aiCopilot = readFileSync(resolve(process.cwd(), 'src/components/AIQuantCopilot.tsx'), 'utf8');
@@ -131,20 +134,46 @@ describe('control-plane authentication contract', () => {
 
   it('requires verified control-plane authorization for system and quant routes', () => {
     expect(server).toContain('authorizeOperatorRequest');
-    expect(server).toContain(
-      "app.use(['/api/system', '/api/quant', '/api/binance', '/api/release', '/api/google']"
+    const protectedApiMiddleware = server.slice(
+      server.indexOf('app.use(['),
+      server.indexOf('], (req, res, next)'),
     );
+    expect(protectedApiMiddleware).toContain("'/api/wealth'");
+    expect(protectedApiMiddleware).toContain("'/api/incidents'");
+    expect(protectedApiMiddleware).toContain("'/api/learning'");
     expect(server).toContain('CONTROL_PLANE_AUTH_REQUIRED');
     expect(server).toContain('CONTROL_PLANE_AUTH_FORBIDDEN');
     expect(server).toContain("requiredRole: ControlPlaneRole");
     expect(server).toContain('req.baseUrl ||');
     expect(server).toContain('/api/release/mainnet/approve');
-    expect(server.indexOf("app.use(['/api/system', '/api/quant', '/api/binance']")).toBeLessThan(
+    expect(server.indexOf('app.use([')).toBeLessThan(
       server.indexOf("app.get('/api/binance/verify-key'")
     );
-    expect(server.indexOf("app.use(['/api/system', '/api/quant', '/api/binance', '/api/release', '/api/google']")).toBeLessThan(
+    expect(server.indexOf('app.use([')).toBeLessThan(
       server.indexOf("app.get('/api/google/products'")
     );
+  });
+
+  it('requires viewer/operator authorization for Wealth and 8D API routes', () => {
+    expect(requiredControlPlaneRole({ method: 'GET', path: '/api/wealth/metrics' })).toBe('viewer');
+    expect(requiredControlPlaneRole({ method: 'GET', path: '/api/incidents/8d' })).toBe('viewer');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/incidents/8d/8D-20260923-ABC123/close' })).toBe('operator');
+    expect(server).toContain('encodeURIComponent(incidentId)');
+    expect(isEightDIncidentId('8D-20260923-ABC123')).toBe(true);
+    expect(isEightDIncidentId('../../kill-switch?')).toBe(false);
+    expect(isEightDIncidentId('8D-20260923-ABC123/../kill-switch')).toBe(false);
+  });
+
+  it('keeps Wealth telemetry unavailable when the Worker has no verified evidence', () => {
+    const wealthRoutes = server.slice(server.indexOf('// Wealth Growth & 8D Learning Engine Endpoints'));
+    expect(wealthRoutes).toContain("evidence_status: 'UNAVAILABLE'");
+    expect(wealthRoutes).not.toContain('is_capital_safe: true');
+    expect(wealthRoutes).not.toContain('res.json([])');
+    expect(wealthGrowthDeck).toContain('WEALTH_TELEMETRY_UNAVAILABLE');
+    expect(wealthGrowthDeck).toContain('apiClient.get<WealthMetrics>');
+    expect(wealthGrowthDeck).not.toContain('Shadow test verified mitigation.');
+    expect(wealthGrowthDeck).not.toContain("signoff_agent: 'ChiefRiskOfficerAgent'");
+    expect(workerDockerfile).toContain('COPY apps/learning_engine/ ./apps/learning_engine/');
   });
 
   it('uses a Google-signed Worker identity in production', () => {

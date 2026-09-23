@@ -86,7 +86,7 @@ def test_incidents_8d_and_close_endpoint(client):
             "verification": "Shadow tested slippage bounds successfully verified.",
             "prevention": "Level 2 order book depth gate enforced globally.",
             "lessons": "Taker orders without L2 depth gate strictly prohibited.",
-            "signoff_agent": "RiskSupervisor",
+            "signoff_user_id": "operator-test-uid",
         },
     )
     assert close_res.status_code == 200
@@ -97,6 +97,30 @@ def test_incidents_8d_and_close_endpoint(client):
     assert active_res.status_code == 200
     active_incidents = active_res.json()
     assert all(i["incident_id"] != inc["incident_id"] for i in active_incidents)
+    closed = client.get('/incidents/8d').json()
+    closed_incident = next(i for i in closed if i["incident_id"] == inc["incident_id"])
+    assert closed_incident["d8_closure"]["signoff_user_id"] == "operator-test-uid"
+
+
+def test_close_incident_rejects_blank_evidence(client):
+    incident = client.get('/incidents/8d').json()[0]
+    response = client.post(
+        f"/incidents/8d/{incident['incident_id']}/close",
+        json={
+            "verification": "   ",
+            "prevention": "prevention record",
+            "lessons": "closure lessons",
+            "signoff_user_id": "operator-test-uid",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_worker_image_contains_learning_engine_package():
+    from pathlib import Path
+
+    dockerfile = Path(__file__).resolve().parents[2].joinpath('Dockerfile.worker').read_text()
+    assert 'COPY apps/learning_engine/ ./apps/learning_engine/' in dockerfile
 
 
 def test_learning_lineages_endpoint(client):

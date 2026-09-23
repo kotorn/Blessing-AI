@@ -139,6 +139,12 @@ async function verifyGoogleIdToken(
   return ticket.getPayload() || undefined;
 }
 
+export function isEightDIncidentId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length === 18
+    && /^8D-[0-9]{8}-[0-9A-F]{6}$/.test(value);
+}
+
 /**
  * Verify a Google-signed Cloud Run service identity.
  *
