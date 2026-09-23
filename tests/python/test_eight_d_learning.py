@@ -159,6 +159,18 @@ def test_pdca_evaluator_drift_detection():
     assert any("Clamp strategy allocation" in action for action in result.recommended_actions)
 
 
+def test_pdca_evaluator_with_no_sample_reports_unknown_not_healthy():
+    result = PDCAEvaluator().evaluate_strategy("trend_breakout", [])
+
+    assert result.sample_size == 0
+    assert result.evidence_status == "INSUFFICIENT_SAMPLE"
+    assert result.authoritative is False
+    assert result.drift_detected is None
+    assert result.drift_severity == "UNKNOWN"
+    assert result.triggers_8d is None
+    assert any("Insufficient evidence" in action for action in result.recommended_actions)
+
+
 def test_dynamic_capital_allocator_scaling_and_rule_zero():
     allocator = DynamicCapitalAllocator()
 

@@ -7,7 +7,6 @@ import {
   AlertTriangle,
   Award,
   Layers,
-  CheckCircle2,
   HelpCircle,
   RefreshCw,
   GitCommit,
@@ -18,6 +17,13 @@ import {
 } from 'lucide-react';
 
 interface WealthMetrics {
+  evidence: {
+    status: 'INSUFFICIENT_SAMPLE' | 'PROCESS_LOCAL_UNVERIFIED';
+    source: 'PROCESS_MEMORY';
+    sample_size: number;
+    authoritative: boolean;
+    reason: string;
+  };
   portfolio: {
     total_trades: number;
     win_trades: number;
@@ -44,6 +50,7 @@ interface WealthMetrics {
     unknown_risk_violations: number;
     sustainable_growth_score: number;
     is_capital_safe: boolean;
+    capital_safety_status: 'UNKNOWN' | 'SAFE' | 'UNSAFE';
   };
   promotion_gate: {
     current_stage: string;
@@ -113,6 +120,8 @@ interface EightDIncident {
 
 interface PDCACheck {
   sample_size: number;
+  evidence_status: 'INSUFFICIENT_SAMPLE' | 'PROCESS_LOCAL_UNVERIFIED';
+  authoritative: boolean;
   plan_win_rate_pct: number;
   actual_win_rate_pct: number;
   win_rate_gap_pct: number;
@@ -121,10 +130,10 @@ interface PDCACheck {
   edge_decay_bps: number;
   plan_slippage_bps: number;
   actual_slippage_bps: number;
-  drift_detected: boolean;
+  drift_detected: boolean | null;
   drift_severity: string;
   recommended_actions: string[];
-  triggers_8d: boolean;
+  triggers_8d: boolean | null;
 }
 
 interface TradeLineageItem {
@@ -269,7 +278,10 @@ export const WealthGrowthDeck: React.FC = () => {
   }
 
   const p = metrics?.portfolio;
+  const evidence = metrics?.evidence;
+  const hasVerifiedEvidence = evidence?.authoritative === true && evidence.sample_size > 0;
   const gate = metrics?.promotion_gate;
+  const promotionEligible = gate?.eligible === true && hasVerifiedEvidence;
   const currentStage = gate?.current_stage || 'OBSERVE_ONLY';
   const stageIdx = STAGES.indexOf(currentStage);
 
@@ -285,8 +297,8 @@ export const WealthGrowthDeck: React.FC = () => {
               </span>
               <h2 className="text-lg font-bold text-zinc-100 flex items-center space-x-2">
                 <span>Wealth Growth & Risk-Adjusted Return Engine</span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800 font-mono">
-                  AUTONOMOUS LOOP
+                <span className="text-xs px-2 py-0.5 rounded-full bg-amber-950 text-amber-200 border border-amber-800 font-mono">
+                  OBSERVE ONLY
                 </span>
               </h2>
             </div>
@@ -301,16 +313,24 @@ export const WealthGrowthDeck: React.FC = () => {
               className={`flex items-center space-x-2 px-3 py-1.5 rounded-xl border text-xs font-mono font-bold ${
                 p?.unknown_risk_violations && p.unknown_risk_violations > 0
                   ? 'bg-rose-950/90 text-rose-300 border-rose-800 animate-pulse'
-                  : 'bg-emerald-950/70 text-emerald-300 border-emerald-800'
+                  : hasVerifiedEvidence
+                    ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800'
+                    : 'bg-amber-950/70 text-amber-200 border-amber-800'
               }`}
             >
               {p?.unknown_risk_violations && p.unknown_risk_violations > 0 ? (
                 <ShieldAlert className="w-4 h-4 text-rose-400" />
-              ) : (
+              ) : hasVerifiedEvidence ? (
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              ) : (
+                <HelpCircle className="w-4 h-4 text-amber-400" />
               )}
               <span>
-                RULE #0: {p?.unknown_risk_violations && p.unknown_risk_violations > 0 ? 'BREACHED (NO NEW RISK)' : 'UNKNOWN RISK = NO NEW RISK'}
+                RULE #0: {p?.unknown_risk_violations && p.unknown_risk_violations > 0
+                  ? 'BREACHED (NO NEW RISK)'
+                  : hasVerifiedEvidence
+                    ? 'NO BREACH OBSERVED'
+                    : 'STATUS UNKNOWN — NO VERIFIED SAMPLE'}
               </span>
             </div>
 
@@ -323,6 +343,16 @@ export const WealthGrowthDeck: React.FC = () => {
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
           </div>
+        </div>
+
+        <div role="status" className="mt-4 rounded-xl border border-amber-800/70 bg-amber-950/40 p-3 text-xs text-amber-100">
+          <div className="font-bold font-mono">
+            {evidence?.status === 'INSUFFICIENT_SAMPLE' ? 'INSUFFICIENT SAMPLE' : 'UNVERIFIED PROCESS-LOCAL SAMPLE'}
+            {' · '}{evidence?.sample_size ?? 0} closed trades
+          </div>
+          <p className="mt-1 text-amber-200/90">
+            {evidence?.reason || 'No authoritative closed-trade evidence is available. Performance and safety metrics are not proof of live results.'}
+          </p>
         </div>
 
         {/* Progressive Deployment Pipeline */}
@@ -351,7 +381,7 @@ export const WealthGrowthDeck: React.FC = () => {
                       : isPast
                       ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-400'
                       : isTarget
-                      ? gate?.eligible
+                      ? promotionEligible
                         ? 'bg-emerald-950/60 border-emerald-500 text-emerald-300 border-dashed animate-pulse'
                         : 'bg-zinc-950/60 border-zinc-800 text-zinc-500 border-dashed'
                       : 'bg-zinc-950/40 border-zinc-900 text-zinc-600'
@@ -360,7 +390,7 @@ export const WealthGrowthDeck: React.FC = () => {
                   <div className="text-[10px] text-zinc-500">Stage {idx + 1}</div>
                   <div className="truncate">{st.replace('_', ' ')}</div>
                   <div className="text-[9px] mt-0.5">
-                    {isActive ? '● CURRENT' : isPast ? '✓ PASSED' : isTarget ? (gate?.eligible ? '★ ELIGIBLE' : '🔒 LOCKED') : 'PENDING'}
+                    {isActive ? '● CURRENT' : isPast ? '✓ PASSED' : isTarget ? (promotionEligible ? '★ ELIGIBLE' : '🔒 LOCKED') : 'PENDING'}
                   </div>
                 </div>
               );
@@ -444,7 +474,7 @@ export const WealthGrowthDeck: React.FC = () => {
                 <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
               </span>
               <div className="text-xl font-bold text-zinc-100">
-                {p ? p.sharpe_ratio.toFixed(2) : '0.00'}
+                {hasVerifiedEvidence && p ? p.sharpe_ratio.toFixed(2) : '—'}
               </div>
               <p className="text-[10px] text-zinc-500">Annualized excess return / volatility</p>
             </div>
@@ -453,10 +483,10 @@ export const WealthGrowthDeck: React.FC = () => {
             <div className="p-4 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-1">
               <span className="text-zinc-400 text-xs flex items-center justify-between">
                 <span>SORTINO RATIO</span>
-                <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+                <TrendingUp className="w-3.5 h-3.5 text-zinc-500" />
               </span>
-              <div className="text-xl font-bold text-emerald-400">
-                {p ? p.sortino_ratio.toFixed(2) : '0.00'}
+              <div className="text-xl font-bold text-zinc-400">
+                {hasVerifiedEvidence && p ? p.sortino_ratio.toFixed(2) : '—'}
               </div>
               <p className="text-[10px] text-zinc-500">Downside deviation adjusted</p>
             </div>
@@ -468,7 +498,7 @@ export const WealthGrowthDeck: React.FC = () => {
                 <Award className="w-3.5 h-3.5 text-cyan-400" />
               </span>
               <div className="text-xl font-bold text-zinc-100">
-                {p ? p.calmar_ratio.toFixed(2) : '0.00'}
+                {hasVerifiedEvidence && p ? p.calmar_ratio.toFixed(2) : '—'}
               </div>
               <p className="text-[10px] text-zinc-500">CAGR % / Max Drawdown %</p>
             </div>
@@ -479,8 +509,8 @@ export const WealthGrowthDeck: React.FC = () => {
                 <span>GROWTH SCORE</span>
                 <Zap className="w-3.5 h-3.5 text-amber-400" />
               </span>
-              <div className="text-xl font-bold text-indigo-300">
-                {p ? p.sustainable_growth_score.toFixed(1) : '50.0'} / 100
+              <div className="text-xl font-bold text-zinc-400">
+                {hasVerifiedEvidence && p ? p.sustainable_growth_score.toFixed(1) : '—'} / 100
               </div>
               <p className="text-[10px] text-zinc-500">Composite wealth stability index</p>
             </div>
@@ -490,8 +520,8 @@ export const WealthGrowthDeck: React.FC = () => {
             {/* Max Drawdown */}
             <div className="p-4 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-1">
               <span className="text-zinc-400 text-xs">MAX DRAWDOWN</span>
-              <div className={`text-xl font-bold ${p && p.max_drawdown_pct > 3.0 ? 'text-amber-400' : 'text-zinc-100'}`}>
-                {p ? p.max_drawdown_pct.toFixed(2) : '0.00'}%
+              <div className={`text-xl font-bold ${!hasVerifiedEvidence ? 'text-zinc-400' : p && p.max_drawdown_pct > 3.0 ? 'text-amber-400' : 'text-zinc-100'}`}>
+                {hasVerifiedEvidence && p ? p.max_drawdown_pct.toFixed(2) : '—'}%
               </div>
               <p className="text-[10px] text-zinc-500">Peak-to-trough decline</p>
             </div>
@@ -500,7 +530,7 @@ export const WealthGrowthDeck: React.FC = () => {
             <div className="p-4 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-1">
               <span className="text-zinc-400 text-xs">VaR 95% / CVaR 95%</span>
               <div className="text-xl font-bold text-zinc-100">
-                {p ? `${p.var_95_pct.toFixed(1)}% / ${p.cvar_95_pct.toFixed(1)}%` : '0.0% / 0.0%'}
+                {hasVerifiedEvidence && p ? `${p.var_95_pct.toFixed(1)}% / ${p.cvar_95_pct.toFixed(1)}%` : '— / —'}
               </div>
               <p className="text-[10px] text-zinc-500">Expected Shortfall tail risk</p>
             </div>
@@ -508,17 +538,17 @@ export const WealthGrowthDeck: React.FC = () => {
             {/* Win Rate & Payoff */}
             <div className="p-4 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-1">
               <span className="text-zinc-400 text-xs">WIN RATE & PAYOFF</span>
-              <div className="text-xl font-bold text-emerald-400">
-                {p ? `${p.win_rate_pct.toFixed(1)}% (${p.payoff_ratio.toFixed(2)}x)` : '0.0% (0.0x)'}
+              <div className="text-xl font-bold text-zinc-400">
+                {hasVerifiedEvidence && p ? `${p.win_rate_pct.toFixed(1)}% (${p.payoff_ratio.toFixed(2)}x)` : '—'}
               </div>
-              <p className="text-[10px] text-zinc-500">{p?.win_trades || 0}W / {p?.loss_trades || 0}L ({p?.total_trades || 0} Total)</p>
+              <p className="text-[10px] text-zinc-500">{hasVerifiedEvidence && p ? `${p.win_trades}W / ${p.loss_trades}L (${p.total_trades} Total)` : 'No verified sample'}</p>
             </div>
 
             {/* Profit Factor & Expectancy */}
             <div className="p-4 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-1">
               <span className="text-zinc-400 text-xs">PROFIT FACTOR</span>
               <div className="text-xl font-bold text-zinc-100">
-                {p ? `${p.profit_factor.toFixed(2)} ($${p.expectancy_usdt.toFixed(2)})` : '0.00 ($0.00)'}
+                {hasVerifiedEvidence && p ? `${p.profit_factor.toFixed(2)} ($${p.expectancy_usdt.toFixed(2)})` : '—'}
               </div>
               <p className="text-[10px] text-zinc-500">Expectancy per trade</p>
             </div>
@@ -527,16 +557,16 @@ export const WealthGrowthDeck: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 font-mono text-xs">
             <div className="p-3 bg-zinc-950 rounded-xl border border-zinc-800 space-y-1">
               <span className="text-zinc-500">EXECUTION SLIPPAGE DRAG:</span>
-              <div className="text-zinc-200 font-bold">{p?.avg_slippage_bps.toFixed(2) || '0.00'} bps average</div>
+              <div className="text-zinc-200 font-bold">{hasVerifiedEvidence && p ? `${p.avg_slippage_bps.toFixed(2)} bps average` : '—'}</div>
             </div>
             <div className="p-3 bg-zinc-950 rounded-xl border border-zinc-800 space-y-1">
               <span className="text-zinc-500">COMMISSIONS & FUNDING:</span>
-              <div className="text-zinc-200 font-bold">${p?.total_commission.toFixed(2) || '0.00'} fees | ${p?.total_funding.toFixed(2) || '0.00'} carry</div>
+              <div className="text-zinc-200 font-bold">{hasVerifiedEvidence && p ? `$${p.total_commission.toFixed(2)} fees | $${p.total_funding.toFixed(2)} carry` : '—'}</div>
             </div>
             <div className="p-3 bg-zinc-950 rounded-xl border border-zinc-800 space-y-1">
               <span className="text-zinc-500">NET REALIZED WEALTH GROWTH:</span>
-              <div className={`font-bold ${p && p.net_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                ${p?.net_pnl.toFixed(2) || '0.00'} USDT
+              <div className={`font-bold ${!hasVerifiedEvidence ? 'text-zinc-400' : p && p.net_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {hasVerifiedEvidence && p ? `$${p.net_pnl.toFixed(2)} USDT` : '—'}
               </div>
             </div>
           </div>
@@ -552,15 +582,15 @@ export const WealthGrowthDeck: React.FC = () => {
               <span>8D Problem Solving Incidents ({incidents.length})</span>
             </h3>
             <span className="text-xs text-zinc-500 font-mono">
-              Auto-triggered when Actual vs Expected breaches drift tolerance
+              Snapshot records only; absence of incidents does not prove execution was incident-free
             </span>
           </div>
 
           {incidents.length === 0 ? (
             <div className="p-8 text-center rounded-2xl bg-zinc-900/50 border border-zinc-800/80 space-y-2">
-              <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto" />
-              <div className="text-sm font-bold text-zinc-200">Zero Active 8D Incidents</div>
-              <p className="text-xs text-zinc-400">All strategies and execution gates are operating within expected risk tolerance.</p>
+              <HelpCircle className="w-8 h-8 text-amber-400 mx-auto" />
+              <div className="text-sm font-bold text-zinc-200">No 8D records in this worker snapshot</div>
+              <p className="text-xs text-zinc-400">This does not establish incident-free execution. Verified closed-trade lineage is not connected to durable execution history.</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -753,9 +783,14 @@ export const WealthGrowthDeck: React.FC = () => {
               <RefreshCw className="w-4 h-4 text-cyan-400" />
               <span>PDCA (Plan-Do-Check-Act) Strategy Performance & Drift</span>
             </h3>
-            <span className="text-xs text-zinc-500 font-mono">Continuous edge decay evaluation</span>
+            <span className="text-xs text-amber-300 font-mono">Process-local evidence · not an execution authority</span>
           </div>
 
+          {Object.keys(pdca).length === 0 ? (
+            <div role="status" className="rounded-xl border border-amber-800 bg-amber-950/30 p-5 text-center text-xs text-amber-100">
+              INSUFFICIENT SAMPLE · PDCA evidence is unavailable; health and drift status are unknown.
+            </div>
+          ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 font-mono text-xs">
             {(Object.entries(pdca) as [string, PDCACheck][]).map(([strat, c]) => (
               <div key={strat} className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
@@ -763,31 +798,35 @@ export const WealthGrowthDeck: React.FC = () => {
                   <span className="font-bold text-zinc-200 uppercase">{strat.replace('_', ' ')}</span>
                   <span
                     className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      c.drift_detected ? 'bg-rose-950 text-rose-300 border border-rose-800' : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                      c.drift_detected === true && c.authoritative ? 'bg-rose-950 text-rose-300 border border-rose-800' : c.authoritative && c.sample_size > 0 && c.drift_detected === false ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-amber-950 text-amber-200 border border-amber-800'
                     }`}
                   >
-                    {c.drift_detected ? `DRIFT: ${c.drift_severity}` : 'HEALTHY'}
+                    {c.evidence_status === 'INSUFFICIENT_SAMPLE' || c.sample_size === 0
+                      ? 'INSUFFICIENT SAMPLE'
+                      : c.drift_detected === true
+                        ? c.authoritative ? `DRIFT: ${c.drift_severity}` : `UNVERIFIED DRIFT: ${c.drift_severity}`
+                        : c.authoritative && c.drift_detected === false ? 'HEALTHY' : 'UNVERIFIED SAMPLE'}
                   </span>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 text-[11px]">
                   <div className="p-2 bg-zinc-900 rounded border border-zinc-800/80">
                     <span className="text-zinc-500 block">WIN RATE (PLAN vs ACTUAL)</span>
-                    <span className="text-zinc-200 font-bold">{c.plan_win_rate_pct}% vs {c.actual_win_rate_pct}%</span>
+                    <span className="text-zinc-200 font-bold">{c.plan_win_rate_pct}% vs {c.authoritative && c.sample_size > 0 ? `${c.actual_win_rate_pct}%` : '—'}</span>
                   </div>
                   <div className="p-2 bg-zinc-900 rounded border border-zinc-800/80">
                     <span className="text-zinc-500 block">EDGE DECAY</span>
-                    <span className={`font-bold ${c.edge_decay_bps > 10 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                      {c.edge_decay_bps.toFixed(1)} bps
+                    <span className={`font-bold ${!c.authoritative || c.sample_size === 0 ? 'text-zinc-400' : c.edge_decay_bps > 10 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                      {c.authoritative && c.sample_size > 0 ? `${c.edge_decay_bps.toFixed(1)} bps` : '—'}
                     </span>
                   </div>
                   <div className="p-2 bg-zinc-900 rounded border border-zinc-800/80">
                     <span className="text-zinc-500 block">SLIPPAGE (PLAN vs ACTUAL)</span>
-                    <span className="text-zinc-200 font-bold">{c.plan_slippage_bps} vs {c.actual_slippage_bps} bps</span>
+                    <span className="text-zinc-200 font-bold">{c.plan_slippage_bps} vs {c.authoritative && c.sample_size > 0 ? `${c.actual_slippage_bps} bps` : '—'}</span>
                   </div>
                   <div className="p-2 bg-zinc-900 rounded border border-zinc-800/80">
                     <span className="text-zinc-500 block">SAMPLE SIZE</span>
-                    <span className="text-zinc-200 font-bold">{c.sample_size} trades</span>
+                    <span className="text-zinc-200 font-bold">{c.sample_size} process-local trades</span>
                   </div>
                 </div>
 
@@ -802,6 +841,7 @@ export const WealthGrowthDeck: React.FC = () => {
               </div>
             ))}
           </div>
+          )}
         </div>
       )}
 

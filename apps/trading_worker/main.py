@@ -762,7 +762,22 @@ class TradingWorkerApp:
     def get_wealth_metrics(self) -> Dict[str, Any]:
         pm = self.wealth_evaluator.get_portfolio_metrics()
         gate = self.wealth_evaluator.check_promotion_readiness()
+        insufficient_sample = pm.total_trades == 0 or any(
+            reason.startswith("Insufficient trade sample size")
+            for reason in gate.blocking_reasons
+        )
+        evidence_authoritative = False
         return {
+            "evidence": {
+                "status": "INSUFFICIENT_SAMPLE" if insufficient_sample else "PROCESS_LOCAL_UNVERIFIED",
+                "source": "PROCESS_MEMORY",
+                "sample_size": pm.total_trades,
+                "authoritative": evidence_authoritative,
+                "reason": (
+                    "Closed-trade lineage is not yet connected to durable execution history; "
+                    "worker memory is not authoritative performance evidence."
+                ),
+            },
             "portfolio": {
                 "total_trades": pm.total_trades,
                 "win_trades": pm.win_trades,
@@ -788,7 +803,10 @@ class TradingWorkerApp:
                 "avg_slippage_bps": float(pm.avg_slippage_bps),
                 "unknown_risk_violations": pm.unknown_risk_violations,
                 "sustainable_growth_score": float(pm.sustainable_growth_score),
-                "is_capital_safe": pm.is_capital_safe,
+                "is_capital_safe": pm.is_capital_safe and evidence_authoritative,
+                "capital_safety_status": (
+                    "UNKNOWN" if not evidence_authoritative else "SAFE" if pm.is_capital_safe else "UNSAFE"
+                ),
             },
             "promotion_gate": {
                 "current_stage": gate.current_stage.value,
@@ -840,6 +858,7 @@ class TradingWorkerApp:
             check = self.pdca_evaluator.evaluate_strategy(strat, lineages)
             results[strat] = {
                 "sample_size": check.sample_size,
+                "authoritative": check.authoritative,
                 "plan_win_rate_pct": float(check.plan_win_rate_pct),
                 "actual_win_rate_pct": float(check.actual_win_rate_pct),
                 "win_rate_gap_pct": float(check.win_rate_gap_pct),
@@ -850,6 +869,7 @@ class TradingWorkerApp:
                 "actual_slippage_bps": float(check.actual_slippage_bps),
                 "drift_detected": check.drift_detected,
                 "drift_severity": check.drift_severity,
+                "evidence_status": check.evidence_status,
                 "recommended_actions": check.recommended_actions,
                 "triggers_8d": check.triggers_8d,
             }
