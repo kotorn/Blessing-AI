@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from domain.eight_d import (
     EightDIncident,
