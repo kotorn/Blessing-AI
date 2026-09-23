@@ -544,7 +544,7 @@ async def test_decision_gate_fails_closed_on_restricted_state_flag_mismatch(
     ("field", "value"),
     [
         ("available_balance", Decimal(0)),
-        ("effective_leverage", Decimal(2)),
+        ("effective_leverage", Decimal(10)),
         ("margin_utilization_pct", Decimal(70)),
         ("total_position_notional", Decimal(100)),
     ],
