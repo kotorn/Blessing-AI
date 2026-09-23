@@ -22,7 +22,18 @@ $raw = & gcloud artifacts docker images list $package `
   --format=json
 if ($LASTEXITCODE -ne 0) { throw "Unable to read Artifact Registry images" }
 
-$images = @($raw | ConvertFrom-Json)
+# gcloud >= 440 prints a human preamble ("Listing items under ...") before the
+# JSON body on stdout. Keep only from the first JSON-looking line onward.
+$jsonLines = @()
+$started = $false
+foreach ($line in @($raw)) {
+  if (-not $started -and $line -match '^\s*[\[{]') { $started = $true }
+  if ($started) { $jsonLines += $line }
+}
+if ($jsonLines.Count -eq 0) { throw "Artifact Registry returned no JSON body to parse" }
+# ConvertFrom-Json -InputObject (not the pipeline) so Windows PowerShell 5.1
+# does not wrap the parsed array inside a single-element array.
+$images = @(ConvertFrom-Json -InputObject ($jsonLines -join "`n"))
 $missing = [System.Collections.Generic.List[string]]::new()
 $untagged = [System.Collections.Generic.List[string]]::new()
 foreach ($uri in $ProtectedImageUri) {
@@ -32,7 +43,9 @@ foreach ($uri in $ProtectedImageUri) {
     $missing.Add($uri)
     continue
   }
-  if (@($match.tags).Count -eq 0) { $untagged.Add($uri) }
+  $tagList = @()
+  if ($null -ne $match.tags) { $tagList = @($match.tags | Where-Object { $null -ne $_ -and "$_" -ne "" }) }
+  if ($tagList.Count -eq 0) { $untagged.Add($uri) }
 }
 
 if ($missing.Count -gt 0) { throw "Protected image digests are missing: $($missing -join ', ')" }
