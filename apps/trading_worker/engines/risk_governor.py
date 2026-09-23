@@ -35,14 +35,14 @@ class RiskGovernor:
         # LIVE must never silently use stale hardcoded values. Loading is
         # enabled automatically for an EXECUTION_MODE=LIVE process; a missing
         # or invalid policy raises and therefore fails closed. Non-LIVE callers
-        # keep conservative fallback defaults for test/research compatibility.
+        # retain the legacy conservative envelope for test/research behavior.
         if load_runtime_policy is None:
             load_runtime_policy = os.getenv("EXECUTION_MODE", "PAPER").strip().upper() == "LIVE"
         if risk_policy is None and load_runtime_policy:
             risk_policy = load_mainnet_risk_policy()
 
-        policy_leverage = risk_policy.max_leverage if risk_policy else Decimal("2.0")
-        policy_drawdown = risk_policy.emergency_stop_pct if risk_policy else Decimal("20.0")
+        policy_leverage = risk_policy.max_leverage if risk_policy else Decimal("10.0")
+        policy_drawdown = risk_policy.emergency_stop_pct if risk_policy else Decimal("6.0")
         policy_margin = (
             risk_policy.max_margin_utilization_pct
             if risk_policy
@@ -146,11 +146,11 @@ class RiskGovernor:
                     target,
                     f"Risk state is {risk_state.value}; new or increased risk is blocked.",
                 )
-            
+
         if risk_snapshot.current_drawdown_pct >= self.max_drawdown_pct:
             if not is_reducing:
                 return self._reject(target, f"Drawdown ({risk_snapshot.current_drawdown_pct}%) exceeds limit ({self.max_drawdown_pct}%).")
-            
+
         # 2. Leverage Constraint
         if risk_snapshot.effective_leverage >= self.max_leverage:
             if not is_reducing:
@@ -164,7 +164,7 @@ class RiskGovernor:
                     f"({risk_snapshot.margin_utilization_pct}%) exceeds limit "
                     f"({self.max_margin_utilization_pct}%). Cannot increase exposure.",
                 )
-                
+
         # 3. Generate a decision for the relative delta.  Crossing zero is
         # deliberately rejected so close and reopen are separate traceable
         # decisions with independent gates.
@@ -180,7 +180,7 @@ class RiskGovernor:
                 target_exposure_id=target.exposure_id,
                 source_intent_ids=target.source_intent_ids,
             )
-            
+
         # 4. Generate Execution Decision
         risk_class = self._classify_risk(required_delta, current_position_qty)
         if risk_class is None:
@@ -196,7 +196,7 @@ class RiskGovernor:
             pos_side = PositionSide.LONG if current_position_qty > 0 else PositionSide.SHORT
         else:
             pos_side = PositionSide.LONG if required_delta > 0 else PositionSide.SHORT
-        
+
         order = OrderIntent(
             client_order_id=self._next_id("B-SYS", now),
             symbol=target.symbol,
@@ -211,7 +211,7 @@ class RiskGovernor:
             source_intent_ids=target.source_intent_ids,
             created_at=now,
         )
-        
+
         return ExecutionDecision(
             decision_id=self._next_id("DEC", now),
             symbol=target.symbol,
