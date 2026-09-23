@@ -1,0 +1,130 @@
+name: Temporary risk test contract migration
+
+on:
+  push:
+    branches:
+      - codex/mainnet-risk-policy-20pct
+    paths:
+      - .github/workflows/tmp-risk-test-contract-migration.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/mainnet-risk-policy-20pct
+          fetch-depth: 0
+
+      - name: Apply exact test-contract replacements
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path: str, old: str, new: str, *, count: int | None = 1) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              observed = text.count(old)
+              if count is not None and observed != count:
+                  raise SystemExit(f"{path}: expected {count} occurrence(s) of {old!r}, found {observed}")
+              if observed == 0:
+                  raise SystemExit(f"{path}: replacement source not found: {old!r}")
+              p.write_text(text.replace(old, new), encoding="utf-8")
+
+          def replace_in_region(path: str, start_marker: str, end_marker: str, replacements: list[tuple[str, str]]) -> None:
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              start = text.find(start_marker)
+              if start < 0:
+                  raise SystemExit(f"{path}: start marker not found: {start_marker}")
+              end = text.find(end_marker, start + len(start_marker))
+              if end < 0:
+                  raise SystemExit(f"{path}: end marker not found: {end_marker}")
+              region = text[start:end]
+              for old, new in replacements:
+                  if region.count(old) != 1:
+                      raise SystemExit(f"{path}: expected exactly one {old!r} in target region")
+                  region = region.replace(old, new, 1)
+              p.write_text(text[:start] + region + text[end:], encoding="utf-8")
+
+          # Mainnet gate coverage helper: keep tests focused on the branch they
+          # intend to exercise rather than failing first on the new 2x cap.
+          replace_in_region(
+              "tests/python/test_gates_coverage.py",
+              "def make_mainnet_snapshot(**overrides)",
+              "\n\nclass _WorkerStub",
+              [("configured_leverage=Decimal(10)", "configured_leverage=Decimal(2)")],
+          )
+          replace_in_region(
+              "tests/python/test_gates_coverage.py",
+              "async def test_mainnet_daily_loss_boundary_just_under_cap_passes_just_over_blocks",
+              "\n\n@pytest.mark.asyncio\n@pytest.mark.parametrize",
+              [
+                  ("daily_realized_pnl=Decimal(-4), unrealized_pnl=Decimal(\"-0.99\")", "daily_realized_pnl=Decimal(-24), unrealized_pnl=Decimal(\"-0.99\")"),
+                  ("daily_realized_pnl=Decimal(-4), unrealized_pnl=Decimal(\"-1.01\")", "daily_realized_pnl=Decimal(-24), unrealized_pnl=Decimal(\"-1.01\")"),
+              ],
+          )
+
+          # Mainnet safety contract is now 2x leverage and 25 USDC/day.
+          replace_exact(
+              "tests/python/test_mainnet_safety.py",
+              "assert limits.max_daily_loss <= Decimal(\"5.0\")",
+              "assert limits.max_daily_loss <= Decimal(\"25.0\")",
+          )
+          replace_exact(
+              "tests/python/test_mainnet_safety.py",
+              "assert mainnet_limits.max_leverage <= Decimal(\"10.0\")",
+              "assert mainnet_limits.max_leverage <= Decimal(\"2.0\")",
+          )
+          replace_exact(
+              "tests/python/test_mainnet_safety.py",
+              "assert limits.max_leverage <= Decimal(\"10.0\")",
+              "assert limits.max_leverage <= Decimal(\"2.0\")",
+          )
+          replace_in_region(
+              "tests/python/test_mainnet_safety.py",
+              "async def test_mainnet_caps_enforced",
+              "\n\ndef test_stale_stream_and_persistence_rejection",
+              [("configured_leverage=Decimal(\"5.0\")", "configured_leverage=Decimal(\"2.0\")")],
+          )
+
+          # This test's purpose is daily-loss enforcement, not high-leverage rejection.
+          replace_in_region(
+              "tests/python/test_testnet_safety.py",
+              "async def test_mainnet_order_gate_blocks_daily_loss_at_five_usdc",
+              "\n\n@pytest.mark.asyncio\nasync def test_exchange_modes_preserve_configured_symbols_without_scanner_replacement",
+              [
+                  ("test_mainnet_order_gate_blocks_daily_loss_at_five_usdc", "test_mainnet_order_gate_blocks_daily_loss_at_twenty_five_usdc"),
+                  ("daily_realized_pnl=Decimal(-5)", "daily_realized_pnl=Decimal(-25)"),
+                  ("configured_leverage=Decimal(10)", "configured_leverage=Decimal(2)"),
+              ],
+          )
+
+          # Read-only preflight fixture should represent a compliant 2x account.
+          replace_in_region(
+              "tests/python/test_worker_state_api.py",
+              "async def test_mainnet_read_only_preflight_never_arms_worker_or_submits_orders",
+              "\n\n@pytest.mark.asyncio\nasync def test_mainnet_preflight_rejects_unknown_persistence_counters",
+              [("configured_leverage=Decimal(5)", "configured_leverage=Decimal(2)")],
+          )
+          PY
+
+          git diff --check
+          git diff -- tests/python/test_gates_coverage.py tests/python/test_mainnet_safety.py tests/python/test_testnet_safety.py tests/python/test_worker_state_api.py
+
+      - name: Commit migrated test contract
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/python/test_gates_coverage.py tests/python/test_mainnet_safety.py tests/python/test_testnet_safety.py tests/python/test_worker_state_api.py
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "test(risk): migrate Mainnet fixtures to 2x and 25 USDC"
+          git push origin HEAD:codex/mainnet-risk-policy-20pct
