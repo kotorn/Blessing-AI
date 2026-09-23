@@ -30,6 +30,8 @@ class StrategyPlan:
 class PDCACheckResult:
     strategy_id: str
     sample_size: int
+    evidence_status: str
+    authoritative: bool
     plan_win_rate_pct: Decimal
     actual_win_rate_pct: Decimal
     win_rate_gap_pct: Decimal
@@ -39,10 +41,10 @@ class PDCACheckResult:
     plan_slippage_bps: Decimal
     actual_slippage_bps: Decimal
     slippage_excess_bps: Decimal
-    drift_detected: bool
+    drift_detected: Optional[bool]
     drift_severity: str  # "NONE", "MODERATE", "CRITICAL"
     recommended_actions: List[str]
-    triggers_8d: bool
+    triggers_8d: Optional[bool]
 
 
 class PDCAEvaluator:
@@ -71,6 +73,8 @@ class PDCAEvaluator:
             return PDCACheckResult(
                 strategy_id=strategy_id,
                 sample_size=0,
+                evidence_status="INSUFFICIENT_SAMPLE",
+                authoritative=False,
                 plan_win_rate_pct=plan.target_win_rate_pct,
                 actual_win_rate_pct=Decimal("0.0"),
                 win_rate_gap_pct=Decimal("0.0"),
@@ -80,10 +84,12 @@ class PDCAEvaluator:
                 plan_slippage_bps=plan.max_slippage_bps,
                 actual_slippage_bps=Decimal("0.0"),
                 slippage_excess_bps=Decimal("0.0"),
-                drift_detected=False,
-                drift_severity="NONE",
-                recommended_actions=["Collect more closed trade lineages to begin PDCA evaluation."],
-                triggers_8d=False,
+                drift_detected=None,
+                drift_severity="UNKNOWN",
+                recommended_actions=[
+                    "Insufficient evidence: collect verified closed-trade lineages before drawing a PDCA health conclusion."
+                ],
+                triggers_8d=None,
             )
 
         n = len(relevant)
@@ -149,6 +155,8 @@ class PDCAEvaluator:
         return PDCACheckResult(
             strategy_id=strategy_id,
             sample_size=n,
+            evidence_status="PROCESS_LOCAL_UNVERIFIED",
+            authoritative=False,
             plan_win_rate_pct=plan.target_win_rate_pct,
             actual_win_rate_pct=actual_win_rate,
             win_rate_gap_pct=win_rate_gap,

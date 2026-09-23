@@ -123,7 +123,8 @@ def calculate_wealth_metrics(
             avg_slippage_bps=Decimal("0.0"),
             unknown_risk_violations=0,
             sustainable_growth_score=Decimal("0.0"),
-            is_capital_safe=True,
+            # Absence of observations cannot establish capital safety.
+            is_capital_safe=False,
         )
 
     total_trades = len(trades)
@@ -396,8 +397,10 @@ def evaluate_promotion_gate(
     current_stage: DeploymentStage,
 ) -> PromotionGateVerdict:
     """
-    Evaluates whether the trading system qualifies for promotion to the next deployment stage.
-    Strictly fail-closed: Any violation of Rule #0 (Unknown Risk = No New Risk) blocks promotion.
+    Fail closed while promotion evidence is process-local and non-authoritative.
+
+    Promotion must remain blocked until durable execution lineage is wired into
+    this gate. A caller-supplied boolean is intentionally not accepted as proof.
     """
     try:
         curr_idx = STAGE_SEQUENCE.index(current_stage)
@@ -416,88 +419,50 @@ def evaluate_promotion_gate(
             current_stage=current_stage,
             target_stage=current_stage,
             eligible=False,
-            passed_criteria=["System is already at the highest deployment stage (PORTFOLIO_AUTONOMOUS)"],
-            blocking_reasons=[],
+            passed_criteria=[],
+            blocking_reasons=[
+                "No higher deployment stage exists; this gate does not certify current-stage safety."
+            ],
             metrics_snapshot=metrics,
         )
 
     target_stage = STAGE_SEQUENCE[curr_idx + 1]
     reqs = PROMOTION_REQUIREMENTS.get(target_stage, {})
-
-    passed: List[str] = []
-    blocking: List[str] = []
-
-    # Rule #0 invariant check
-    if metrics.unknown_risk_violations > 0:
+    min_trades = reqs.get("min_trades", 0)
+    blocking = [
+        "Promotion blocked: performance evidence is not authoritative. "
+        "Process-local metrics cannot approve a stage change."
+    ]
+    if metrics.total_trades == 0:
         blocking.append(
-            f"RULE #0 BREACH: {metrics.unknown_risk_violations} unknown risk events observed. "
-            f"Promotion is forbidden until unknown risks are eliminated."
+            "Rule #0 status UNKNOWN: no closed-trade evidence is available. "
+            "Promotion remains blocked until risk can be evaluated."
+        )
+    elif metrics.unknown_risk_violations > 0:
+        blocking.append(
+            "RULE #0 BREACH observed in the available sample: "
+            f"{metrics.unknown_risk_violations} unknown risk event(s)."
         )
     else:
-        passed.append("Rule #0 passed: 0 unknown risk violations.")
+        blocking.append(
+            "Rule #0 status UNKNOWN: zero observed events in non-authoritative "
+            "process memory cannot establish a pass."
+        )
 
-    # Minimum trade sample size
-    min_trades = reqs.get("min_trades", 0)
-    if metrics.total_trades >= min_trades:
-        passed.append(f"Trade sample size sufficient: {metrics.total_trades} >= {min_trades}")
+    if metrics.total_trades < min_trades:
+        blocking.append(
+            f"Insufficient trade sample size: {metrics.total_trades} < {min_trades}"
+        )
     else:
-        blocking.append(f"Insufficient trade sample size: {metrics.total_trades} < {min_trades}")
-
-    # Maximum Drawdown
-    max_dd_limit = reqs.get("max_drawdown_pct")
-    if max_dd_limit is not None:
-        if metrics.max_drawdown_pct <= max_dd_limit:
-            passed.append(f"Drawdown within boundary: {metrics.max_drawdown_pct}% <= {max_dd_limit}%")
-        else:
-            blocking.append(f"Drawdown too high: {metrics.max_drawdown_pct}% > {max_dd_limit}%")
-
-    # Profit Factor
-    min_pf = reqs.get("min_profit_factor")
-    if min_pf is not None:
-        if metrics.profit_factor >= min_pf:
-            passed.append(f"Profit factor acceptable: {metrics.profit_factor} >= {min_pf}")
-        else:
-            blocking.append(f"Profit factor below standard: {metrics.profit_factor} < {min_pf}")
-
-    # Sharpe Ratio
-    min_sharpe = reqs.get("min_sharpe")
-    if min_sharpe is not None:
-        if metrics.sharpe_ratio >= min_sharpe:
-            passed.append(f"Sharpe ratio meets threshold: {metrics.sharpe_ratio} >= {min_sharpe}")
-        else:
-            blocking.append(f"Sharpe ratio below threshold: {metrics.sharpe_ratio} < {min_sharpe}")
-
-    # Sortino Ratio
-    min_sortino = reqs.get("min_sortino")
-    if min_sortino is not None:
-        if metrics.sortino_ratio >= min_sortino:
-            passed.append(f"Sortino ratio meets threshold: {metrics.sortino_ratio} >= {min_sortino}")
-        else:
-            blocking.append(f"Sortino ratio below threshold: {metrics.sortino_ratio} < {min_sortino}")
-
-    # Win Rate %
-    min_wr = reqs.get("min_win_rate_pct")
-    if min_wr is not None:
-        if metrics.win_rate_pct >= min_wr:
-            passed.append(f"Win rate meets criteria: {metrics.win_rate_pct}% >= {min_wr}%")
-        else:
-            blocking.append(f"Win rate below criteria: {metrics.win_rate_pct}% < {min_wr}%")
-
-    # Growth Score
-    min_score = reqs.get("min_growth_score")
-    if min_score is not None:
-        if metrics.sustainable_growth_score >= min_score:
-            passed.append(f"Sustainable growth score high: {metrics.sustainable_growth_score} >= {min_score}")
-        else:
-            blocking.append(f"Growth score below threshold: {metrics.sustainable_growth_score} < {min_score}")
-
-    eligible = len(blocking) == 0
+        blocking.append(
+            f"Trade sample count {metrics.total_trades} is process-local and unverified."
+        )
 
     return PromotionGateVerdict(
         current_stage=current_stage,
         target_stage=target_stage,
-        eligible=eligible,
-        passed_criteria=passed,
+        eligible=False,
+        passed_criteria=[],
         blocking_reasons=blocking,
         metrics_snapshot=metrics,
     )

@@ -19,8 +19,12 @@ def test_wealth_metrics_empty_trades():
     assert metrics.total_trades == 0
     assert metrics.win_trades == 0
     assert metrics.net_pnl == Decimal("0.0")
-    assert metrics.is_capital_safe is True
+    assert metrics.is_capital_safe is False
     assert metrics.sustainable_growth_score == Decimal("0.0")
+    verdict = evaluate_promotion_gate(metrics, DeploymentStage.OBSERVE_ONLY)
+    assert verdict.eligible is False
+    assert any("status UNKNOWN" in reason for reason in verdict.blocking_reasons)
+    assert not any("Rule #0 passed" in criterion for criterion in verdict.passed_criteria)
 
 
 def test_wealth_metrics_profitable_series():
@@ -116,13 +120,16 @@ def test_promotion_gate_evaluation():
 
     metrics = calculate_wealth_metrics(trades, initial_capital=Decimal("1000.0"))
     
-    # Evaluate promotion from OBSERVE_ONLY to SHADOW_TRADING
+    # Adequate-looking process-local metrics cannot approve a stage change.
     verdict = evaluate_promotion_gate(metrics, DeploymentStage.OBSERVE_ONLY)
     assert verdict.current_stage == DeploymentStage.OBSERVE_ONLY
     assert verdict.target_stage == DeploymentStage.SHADOW_TRADING
-    assert verdict.eligible is True
-    assert len(verdict.passed_criteria) >= 3
-    assert len(verdict.blocking_reasons) == 0
+    assert verdict.eligible is False
+    assert verdict.passed_criteria == []
+    assert any("not authoritative" in reason for reason in verdict.blocking_reasons)
+    assert any("process-local and unverified" in reason for reason in verdict.blocking_reasons)
+    with pytest.raises(TypeError):
+        evaluate_promotion_gate(metrics, DeploymentStage.OBSERVE_ONLY, evidence_authoritative=True)
 
 
 def test_promotion_gate_blocks_on_rule_zero_breach():

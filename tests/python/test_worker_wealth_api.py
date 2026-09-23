@@ -1,9 +1,11 @@
 from decimal import Decimal
+from datetime import UTC, datetime
 import pytest
 from fastapi.testclient import TestClient
 
 from apps.trading_worker.main import app, TradingWorkerApp, set_worker_engine
 from domain.trade_lineage import TradeLineage, OutcomeGrade
+from domain.wealth_metrics import TradeRecord
 
 
 @pytest.fixture
@@ -67,6 +69,76 @@ def test_wealth_metrics_endpoint(client):
     assert data["portfolio"]["total_trades"] == 2
     assert "win_rate_pct" in data["portfolio"]
     assert "current_stage" in data["promotion_gate"]
+    assert data["evidence"]["status"] == "INSUFFICIENT_SAMPLE"
+    assert data["evidence"]["authoritative"] is False
+    assert data["portfolio"]["is_capital_safe"] is False
+    assert data["portfolio"]["capital_safety_status"] == "UNKNOWN"
+    assert data["promotion_gate"]["eligible"] is False
+    assert data["promotion_gate"]["passed_criteria"] == []
+    assert any("not authoritative" in reason for reason in data["promotion_gate"]["blocking_reasons"])
+
+
+def test_empty_wealth_evidence_is_never_reported_as_safe_or_verified():
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    set_worker_engine(worker)
+    try:
+        response = TestClient(app).get("/wealth/metrics")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["evidence"] == {
+            "status": "INSUFFICIENT_SAMPLE",
+            "source": "PROCESS_MEMORY",
+            "sample_size": 0,
+            "authoritative": False,
+            "reason": (
+                "Closed-trade lineage is not yet connected to durable execution history; "
+                "worker memory is not authoritative performance evidence."
+            ),
+        }
+        assert data["portfolio"]["is_capital_safe"] is False
+        assert data["promotion_gate"]["eligible"] is False
+        pdca = TestClient(app).get("/learning/pdca").json()
+        assert pdca["trend_breakout"]["evidence_status"] == "INSUFFICIENT_SAMPLE"
+        assert pdca["trend_breakout"]["authoritative"] is False
+        assert pdca["trend_breakout"]["sample_size"] == 0
+        assert pdca["trend_breakout"]["drift_detected"] is None
+        assert pdca["trend_breakout"]["drift_severity"] == "UNKNOWN"
+        assert pdca["trend_breakout"]["triggers_8d"] is None
+    finally:
+        set_worker_engine(None)
+
+
+def test_sufficient_process_local_trade_sample_remains_unverified_and_blocked():
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.wealth_evaluator.trades = [
+        TradeRecord(
+            trade_id=f"LOCAL-{i}",
+            symbol="ETHUSDC",
+            strategy_id="trend_breakout",
+            realized_pnl=Decimal("25.0"),
+            commission=Decimal("0.1"),
+            funding=Decimal("0.0"),
+            slippage_bps=Decimal("1.0"),
+            holding_seconds=120.0,
+            entry_price=Decimal("2500.0"),
+            exit_price=Decimal("2525.0"),
+            closed_at=datetime(2026, 9, 23, 12, i, tzinfo=UTC),
+        )
+        for i in range(10)
+    ]
+    set_worker_engine(worker)
+    try:
+        data = TestClient(app).get("/wealth/metrics").json()
+        assert data["evidence"]["status"] == "PROCESS_LOCAL_UNVERIFIED"
+        assert data["evidence"]["sample_size"] == 10
+        assert data["evidence"]["authoritative"] is False
+        assert data["portfolio"]["capital_safety_status"] == "UNKNOWN"
+        assert data["portfolio"]["is_capital_safe"] is False
+        assert data["promotion_gate"]["eligible"] is False
+        assert data["promotion_gate"]["passed_criteria"] == []
+        assert any("process-local and unverified" in reason for reason in data["promotion_gate"]["blocking_reasons"])
+    finally:
+        set_worker_engine(None)
 
 
 def test_incidents_8d_and_close_endpoint(client):
@@ -139,6 +211,8 @@ def test_learning_pdca_endpoint(client):
     assert "trend_breakout" in pdca
     tb = pdca["trend_breakout"]
     assert tb["sample_size"] == 2
+    assert tb["evidence_status"] == "PROCESS_LOCAL_UNVERIFIED"
+    assert tb["authoritative"] is False
     assert "plan_win_rate_pct" in tb
     assert "actual_win_rate_pct" in tb
     assert "drift_detected" in tb
