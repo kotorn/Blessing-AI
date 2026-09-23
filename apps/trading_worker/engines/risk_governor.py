@@ -165,6 +165,18 @@ class RiskGovernor:
                     f"({self.max_margin_utilization_pct}%). Cannot increase exposure.",
                 )
 
+        if self.risk_policy is not None and not is_reducing:
+            capital_scale = self.risk_policy.capital_scale_for_drawdown(
+                risk_snapshot.current_drawdown_pct
+            )
+            if capital_scale <= 0:
+                return self._reject(
+                    target,
+                    "Runtime risk policy blocks new exposure at the current drawdown tier.",
+                )
+            if capital_scale < 1:
+                required_delta *= capital_scale
+
         # 3. Generate a decision for the relative delta.  Crossing zero is
         # deliberately rejected so close and reopen are separate traceable
         # decisions with independent gates.

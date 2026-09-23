@@ -368,6 +368,7 @@ class PersistenceRepository:
         image_digest: str,
         symbol: str = "ETHUSDC",
         policy: str = "STAGED_FIRST_ORDER",
+        baseline_capital: Decimal = Decimal("250"),
         max_risk_increasing_orders: int = 1,
     ) -> Mapping[str, Any]:
         """Create or verify the durable staged-launch session.
@@ -384,6 +385,12 @@ class PersistenceRepository:
             raise ValueError("Mainnet launch session is bounded to ETHUSDC staged launch")
         if max_risk_increasing_orders != 1:
             raise ValueError("Mainnet staged launch permits exactly one risk-increasing order")
+        try:
+            baseline = Decimal(str(baseline_capital))
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise ValueError("Mainnet launch baseline capital is invalid") from exc
+        if not baseline.is_finite() or baseline <= 0:
+            raise ValueError("Mainnet launch baseline capital must be finite and positive")
         await self.db.execute(
             """
             UPDATE mainnet_launch_sessions
@@ -418,8 +425,8 @@ class PersistenceRepository:
                 INSERT INTO mainnet_launch_sessions (
                     launch_id, approval_id, image_digest, symbol, policy,
                     max_risk_increasing_orders, reserved_orders, submitted_orders,
-                    state, created_at, updated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'ACTIVE', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    state, baseline_capital, baseline_set_at, created_at, updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, 'ACTIVE', $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT (approval_id) DO NOTHING
                 """,
                 launch_id,
@@ -428,6 +435,7 @@ class PersistenceRepository:
                 symbol.upper(),
                 policy,
                 max_risk_increasing_orders,
+                baseline,
             )
         except Exception as exc:
             exc_name = type(exc).__name__
@@ -439,7 +447,8 @@ class PersistenceRepository:
             SELECT launch_id, approval_id, image_digest, symbol, policy,
                    max_risk_increasing_orders, reserved_orders, submitted_orders,
                    state, continuation_approval_id, first_order_verified_at,
-                   autonomous_approved_at, last_restart_at, created_at, updated_at
+                   autonomous_approved_at, last_restart_at, baseline_capital,
+                   baseline_set_at, created_at, updated_at
             FROM mainnet_launch_sessions
             WHERE approval_id = $1
             """,
@@ -447,14 +456,23 @@ class PersistenceRepository:
         )
         if row is None:
             raise RuntimeError("mainnet launch session could not be read after creation")
+        result = dict(row)
         if (
-            str(row["launch_id"]) != launch_id
-            or str(row["image_digest"]) != image_digest
-            or str(row["symbol"]).upper() != symbol.upper()
-            or str(row["policy"]) != policy
+            str(result["launch_id"]) != launch_id
+            or str(result["image_digest"]) != image_digest
+            or str(result["symbol"]).upper() != symbol.upper()
+            or str(result["policy"]) != policy
         ):
             raise RuntimeError("existing launch session does not match release approval")
-        return dict(row)
+        persisted_baseline = result.get("baseline_capital")
+        if persisted_baseline is not None and Decimal(str(persisted_baseline)) != baseline:
+            raise RuntimeError("existing launch session baseline does not match release policy")
+        # Asyncpg returns these columns after migration 007. Minimal unit-test
+        # doubles may omit them; project the values used for the INSERT so the
+        # manager-level contract remains representative without weakening SQL.
+        result.setdefault("baseline_capital", baseline)
+        result.setdefault("baseline_set_at", datetime.now(UTC))
+        return result
 
     async def reserve_mainnet_risk_order(self, launch_id: str) -> bool:
         """Atomically reserve a risk-increasing order slot.
@@ -616,7 +634,8 @@ class PersistenceRepository:
                       max_risk_increasing_orders, reserved_orders,
                       submitted_orders, state, continuation_approval_id,
                       first_order_verified_at, autonomous_approved_at,
-                      last_restart_at, created_at, updated_at
+                      last_restart_at, baseline_capital, baseline_set_at,
+                      created_at, updated_at
             """,
             launch_id,
             continuation_approval_id,
@@ -651,7 +670,8 @@ class PersistenceRepository:
             SELECT launch_id, approval_id, image_digest, symbol, policy,
                    max_risk_increasing_orders, reserved_orders, submitted_orders,
                    state, continuation_approval_id, first_order_verified_at,
-                   autonomous_approved_at, last_restart_at, created_at, updated_at
+                   autonomous_approved_at, last_restart_at, baseline_capital,
+                   baseline_set_at, created_at, updated_at
             FROM mainnet_launch_sessions
             WHERE launch_id = $1
             """,
@@ -665,7 +685,8 @@ class PersistenceRepository:
             SELECT launch_id, approval_id, image_digest, symbol, policy,
                    max_risk_increasing_orders, reserved_orders, submitted_orders,
                    state, continuation_approval_id, first_order_verified_at,
-                   autonomous_approved_at, last_restart_at, created_at, updated_at
+                   autonomous_approved_at, last_restart_at, baseline_capital,
+                   baseline_set_at, created_at, updated_at
             FROM mainnet_launch_sessions
             WHERE symbol = $1
               AND state IN (
