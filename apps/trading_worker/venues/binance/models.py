@@ -89,8 +89,8 @@ class TestnetSafetyLimits(BaseModel):
 
         Testnet keeps its historical bounded defaults and explicit override
         acknowledgement. Mainnet is intentionally fixed to ETHUSDC and the
-        pilot caps from the launch plan: collateral 100, gross 1000, order 50,
-        daily loss 5, leverage 10x, and one active chain.
+        pilot caps from the launch plan: collateral 250, gross 1000, order 50,
+        daily loss 25, leverage 2x, and one active chain.
         """
 
         normalized = getattr(environment, "value", environment)
@@ -107,8 +107,8 @@ class TestnetSafetyLimits(BaseModel):
                 max_open_orders=1,
                 max_active_exposure_chains=1,
                 max_collateral=Decimal("250"),
-                max_daily_loss=Decimal("5"),
-                max_leverage=Decimal("10"),
+                max_daily_loss=Decimal("25"),
+                max_leverage=Decimal("2"),
             )
             prefix = "MAINNET"
             overrides_approved = False
