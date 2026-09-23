@@ -42,6 +42,7 @@ from apps.trading_worker.engines.market_state import MarketStateClassifier
 from apps.trading_worker.engines.meta_allocator import MetaAllocator
 from apps.trading_worker.engines.price_action import PriceActionEngine
 from apps.trading_worker.engines.risk_governor import RiskGovernor
+from apps.trading_worker.config.risk_policy import DrawdownTier, RiskPolicyError, load_mainnet_risk_policy
 from apps.trading_worker.engines.shock_strategy import ShockStrategyEngine
 from apps.trading_worker.engines.trend_strategy import TrendStrategyEngine
 from apps.trading_worker.evidence import BuildEvidence
@@ -634,6 +635,12 @@ async def kill_switch_endpoint(req: ToggleRequest):
         "engine_state": WORKER_ENGINE.get_state().engine_state.value,
     }
 
+@app.get("/risk")
+def get_risk_status_endpoint():
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    return WORKER_ENGINE.get_risk_status()
+
 @app.post("/reconcile")
 async def reconcile_endpoint():
     if not WORKER_ENGINE:
@@ -758,6 +765,8 @@ class TradingWorkerApp:
         self._mainnet_launch_id: Optional[str] = None
         self._mainnet_launch_session: Optional[dict[str, Any]] = None
         self._last_risk_snapshot_enqueued_at: float = 0.0
+        self._last_drawdown_tier: Optional[str] = None
+        self._drawdown_emergency_disarmed = False
 
     def get_wealth_metrics(self) -> Dict[str, Any]:
         pm = self.wealth_evaluator.get_portfolio_metrics()
@@ -894,6 +903,101 @@ class TradingWorkerApp:
         if self._mainnet_launch_session is None:
             return default
         return self._mainnet_launch_session.get(key, default)
+
+    def _mainnet_baseline_capital(self) -> Optional[Decimal]:
+        raw = self._launch_session_value("baseline_capital")
+        if raw is None:
+            return None
+        try:
+            baseline = Decimal(str(raw))
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if not baseline.is_finite() or baseline <= 0:
+            return None
+        return baseline
+
+    def get_risk_status(self) -> Dict[str, Any]:
+        policy = self.risk_governor.risk_policy
+        baseline = self._mainnet_baseline_capital()
+        return {
+            "max_drawdown": str(
+                policy.emergency_stop_pct if policy is not None else self.risk_governor.max_drawdown_pct
+            ),
+            "leverage": str(
+                policy.max_leverage if policy is not None else self.risk_governor.max_leverage
+            ),
+            "baseline": str(baseline) if baseline is not None else None,
+            "baseline_set_at": self._launch_session_value("baseline_set_at"),
+            "drawdown_tier": self._last_drawdown_tier,
+            "engine_state": self.engine_state.value,
+        }
+
+    async def _apply_mainnet_drawdown_policy(
+        self, equity: Decimal
+    ) -> tuple[Decimal, RiskState, bool]:
+        policy = self.risk_governor.risk_policy
+        baseline = self._mainnet_baseline_capital()
+        if policy is None or baseline is None:
+            raise RuntimeError("LIVE risk policy or durable starting-capital baseline is unavailable")
+        if baseline != policy.baseline_capital:
+            raise RuntimeError("Durable starting-capital baseline does not match runtime risk policy")
+
+        self.session_start_equity = baseline
+        drawdown_pct = policy.drawdown_pct(equity)
+        tier = policy.tier_for_drawdown(drawdown_pct)
+        risk_state = policy.risk_state_for_drawdown(drawdown_pct)
+        if tier.value != self._last_drawdown_tier:
+            logger.warning(
+                "monitor_event=drawdown_tier tier=%s drawdown_pct=%s baseline=%s equity=%s",
+                tier.value,
+                drawdown_pct,
+                baseline,
+                equity,
+            )
+            self._last_drawdown_tier = tier.value
+
+        if tier is DrawdownTier.NO_NEW_GRID:
+            self.pause_new_risk = True
+            self._refresh_engine_state()
+        elif tier is DrawdownTier.RECOVERY_ONLY:
+            self.pause_new_risk = True
+            self.recovery_only = True
+            self._refresh_engine_state()
+        elif tier is DrawdownTier.EMERGENCY:
+            self.pause_new_risk = True
+            self.recovery_only = True
+            logger.error(
+                "monitor_event=drawdown_emergency drawdown_pct=%s baseline=%s equity=%s",
+                drawdown_pct,
+                baseline,
+                equity,
+            )
+            try:
+                await self.set_kill_switch(True)
+            except Exception as exc:
+                self.kill_switch_active = True
+                logger.error("Drawdown kill-switch workflow failed closed: %s", type(exc).__name__)
+
+            adapter = self.execution_adapter
+            if adapter is not None:
+                try:
+                    adapter.bind_worker_authority(self)
+                    await adapter.emergency_flatten("ETHUSDC", authority=self)
+                except Exception as exc:
+                    logger.error(
+                        "monitor_event=drawdown_emergency_flatten_failed error=%s",
+                        type(exc).__name__,
+                    )
+
+            # A 20%% drawdown is a terminal runtime state for this arm. Keep the
+            # kill switch active, clear execution authorization, and present
+            # DISARMED until an operator explicitly resets the control path.
+            self.active_configuration = None
+            self._drawdown_emergency_disarmed = True
+            self._refresh_engine_state()
+            return drawdown_pct, risk_state, True
+
+        return drawdown_pct, risk_state, False
 
     async def _fence_autonomous_launch(self, reason: str) -> bool:
         """Move an active autonomous launch behind fresh authorization.
@@ -1657,9 +1761,12 @@ class TradingWorkerApp:
 
     def _refresh_engine_state(self) -> None:
         """Derive the single operational state from canonical control flags."""
-        if self.kill_switch_active:
+        if self.kill_switch_active and self._drawdown_emergency_disarmed:
+            self.engine_state = WorkerEngineState.DISARMED
+        elif self.kill_switch_active:
             self.engine_state = WorkerEngineState.EMERGENCY
         elif self.active_configuration is None:
+            self._drawdown_emergency_disarmed = False
             self.engine_state = WorkerEngineState.DISARMED
         elif (
             self.execution_mode in {
@@ -2796,6 +2903,29 @@ class TradingWorkerApp:
         if session:
             self._set_mainnet_launch_session(session)
 
+        runtime_policy = self.risk_governor.risk_policy
+        if runtime_policy is None:
+            try:
+                runtime_policy = load_mainnet_risk_policy()
+                self.risk_governor.apply_risk_policy(runtime_policy)
+            except RiskPolicyError:
+                runtime_policy = None
+        durable_baseline = self._mainnet_baseline_capital()
+        baseline_ready = bool(
+            session
+            and runtime_policy is not None
+            and durable_baseline == runtime_policy.baseline_capital
+            and session.get("baseline_set_at") is not None
+        )
+        add_check(
+            "CHK-CONTINUATION-RISK-BASELINE",
+            "Durable Starting-capital Baseline",
+            baseline_ready,
+            "Starting-capital baseline matches the runtime Mainnet risk policy"
+            if baseline_ready
+            else "Durable starting-capital baseline is missing or mismatched",
+        )
+
         policy = str(session.get("policy", "")) if session else ""
         state = str(session.get("state", "")) if session else ""
         submitted_orders = int(session.get("submitted_orders", 0) or 0) if session else 0
@@ -3146,6 +3276,18 @@ class TradingWorkerApp:
                 "until the transactional outbox is durable."
             )
 
+        # LIVE policy is a release input. Load it before any Mainnet
+        # observation or adapter lifecycle mutation; invalid/missing policy
+        # therefore refuses ARM fail-closed.
+        mainnet_risk_policy = None
+        if mode == "LIVE":
+            try:
+                mainnet_risk_policy = load_mainnet_risk_policy()
+                self.risk_governor.apply_risk_policy(mainnet_risk_policy)
+            except RiskPolicyError as exc:
+                logger.error("LIVE ARM risk policy unavailable: %s", type(exc).__name__)
+                return False, "LIVE risk policy is unavailable or invalid; execution remains disarmed."
+
         # This observation is intentionally performed before the Worker
         # changes mode, starts its persistent adapter, or acquires an
         # execution lease. It must pass without changing the lifecycle.
@@ -3299,10 +3441,13 @@ class TradingWorkerApp:
                     await self._reset_after_failed_exchange_arm()
                     return False, "LIVE ARM requires the immutable WORKER_IMAGE_DIGEST release input."
                 try:
+                    if mainnet_risk_policy is None:
+                        raise RuntimeError("validated Mainnet risk policy is unavailable")
                     session = await self.persistence.create_mainnet_launch_session(
                         approval_id=release_approval_id,
                         image_digest=image_digest,
                         symbol="ETHUSDC",
+                        baseline_capital=mainnet_risk_policy.baseline_capital,
                     )
                 except Exception as exc:
                     error_msg = str(exc)
@@ -3318,6 +3463,17 @@ class TradingWorkerApp:
                 ):
                     await self._reset_after_failed_exchange_arm()
                     return False, "LIVE staged launch session is already used or requires reconciliation."
+                try:
+                    persisted_baseline = Decimal(str(session.get("baseline_capital")))
+                except (TypeError, ValueError, ArithmeticError):
+                    persisted_baseline = Decimal("0")
+                if (
+                    mainnet_risk_policy is None
+                    or persisted_baseline != mainnet_risk_policy.baseline_capital
+                    or session.get("baseline_set_at") is None
+                ):
+                    await self._reset_after_failed_exchange_arm()
+                    return False, "LIVE starting-capital baseline is not durably bound to this launch."
                 self._set_mainnet_launch_session(dict(session))
 
             self.engine_state = WorkerEngineState.ARMED
@@ -3728,16 +3884,42 @@ class TradingWorkerApp:
                 # PnL and risk double-counting account adjustments.
                 equity = snapshot.margin_balance
                 
-                # Drawdown tracking
-                if self.session_start_equity is None:
-                    self.session_start_equity = equity
-                if self.session_peak_equity is None or equity > self.session_peak_equity:
-                    self.session_peak_equity = equity
-                    
-                if self.session_peak_equity > Decimal("0"):
-                    drawdown_pct = ((self.session_peak_equity - equity) / self.session_peak_equity) * Decimal("100.0")
+                # LIVE drawdown is measured from the durable starting-capital
+                # baseline captured at operator ARM. Testnet retains its legacy
+                # session-peak behavior so research semantics do not drift.
+                if self.execution_mode == WorkerExecutionMode.LIVE:
+                    drawdown_pct, tier_risk_state, emergency_handled = (
+                        await self._apply_mainnet_drawdown_policy(equity)
+                    )
+                    if emergency_handled:
+                        return
+                    account_risk_state = self._derive_testnet_risk_state(
+                        snapshot, drawdown_pct
+                    )
+                    if tier_risk_state in {
+                        RiskState.NO_NEW_RISK,
+                        RiskState.RECOVERY_ONLY,
+                        RiskState.EMERGENCY,
+                    }:
+                        effective_risk_state = tier_risk_state
+                    elif account_risk_state != RiskState.NORMAL:
+                        effective_risk_state = account_risk_state
+                    else:
+                        effective_risk_state = tier_risk_state
                 else:
-                    drawdown_pct = Decimal("0.0")
+                    if self.session_start_equity is None:
+                        self.session_start_equity = equity
+                    if self.session_peak_equity is None or equity > self.session_peak_equity:
+                        self.session_peak_equity = equity
+                    if self.session_peak_equity > Decimal("0"):
+                        drawdown_pct = (
+                            (self.session_peak_equity - equity) / self.session_peak_equity
+                        ) * Decimal("100.0")
+                    else:
+                        drawdown_pct = Decimal("0.0")
+                    effective_risk_state = self._derive_testnet_risk_state(
+                        snapshot, max(Decimal("0.0"), drawdown_pct)
+                    )
 
                 risk_snapshot = RiskSnapshot(
                     portfolio_equity=equity,
@@ -3752,10 +3934,7 @@ class TradingWorkerApp:
                     effective_leverage=snapshot.effective_leverage,
                     current_drawdown_pct=max(Decimal("0.0"), drawdown_pct),
                     liquidation_distance_pct=snapshot.min_liquidation_distance_pct,
-                    risk_state=self._derive_testnet_risk_state(
-                        snapshot,
-                        max(Decimal("0.0"), drawdown_pct),
-                    ),
+                    risk_state=effective_risk_state,
                     realized_pnl_24h_known=bool(snapshot.daily_loss_known),
                 )
                 now_monotonic = time.monotonic()

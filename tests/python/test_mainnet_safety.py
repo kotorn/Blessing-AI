@@ -109,7 +109,7 @@ def test_unknown_exchange_filters_fail_closed():
 def test_leverage_exceeding_10x_rejected():
     """Verify that leverage >10x is rejected on Mainnet."""
     mainnet_limits = SafetyLimits.from_environment(BinanceEnvironment.MAINNET)
-    assert mainnet_limits.max_leverage <= Decimal("10.0")
+    assert mainnet_limits.max_leverage <= Decimal("2.0")
 
 
 @pytest.mark.asyncio
@@ -173,9 +173,9 @@ async def test_mainnet_caps_enforced(monkeypatch):
     assert limits.max_collateral <= Decimal("250.0")
     assert limits.max_total_open_notional <= Decimal("1000.0")
     assert limits.max_single_order_notional <= Decimal("50.0")
-    assert limits.max_daily_loss <= Decimal("5.0")
+    assert limits.max_daily_loss <= Decimal("25.0")
     assert limits.max_active_exposure_chains == 1
-    assert limits.max_leverage <= Decimal("10.0")
+    assert limits.max_leverage <= Decimal("2.0")
 
     # Build mock rules for ETHUSDC
     rules = SymbolTradingRules("ETHUSDC")
@@ -232,7 +232,7 @@ async def test_mainnet_caps_enforced(monkeypatch):
             risk_currency="USDC",
             margin_mode="SINGLE_ASSET_CROSS",
             margin_mode_known=True,
-            configured_leverage=Decimal("5.0"),
+            configured_leverage=Decimal("2.0"),
             configured_leverage_known=True,
             daily_loss_known=True,
             daily_loss_asset="USDC",

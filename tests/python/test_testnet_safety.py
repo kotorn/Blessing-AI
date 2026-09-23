@@ -361,7 +361,7 @@ async def test_mainnet_daily_pnl_is_paginated_filtered_and_fee_funding_inclusive
 
 
 @pytest.mark.asyncio
-async def test_mainnet_order_gate_blocks_daily_loss_at_five_usdc(monkeypatch):
+async def test_mainnet_order_gate_blocks_daily_loss_at_twenty_five_usdc(monkeypatch):
     monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")
     adapter = BinanceExecutionAdapter(
         api_key="unit-test-mainnet-key",
@@ -395,7 +395,7 @@ async def test_mainnet_order_gate_blocks_daily_loss_at_five_usdc(monkeypatch):
         margin_utilization_pct=Decimal(10),
         liquidation_safety="KNOWN",
         exchange_environment=environment_label(BinanceEnvironment.MAINNET),
-        daily_realized_pnl=Decimal(-5),
+        daily_realized_pnl=Decimal(-25),
         daily_loss_known=True,
         collateral_asset="USDC",
         risk_currency="USDC",
@@ -404,7 +404,7 @@ async def test_mainnet_order_gate_blocks_daily_loss_at_five_usdc(monkeypatch):
         daily_pnl_includes_funding=True,
         daily_loss_window_start=window_start,
         daily_loss_window_end=window_start + timedelta(days=1),
-        configured_leverage=Decimal(10),
+        configured_leverage=Decimal(2),
         configured_leverage_known=True,
         margin_mode="SINGLE_ASSET_CROSS",
         margin_mode_known=True,
@@ -544,7 +544,7 @@ async def test_decision_gate_fails_closed_on_restricted_state_flag_mismatch(
     ("field", "value"),
     [
         ("available_balance", Decimal(0)),
-        ("effective_leverage", Decimal(2)),
+        ("effective_leverage", Decimal(10)),
         ("margin_utilization_pct", Decimal(70)),
         ("total_position_notional", Decimal(100)),
     ],

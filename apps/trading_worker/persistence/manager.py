@@ -253,6 +253,7 @@ class PersistenceManager:
         approval_id: str,
         image_digest: str,
         symbol: str = "ETHUSDC",
+        baseline_capital: Decimal = Decimal("250"),
     ) -> dict[str, Any]:
         repository = self._require_durable_launch_repository()
         launch_id = f"launch-{approval_id}"
@@ -261,6 +262,7 @@ class PersistenceManager:
             approval_id=approval_id,
             image_digest=image_digest,
             symbol=symbol,
+            baseline_capital=baseline_capital,
         )
         self._mainnet_launch_session = dict(session)
         return dict(session)

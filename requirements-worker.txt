@@ -1,10 +1,10 @@
-# Python 3.13 Cloud Run execution image. Keep this file exact-pinned.
-aiohttp==3.14.3
-asyncpg==0.31.0
-fastapi==0.141.1
-httpx==0.28.1
-orjson==3.12.0
-pydantic==2.13.5
-python-dotenv==1.2.3
-uvicorn[standard]==0.53.0
-websockets==15.0.1
+aiohttp==3.11.14
+asyncpg==0.30.0
+fastapi==0.115.11
+orjson==3.10.15
+prometheus-client==0.21.1
+pydantic==2.10.6
+pyyaml==6.0.3
+structlog==24.4.0
+uvicorn==0.34.0
+websockets==13.1

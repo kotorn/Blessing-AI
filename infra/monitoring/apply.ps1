@@ -15,6 +15,20 @@ function Invoke-GCloud {
   }
 }
 
+function Read-DefinitionSet {
+  param(
+    [Parameter(Mandatory = $true)][string]$Pattern
+  )
+
+  return @(
+    Get-ChildItem -LiteralPath $monitoringRoot -Filter $Pattern -File |
+      Sort-Object Name |
+      ForEach-Object {
+        @(Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json)
+      }
+  )
+}
+
 Invoke-GCloud @(
   "services", "enable",
   "logging.googleapis.com",
@@ -24,7 +38,7 @@ Invoke-GCloud @(
   "--quiet"
 )
 
-$metricDefinitions = Get-Content (Join-Path $monitoringRoot "log-metrics.json") -Raw | ConvertFrom-Json
+$metricDefinitions = Read-DefinitionSet -Pattern "*log-metrics.json"
 $existingMetricNames = @(
   & gcloud logging metrics list --project=$ProjectId --format="value(name)"
 )
@@ -51,7 +65,7 @@ foreach ($metric in $metricDefinitions) {
 $tempPolicyRoot = Join-Path ([System.IO.Path]::GetTempPath()) "blessing-monitoring-$PID"
 New-Item -ItemType Directory -Path $tempPolicyRoot -Force | Out-Null
 try {
-  $policyDefinitions = Get-Content (Join-Path $monitoringRoot "alert-policies.json") -Raw | ConvertFrom-Json
+  $policyDefinitions = Read-DefinitionSet -Pattern "*alert-policies.json"
   $existingPoliciesJson = & gcloud monitoring policies list --project=$ProjectId --format=json
   if ($LASTEXITCODE -ne 0) {
     throw "Unable to read existing monitoring alert policies"
