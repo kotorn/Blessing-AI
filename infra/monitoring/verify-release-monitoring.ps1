@@ -14,15 +14,29 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+function Read-DefinitionSet {
+  param(
+    [Parameter(Mandatory = $true)][string]$Pattern
+  )
+
+  return @(
+    Get-ChildItem -LiteralPath $scriptDir -Filter $Pattern -File |
+      Sort-Object Name |
+      ForEach-Object {
+        @(Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json)
+      }
+  )
+}
+
 if ($MetricNames.Count -eq 0) {
   $MetricNames = @(
-    (Get-Content (Join-Path $scriptDir "log-metrics.json") -Raw | ConvertFrom-Json) |
+    Read-DefinitionSet -Pattern "*log-metrics.json" |
       ForEach-Object { [string]$_.name }
   )
 }
 if ($PolicyNames.Count -eq 0) {
   $PolicyNames = @(
-    (Get-Content (Join-Path $scriptDir "alert-policies.json") -Raw | ConvertFrom-Json) |
+    Read-DefinitionSet -Pattern "*alert-policies.json" |
       ForEach-Object { [string]$_.displayName }
   )
 }
