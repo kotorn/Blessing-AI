@@ -1,39 +1,36 @@
-# Portfolio Risk Governor Configuration
-# Hard rules CANNOT be overridden by AI models or strategy modules.
+# Authoritative runtime risk policy for Blessing AI.
+# Production LIVE loads and validates this file at runtime; missing or invalid
+# policy must fail closed. Drawdown tiers are measured from starting capital,
+# not from the session peak.
 risk_governor:
-  version: "0.1.0"
+  version: "0.2.0"
   kill_switch_active: false
 
-  # Hard Leverage Limits (Effective real exposure, not nominal UI setting)
   leverage:
     max_portfolio_leverage: 2.0
     btc_max_effective_leverage: 2.0
     eth_max_effective_leverage: 2.0
-    sol_max_effective_leverage: 1.5
+    sol_max_effective_leverage: 2.0
     bnb_max_effective_leverage: 2.0
 
-  # Margin Utilization Constraints
   margin:
     normal_target_pct: 18.0
     stress_threshold_pct: 30.0
     extreme_hard_limit_pct: 40.0
     min_liquidation_distance_pct: 25.0
 
-  # Equity Drawdown Escalation Tiers
   drawdown_escalation:
-    caution_pct: 2.0        # State -> CAUTION
-    no_new_grid_pct: 4.0    # State -> NO_NEW_GRID (freezes new basket entries)
-    recovery_only_pct: 6.0  # State -> RECOVERY_ONLY (stops level expansion, works on partial reduction)
-    emergency_stop_pct: 8.0 # State -> EMERGENCY (market cancels all and flattens positions)
+    caution_pct: 5.0
+    no_new_grid_pct: 10.0
+    recovery_only_pct: 15.0
+    emergency_stop_pct: 20.0
 
-  # Fail-Closed Infrastructure Constraints
   fail_closed:
     max_market_data_staleness_sec: 3.0
-    max_private_ws_heartbeat_sec: 5.0
+    max_private_ws_heartbeat_sec: 10.0
     require_reconciliation_on_reconnect: true
     block_entry_on_db_disconnect: true
 
-  # Portfolio Correlation Limits
   correlation:
-    max_btc_eth_rolling_corr: 0.88
-    max_concurrent_crypto_beta_exposure_pct: 65.0
+    max_btc_eth_rolling_corr: 0.85
+    max_concurrent_crypto_beta_exposure_pct: 70.0
