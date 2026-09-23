@@ -211,13 +211,14 @@ def test_dynamic_capital_allocator_scaling_and_rule_zero():
     assert verdict.scaled_allocation_multiplier > Decimal("1.0")
     assert verdict.rule_zero_compliant is True
 
-    # 2. Drawdown elevated -> Dampens allocation
+    # 2. At the 5% CAUTION tier, new-risk allocation is halved.
     verdict_dd = allocator.evaluate_allocation(
         strategy_id="trend_breakout",
         metrics=base_metrics,
-        current_drawdown_pct=Decimal("4.5"),
+        current_drawdown_pct=Decimal("5.0"),
     )
-    assert verdict_dd.scaled_allocation_multiplier < Decimal("0.6")
+    assert verdict_dd.drawdown_factor == Decimal("0.50")
+    assert verdict_dd.scaled_allocation_multiplier < verdict.scaled_allocation_multiplier
 
     # 3. Rule #0 Breach -> Allocations immediately reduced to 0.0x
     import dataclasses
