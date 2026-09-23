@@ -37,9 +37,25 @@ class DynamicCapitalAllocator:
         self,
         min_multiplier: Decimal = Decimal("0.0"),
         max_multiplier: Decimal = Decimal("1.5"),
+        caution_drawdown_pct: Decimal = Decimal("5.0"),
+        no_new_grid_drawdown_pct: Decimal = Decimal("10.0"),
+        recovery_only_drawdown_pct: Decimal = Decimal("15.0"),
+        emergency_drawdown_pct: Decimal = Decimal("20.0"),
     ):
+        tiers = (
+            caution_drawdown_pct,
+            no_new_grid_drawdown_pct,
+            recovery_only_drawdown_pct,
+            emergency_drawdown_pct,
+        )
+        if not (tiers[0] < tiers[1] < tiers[2] < tiers[3]):
+            raise ValueError("drawdown scaling tiers must be strictly increasing")
         self.min_multiplier = min_multiplier
         self.max_multiplier = max_multiplier
+        self.caution_drawdown_pct = caution_drawdown_pct
+        self.no_new_grid_drawdown_pct = no_new_grid_drawdown_pct
+        self.recovery_only_drawdown_pct = recovery_only_drawdown_pct
+        self.emergency_drawdown_pct = emergency_drawdown_pct
 
     def evaluate_allocation(
         self,
@@ -93,17 +109,14 @@ class DynamicCapitalAllocator:
         else:
             perf_factor = Decimal("0.70")
 
-        # 3. Drawdown Factor (Non-linear dampening)
-        if current_drawdown_pct <= Decimal("1.0"):
+        # 3. Drawdown Factor. At 5% new-risk sizing is halved. At 10% and
+        # above the governance contract blocks new risk entirely; the 15% and
+        # 20% tiers further restrict execution to recovery/emergency behavior.
+        if current_drawdown_pct < self.caution_drawdown_pct:
             dd_factor = Decimal("1.0")
-        elif current_drawdown_pct <= Decimal("2.5"):
-            dd_factor = Decimal("0.80")
-        elif current_drawdown_pct <= Decimal("4.0"):
+        elif current_drawdown_pct < self.no_new_grid_drawdown_pct:
             dd_factor = Decimal("0.50")
-        elif current_drawdown_pct < Decimal("6.0"):
-            dd_factor = Decimal("0.25")
         else:
-            # At or above hard drawdown threshold
             dd_factor = Decimal("0.0")
 
         # 4. Consistency Factor (Profit factor and expectancy)
