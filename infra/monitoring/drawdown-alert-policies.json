@@ -1,0 +1,82 @@
+[
+  {
+    "displayName": "Blessing AI - Drawdown CAUTION 5%",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Mainnet drawdown entered CAUTION",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_drawdown_caution\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "0s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "Mainnet drawdown reached 5% from the durable starting-capital baseline. CAUTION is active and capital scaling is reduced to 50%. Review exposure and market conditions; this alert does not authorize any trading action." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "drawdown_caution", "environment": "mainnet" }
+  },
+  {
+    "displayName": "Blessing AI - Drawdown NO_NEW_GRID 10%",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Mainnet drawdown entered NO_NEW_GRID",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_drawdown_no_new_grid\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "0s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "Mainnet drawdown reached 10% from the durable starting-capital baseline. New grid/risk expansion must remain blocked while reduction paths remain available." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "drawdown_no_new_grid", "environment": "mainnet" }
+  },
+  {
+    "displayName": "Blessing AI - Drawdown RECOVERY_ONLY 15%",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Mainnet drawdown entered RECOVERY_ONLY",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_drawdown_recovery_only\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "0s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "3600s" },
+    "documentation": { "mimeType": "text/markdown", "content": "Mainnet drawdown reached 15% from the durable starting-capital baseline. RECOVERY_ONLY is active; only exposure-reducing orders are permitted." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "drawdown_recovery_only", "environment": "mainnet" }
+  },
+  {
+    "displayName": "Blessing AI - Drawdown EMERGENCY 20%",
+    "combiner": "OR",
+    "conditions": [
+      {
+        "displayName": "Mainnet drawdown entered EMERGENCY",
+        "conditionThreshold": {
+          "filter": "metric.type=\"logging.googleapis.com/user/blessing_drawdown_emergency\" resource.type=\"cloud_run_revision\"",
+          "comparison": "COMPARISON_GT",
+          "thresholdValue": 0,
+          "duration": "0s",
+          "aggregations": [{ "alignmentPeriod": "60s", "perSeriesAligner": "ALIGN_RATE", "crossSeriesReducer": "REDUCE_SUM" }]
+        }
+      }
+    ],
+    "alertStrategy": { "autoClose": "86400s" },
+    "documentation": { "mimeType": "text/markdown", "content": "Mainnet drawdown reached 20% from the durable starting-capital baseline. The Worker must execute the emergency kill-switch/cancel/flatten path and remain DISARMED with the kill switch active until explicit operator recovery." },
+    "enabled": true,
+    "userLabels": { "blessing_signal": "drawdown_emergency", "environment": "mainnet" }
+  }
+]
