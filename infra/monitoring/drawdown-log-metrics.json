@@ -1,0 +1,22 @@
+[
+  {
+    "name": "blessing_drawdown_caution",
+    "description": "Blessing AI Mainnet drawdown entered the 5% CAUTION tier from the durable starting-capital baseline.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=drawdown_tier\" AND textPayload:\"tier=CAUTION\""
+  },
+  {
+    "name": "blessing_drawdown_no_new_grid",
+    "description": "Blessing AI Mainnet drawdown entered the 10% NO_NEW_GRID tier from the durable starting-capital baseline.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=drawdown_tier\" AND textPayload:\"tier=NO_NEW_GRID\""
+  },
+  {
+    "name": "blessing_drawdown_recovery_only",
+    "description": "Blessing AI Mainnet drawdown entered the 15% RECOVERY_ONLY tier from the durable starting-capital baseline.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=drawdown_tier\" AND textPayload:\"tier=RECOVERY_ONLY\""
+  },
+  {
+    "name": "blessing_drawdown_emergency",
+    "description": "Blessing AI Mainnet drawdown entered the 20% EMERGENCY tier from the durable starting-capital baseline.",
+    "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"blessing-trading-worker\" AND textPayload:\"monitor_event=drawdown_tier\" AND textPayload:\"tier=EMERGENCY\""
+  }
+]
