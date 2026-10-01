@@ -105,15 +105,40 @@ trusted collector channel is implemented and verified. The operator must obtain 
 `PERSISTENCE`; plain JSON reports and distinct reviewer-name strings do not
 authenticate reviewer identity or independence and cannot open the gate.
 
-Before any Mainnet secret can be passed to the Worker, the Local supervisor
-also requires a non-elevated Windows host with a Python Software Foundation
-signed interpreter, a protected installation tree, and the pinned Worker
+The Worker runtime is selected by `LOCAL_WORKER_RUNTIME`.
+`scripts/start-local.ps1` always sets it to `DOCKER`, so the default launcher
+never resolves a host Python for the Worker: the Worker runs in the pinned
+`blessing-worker:local-runtime` image and the supervisor instead requires a
+non-elevated shell, a trusted Docker CLI at
+`C:\Program Files\Docker\Docker\resources\bin\docker.exe` (admin-owned,
+Authenticode `CN=Docker Inc,`), the `docker-desktop` Linux engine, and a
+matching `LOCAL_WORKER_IMAGE_ID`.
+
+Only when the Worker is started in `HOST_PYTHON` mode (not the default) does
+the Local supervisor require, before any Mainnet secret can be passed to the
+Worker, a non-elevated Windows host with a Python Software Foundation signed
+interpreter, a protected installation tree, and the pinned Worker
 dependencies available in isolated mode. It ignores
 `LOCAL_PYTHON_EXECUTABLE`; the process starts with Python isolated mode so
-user-site startup hooks do not run. On the current host, Python 3.14 is missing
-Worker dependencies and the Python 3.13 installation with dependencies is
-under the interactive user's profile, so no eligible runtime is verified.
-This is a blocking host prerequisite, not a test result that can be overridden.
+user-site startup hooks do not run. The same trusted interpreter is also
+required by `scripts/collect_local_pilot_capability.ts` and by the advisory
+CI-attestation check. On the current host, Python 3.14 is missing Worker
+dependencies and the Python 3.13 installation with dependencies is under the
+interactive user's profile; additionally the protected-tree check rejects the
+inherited `Authenticated Users:(OI)(CI)(IO)(M)` entry on every NTFS drive
+root, so no eligible runtime is verified. For `HOST_PYTHON` and the collector
+this is a blocking host prerequisite, not a test result that can be
+overridden.
+
+Open item (launcher hygiene): `scripts/start-local.ps1` runs
+`scripts/apply_local_postgres_migrations.py` with whichever `python.exe`
+`Get-Command` finds first on `PATH`, without the trust checks above and
+without Python isolated mode, while `POSTGRES_PASSWORD` is set in the
+environment. User-writable `PATH` entries or user-site packages could
+therefore execute code with the local database password. This does not touch
+Mainnet keys, but the migration step should use a verified interpreter in
+isolated mode (or run inside the pinned container) before the local database
+is relied on for Pilot evidence.
 
 The collector also requires a recent sanitized `testnet-trial-*.json` from a
 separately authorized `ETHUSDC` Testnet lifecycle with `IN_SYNC` reconciliation
