@@ -130,6 +130,15 @@ def test_container_settings_read_database_password_from_private_file(monkeypatch
     monkeypatch.setattr(runtime_module, "local_container_runtime", lambda values: True)
     monkeypatch.setattr(client_module, "local_container_runtime", lambda values: True)
     monkeypatch.setattr(client_module, "local_postgres_host", lambda values: "host.docker.internal")
+    original_reader = runtime_module.local_container_secret_file
+    # Production reads /run/secrets; redirect the reader to tmp_path for this test only.
+    monkeypatch.setattr(
+        runtime_module,
+        "local_container_secret_file",
+        lambda variable, filename, environ=None, secret_directory=tmp_path: original_reader(
+            variable, filename, environ, tmp_path
+        ),
+    )
     password_file = tmp_path / "postgres_password"
     password_file.write_text("container-db-password", encoding="utf-8")
     password_file.chmod(0o600)

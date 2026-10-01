@@ -15,8 +15,12 @@ from apps.trading_worker.venues.binance.local_pilot_readiness import (
 from apps.trading_worker.mainnet_preflight import local_pilot_flat_account_verified
 
 
-def test_live_pilot_readiness_stays_blocked_until_runtime_evidence_exists():
-    readiness = local_live_pilot_readiness()
+def test_live_pilot_readiness_stays_blocked_until_runtime_evidence_exists(monkeypatch, tmp_path):
+    from apps.trading_worker.venues.binance import local_pilot_readiness as module
+
+    # Hermetic: do not depend on whether the checkout running the tests is clean.
+    monkeypatch.setattr(module, "_git", lambda root, *args: "a" * 40 if args[0] == "rev-parse" else " M server.ts")
+    readiness = local_live_pilot_readiness(tmp_path)
 
     assert readiness["status"] == "BLOCKED"
     assert readiness["can_approve"] is False

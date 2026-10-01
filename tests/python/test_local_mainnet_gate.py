@@ -23,8 +23,12 @@ from domain.enums import MarketType, OrderSide, OrderType, PositionSide, TimeInF
 from domain.models import OrderIntent
 
 
-def test_pilot_readiness_stays_blocked_without_committed_runtime_evidence():
-    readiness = local_live_pilot_readiness()
+def test_pilot_readiness_stays_blocked_without_committed_runtime_evidence(monkeypatch, tmp_path):
+    from apps.trading_worker.venues.binance import local_pilot_readiness as module
+
+    # Hermetic: do not depend on whether the checkout running the tests is clean.
+    monkeypatch.setattr(module, "_git", lambda root, *args: "a" * 40 if args[0] == "rev-parse" else " M server.ts")
+    readiness = local_live_pilot_readiness(tmp_path)
 
     assert readiness["status"] == "BLOCKED"
     assert readiness["can_approve"] is False

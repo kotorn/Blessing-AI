@@ -126,6 +126,15 @@ def test_bootstrap_execs_worker_with_only_tmpfs_secret_paths(monkeypatch, tmp_pa
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file ownership and modes are verified in the Linux Docker runtime")
 def test_file_secret_reader_requires_exact_container_paths_and_private_file(monkeypatch, tmp_path):
     monkeypatch.setattr(local_runtime, "local_container_runtime", lambda values: True)
+    original_reader = local_runtime.local_container_secret_file
+    # Production reads /run/secrets; the helpers under test do not take a directory, so point them at tmp_path.
+    monkeypatch.setattr(
+        local_runtime,
+        "local_container_secret_file",
+        lambda variable, filename, environ=None, secret_directory=tmp_path: original_reader(
+            variable, filename, environ, tmp_path
+        ),
+    )
     paths = local_container_bootstrap.stage_secrets(
         b'{"apiKey":"test-key","apiSecret":"test-secret","workerIdentityToken":"worker-token","postgresPassword":"db-password"}', tmp_path
     )
