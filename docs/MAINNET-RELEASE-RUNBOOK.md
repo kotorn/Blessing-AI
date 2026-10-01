@@ -9,21 +9,120 @@ and must leave the Worker `DISARMED` when evidence is missing or stale.
 - Project: `gen-lang-client-0730128480`
 - Region: `asia-southeast1`
 - Symbol: `ETHUSDC` USDⓈ-M perpetual
-- SQL: `blessing-sql-primary` / `blessing_trading`
+- Cloud SQL (Cloud Run only): `blessing-sql-primary` / `blessing_trading`
 - Initial release policy: `STAGED_FIRST_ORDER`
 - Continuation policy: `AUTONOMOUS_AFTER_REVIEW`
 - Collateral: at most 250 USDC
 - Gross exposure: at most 1,000 USDC
 - First order: at most 50 USDC notional
 - Daily loss: at most 5 USDC
-- Leverage: at most 10x
+- Basket budget: 250 USDC; basket drawdown stop: 125 USDC
+- Risk:reward: at least 1:2 net of fees, funding, and slippage
+- Configured and effective leverage: at most 10x
 - Active exposure chains: exactly one
+- The exchange leverage setting is observed, never changed automatically
 - `VITE_DATA_CONNECT_CUTOVER=false`; Firestore remains the authority
 - Carry remains fail-closed until live economics are evidenced
 
 Never put an API key, API secret, password, DSN, Firebase token, OIDC token, or
 private stream listen key in a prompt, command argument, log, evidence file, or
 this repository. Secret Manager values are injected only into the Worker.
+
+## Separate runtime targets
+
+Cloud Run and Local are independent release targets. Cloud candidates use the
+Cloud release store, immutable Worker digest/revision, and Cloud SQL. Local
+candidates use the separate `local_release_candidates` collection, a fresh
+Local run ID, source/dependency/migration fingerprints, pinned Secret Manager
+versions, and the canonical `config/risk/mainnet_local_policy.json` hash.
+Cloud endpoints reject Local candidate/approval IDs; Local endpoints never
+read or consume Cloud release candidates.
+
+The Local launcher binds the UI to `127.0.0.1:3001`, Worker to
+`127.0.0.1:8000`, and PostgreSQL to `127.0.0.1:5433`. The Worker starts in
+`PAPER`/`DISARMED` with no Mainnet key. Only a Firebase
+`trading_admin` approval of a current, unexpired Local candidate permits the
+server to retrieve the exact numeric Secret Manager versions and pass them to
+the supervised Worker. That transition starts `LIVE`/`DISARMED`, performs a
+read-only preflight, and does not arm or submit an order. Any failed preflight
+returns the Worker to `PAPER`; restart/reboot never restores approval or
+credentials. Local persistence must identify itself as loopback PostgreSQL,
+not Cloud SQL.
+
+The first risk-increasing order is capped at 50 USDC notional. With a fresh
+5 USDC daily-loss headroom, planned loss (R) is at most 5 USDC and net target
+reward must be at least 10 USDC after fees, funding, and slippage. The 125 USDC
+basket drawdown cap is separate and the tighter remaining limit wins. Orders
+are blocked unless durable basket headroom and the exact Binance stop/target
+orders can both be verified. The Local adapter now has code paths for durable
+risk context, exchange-backed cost evidence, fill-sized protection read-back,
+and pilot accounting. These code paths are not proof of operational readiness:
+the risk context requires a fresh VERIFIED accounting snapshot after the first
+order; the lifecycle monitor re-reads the live bracket and position; and the
+emergency flatten path requires a second signed position read proving flat.
+Regression tests cover these fail-closed conditions, but no approved live
+preflight or live-order test has been run.
+
+Current Mainnet reconciliation audits `allOrders` and `userTrades` with
+bounded pagination and fails closed on missing identities, duplicate client
+IDs, invalid cursors, or a page limit. Durable launch-scoped history cursors,
+accounting event anchors, and protection ownership are implemented in the
+current source tree, but still require an isolated PostgreSQL 17 integration
+run against this exact reviewed commit and an authorized Testnet lifecycle
+artifact. A Python-level reconnect test is not equivalent to killing and
+restarting the Worker or PostgreSQL service.
+
+The Local supervisor passes a minimal Worker environment allowlist rather than
+inheriting the Control Plane's full environment. Firebase/Google ADC and
+unrelated credentials are excluded; PostgreSQL connection values and explicit
+runtime settings are retained. This isolation has unit coverage but has not
+yet been read back from a running Worker process.
+
+The capped seven-day Local Live Research Pilot is a separate, fixed-risk
+research cohort. OOS/Shadow evidence is not a prerequisite for that pilot, but
+pilot results must not be counted as OOS/Shadow evidence or authorize larger
+size. Any later promotion or increase in risk still requires authentic OOS and
+Shadow evidence: at least 50 closed baskets combined, with each cohort
+independently meeting MaxDD (le 3.5%), Sharpe (ge 1.0), Win Rate (ge 50%), and
+zero Rule #0 violations. Evidence must be hash-bound to its dataset,
+configuration, replay artifact, and reviewed source SHA. Missing or
+illustrative evidence keeps scale-up blocked.
+
+Local Pilot capability checks use a separate audit export at
+`artifacts/local-pilot-capability.json` (ignored by Git). The collector
+`npx tsx scripts/collect_local_pilot_capability.ts` runs the TypeScript and
+Python suites, lint, build, isolated PostgreSQL 17 migration/restart test,
+lease tests, and protection/monitor tests against an exact clean commit. It
+requires `BLESSING_MIGRATION_TEST_DSN` to name a fresh dedicated test database
+and the pinned secret resource identifiers in the operator environment; it
+does not read secret values or call the exchange. A failed or interrupted
+collection invalidates an earlier receipt. The receipt is accepted only for
+the current commit, source/dependency/migration/policy fingerprints and recent
+results. This JSON and its hashes prove integrity only, not who ran the checks.
+The current Control Plane and Worker therefore keep the gate `BLOCKED` until a
+trusted collector channel is implemented and verified. The operator must obtain three independent PASS reports in
+`artifacts/local-pilot-reviews/` for `AUTH_RELEASE`, `ORDER_RISK`, and
+`PERSISTENCE`; plain JSON reports and distinct reviewer-name strings do not
+authenticate reviewer identity or independence and cannot open the gate.
+
+Before any Mainnet secret can be passed to the Worker, the Local supervisor
+also requires a non-elevated Windows host with a Python Software Foundation
+signed interpreter, a protected installation tree, and the pinned Worker
+dependencies available in isolated mode. It ignores
+`LOCAL_PYTHON_EXECUTABLE`; the process starts with Python isolated mode so
+user-site startup hooks do not run. On the current host, Python 3.14 is missing
+Worker dependencies and the Python 3.13 installation with dependencies is
+under the interactive user's profile, so no eligible runtime is verified.
+This is a blocking host prerequisite, not a test result that can be overridden.
+
+The collector also requires a recent sanitized `testnet-trial-*.json` from a
+separately authorized `ETHUSDC` Testnet lifecycle with `IN_SYNC` reconciliation
+and no remaining position. That artifact is an audit claim, not a trusted
+exchange observation; without a trusted observer/attestation path it cannot
+open the gate. The existing manual Testnet workflow currently
+targets `BTCUSDT`; its artifact cannot pass the Pilot receipt. No Testnet
+order is submitted by the collector. Missing, stale, incomplete, or
+cross-symbol evidence keeps Pilot approval blocked.
 
 ## Gate 1 — Repository and identities
 
@@ -50,10 +149,12 @@ this repository. Secret Manager values are injected only into the Worker.
      -ProjectId gen-lang-client-0730128480 `
      -BillingAccount '<BILLING_ACCOUNT_ID>'
    ```
-4. Apply the durable database schema to Cloud SQL before any Worker
-   deployment that requires persistence. Use `infra/postgres/init_schema.sql`
-   for a fresh install, or `infra/postgres/migrations/001..006` in filename
-   order for an upgrade, executed through the Cloud SQL Auth Proxy against
+4. For Cloud Run only, apply the durable database schema to Cloud SQL before any Worker
+   deployment that requires persistence. Use the current full schema in `infra/postgres/init_schema.sql`
+   for a fresh install, or `infra/postgres/migrations/001..020` in filename
+   order for an upgrade (migration 020 is deliberately not in
+   `SAFE_POPULATED_UPGRADES`; do not apply it to a populated database without
+   separate review), executed through the Cloud SQL Auth Proxy against
    `blessing-sql-primary` / database `blessing_trading`. Record the applied
    file list and timestamp as evidence. There is no automated applier in this
    repository on purpose: this step is manual and audited. The Worker

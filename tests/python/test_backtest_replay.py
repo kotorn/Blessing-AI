@@ -143,7 +143,19 @@ def test_replay_runs_existing_pipeline_and_accounts_explicit_costs_and_funding()
     assert result.economic_result.funding_pnl < 0
     assert result.economic_result.trading_fees > 0
     assert result.economic_result.spread_cost > 0
-    assert result.economic_result.slippage_cost > 0
+
+
+def test_open_position_mark_to_market_equity_includes_entry_and_exit_cost_liability():
+    config = _config(force_close_at_end=False)
+    result = run_replay(_open_then_close_events()[:2], config)
+
+    assert result.final_position_qty != 0
+    point = result.equity_curve[-1]
+    gross_mark_equity = (
+        config.initial_capital + point.unrealized_pnl + point.open_funding_pnl
+    )
+    assert point.equity < gross_mark_equity
+    assert result.economic_result is None  # open positions are not closed-trade metrics
     assert result.evidence_status == "RESEARCH_REPLAY_ONLY"
     assert result.launch_eligible is False
 

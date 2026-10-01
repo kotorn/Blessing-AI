@@ -42,6 +42,25 @@ docker compose up -d
 
 ---
 
+## Local Chrome Remote Desktop Runtime
+
+On Windows, run `npm run dev:local` to start the Control Plane and Trading Worker as local processes and the isolated PostgreSQL 17 database through Docker Desktop. Open `http://127.0.0.1:3001` in the browser on this computer (including during a Chrome Remote Desktop session). The Worker listens on `127.0.0.1:8000`; local Postgres is published on `127.0.0.1:5433` and maps to container port `5432`, so it can coexist with another local database using `5432`.
+
+The local launcher refuses occupied required ports and does not stop or move existing processes. A server-side supervisor starts the Worker in PAPER/DISARMED mode without Mainnet secrets. Firebase and Secret Manager are used only when their authenticated Local approval endpoints are invoked; a restart always returns to PAPER/DISARMED.
+
+The authenticated Local endpoints are `GET /api/local/runtime`,
+`POST /api/local/mainnet/candidate` (empty request body), and
+`POST /api/local/mainnet/approve` (`candidateId` only). Candidate creation
+fails closed until the hash-bound OOS/Shadow bundle passes the 50-basket and
+per-cohort thresholds. Approval loads only the pinned Secret Manager versions,
+starts LIVE/DISARMED, and runs read-only preflight; it does not ARM the Worker.
+The ETHUSDC QUICK Live Research Pilot (50 USDC exposure, 2 USDC planned stop
+risk, 5 USDC campaign drawdown, leverage <= 10x, 7 days) is gated by
+`trading_admin` campaign approval, clean-SHA evidence and three independent
+reviews. Local readiness stays `BLOCKED` until that evidence is verified, and
+no order is sent before a separate ARM. See `docs/MAINNET-RELEASE-RUNBOOK.md`.
+The Cloud Run release APIs and Cloud SQL release path remain a separate target.
+
 ## Development & Testing
 
 ```bash

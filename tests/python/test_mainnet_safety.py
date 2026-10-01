@@ -154,7 +154,7 @@ async def test_read_only_mainnet_adapter_bypasses_approval_but_blocks_mutations(
     )
     assert await adapter.emergency_flatten(authority=authority) == []
     assert adapter.last_emergency_result["status"] == "BLOCKED"
-    with pytest.raises(PermissionError, match="cannot call the order endpoint"):
+    with pytest.raises(PermissionError, match="cannot mutate an order endpoint"):
         await adapter.rest_client.request(
             "POST",
             "/fapi/v1/order",
@@ -603,6 +603,5 @@ def test_clamp_order_notional_bumps_undersized_order_to_satisfy_min_notional():
     assert clamped_notional <= Decimal("50.0"), f"Expected <= 50, got {clamped_notional}"
     assert clamped_order.quantity == Decimal("0.010")  # 25 / 2500 = 0.010
     assert decision.net_exposure_delta == Decimal("0.010")
-
 
 

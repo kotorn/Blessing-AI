@@ -8,6 +8,7 @@ const firebaseAuthMock = vi.hoisted(() => ({
   initializeApp: vi.fn(() => ({ name: 'test-app' })),
   getAuth: vi.fn(),
   verifyIdToken: vi.fn(),
+  getUser: vi.fn(async () => ({ customClaims: { role: 'trading_admin' }, disabled: false })),
 }));
 
 vi.mock('firebase-admin/app', () => ({
@@ -19,10 +20,12 @@ vi.mock('firebase-admin/app', () => ({
 vi.mock('firebase-admin/auth', () => ({
   getAuth: firebaseAuthMock.getAuth.mockImplementation(() => ({
     verifyIdToken: firebaseAuthMock.verifyIdToken,
+    getUser: firebaseAuthMock.getUser,
   })),
 }));
 import {
   authorizeFirebaseRequest,
+  authorizeBigQueryRequest,
   authorizeOperatorRequest,
 } from '../src/backend/bigquery.js';
 import {
@@ -56,11 +59,27 @@ describe('control-plane authentication contract', () => {
     expect(anonymous.forbidden).toBeUndefined();
 
     const malformed = await authorizeFirebaseRequest(request('Bearer not-a-firebase-id-token'), {
-      localBypassEnv: '__CONTROL_PLANE_TEST_BYPASS_DISABLED__',
       requiredRole: 'viewer',
     });
     expect(malformed.ok).toBe(false);
     expect(malformed.error).toBeTruthy();
+  });
+
+  it('never bypasses Firebase auth for local control-plane or BigQuery requests', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL', 'true');
+    vi.stubEnv('BIGQUERY_ALLOW_LOCAL_UNAUTHENTICATED', 'true');
+    try {
+      const anonymous = { header: () => undefined } as any;
+      const operator = await authorizeOperatorRequest(anonymous, { requiredRole: 'trading_admin' });
+      const bigQuery = await authorizeBigQueryRequest(anonymous);
+      expect(operator.ok).toBe(false);
+      expect(bigQuery.ok).toBe(false);
+      expect(operator.mode).toBe('FIREBASE_ID_TOKEN');
+      expect(bigQuery.mode).toBe('FIREBASE_ID_TOKEN');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('allows a verified trading_admin and denies a verified viewer for mutation', async () => {
@@ -69,12 +88,13 @@ describe('control-plane authentication contract', () => {
     }) as any;
 
     firebaseAuthMock.verifyIdToken
-      .mockResolvedValueOnce({ uid: 'admin-user', role: 'trading_admin' })
+      .mockResolvedValueOnce({ uid: 'admin-user', role: 'trading_admin', firebase: { sign_in_provider: 'google.com' } })
       .mockResolvedValueOnce({ uid: 'viewer-user', role: 'viewer' });
 
     const admin = await authorizeOperatorRequest(request('Bearer verified-admin'), {
       requiredRole: 'trading_admin',
     });
+    expect(firebaseAuthMock.verifyIdToken).toHaveBeenLastCalledWith('verified-admin', true);
     expect(admin.ok).toBe(true);
     expect(admin.uid).toBe('admin-user');
     expect(admin.role).toBe('trading_admin');
@@ -82,9 +102,41 @@ describe('control-plane authentication contract', () => {
     const viewer = await authorizeOperatorRequest(request('Bearer verified-viewer'), {
       requiredRole: 'operator',
     });
+    expect(firebaseAuthMock.verifyIdToken).toHaveBeenLastCalledWith('verified-viewer', false);
     expect(viewer.ok).toBe(false);
     expect(viewer.forbidden).toBe(true);
     expect(viewer.role).toBe('viewer');
+  });
+
+  it('denies trading_admin when Firebase reports a revoked token or cannot check revocation', async () => {
+    const request = { header: () => 'Bearer admin-token' } as any;
+    firebaseAuthMock.verifyIdToken
+      .mockRejectedValueOnce(new Error('auth/id-token-revoked'))
+      .mockRejectedValueOnce(new Error('revocation lookup unavailable'));
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = await authorizeOperatorRequest(request, { requiredRole: 'trading_admin' });
+      expect(firebaseAuthMock.verifyIdToken).toHaveBeenLastCalledWith('admin-token', true);
+      expect(result).toEqual({
+        ok: false,
+        mode: 'FIREBASE_ID_TOKEN',
+        error: 'Firebase ID token could not be verified',
+      });
+    }
+  });
+
+  it('denies a stale admin claim after current Firebase roles are removed', async () => {
+    const request = { header: () => 'Bearer stale-admin-token' } as any;
+    firebaseAuthMock.verifyIdToken.mockResolvedValueOnce({
+      uid: 'former-admin', role: 'trading_admin', firebase: { sign_in_provider: 'google.com' },
+    });
+    firebaseAuthMock.getUser.mockResolvedValueOnce({ customClaims: { role: 'viewer' }, disabled: false });
+
+    const result = await authorizeOperatorRequest(request, { requiredRole: 'trading_admin' });
+
+    expect(result.ok).toBe(false);
+    expect(result.forbidden).toBe(true);
+    expect(firebaseAuthMock.getUser).toHaveBeenLastCalledWith('former-admin');
   });
 
   it('rejects custom tokens for trading_admin actions and requires interactive google sign-in', async () => {
@@ -183,8 +235,10 @@ describe('control-plane authentication contract', () => {
     expect(server).toContain('getIdTokenClient');
     expect(server).toContain('getRequestHeaders');
     expect(server).toContain('Firebase user tokens never cross this service boundary');
+    expect(server).not.toContain('CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL');
     expect(envExample).toContain('CONTROL_PLANE_SERVICE_ACCOUNT=blessing-control-plane@');
-    expect(envExample).toContain('CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL=false');
+    expect(envExample).toContain('WORKER_IDENTITY_TOKEN=');
+    expect(envExample).not.toContain('CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL');
   });
 
   it('keeps Control Plane readiness behind the internal OIDC boundary', () => {
@@ -196,12 +250,28 @@ describe('control-plane authentication contract', () => {
     expect(server).toContain("forwardWorkerRequest('/ready')");
   });
 
+  it('isolates Cloud release APIs and controller routes from a Local runtime', () => {
+    const apiIsolation = server.indexOf("app.use('/api/release/mainnet'");
+    const internalIsolation = server.indexOf("app.use('/internal/release', (req, res, next) =>");
+    expect(apiIsolation).toBeGreaterThanOrEqual(0);
+    expect(internalIsolation).toBeGreaterThanOrEqual(0);
+    expect(apiIsolation).toBeLessThan(server.indexOf("app.post('/api/release/mainnet/approve'"));
+    expect(internalIsolation).toBeLessThan(server.indexOf("app.post('/internal/release/candidate'"));
+    expect(server.slice(apiIsolation, apiIsolation + 500)).toContain('CLOUD_RELEASE_UNAVAILABLE_IN_LOCAL_RUNTIME');
+    expect(server.slice(internalIsolation, internalIsolation + 600)).toContain('CLOUD_RELEASE_CONTROLLER_UNAVAILABLE_IN_LOCAL_RUNTIME');
+    expect(server.slice(apiIsolation, internalIsolation)).toContain('if (!LOCAL_ONLY) return next()');
+    expect(server).toContain("app.post('/api/local/mainnet/approve'");
+  });
+
   it('maps only verified claims to hierarchical roles', () => {
     expect(controlPlaneRoles({})).toEqual([]);
     expect(controlPlaneRoles({ role: 'viewer' })).toEqual(['viewer']);
     expect(controlPlaneRoles({ roles: ['operator'] })).toEqual(['operator']);
     expect(controlPlaneRoles({ role: 'trading_admin' })).toEqual(['trading_admin']);
-    expect(controlPlaneRoles({ admin: true })).toEqual(['trading_admin']);
+    expect(controlPlaneRoles({ admin: true })).toEqual([]);
+    expect(controlPlaneRoles({ role: 'admin' })).toEqual([]);
+    expect(controlPlaneRoles({ role: 'trader' })).toEqual([]);
+    expect(controlPlaneRoles({ trading_admin: true })).toEqual(['trading_admin']);
 
     expect(hasControlPlaneRole(['viewer'], 'viewer')).toBe(true);
     expect(hasControlPlaneRole(['viewer'], 'operator')).toBe(false);
@@ -224,6 +294,18 @@ describe('control-plane authentication contract', () => {
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/disarm' })).toBe('operator');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/arm', body: { executionMode: 'TESTNET' } })).toBe('operator');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/arm', body: { executionMode: 'LIVE' } })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/mainnet/candidate' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/mainnet/approve' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/mainnet/continuation/request' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/mainnet/continuation/approve' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/pilot/prepare' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/pilot/acceptance' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'GET', path: '/api/local/pilot/acceptance/' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/pilot/acceptance/' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', originalUrl: '/api/local/pilot/start/?ignored=1' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'GET', path: '/api/local/pilot/acceptance/22222222-2222-4222-8222-222222222222/' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'GET', path: '/api/local/pilot/acceptance/22222222-2222-4222-8222-222222222222' })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/pilot/start' })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/kill-switch', body: { active: true } })).toBe('operator');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/kill-switch', body: { active: false } })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/preflight/read-only' })).toBe('trading_admin');

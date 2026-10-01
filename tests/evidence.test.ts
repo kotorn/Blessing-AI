@@ -36,10 +36,12 @@ describe('authoritative evidence status', () => {
 });
 
 describe('control-plane role guidance', () => {
-  it('matches the server role hierarchy and legacy trusted claims', () => {
+  it('matches the server role hierarchy and trading-specific claims', () => {
     expect(highestControlPlaneRoleFromClaims({ role: 'viewer' })).toBe('viewer');
     expect(highestControlPlaneRoleFromClaims({ roles: ['viewer', 'operator'] })).toBe('operator');
-    expect(highestControlPlaneRoleFromClaims({ tradingAdmin: true })).toBe('trading_admin');
+    expect(highestControlPlaneRoleFromClaims({ trading_admin: true })).toBe('trading_admin');
+    expect(highestControlPlaneRoleFromClaims({ admin: true })).toBe('unknown');
+    expect(highestControlPlaneRoleFromClaims({ role: 'trader' })).toBe('unknown');
     expect(highestControlPlaneRoleFromClaims({})).toBe('unknown');
   });
 

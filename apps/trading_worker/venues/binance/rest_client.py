@@ -6,7 +6,7 @@ import math
 import os
 import aiohttp
 import logging
-from typing import Dict, Any, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urlencode
 
 from .config import BinanceEnvironment, get_rest_url, PAPI_REST_URL, is_portfolio_margin_enabled
@@ -71,9 +71,18 @@ _ALLOWED_REQUEST_METHODS: dict[str, frozenset[str]] = {
     "/fapi/v2/account": frozenset({"GET"}),
     "/fapi/v2/positionRisk": frozenset({"GET"}),
     "/fapi/v1/openOrders": frozenset({"GET"}),
+    "/fapi/v1/allOrders": frozenset({"GET"}),
+    "/fapi/v1/algoOrder": frozenset({"GET", "POST", "DELETE"}),
+    "/fapi/v1/openAlgoOrders": frozenset({"GET"}),
+    "/fapi/v1/allAlgoOrders": frozenset({"GET"}),
     "/fapi/v1/userTrades": frozenset({"GET"}),
     "/fapi/v1/income": frozenset({"GET"}),
     "/fapi/v1/premiumIndex": frozenset({"GET"}),
+    "/fapi/v1/commissionRate": frozenset({"GET"}),
+    "/fapi/v1/leverageBracket": frozenset({"GET"}),
+    "/fapi/v1/depth": frozenset({"GET"}),
+    "/fapi/v1/fundingRate": frozenset({"GET"}),
+    "/fapi/v1/fundingInfo": frozenset({"GET"}),
     "/fapi/v1/ticker/bookTicker": frozenset({"GET"}),
     "/fapi/v1/order": frozenset({"GET", "POST", "PUT", "DELETE"}),
     "/fapi/v1/listenKey": frozenset({"POST", "PUT", "DELETE"}),
@@ -84,7 +93,12 @@ _ALLOWED_REQUEST_METHODS: dict[str, frozenset[str]] = {
     "/papi/v1/um/positionSide/dual": frozenset({"GET"}),
     "/papi/v1/um/positionRisk": frozenset({"GET"}),
     "/papi/v1/um/openOrders": frozenset({"GET"}),
+    "/papi/v1/um/allOrders": frozenset({"GET"}),
     "/papi/v1/um/userTrades": frozenset({"GET"}),
+    "/papi/v1/um/algo/algoOrder": frozenset({"GET"}),
+    "/papi/v1/um/algo/order": frozenset({"POST", "DELETE"}),
+    "/papi/v1/um/algo/openAlgoOrders": frozenset({"GET"}),
+    "/papi/v1/um/algo/allAlgoOrders": frozenset({"GET"}),
     "/papi/v1/um/income": frozenset({"GET"}),
     "/papi/v1/um/order": frozenset({"GET", "POST", "PUT", "DELETE"}),
     "/papi/v1/um/leverage": frozenset({"POST"}),
@@ -208,6 +222,8 @@ class BinanceRestClient:
         method: str,
         path: str,
         signed: bool = False,
+        *,
+        before_mutation: Optional[Callable[[], Awaitable[None]]] = None,
         **kwargs,
     ) -> Any:
         method_upper = method.upper()
@@ -217,11 +233,18 @@ class BinanceRestClient:
                 "Binance request is outside the fixed USDⓈ-M endpoint allowlist: "
                 f"{method_upper} {path}"
             )
-        if path in ("/fapi/v1/order", "/papi/v1/um/order") and method_upper in ("POST", "PUT", "DELETE"):
-            self.order_endpoint_attempts += 1
+        is_order_mutation = (
+            path in (
+                "/fapi/v1/order", "/papi/v1/um/order",
+                "/fapi/v1/algoOrder", "/papi/v1/um/algo/order",
+            )
+            and method_upper in ("POST", "PUT", "DELETE")
+        )
+        if is_order_mutation:
             if self.read_only:
+                self.order_endpoint_attempts += 1
                 raise PermissionError(
-                    "Read-only Binance client cannot call the order endpoint"
+                    "Read-only Binance client cannot mutate an order endpoint"
                 )
         if not self.session:
             await self.init_session()
@@ -238,6 +261,12 @@ class BinanceRestClient:
 
         while True:
             await self._respect_rate_limit()
+            # Invoke the final authority/risk fence after throttle waits but
+            # before creating signed timestamps. The callback may itself make
+            # a read-only position check; signing afterward avoids aging the
+            # mutation request while that check runs.
+            if is_order_mutation and before_mutation is not None:
+                await before_mutation()
             params = dict(base_params)
             if signed:
                 params["timestamp"] = self.clock.get_signed_timestamp()
@@ -246,6 +275,8 @@ class BinanceRestClient:
 
             request_kwargs = dict(kwargs)
             request_kwargs["params"] = params
+            if is_order_mutation:
+                self.order_endpoint_attempts += 1
             try:
                 async with self.session.request(method_upper, url, **request_kwargs) as resp:
                     try:

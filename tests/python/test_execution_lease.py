@@ -57,6 +57,9 @@ async def test_lease_loss_is_checked_immediately_before_order_post(monkeypatch):
             self.calls = []
 
         async def request(self, method, path, **kwargs):
+            before_mutation = kwargs.get("before_mutation")
+            if callable(before_mutation):
+                await before_mutation()
             self.calls.append((method, path, kwargs))
             return {"orderId": 1}
 
@@ -65,6 +68,7 @@ async def test_lease_loss_is_checked_immediately_before_order_post(monkeypatch):
         api_secret="unit-test-secret",
         env=BinanceEnvironment.TESTNET,
     )
+    adapter.require_testnet_protection = False
     adapter.state = ConnectionState.READY
     adapter.rest_client = RestProbe()
     adapter.set_execution_lease(FailingLease(), required=True)
@@ -125,6 +129,9 @@ async def test_risk_increasing_order_posts_only_after_durable_outbox_barrier():
             self.calls = []
 
         async def request(self, method, path, **kwargs):
+            before_mutation = kwargs.get("before_mutation")
+            if callable(before_mutation):
+                await before_mutation()
             self.calls.append((method, path, kwargs))
             assert events == ["PENDING"]
             return {
@@ -139,6 +146,7 @@ async def test_risk_increasing_order_posts_only_after_durable_outbox_barrier():
             }
 
     adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET)
+    adapter.require_testnet_protection = False
     adapter.state = ConnectionState.READY
     adapter.rest_client = RestProbe()
 

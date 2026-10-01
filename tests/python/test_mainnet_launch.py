@@ -22,6 +22,8 @@ class LaunchDatabase:
         self.row = None
         self.reserved = False
         self.submitted = False
+        self.pending_client_order_id = None
+        self.first_client_order_id = None
         self.calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def execute(self, query: str, *args: object) -> str:
@@ -38,11 +40,16 @@ class LaunchDatabase:
                     "reserved_orders": 0,
                     "submitted_orders": 0,
                     "state": "ACTIVE",
+                    "pending_order_client_order_id": None,
+                    "first_order_client_order_id": None,
                 }
             return "INSERT 0 1"
         if "reserved_orders = reserved_orders - 1" in query:
             if self.reserved and not self.submitted:
                 self.reserved = False
+                self.pending_client_order_id = None
+                if self.row:
+                    self.row["pending_order_client_order_id"] = None
                 return "UPDATE 1"
             return "UPDATE 0"
         if "SET state = 'RECONCILIATION_REQUIRED'" in query:
@@ -50,7 +57,11 @@ class LaunchDatabase:
                 self.row["state"] = "RECONCILIATION_REQUIRED"
             return "UPDATE 1"
         if "state = CASE" in query:
-            if self.row and self.row.get("state") == "RECONCILIATION_REQUIRED":
+            if (
+                self.row
+                and self.row.get("state") == "RECONCILIATION_REQUIRED"
+                and int(self.row.get("submitted_orders", 0) or 0) >= 1
+            ):
                 self.row["state"] = "PAUSED_NEW_RISK"
                 return "UPDATE 1"
             return "UPDATE 0"
@@ -60,6 +71,7 @@ class LaunchDatabase:
                 and self.row.get("symbol") == args[0]
                 and self.row.get("approval_id") != args[1]
                 and int(self.row.get("submitted_orders", 0) or 0) == 0
+                and self.row.get("pending_order_client_order_id") is None
             ):
                 self.row["state"] = "CLOSED"
                 return "UPDATE 1"
@@ -85,6 +97,8 @@ class LaunchDatabase:
         if "reserved_orders = reserved_orders + 1" in query:
             if self.row and self.row["state"] == "ACTIVE" and not self.reserved and not self.submitted:
                 self.reserved = True
+                self.pending_client_order_id = str(args[1])
+                self.row["pending_order_client_order_id"] = self.pending_client_order_id
                 self.row["reserved_orders"] = 1
                 return {"launch_id": args[0]}
             return None
@@ -93,6 +107,10 @@ class LaunchDatabase:
                 self.submitted = True
                 self.row["submitted_orders"] = 1
                 self.row["state"] = "PAUSED_NEW_RISK"
+                self.first_client_order_id = self.pending_client_order_id
+                self.row["first_order_client_order_id"] = self.first_client_order_id
+                self.row["pending_order_client_order_id"] = None
+                self.pending_client_order_id = None
                 return {"launch_id": args[0], "submitted_orders": 1, "state": "PAUSED_NEW_RISK"}
             return None
         if "WHERE approval_id = $1" in query:
@@ -103,7 +121,10 @@ class LaunchDatabase:
                     self.row
                     and self.row.get("symbol") == args[0]
                     and self.row.get("approval_id") != args[1]
-                    and int(self.row.get("submitted_orders", 0) or 0) > 0
+                    and (
+                        int(self.row.get("submitted_orders", 0) or 0) > 0
+                        or self.row.get("pending_order_client_order_id") is not None
+                    )
                 ):
                     return self.row
                 return None
@@ -133,11 +154,36 @@ class AutonomousLaunchDatabase:
                     "submitted_orders": 0,
                     "state": "ACTIVE",
                     "continuation_approval_id": None,
+                    "pending_order_client_order_id": None,
+                    "first_order_client_order_id": None,
                 }
             return "INSERT 0 1"
-        if "state = 'REAUTH_REQUIRED'" in query:
-            if self.row and self.row["policy"] == "AUTONOMOUS_AFTER_REVIEW" and self.row["state"] == "AUTONOMOUS_ACTIVE":
-                self.row["state"] = "REAUTH_REQUIRED"
+        if "last_restart_at = CURRENT_TIMESTAMP" in query:
+            if self.row and (
+                self.row["policy"] == "AUTONOMOUS_AFTER_REVIEW"
+                and self.row["state"] == "AUTONOMOUS_ACTIVE"
+                or self.row["policy"] == "STAGED_FIRST_ORDER"
+                and self.row["state"] == "ACTIVE"
+                and self.row.get("pending_order_client_order_id") is not None
+            ):
+                self.row["state"] = (
+                    "RECONCILIATION_REQUIRED"
+                    if self.row.get("pending_order_client_order_id") is not None
+                    else "REAUTH_REQUIRED"
+                )
+                return "UPDATE 1"
+            return "UPDATE 0"
+        if "SET state = CASE" in query and "submitted_orders >= 1" in query:
+            if (
+                self.row
+                and self.row["state"] == "RECONCILIATION_REQUIRED"
+                and int(self.row["submitted_orders"] or 0) >= 1
+                and self.row.get("pending_order_client_order_id") is None
+            ):
+                self.row["state"] = (
+                    "PAUSED_NEW_RISK" if self.row["policy"] == "STAGED_FIRST_ORDER"
+                    else "REAUTH_REQUIRED"
+                )
                 return "UPDATE 1"
             return "UPDATE 0"
         return "UPDATE 0"
@@ -157,6 +203,8 @@ class AutonomousLaunchDatabase:
                     "submitted_orders": 0,
                     "state": "ACTIVE",
                     "continuation_approval_id": None,
+                    "pending_order_client_order_id": None,
+                    "first_order_client_order_id": None,
                 }
             return self.row
         if "continuation_approval_id = $2" in query:
@@ -171,6 +219,7 @@ class AutonomousLaunchDatabase:
                     self.row["policy"] == "AUTONOMOUS_AFTER_REVIEW"
                     and self.row["state"] == "REAUTH_REQUIRED"
                     and int(self.row["submitted_orders"] or 0) >= 1
+                    and self.row.get("pending_order_client_order_id") is None
                 )
                 if staged or reauth:
                     self.row.update(
@@ -198,6 +247,7 @@ class AutonomousLaunchDatabase:
             )
             if staged or autonomous:
                 self.row["reserved_orders"] = int(self.row["reserved_orders"] or 0) + 1
+                self.row["pending_order_client_order_id"] = str(args[1])
                 return {"launch_id": args[0]}
             return None
         if "state = CASE" in query:
@@ -206,7 +256,11 @@ class AutonomousLaunchDatabase:
             if self.row["policy"] == "STAGED_FIRST_ORDER" and self.row["submitted_orders"] >= 1:
                 return None
             self.row["submitted_orders"] = int(self.row["submitted_orders"] or 0) + 1
-            self.row["state"] = "PAUSED_NEW_RISK" if self.row["policy"] == "STAGED_FIRST_ORDER" else "AUTONOMOUS_ACTIVE"
+            if self.row["state"] != "RECONCILIATION_REQUIRED":
+                self.row["state"] = "PAUSED_NEW_RISK" if self.row["policy"] == "STAGED_FIRST_ORDER" else "AUTONOMOUS_ACTIVE"
+            if self.row["policy"] == "STAGED_FIRST_ORDER" and self.row["submitted_orders"] == 1:
+                self.row["first_order_client_order_id"] = self.row.get("pending_order_client_order_id")
+            self.row["pending_order_client_order_id"] = None
             return {"launch_id": args[0], "submitted_orders": self.row["submitted_orders"], "state": self.row["state"]}
         if "WHERE approval_id = $1" in query:
             return self.row
@@ -237,11 +291,13 @@ async def test_launch_session_reservation_is_atomic_and_restart_safe():
         image_digest=IMAGE,
     )
     assert session["state"] == "ACTIVE"
-    assert await repository.reserve_mainnet_risk_order("launch-approval-1") is True
-    assert await repository.reserve_mainnet_risk_order("launch-approval-1") is False
-    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-1") is True
-    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-1") is False
+    assert await repository.reserve_mainnet_risk_order("launch-approval-1", "order-first-1") is True
+    assert await repository.reserve_mainnet_risk_order("launch-approval-1", "order-first-2") is False
+    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-1", "order-first-1") is True
+    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-1", "order-first-1") is False
     assert db.row["state"] == "PAUSED_NEW_RISK"
+    assert db.row["first_order_client_order_id"] == "order-first-1"
+    assert db.row["pending_order_client_order_id"] is None
 
     # A new repository/worker sees the durable paused state rather than
     # resetting the one-order budget after a process restart.
@@ -250,6 +306,7 @@ async def test_launch_session_reservation_is_atomic_and_restart_safe():
     assert persisted is not None
     assert persisted["submitted_orders"] == 1
     assert persisted["state"] == "PAUSED_NEW_RISK"
+    assert persisted["first_order_client_order_id"] == "order-first-1"
 
 
 @pytest.mark.asyncio
@@ -264,8 +321,8 @@ async def test_cannot_arm_new_session_when_prior_session_has_unreviewed_order():
         image_digest=IMAGE,
     )
     assert session["state"] == "ACTIVE"
-    assert await repository.reserve_mainnet_risk_order("launch-approval-orig") is True
-    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-orig") is True
+    assert await repository.reserve_mainnet_risk_order("launch-approval-orig", "order-orig") is True
+    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-orig", "order-orig") is True
     assert db.row["state"] == "PAUSED_NEW_RISK"
     assert db.row["submitted_orders"] == 1
 
@@ -296,10 +353,10 @@ async def test_definitive_rejection_can_release_but_ambiguous_outcome_cannot():
         approval_id="approval-2",
         image_digest=IMAGE,
     )
-    assert await repository.reserve_mainnet_risk_order("launch-approval-2") is True
-    assert await repository.release_mainnet_risk_order_reservation("launch-approval-2") is True
-    assert await repository.reserve_mainnet_risk_order("launch-approval-2") is True
-    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-2") is True
+    assert await repository.reserve_mainnet_risk_order("launch-approval-2", "order-rejected") is True
+    assert await repository.release_mainnet_risk_order_reservation("launch-approval-2", "order-rejected") is True
+    assert await repository.reserve_mainnet_risk_order("launch-approval-2", "order-confirmed") is True
+    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-2", "order-confirmed") is True
     assert await repository.mark_mainnet_launch_reconciliation_required("launch-approval-2") is True
     assert db.row["state"] == "RECONCILIATION_REQUIRED"
     assert await repository.mark_mainnet_launch_reconciled("launch-approval-2") is True
@@ -307,6 +364,58 @@ async def test_definitive_rejection_can_release_but_ambiguous_outcome_cannot():
     # The reconciliation transition clears only the durable ambiguity fence;
     # it does not release the staged slot or resume risk.
     assert db.reserved is True
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_first_order_keeps_client_id_and_cannot_be_replayed():
+    db = LaunchDatabase()
+    repository = PersistenceRepository(db)  # type: ignore[arg-type]
+    await repository.create_mainnet_launch_session(
+        launch_id="launch-ambiguous-first",
+        approval_id="approval-ambiguous-first",
+        image_digest=IMAGE,
+    )
+    assert await repository.reserve_mainnet_risk_order(
+        "launch-ambiguous-first", "order-ambiguous-1"
+    ) is True
+    assert await repository.mark_mainnet_launch_reconciliation_required(
+        "launch-ambiguous-first"
+    ) is True
+    assert db.row["pending_order_client_order_id"] == "order-ambiguous-1"
+    assert await repository.mark_mainnet_launch_reconciled("launch-ambiguous-first") is False
+    assert await repository.reserve_mainnet_risk_order(
+        "launch-ambiguous-first", "order-ambiguous-retry"
+    ) is False
+    assert db.row["pending_order_client_order_id"] == "order-ambiguous-1"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_pending_order_cannot_be_superseded_by_a_new_approval():
+    db = LaunchDatabase()
+    repository = PersistenceRepository(db)  # type: ignore[arg-type]
+    await repository.create_mainnet_launch_session(
+        launch_id="launch-ambiguous-fence",
+        approval_id="approval-ambiguous-fence",
+        image_digest=IMAGE,
+    )
+    assert await repository.reserve_mainnet_risk_order(
+        "launch-ambiguous-fence", "order-pending-ambiguous"
+    ) is True
+    assert await repository.mark_mainnet_launch_reconciliation_required(
+        "launch-ambiguous-fence"
+    ) is True
+
+    with pytest.raises(RuntimeError, match="unresolved client order"):
+        await repository.create_mainnet_launch_session(
+            launch_id="launch-new-approval",
+            approval_id="approval-new-approval",
+            image_digest=IMAGE,
+        )
+
+    assert db.row["launch_id"] == "launch-ambiguous-fence"
+    assert db.row["state"] == "RECONCILIATION_REQUIRED"
+    assert db.row["pending_order_client_order_id"] == "order-pending-ambiguous"
+    assert db.row["submitted_orders"] == 0
 
 
 @pytest.mark.asyncio
@@ -331,8 +440,8 @@ async def test_autonomous_transition_is_atomic_and_restart_requires_reauthorizat
         approval_id="approval-autonomous",
         image_digest=IMAGE,
     )
-    assert await repository.reserve_mainnet_risk_order("launch-approval-autonomous") is True
-    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-autonomous") is True
+    assert await repository.reserve_mainnet_risk_order("launch-approval-autonomous", "order-auto-1") is True
+    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-autonomous", "order-auto-1") is True
 
     activated = await repository.activate_mainnet_autonomous(
         launch_id="launch-approval-autonomous",
@@ -347,16 +456,16 @@ async def test_autonomous_transition_is_atomic_and_restart_requires_reauthorizat
 
     # Autonomous mode has no session-wide order count; each reservation is
     # still guarded by the Worker risk governor before the exchange call.
-    assert await repository.reserve_mainnet_risk_order("launch-approval-autonomous") is True
-    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-autonomous") is True
-    assert await repository.reserve_mainnet_risk_order("launch-approval-autonomous") is True
-    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-autonomous") is True
+    assert await repository.reserve_mainnet_risk_order("launch-approval-autonomous", "order-auto-2") is True
+    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-autonomous", "order-auto-2") is True
+    assert await repository.reserve_mainnet_risk_order("launch-approval-autonomous", "order-auto-3") is True
+    assert await repository.mark_mainnet_risk_order_submitted("launch-approval-autonomous", "order-auto-3") is True
     assert db.row["submitted_orders"] == 3
 
     assert await repository.mark_mainnet_launches_reauth_required() == 1
     assert db.row["state"] == "REAUTH_REQUIRED"
     assert db.row["submitted_orders"] == 3
-    assert await repository.reserve_mainnet_risk_order("launch-approval-autonomous") is False
+    assert await repository.reserve_mainnet_risk_order("launch-approval-autonomous", "order-auto-4") is False
 
     reauthorized = await repository.activate_mainnet_autonomous(
         launch_id="launch-approval-autonomous",
@@ -368,6 +477,67 @@ async def test_autonomous_transition_is_atomic_and_restart_requires_reauthorizat
     assert reauthorized["state"] == "AUTONOMOUS_ACTIVE"
     assert reauthorized["continuation_approval_id"] == "continuation-after-restart"
     assert reauthorized["submitted_orders"] == 3
+
+
+@pytest.mark.asyncio
+async def test_cloud_restart_with_pending_order_requires_reconciliation_not_reapproval():
+    db = AutonomousLaunchDatabase()
+    repository = PersistenceRepository(db)  # type: ignore[arg-type]
+    await repository.create_mainnet_launch_session(
+        launch_id="launch-cloud-pending-restart",
+        approval_id="approval-cloud-pending-restart",
+        image_digest=IMAGE,
+    )
+    assert await repository.reserve_mainnet_risk_order(
+        "launch-cloud-pending-restart", "order-cloud-pending"
+    ) is True
+    # Model a previously reviewed autonomous Cloud launch with one ambiguous
+    # in-flight client order when the process exits.
+    assert db.row is not None
+    db.row.update(
+        {
+            "policy": "AUTONOMOUS_AFTER_REVIEW",
+            "max_risk_increasing_orders": None,
+            "state": "AUTONOMOUS_ACTIVE",
+            "submitted_orders": 1,
+            "reserved_orders": 2,
+            "continuation_approval_id": "continuation-before-restart",
+        }
+    )
+
+    assert await repository.mark_mainnet_launches_reauth_required() == 1
+    assert db.row["state"] == "RECONCILIATION_REQUIRED"
+    assert db.row["pending_order_client_order_id"] == "order-cloud-pending"
+    assert await repository.activate_mainnet_autonomous(
+        launch_id="launch-cloud-pending-restart",
+        continuation_approval_id="continuation-after-restart",
+        first_order_verified_at=datetime.now(UTC),
+        image_digest=IMAGE,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_local_staged_restart_with_pending_order_requires_reconciliation():
+    db = AutonomousLaunchDatabase()
+    repository = PersistenceRepository(db)  # type: ignore[arg-type]
+    await repository.create_mainnet_launch_session(
+        launch_id="launch-local-staged-pending",
+        approval_id="approval-local-staged-pending",
+        image_digest=IMAGE,
+    )
+    assert await repository.reserve_mainnet_risk_order(
+        "launch-local-staged-pending", "order-local-pending"
+    ) is True
+
+    assert await repository.mark_mainnet_launches_reauth_required() == 1
+    assert db.row["state"] == "RECONCILIATION_REQUIRED"
+    assert db.row["pending_order_client_order_id"] == "order-local-pending"
+    assert await repository.mark_mainnet_risk_order_submitted(
+        "launch-local-staged-pending", "order-local-pending"
+    ) is True
+    assert db.row["state"] == "RECONCILIATION_REQUIRED"
+    assert await repository.mark_mainnet_launch_reconciled("launch-local-staged-pending") is True
+    assert db.row["state"] == "PAUSED_NEW_RISK"
 
 
 @pytest.mark.asyncio
