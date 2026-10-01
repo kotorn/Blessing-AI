@@ -224,6 +224,13 @@ export function requiredControlPlaneRole(req: ControlPlaneRequestLike): ControlP
     return mode === 'LIVE' ? 'trading_admin' : 'operator';
   }
 
+  if (route.endsWith('/system/recovery-only')) {
+    const active = (req.body as { active?: unknown } | undefined)?.active;
+    // Entering recovery-only is risk-reducing (operator); any other body, including a
+    // missing/non-true active flag, is a release and strictly requires trading_admin.
+    return active === true ? 'operator' : 'trading_admin';
+  }
+
   if (route.endsWith('/kill-switch') || route.endsWith('/killswitch')) {
     const active = (req.body as { active?: unknown } | undefined)?.active;
     // Disengaging the kill switch (active === false) strictly requires trading_admin.

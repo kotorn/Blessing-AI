@@ -595,6 +595,8 @@ async def test_pilot_caps_and_expiry_block_new_risk(monkeypatch):
     assert expired is not None and "expired" in expired.reason
     drawdown = await evaluate({"current_net_pnl_usdc": Decimal("-5")})
     assert drawdown is not None and "drawdown" in drawdown.reason
+    headroom = await evaluate({"current_net_pnl_usdc": Decimal("-4.9")})
+    assert headroom is not None and "drawdown" in headroom.reason
     already_open = await evaluate({"active_position_count": 1})
     assert already_open is not None and "active" in already_open.reason
 

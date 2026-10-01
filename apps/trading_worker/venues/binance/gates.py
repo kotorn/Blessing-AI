@@ -450,6 +450,8 @@ async def _local_mainnet_risk_gate(
         or validation.stop_loss_risk_usdc > expected_pilot_limits['max_position_stop_risk_usdc']
     ):
         return GateResult(False, 'Live Research Pilot notional or planned stop-risk cap is exceeded')
+    if campaign_dd + validation.stop_loss_risk_usdc > expected_pilot_limits['campaign_drawdown_usdc']:
+        return GateResult(False, 'Live Research Pilot planned stop loss would exceed the campaign drawdown cap')
     if management_mode == 'QUICK' and validation.net_reward_usdc < Decimal('0.25'):
         return GateResult(False, 'QUICK management target must net at least 0.25 USDC after costs')
 

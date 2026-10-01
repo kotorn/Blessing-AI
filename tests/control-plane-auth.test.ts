@@ -294,6 +294,9 @@ describe('control-plane authentication contract', () => {
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/disarm' })).toBe('operator');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/arm', body: { executionMode: 'TESTNET' } })).toBe('operator');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/arm', body: { executionMode: 'LIVE' } })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/recovery-only', body: { active: true } })).toBe('operator');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/recovery-only', body: { active: false } })).toBe('trading_admin');
+    expect(requiredControlPlaneRole({ method: 'POST', path: '/api/system/recovery-only', body: {} })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/mainnet/candidate' })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/mainnet/approve' })).toBe('trading_admin');
     expect(requiredControlPlaneRole({ method: 'POST', path: '/api/local/mainnet/continuation/request' })).toBe('trading_admin');
