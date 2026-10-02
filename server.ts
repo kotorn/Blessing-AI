@@ -134,14 +134,14 @@ function reserveLocalPilotTransition(): boolean {
   localPilotTransitionBusy = true;
   return true;
 }
-function rejectUnreadyLocalPilot(res: Response): boolean {
-  const readiness = currentPilotCapabilityReadiness();
+function rejectUnreadyLocalPilot(res: Response, adminUid?: string): boolean {
+  const readiness = currentPilotCapabilityReadiness(adminUid);
   if (readiness.status === 'READY') return false;
   res.status(409).json({ error: 'LOCAL_PILOT_RUNTIME_NOT_READY', readiness, evidence_status: 'FAIL' });
   return true;
 }
 
-function currentPilotCapabilityReadiness() {
+function currentPilotCapabilityReadiness(adminUid?: string) {
   try {
     const fingerprint = currentLocalFingerprint(
       (process.env.LOCAL_MAINNET_API_KEY_VERSION || '').trim(),
@@ -151,6 +151,10 @@ function currentPilotCapabilityReadiness() {
       root: process.cwd(),
       fingerprint,
       pilotPolicySha256: localLivePilotPolicySha256(),
+      authenticatedServerAuthority: adminUid ? {
+        adminUid,
+        verifiedAt: new Date().toISOString(),
+      } : undefined,
     });
   } catch {
     return localLivePilotReadiness();
@@ -2510,7 +2514,7 @@ app.get('/api/local/pilot/:campaignId', async (req: Request, res: Response) => {
       : null;
     return res.json({
       ...safeLocalLivePilotCampaign(campaign),
-      readiness: currentPilotCapabilityReadiness(),
+      readiness: currentPilotCapabilityReadiness(typeof res.locals.firebaseUid === 'string' ? res.locals.firebaseUid : undefined),
       supervision: supervisor?.pilotCampaignId === campaign.campaignId ? {
         workerResponsiveness: supervisor.workerResponsiveness,
         workerStateObservedAt: supervisor.workerStateObservedAt,
@@ -2550,14 +2554,14 @@ app.get('/api/local/pilot/:campaignId', async (req: Request, res: Response) => {
 
 app.post('/api/local/pilot/approve', async (req: Request, res: Response) => {
   if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
-  if (rejectUnreadyLocalPilot(res)) return;
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  if (rejectUnreadyLocalPilot(res, uid)) return;
   const body = releaseRequestObject(req.body) || {};
   if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
     return res.status(400).json({ error: 'LOCAL_PILOT_APPROVAL_INVALID' });
   }
   const campaignId = String(body.campaignId || '').trim();
-  const uid = res.locals.firebaseUid;
-  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
   try {
     assertCommittedPilotCandidate();
     const store = getServerLocalLivePilotStore();
@@ -2593,13 +2597,13 @@ app.post('/api/local/pilot/approve', async (req: Request, res: Response) => {
 
 app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
   if (!LOCAL_ONLY || !localWorkerSupervisor) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
-  if (rejectUnreadyLocalPilot(res)) return;
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  if (rejectUnreadyLocalPilot(res, uid)) return;
   const body = releaseRequestObject(req.body) || {};
   if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
     return res.status(400).json({ error: 'LOCAL_PILOT_PREPARE_INVALID' });
   }
-  const uid = res.locals.firebaseUid;
-  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
   if (!reserveLocalPilotTransition()) return res.status(409).json({ error: 'LOCAL_PILOT_TRANSITION_IN_PROGRESS' });
   const campaignId = String(body.campaignId || '').trim();
   const store = getServerLocalLivePilotStore();

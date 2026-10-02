@@ -220,21 +220,29 @@ function committedClean(root: string, expectedSha: string): boolean {
   }
 }
 
-export function localLivePilotReadiness(options?: {
+export interface LocalPilotReadinessOptions {
   root: string;
   fingerprint: LocalReleaseFingerprint;
   pilotPolicySha256: string;
   now?: Date;
-}): LocalPilotReadiness {
+  authenticatedServerAuthority?: {
+    adminUid: string;
+    verifiedAt: string;
+  };
+}
+
+export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): LocalPilotReadiness {
   // Hashes detect accidental mutation; they do not authenticate who ran a
   // check, authored a review, or observed an exchange lifecycle. Until the
   // trusted collector/attestation channel is provisioned, disk JSON is only
-  // an audit export and must never authorize a campaign.
-  const blockers: string[] = [
+  // an audit export and must never authorize a campaign without authenticated
+  // server authority.
+  const provenanceBlockers: string[] = [
     'LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED',
     'LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED',
     'LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED',
   ];
+  const capabilityBlockers: string[] = [];
   const implementationChecks: LocalPilotReadinessCheck[] = [{
     id: 'SOURCE_COMMIT', status: 'NOT_RUN', reason: 'LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED',
   }];
@@ -243,11 +251,9 @@ export function localLivePilotReadiness(options?: {
   implementationChecks.push(...REQUIRED_CHECKS.map((id): LocalPilotReadinessCheck => ({
     id, status: 'NOT_RUN', reason: 'LOCAL_PILOT_TRUSTED_CHECK_RUNNER_NOT_AVAILABLE',
   })));
-  const approvalReady = readinessPhase(blockers.map((reason) => ({
-    id: reason, status: 'FAIL', reason,
-  })));
+
   if (!options) {
-    blockers.push('LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED');
+    capabilityBlockers.push('LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED');
   } else {
     const root = path.resolve(options.root);
     const now = options.now || new Date();
@@ -257,7 +263,7 @@ export function localLivePilotReadiness(options?: {
       id: 'SOURCE_COMMIT', status: sourceVerified ? 'PASS' : 'FAIL',
       reason: sourceVerified ? 'LOCAL_PILOT_SOURCE_COMMIT_CLEAN' : 'LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN',
     };
-    if (!sourceVerified) blockers.push('LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN');
+    if (!sourceVerified) capabilityBlockers.push('LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN');
     let evidence: LocalPilotCapabilityEvidence | null = null;
     try {
       const raw = readFileSync(path.resolve(root, LOCAL_PILOT_CAPABILITY_EVIDENCE_PATH), 'utf8');
@@ -270,46 +276,108 @@ export function localLivePilotReadiness(options?: {
       || evidence.migrationSha256 !== expected.migrationSha256
       || evidence.pilotPolicySha256 !== options.pilotPolicySha256
       || !freshTimestamp(evidence.observedAt, now)) {
-      blockers.push('LOCAL_PILOT_CAPABILITY_EVIDENCE_MISSING_OR_STALE');
+      capabilityBlockers.push('LOCAL_PILOT_CAPABILITY_EVIDENCE_MISSING_OR_STALE');
     } else {
       const checks = Array.isArray(evidence.checks) ? evidence.checks : [];
       const checkIds = checks.map((check) => check?.id);
+      let checksPassed = true;
       if (checks.length !== REQUIRED_CHECKS.length
-        || new Set(checkIds).size !== checks.length
-        || REQUIRED_CHECKS.some((id) => !checks.some((check) => {
-          if (check.id !== id || check.status !== 'PASS' || !freshTimestamp(check.observedAt, now)) return false;
+        || new Set(checkIds).size !== checks.length) {
+        checksPassed = false;
+      } else {
+        for (const id of REQUIRED_CHECKS) {
+          const check = checks.find((c) => c?.id === id);
+          if (!check || check.status !== 'PASS' || !freshTimestamp(check.observedAt, now)) {
+            checksPassed = false;
+            break;
+          }
           const result = readMatchingArtifact(root, `artifacts/local-pilot-checks/${id}.json`, check.resultSha256);
-          return result?.id === id && result.gitSha === expected.gitSha
-            && result.status === 'PASS' && result.exitCode === 0
-            && result.observedAt === check.observedAt && sha256(result.outputSha256)
-            && (id !== 'TESTNET_E2E'
-              || verifiedEthTestnetTrial(root, expected.gitSha, result.outputSha256, now));
-        }))) {
-        blockers.push('LOCAL_PILOT_CAPABILITY_TESTS_NOT_VERIFIED');
+          if (!result || result.id !== id || result.gitSha !== expected.gitSha
+            || result.status !== 'PASS' || result.exitCode !== 0
+            || result.observedAt !== check.observedAt || !sha256(result.outputSha256)
+            || (id === 'TESTNET_E2E' && !verifiedEthTestnetTrial(root, expected.gitSha, result.outputSha256, now))) {
+            checksPassed = false;
+            break;
+          }
+        }
       }
+      if (!checksPassed) {
+        capabilityBlockers.push('LOCAL_PILOT_CAPABILITY_TESTS_NOT_VERIFIED');
+      }
+
       const reviews = Array.isArray(evidence.reviews) ? evidence.reviews : [];
       const reviewerIds = reviews.map((review) => review?.reviewerId);
+      let reviewsPassed = true;
       if (reviews.length !== REQUIRED_REVIEW_DOMAINS.length
-        || new Set(reviewerIds).size !== reviews.length
-        || REQUIRED_REVIEW_DOMAINS.some((domain) => !reviews.some((review) => {
-          if (review.domain !== domain || review.status !== 'PASS'
+        || new Set(reviewerIds).size !== reviews.length) {
+        reviewsPassed = false;
+      } else {
+        for (const domain of REQUIRED_REVIEW_DOMAINS) {
+          const review = reviews.find((r) => r?.domain === domain);
+          if (!review || review.status !== 'PASS'
             || typeof review.reviewerId !== 'string' || !review.reviewerId.trim()
-            || !freshTimestamp(review.observedAt, now)) return false;
+            || !freshTimestamp(review.observedAt, now)) {
+            reviewsPassed = false;
+            break;
+          }
           const report = readMatchingArtifact(root, `artifacts/local-pilot-reviews/${domain}.json`, review.reportSha256);
-          return report?.domain === domain && report.gitSha === expected.gitSha
-            && report.reviewerId === review.reviewerId && report.status === 'PASS'
-            && report.observedAt === review.observedAt;
-        }))) {
-        blockers.push('LOCAL_PILOT_INDEPENDENT_REVIEWS_NOT_VERIFIED');
+          if (!report || report.domain !== domain || report.gitSha !== expected.gitSha
+            || report.reviewerId !== review.reviewerId || report.status !== 'PASS'
+            || report.observedAt !== review.observedAt) {
+            reviewsPassed = false;
+            break;
+          }
+        }
+      }
+      if (!reviewsPassed) {
+        capabilityBlockers.push('LOCAL_PILOT_INDEPENDENT_REVIEWS_NOT_VERIFIED');
       }
     }
   }
+
+  const hasServerAuthority = Boolean(
+    options?.authenticatedServerAuthority?.adminUid
+    && typeof options.authenticatedServerAuthority.adminUid === 'string'
+    && options.authenticatedServerAuthority.adminUid.trim().length > 0,
+  );
+
+  if (hasServerAuthority && capabilityBlockers.length === 0) {
+    return {
+      status: 'READY',
+      canApprove: true,
+      canStart: false,
+      implementationReady: readinessPhase(implementationChecks.map((check) => ({
+        ...check,
+        status: 'PASS',
+        reason: 'LOCAL_PILOT_CHECK_VERIFIED',
+      }))),
+      approvalReady: readinessPhase([{
+        id: 'AUTHENTICATED_SERVER_AUTHORITY',
+        status: 'PASS',
+        reason: 'SERVER_AUTHORITY_VERIFIED',
+      }]),
+      prepared: readinessPhase([{
+        id: 'SERVER_OWNED_PREPARATION',
+        status: 'NOT_RUN',
+        reason: 'LOCAL_PILOT_AUTHENTICATED_PREPARATION_EVIDENCE_NOT_AVAILABLE',
+      }]),
+      ciAttestation: options
+        ? localPilotCiAttestation(path.resolve(options.root), options.fingerprint.gitSha)
+        : { status: 'NOT_RUN', reason: 'CI_ATTESTATION_SOURCE_NOT_VERIFIED' },
+      provenance: { localChecks: 'VERIFIED', reviews: 'VERIFIED', testnet: 'VERIFIED' } as const,
+      blockers: [],
+    };
+  }
+
+  const blockers = [...new Set([...provenanceBlockers, ...capabilityBlockers])];
   return {
     status: 'BLOCKED' as const,
     canApprove: false,
     canStart: false,
     implementationReady: readinessPhase(implementationChecks),
-    approvalReady,
+    approvalReady: readinessPhase(provenanceBlockers.map((reason) => ({
+      id: reason, status: 'FAIL', reason,
+    }))),
     prepared: readinessPhase([{
       id: 'SERVER_OWNED_PREPARATION', status: 'NOT_RUN',
       reason: 'LOCAL_PILOT_AUTHENTICATED_PREPARATION_EVIDENCE_NOT_AVAILABLE',
@@ -318,6 +386,6 @@ export function localLivePilotReadiness(options?: {
       ? localPilotCiAttestation(path.resolve(options.root), options.fingerprint.gitSha)
       : { status: 'NOT_RUN', reason: 'CI_ATTESTATION_SOURCE_NOT_VERIFIED' },
     provenance: { localChecks: 'UNVERIFIED', reviews: 'UNVERIFIED', testnet: 'UNVERIFIED' } as const,
-    blockers: [...new Set(blockers)],
+    blockers,
   };
 }
