@@ -85,6 +85,7 @@ import {
   localLivePilotBinding,
   localLivePilotCanPrepare,
   localLivePilotCanStart,
+  assertLocalLivePilotRecoveryReleaseAllowed,
   newLocalLivePilotCampaign,
   validateLocalLivePilotActor,
   type LocalLivePilotCampaign,
@@ -2881,11 +2882,14 @@ app.post('/api/local/pilot/close-only', async (req: Request, res: Response) => {
   if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
     return res.status(400).json({ error: 'LOCAL_PILOT_CLOSE_ONLY_INVALID' });
   }
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
   if (!reserveLocalPilotTransition()) return res.status(409).json({ error: 'LOCAL_PILOT_TRANSITION_IN_PROGRESS' });
   try {
     const store = getServerLocalLivePilotStore();
     const campaign = await store.get(String(body.campaignId || '').trim());
     if (!campaign) return res.status(404).json({ error: 'LOCAL_PILOT_NOT_FOUND' });
+    if (campaign.adminUid !== uid) return res.status(403).json({ error: 'LOCAL_PILOT_CLOSER_UID_MISMATCH' });
     if (!['APPROVED', 'ACTIVE', 'EXPIRED'].includes(campaign.status)) {
       return res.status(409).json({ error: 'LOCAL_PILOT_CANNOT_ENTER_CLOSE_ONLY_FROM_STATUS' });
     }
@@ -4081,6 +4085,20 @@ app.post('/api/system/recovery-only', async (req, res) => {
         return res.status(409).json({ error: 'LOCAL_PILOT_WORKER_CAMPAIGN_MISMATCH' });
       }
       await confirmRunningLocalPilotCampaign(campaignId);
+      if (req.body?.active !== true) {
+        // Release re-opens new-risk authority: bound admin + ACTIVE unexpired campaign only.
+        try {
+          assertLocalLivePilotRecoveryReleaseAllowed(
+            await getServerLocalLivePilotStore().get(campaignId),
+            typeof res.locals.firebaseUid === 'string' ? res.locals.firebaseUid : '',
+          );
+        } catch (releaseError) {
+          const code = releaseError instanceof Error ? releaseError.message : '';
+          if (code === 'LOCAL_PILOT_RELEASE_UID_MISMATCH') return res.status(403).json({ error: code });
+          if (code === 'LOCAL_PILOT_NOT_FOUND') return res.status(404).json({ error: code });
+          return res.status(409).json({ error: 'LOCAL_PILOT_NOT_ACTIVE' });
+        }
+      }
       recoveryBody = { active: req.body?.active };
     }
     const forwarded = await forwardWorkerRequest('/recovery-only', {

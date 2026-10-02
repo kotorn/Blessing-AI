@@ -14,6 +14,7 @@ import {
   localLivePilotCanPrepare,
   localLivePilotCanStart,
   localLivePilotCanIncreaseRisk,
+  assertLocalLivePilotRecoveryReleaseAllowed,
   localLivePilotBinding,
   newLocalLivePilotCampaign,
   type LocalLivePilotInput,
@@ -67,6 +68,30 @@ describe('Local 7-day live research pilot domain', () => {
     expect(localLivePilotCanStart(active, NOW)).toBe(true);
     expect(localLivePilotCanPrepare({ ...active, status: 'CLOSE_ONLY' }, NOW)).toBe(false);
     expect(localLivePilotCanStart(active, new Date(Date.parse(approved.campaignExpiresAt || '') + 1))).toBe(false);
+  });
+
+  it('allows recovery-only release only for the bound admin of an ACTIVE unexpired campaign', async () => {
+    const { store, campaign, expected } = await pending();
+    const approved = await store.approve(campaign.campaignId, ADMIN, expected, NOW);
+    expect(() => assertLocalLivePilotRecoveryReleaseAllowed(approved, ADMIN.uid, NOW))
+      .toThrow('LOCAL_PILOT_NOT_ACTIVE');
+    const active = await store.activate(campaign.campaignId, expected, NOW);
+    expect(() => assertLocalLivePilotRecoveryReleaseAllowed(active, ADMIN.uid, NOW)).not.toThrow();
+    expect(() => assertLocalLivePilotRecoveryReleaseAllowed(null, ADMIN.uid, NOW))
+      .toThrow('LOCAL_PILOT_NOT_FOUND');
+    expect(() => assertLocalLivePilotRecoveryReleaseAllowed(active, 'someone-else', NOW))
+      .toThrow('LOCAL_PILOT_RELEASE_UID_MISMATCH');
+    expect(() => assertLocalLivePilotRecoveryReleaseAllowed(active, '', NOW))
+      .toThrow('LOCAL_PILOT_RELEASE_UID_MISMATCH');
+    const afterExpiry = new Date(Date.parse(active.campaignExpiresAt || '') + 1);
+    expect(() => assertLocalLivePilotRecoveryReleaseAllowed(active, ADMIN.uid, afterExpiry))
+      .toThrow('LOCAL_PILOT_NOT_ACTIVE');
+    const closeOnly = await store.enterCloseOnly(campaign.campaignId, expected, NOW);
+    expect(() => assertLocalLivePilotRecoveryReleaseAllowed(closeOnly, ADMIN.uid, NOW))
+      .toThrow('LOCAL_PILOT_NOT_ACTIVE');
+    const revoked = await store.revoke(campaign.campaignId, ADMIN, expected, NOW);
+    expect(() => assertLocalLivePilotRecoveryReleaseAllowed(revoked, ADMIN.uid, NOW))
+      .toThrow('LOCAL_PILOT_NOT_ACTIVE');
   });
 
   it('does not revoke an eligible campaign when worker recovery-only is rejected', async () => {

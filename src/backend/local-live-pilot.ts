@@ -278,6 +278,20 @@ export function localLivePilotCanIncreaseRisk(campaign: LocalLivePilotCampaign, 
     && Date.parse(campaign.campaignExpiresAt || '') > now.getTime();
 }
 
+/**
+ * Releasing recovery-only re-opens new-risk authority on the live Worker, so it
+ * requires the bound admin and a still-ACTIVE, unexpired campaign.
+ */
+export function assertLocalLivePilotRecoveryReleaseAllowed(
+  campaign: LocalLivePilotCampaign | null | undefined,
+  actorUid: string,
+  now = new Date(),
+): void {
+  if (!campaign) throw new Error('LOCAL_PILOT_NOT_FOUND');
+  if (!actorUid || campaign.adminUid !== actorUid) throw new Error('LOCAL_PILOT_RELEASE_UID_MISMATCH');
+  if (!localLivePilotCanIncreaseRisk(campaign, now)) throw new Error('LOCAL_PILOT_NOT_ACTIVE');
+}
+
 /** An approved/active campaign may prepare a DISARMED Worker; only start permits new risk. */
 export function localLivePilotCanPrepare(campaign: LocalLivePilotCampaign, now = new Date()): boolean {
   return validateLocalLivePilotCampaign(campaign, now).length === 0

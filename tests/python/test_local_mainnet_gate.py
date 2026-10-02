@@ -606,6 +606,41 @@ async def test_pilot_caps_and_expiry_block_new_risk(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pilot_campaign_drawdown_cap_includes_costs_not_only_stop_risk(monkeypatch):
+    monkeypatch.setenv("LOCAL_ONLY", "true")
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")
+    intent = make_intent().model_copy(update={"quantity": Decimal("0.15")})  # stop risk 1.5
+
+    async def evaluate(prior_drawdown):
+        context = make_risk_context()
+        context["live_research_pilot"].update({"current_net_pnl_usdc": -prior_drawdown})
+
+        async def risk_context(_intent, _execution):
+            return context
+
+        async def cost_evidence(_intent, _context):
+            return make_cost_evidence(intent)
+
+        return await _local_mainnet_risk_gate(
+            make_adapter(
+                get_local_mainnet_risk_context=risk_context,
+                get_local_mainnet_cost_evidence=cost_evidence,
+            ),
+            intent,
+            entry_price=Decimal("100"),
+            quantity=Decimal("0.15"),
+        )
+
+    # Stop risk 1.5 + costs (fees/funding/slippage) 0.3 = 1.8 total risk per order.
+    rejected = await evaluate(Decimal("3.5"))  # 3.5 + 1.5 = 5.0 passes stop-only, 5.3 with costs
+    assert rejected is not None and "campaign drawdown cap" in rejected.reason
+    just_over = await evaluate(Decimal("3.21"))  # 3.21 + 1.8 = 5.01
+    assert just_over is not None and "campaign drawdown cap" in just_over.reason
+    exact = await evaluate(Decimal("3.2"))  # 3.2 + 1.8 = 5.0 exactly at cap
+    assert exact is None
+
+
+@pytest.mark.asyncio
 async def test_strategy_cost_estimates_never_count_as_exchange_cost_evidence(monkeypatch):
     monkeypatch.setenv("LOCAL_ONLY", "true")
     monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")

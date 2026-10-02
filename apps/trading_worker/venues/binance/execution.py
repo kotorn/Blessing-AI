@@ -3716,6 +3716,35 @@ class BinanceExecutionAdapter:
             )
         )
 
+    async def _local_mainnet_close_order_filled(
+        self, intent: OrderIntent, close_client_order_id: str
+    ) -> bool:
+        """Read-only check that the reduce-only emergency close is fully FILLED."""
+        try:
+            response = await self.query_order(str(intent.symbol), close_client_order_id)
+            if not isinstance(response, dict):
+                return False
+            close_side = (
+                "SELL"
+                if str(getattr(intent.side, "value", intent.side)).upper() == "BUY"
+                else "BUY"
+            )
+            executed = Decimal(str(response.get("executedQty")))
+            original = Decimal(str(response.get("origQty")))
+            return bool(
+                str(response.get("clientOrderId") or "") == close_client_order_id
+                and str(response.get("symbol") or "").upper() == str(intent.symbol).upper()
+                and str(response.get("side") or "").upper() == close_side
+                and str(response.get("positionSide") or "BOTH").upper() == "BOTH"
+                and _exchange_bool(response.get("reduceOnly")) is True
+                and str(response.get("status") or "").upper() == "FILLED"
+                and executed.is_finite()
+                and executed > 0
+                and executed == original
+            )
+        except Exception:
+            return False
+
     async def _verify_local_mainnet_close(
         self,
         intent: OrderIntent,
@@ -4195,21 +4224,35 @@ class BinanceExecutionAdapter:
                     intent, record, close_client_order_id, authority=authority
                 )
             record = dict(claimed)
-            cancellation_confirmed = await self._cancel_local_mainnet_owned_algos(record)
-            if cancellation_confirmed:
-                record["state_reason"] = self._local_recovery_reason(record, algo_cancel="CONFIRMED")
-                # Failure to acknowledge cleanup must preserve the durable
-                # ATTEMPTED_UNKNOWN marker; it cannot permit another DELETE.
-                if not await self._persist_local_mainnet_protection(record):
-                    record = dict(claimed)
-            # _execute_decision re-derives the same stable client ID from the
-            # decision ID, passes the durable outbox barrier, and performs one
-            # risk-reducing POST. It never retries a POST after ambiguity.
-            await self._execute_decision(
-                close_decision,
-                allow_emergency_fallback=True,
-                authority=authority,
-            )
+            # Send the reduce-only close first. The exchange stop/target stay
+            # live until the close is proven FILLED, so a failed close never
+            # leaves the position unprotected (the one-shot claim forbids a
+            # retry). _execute_decision re-derives the same stable client ID
+            # from the decision ID, passes the durable outbox barrier, and
+            # performs one risk-reducing POST. It never retries after ambiguity.
+            try:
+                await self._execute_decision(
+                    close_decision,
+                    allow_emergency_fallback=True,
+                    authority=authority,
+                )
+            finally:
+                close_filled = await self._local_mainnet_close_order_filled(
+                    intent, close_client_order_id
+                )
+                # Once the close has filled the position is flat. The owned
+                # stop/target are reduce-only, so a trigger racing this window
+                # is reduced to zero by the exchange and cannot reduce twice
+                # or open the opposite side; cancelling them is only cleanup.
+                # On any failure or ambiguity they are left in place.
+                if close_filled:
+                    cancellation_confirmed = await self._cancel_local_mainnet_owned_algos(record)
+                    if cancellation_confirmed:
+                        record["state_reason"] = self._local_recovery_reason(record, algo_cancel="CONFIRMED")
+                        # Failure to acknowledge cleanup must preserve the durable
+                        # ATTEMPTED_UNKNOWN marker; it cannot permit another DELETE.
+                        if not await self._persist_local_mainnet_protection(record):
+                            record = dict(claimed)
         except Exception as exc:
             logger.error(
                 "Local Mainnet close-only request is unresolved: %s", type(exc).__name__

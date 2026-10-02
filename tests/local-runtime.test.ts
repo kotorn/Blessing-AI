@@ -179,6 +179,28 @@ describe('local runtime safety contract', () => {
     expect(revoke).toContain('finally {\n    localPilotTransitionBusy = false;');
   });
 
+  it('binds recovery-only release and close-only to the campaign admin and an ACTIVE campaign', () => {
+    const closeOnly = server
+      .split("app.post('/api/local/pilot/close-only'")[1]
+      ?.split("app.post('/api/local/pilot/revoke'")[0] ?? '';
+    const recoveryRoute = server
+      .split("app.post('/api/system/recovery-only'")[1]
+      ?.split("app.post('/api/system/kill-switch'")[0] ?? '';
+
+    expect(closeOnly).toContain('res.locals.firebaseUid');
+    expect(closeOnly).toContain("'FIREBASE_IDENTITY_MISSING'");
+    expect(closeOnly).toContain('campaign.adminUid !== uid');
+    expect(closeOnly).toContain("'LOCAL_PILOT_CLOSER_UID_MISMATCH'");
+    expect(closeOnly.indexOf('campaign.adminUid !== uid'))
+      .toBeLessThan(closeOnly.indexOf("forwardWorkerRequest('/recovery-only'"));
+    expect(recoveryRoute).toContain('assertLocalLivePilotRecoveryReleaseAllowed(');
+    expect(recoveryRoute).toContain('res.locals.firebaseUid');
+    expect(recoveryRoute).toContain('LOCAL_PILOT_RELEASE_UID_MISMATCH');
+    expect(recoveryRoute).toContain('LOCAL_PILOT_NOT_ACTIVE');
+    expect(recoveryRoute.indexOf('assertLocalLivePilotRecoveryReleaseAllowed('))
+      .toBeLessThan(recoveryRoute.indexOf("forwardWorkerRequest('/recovery-only'"));
+  });
+
   it('permits ACTIVE campaign re-prepare only through the DISARMED flat-account preflight', () => {
     const prepareRoute = server
       .split("app.post('/api/local/pilot/prepare'")[1]

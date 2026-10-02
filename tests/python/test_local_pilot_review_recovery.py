@@ -164,6 +164,7 @@ def make_adapter(row=None):
     }]))
     adapter.query_order = AsyncMock(return_value=None)
     adapter._cancel_local_mainnet_owned_algos = AsyncMock(return_value=True)
+    adapter._local_mainnet_close_order_filled = AsyncMock(return_value=True)
     adapter._verify_local_mainnet_close = AsyncMock(return_value=False)
     adapter._execute_decision = AsyncMock(return_value=[])
     adapter.on_local_mainnet_protection_update = repository.persist
@@ -337,6 +338,53 @@ async def test_legacy_reserved_owner_is_claimed_against_exact_reason():
     await adapter._local_mainnet_close_only_once(intent, order, repository.row, reason="restart", authority=authority)
     assert repository.claims[0]["expected_state_reason"] == reason
     adapter._execute_decision.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_emergency_close_is_sent_before_algos_are_cancelled_and_only_after_fill_check():
+    adapter, authority, repository = make_adapter()
+    events = []
+
+    async def submit(*args, **kwargs):
+        events.append("close_post")
+        return []
+
+    async def filled(*args, **kwargs):
+        events.append("close_fill_verified")
+        return True
+
+    async def cancel(*args, **kwargs):
+        events.append("algo_cancel")
+        return True
+
+    adapter._execute_decision = AsyncMock(side_effect=submit)
+    adapter._local_mainnet_close_order_filled = AsyncMock(side_effect=filled)
+    adapter._cancel_local_mainnet_owned_algos = AsyncMock(side_effect=cancel)
+    intent, order = entry_objects(adapter, repository.row)
+    await adapter._local_mainnet_close_only_once(intent, order, repository.row, reason="test", authority=authority)
+    # The close is reduce-only, so the still-live reduce-only stop/target can never
+    # reduce twice or flip the position once the close has filled; they are removed afterwards.
+    assert events == ["close_post", "close_fill_verified", "algo_cancel"]
+    assert "algo_cancel=CONFIRMED" in repository.row["state_reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("post_failure", ["rejected", "raises"])
+async def test_failed_emergency_close_leaves_exchange_protection_in_place(post_failure):
+    adapter, authority, repository = make_adapter()
+    adapter._local_mainnet_close_order_filled = AsyncMock(return_value=False)
+    if post_failure == "raises":
+        adapter._execute_decision = AsyncMock(side_effect=RuntimeError("exchange rejected close"))
+    intent, order = entry_objects(adapter, repository.row)
+    result = await adapter._local_mainnet_close_only_once(
+        intent, order, repository.row, reason="test", authority=authority
+    )
+    adapter._execute_decision.assert_awaited_once()
+    adapter._cancel_local_mainnet_owned_algos.assert_not_awaited()
+    assert result is False
+    assert "algo_cancel=CONFIRMED" not in repository.row["state_reason"]
+    assert repository.row["state"] == "UNKNOWN"
+    assert authority.pause_new_risk is True
 
 
 @pytest.mark.asyncio
