@@ -3745,6 +3745,28 @@ class BinanceExecutionAdapter:
         except Exception:
             return False
 
+    async def _local_mainnet_position_is_flat(self, intent: OrderIntent) -> bool:
+        """Read signed position risk and verify that the net position is flat (0)."""
+        try:
+            positions = await self.rest_client.request(
+                "GET", self._position_risk_path, signed=True
+            )
+            if not isinstance(positions, list):
+                return False
+            matching = [
+                row
+                for row in positions
+                if isinstance(row, dict)
+                and str(row.get("symbol") or "").upper() == str(intent.symbol).upper()
+                and str(row.get("positionSide") or "BOTH").upper() == "BOTH"
+            ]
+            if len(matching) != 1:
+                return False
+            amount = Decimal(str(matching[0].get("positionAmt")))
+            return amount.is_finite() and amount == 0
+        except Exception:
+            return False
+
     async def _verify_local_mainnet_close(
         self,
         intent: OrderIntent,
@@ -4240,12 +4262,18 @@ class BinanceExecutionAdapter:
                 close_filled = await self._local_mainnet_close_order_filled(
                     intent, close_client_order_id
                 )
-                # Once the close has filled the position is flat. The owned
-                # stop/target are reduce-only, so a trigger racing this window
-                # is reduced to zero by the exchange and cannot reduce twice
-                # or open the opposite side; cancelling them is only cleanup.
-                # On any failure or ambiguity they are left in place.
-                if close_filled:
+                position_is_flat = (
+                    await self._local_mainnet_position_is_flat(intent)
+                    if close_filled
+                    else False
+                )
+                # Once the close has filled and the position reads flat,
+                # the position is verified flat. The owned stop/target are
+                # reduce-only, so a trigger racing this window is reduced to zero
+                # by the exchange and cannot reduce twice or open the opposite
+                # side; cancelling them is only cleanup.
+                # On any failure or ambiguity they are left in place (fail closed).
+                if close_filled and position_is_flat:
                     cancellation_confirmed = await self._cancel_local_mainnet_owned_algos(record)
                     if cancellation_confirmed:
                         record["state_reason"] = self._local_recovery_reason(record, algo_cancel="CONFIRMED")

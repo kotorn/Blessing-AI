@@ -193,6 +193,8 @@ describe('local runtime safety contract', () => {
     expect(closeOnly).toContain("'LOCAL_PILOT_CLOSER_UID_MISMATCH'");
     expect(closeOnly.indexOf('campaign.adminUid !== uid'))
       .toBeLessThan(closeOnly.indexOf("forwardWorkerRequest('/recovery-only'"));
+    expect(recoveryRoute).toContain('reserveLocalPilotTransition');
+    expect(recoveryRoute).toContain('LOCAL_PILOT_TRANSITION_IN_PROGRESS');
     expect(recoveryRoute).toContain('assertLocalLivePilotRecoveryReleaseAllowed(');
     expect(recoveryRoute).toContain('res.locals.firebaseUid');
     expect(recoveryRoute).toContain('LOCAL_PILOT_RELEASE_UID_MISMATCH');

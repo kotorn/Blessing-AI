@@ -7,7 +7,7 @@ export default tseslint.config(
     // Generated SDK, build output, and pytest scratch dirs are not reviewable source.
     // .zcode/ holds tool-generated workflow-run artifacts (same class as dist/), not reviewable source.
     // Runtime secrets are intentionally ACL-protected and must never be scanned.
-    ignores: ['dist/', 'node_modules/', 'src/dataconnect-generated/', '.pytest_temp*/', '.pytest-tmp*/', '.zcode/', '.local-secrets/'],
+    ignores: ['dist/', 'node_modules/', 'src/dataconnect-generated/', '.pytest_temp*/', '.pytest-tmp*/', '.zcode/', '.local-secrets/', '.claude/'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

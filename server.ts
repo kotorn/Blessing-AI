@@ -4075,6 +4075,7 @@ app.post('/api/system/pause-new-risk', async (req, res) => {
 });
 
 app.post('/api/system/recovery-only', async (req, res) => {
+  let reservedPilotTransition = false;
   try {
     let recoveryBody = req.body;
     const supervisor = localWorkerSupervisor?.status();
@@ -4087,6 +4088,10 @@ app.post('/api/system/recovery-only', async (req, res) => {
       await confirmRunningLocalPilotCampaign(campaignId);
       if (req.body?.active !== true) {
         // Release re-opens new-risk authority: bound admin + ACTIVE unexpired campaign only.
+        if (!reserveLocalPilotTransition()) {
+          return res.status(409).json({ error: 'LOCAL_PILOT_TRANSITION_IN_PROGRESS' });
+        }
+        reservedPilotTransition = true;
         try {
           assertLocalLivePilotRecoveryReleaseAllowed(
             await getServerLocalLivePilotStore().get(campaignId),
@@ -4124,6 +4129,10 @@ app.post('/api/system/recovery-only', async (req, res) => {
     res.json(forwarded.data);
   } catch  {
     res.status(503).json({ error: 'WORKER_UNREACHABLE' });
+  } finally {
+    if (reservedPilotTransition) {
+      localPilotTransitionBusy = false;
+    }
   }
 });
 

@@ -165,6 +165,7 @@ def make_adapter(row=None):
     adapter.query_order = AsyncMock(return_value=None)
     adapter._cancel_local_mainnet_owned_algos = AsyncMock(return_value=True)
     adapter._local_mainnet_close_order_filled = AsyncMock(return_value=True)
+    adapter._local_mainnet_position_is_flat = AsyncMock(return_value=True)
     adapter._verify_local_mainnet_close = AsyncMock(return_value=False)
     adapter._execute_decision = AsyncMock(return_value=[])
     adapter.on_local_mainnet_protection_update = repository.persist
@@ -604,3 +605,40 @@ def test_recovery_reason_preserves_attempt_markers_when_diagnostics_are_long():
     assert len(result) <= 256
     assert "algo_cancel=ATTEMPTED_UNKNOWN" in result
     assert "entry_cancel=ATTEMPTED_UNKNOWN" in result
+
+
+@pytest.mark.asyncio
+async def test_close_filled_but_non_flat_position_leaves_algos_in_place():
+    adapter, authority, repository = make_adapter()
+    intent, order = entry_objects(adapter, repository.row)
+    adapter._local_mainnet_close_order_filled = AsyncMock(return_value=True)
+    adapter._local_mainnet_position_is_flat = AsyncMock(return_value=False)
+
+    await adapter._local_mainnet_close_only_once(
+        intent, order, repository.row, reason="test", authority=authority
+    )
+    adapter._execute_decision.assert_awaited_once()
+    adapter._cancel_local_mainnet_owned_algos.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_local_mainnet_position_is_flat_real_implementation():
+    adapter, _, repository = make_adapter()
+    intent, _ = entry_objects(adapter, repository.row)
+
+    # Flat position returns True
+    adapter.rest_client.request = AsyncMock(return_value=[
+        {"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0"}
+    ])
+    assert await BinanceExecutionAdapter._local_mainnet_position_is_flat(adapter, intent) is True
+
+    # Non-flat position returns False
+    adapter.rest_client.request = AsyncMock(return_value=[
+        {"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0.05"}
+    ])
+    assert await BinanceExecutionAdapter._local_mainnet_position_is_flat(adapter, intent) is False
+
+    # Request failure or empty returns False
+    adapter.rest_client.request = AsyncMock(side_effect=Exception("network"))
+    assert await BinanceExecutionAdapter._local_mainnet_position_is_flat(adapter, intent) is False
+
