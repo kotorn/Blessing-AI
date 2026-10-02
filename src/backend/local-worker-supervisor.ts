@@ -591,7 +591,7 @@ export class LocalWorkerSupervisor {
           || (this.mode === 'PAPER' && state.mainnet_live_approved !== false)
           || (this.workerPilotCampaignId !== null
             && state.pilot_campaign_id !== this.workerPilotCampaignId)
-          || (this.workerPilotCampaignId === null && state.pilot_campaign_id != null)) {
+          || (this.workerPilotCampaignId === null && Boolean(state.pilot_campaign_id))) {
           this.lastStateObservedAt = new Date().toISOString();
           this.workerHeartbeatAt = null;
           this.pilotLifecycleMonitorStatus = 'UNKNOWN';
