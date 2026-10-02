@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Activity, AlertTriangle, CheckCircle2, LoaderCircle, ShieldAlert } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { LocalLivePilotStrategyId } from '../backend/local-live-pilot';
@@ -64,6 +64,17 @@ export const LocalLivePilotPanel: React.FC = () => {
   const [readiness, setReadiness] = useState<PilotResponse['readiness']>();
   const [preparation, setPreparation] = useState<PilotResponse['preparation']>();
   const [runtime, setRuntime] = useState<PilotResponse['runtime']>();
+
+  useEffect(() => {
+    let active = true;
+    void apiClient.get<PilotResponse>('/api/local/pilot/readiness')
+      .then((res) => {
+        if (!active) return;
+        if (res.readiness) setReadiness(res.readiness);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   const runAction = useCallback(async (action: string, payload?: Record<string, unknown>) => {
     setBusy(true);

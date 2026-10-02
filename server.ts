@@ -2230,7 +2230,7 @@ async function localPersistenceIsDurable(): Promise<boolean> {
       && persistence.durable === true
       && persistence.runtime_target === 'LOCAL'
       && persistence.database_provider === 'POSTGRES_LOCAL'
-      && persistence.database_host === '127.0.0.1'
+      && (persistence.database_host === '127.0.0.1' || persistence.database_host === 'host.docker.internal' || persistence.database_host === 'localhost')
       && Number(persistence.database_port) === 5433
       && persistence.database_identity_verified === true
       && Number(persistence.pending_outbox) === 0
@@ -2471,6 +2471,16 @@ app.post('/api/local/pilot/request', async (req: Request, res: Response) => {
     const reason = error instanceof Error ? error.message : 'LOCAL_PILOT_REQUEST_FAILED';
     return res.status(503).json({ error: 'LOCAL_PILOT_REQUEST_FAILED', reason, evidence_status: 'UNVERIFIED' });
   }
+});
+
+app.get('/api/local/pilot/readiness', async (_req: Request, res: Response) => {
+  if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  const uid = typeof res.locals.firebaseUid === 'string' ? res.locals.firebaseUid : undefined;
+  const readiness = currentPilotCapabilityReadiness(uid);
+  return res.json({
+    readiness,
+    evidence_status: readiness.status === 'READY' ? 'VERIFIED' : 'UNVERIFIED',
+  });
 });
 
 app.get('/api/local/pilot/:campaignId', async (req: Request, res: Response) => {
