@@ -1,6 +1,7 @@
 import React from 'react';
 import { ArchitectureReviewViewer } from '../components/ArchitectureReviewViewer';
 import { Sliders } from 'lucide-react';
+import { LocalLivePilotPanel } from '../components/LocalLivePilotPanel';
 
 export const SettingsPage: React.FC = () => {
   return (
@@ -15,6 +16,7 @@ export const SettingsPage: React.FC = () => {
         </p>
       </div>
 
+      <LocalLivePilotPanel />
       <ArchitectureReviewViewer />
     </div>
   );

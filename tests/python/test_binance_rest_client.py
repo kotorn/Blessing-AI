@@ -62,9 +62,68 @@ async def test_transport_rejects_unreviewed_endpoint_before_network_call():
     client, session, _ = make_client([])
 
     with pytest.raises(ValueError, match="endpoint allowlist"):
-        await client.request("GET", "/fapi/v1/leverageBracket")
+        await client.request("GET", "/fapi/v1/notReviewedEndpoint")
 
     assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_order_history_endpoints_are_read_only_allowlisted():
+    client, session, _ = make_client([FakeResponse(200, [])])
+
+    assert await client.request(
+        "GET", "/fapi/v1/allOrders", signed=True,
+        params={"symbol": "ETHUSDC", "orderId": 1, "limit": 1000},
+    ) == []
+    assert len(session.calls) == 1
+    with pytest.raises(ValueError, match="endpoint allowlist"):
+        await client.request("POST", "/fapi/v1/allOrders", signed=True)
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,get_allowed,post_allowed", [
+    ("/fapi/v1/algoOrder", True, True),
+    ("/fapi/v1/openAlgoOrders", True, False),
+    ("/fapi/v1/allAlgoOrders", True, False),
+    ("/papi/v1/um/algo/algoOrder", True, False),
+    ("/papi/v1/um/algo/order", False, True),
+    ("/papi/v1/um/algo/openAlgoOrders", True, False),
+    ("/papi/v1/um/algo/allAlgoOrders", True, False),
+])
+async def test_algo_history_endpoints_are_allowlisted(path, get_allowed, post_allowed):
+    client, session, _ = make_client([FakeResponse(200, []), FakeResponse(200, {})])
+    client.portfolio_margin = path.startswith("/papi/")
+
+    if get_allowed:
+        assert await client.request("GET", path, signed=True, params={"symbol": "ETHUSDC"}) == []
+        assert len(session.calls) == 1
+    else:
+        with pytest.raises(ValueError, match="endpoint allowlist"):
+            await client.request("GET", path, signed=True, params={"symbol": "ETHUSDC"})
+        assert len(session.calls) == 0
+    if post_allowed:
+        await client.request("POST", path, signed=True, params={"symbol": "ETHUSDC"})
+        assert len(session.calls) == int(get_allowed) + 1
+    else:
+        with pytest.raises(ValueError, match="endpoint allowlist"):
+            await client.request("POST", path, signed=True, params={"symbol": "ETHUSDC"})
+        assert len(session.calls) == int(get_allowed)
+
+
+@pytest.mark.asyncio
+async def test_read_only_client_blocks_algo_order_mutation_before_network():
+    client, session, _ = make_client([])
+    client.read_only = True
+
+    with pytest.raises(PermissionError, match="cannot mutate an order endpoint"):
+        await client.request(
+            "POST", "/fapi/v1/algoOrder", signed=True,
+            params={"symbol": "ETHUSDC", "algoType": "CONDITIONAL"},
+        )
+
+    assert session.calls == []
+    assert client.order_endpoint_attempts == 1
 
 
 @pytest.mark.asyncio
@@ -143,6 +202,58 @@ async def test_rate_limit_records_retry_after_without_resubmission():
         await client.request("POST", "/fapi/v1/order", signed=True)
     assert len(session.calls) == 1
     assert client._throttle_until >= time.monotonic() + 1.0
+
+
+@pytest.mark.asyncio
+async def test_final_mutation_fence_runs_after_rate_wait_before_network_send():
+    client, session, _ = make_client([FakeResponse()])
+    events = []
+
+    async def rate_wait():
+        events.append("rate_wait")
+
+    async def final_fence():
+        events.append("final_fence")
+
+    client._respect_rate_limit = rate_wait
+    original_request = session.request
+
+    def record_request(method, url, **kwargs):
+        events.append("network_request")
+        return original_request(method, url, **kwargs)
+
+    session.request = record_request
+    await client.request(
+        "POST",
+        "/fapi/v1/order",
+        signed=True,
+        before_mutation=final_fence,
+    )
+
+    assert events == ["rate_wait", "final_fence", "network_request"]
+
+
+@pytest.mark.asyncio
+async def test_final_mutation_fence_can_block_network_send_after_rate_wait():
+    client, session, _ = make_client([])
+
+    async def rate_wait():
+        return None
+
+    async def final_fence():
+        raise RuntimeError("authority expired while rate limited")
+
+    client._respect_rate_limit = rate_wait
+    with pytest.raises(RuntimeError, match="authority expired"):
+        await client.request(
+            "POST",
+            "/fapi/v1/order",
+            signed=True,
+            before_mutation=final_fence,
+        )
+
+    assert session.calls == []
+    assert client.order_endpoint_attempts == 0
 
 
 @pytest.mark.asyncio

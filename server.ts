@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import { execFileSync } from 'node:child_process';
 import path from 'path';
 import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
@@ -7,6 +8,11 @@ import { GoogleGenAI } from '@google/genai';
 import { GoogleAuth } from 'google-auth-library';
 import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+import { getFirestore } from 'firebase-admin/firestore';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { PilotAcceptanceAcknowledgementError, runPilotOfflineAcceptance, type PilotOfflineCheck } from './src/backend/local-pilot-acceptance-runner.js';
+import { FirestorePilotAcceptanceAudit } from './src/backend/local-pilot-acceptance-audit.js';
 import { TradingSystemState, RiskConfiguration } from './src/backend/types.js';
 import {  validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES, isWorkerTradingConnectionHealthy } from './src/backend/system.js';
 import { auditRepository } from './src/backend/audit.js';
@@ -47,12 +53,69 @@ import {
   getReleaseStore,
   type ReleaseStore,
 } from './src/backend/release-store.js';
+import {
+  LocalWorkerSupervisor,
+  localPilotPaperWorkerIsDisarmed,
+  localPilotWorkerStateMatchesCampaign,
+  revokeLocalPilotWithWorkerGuard,
+} from './src/backend/local-worker-supervisor.js';
+import { accessPinnedLocalMainnetSecrets } from './src/backend/local-secret-manager.js';
+import {
+  assertExpectedLocalBinding,
+  newLocalReleaseCandidate,
+  type LocalReleaseBinding,
+  type LocalReleaseCandidate,
+} from './src/backend/local-release.js';
+import { getLocalReleaseStore, type LocalReleaseStore } from './src/backend/local-release-store.js';
+import {
+  localContinuationBinding,
+  localContinuationIdFor,
+  newLocalContinuationApproval,
+} from './src/backend/local-continuation.js';
+import {
+  getLocalContinuationStore,
+  type LocalContinuationStore,
+} from './src/backend/local-continuation-store.js';
+import {
+  computeLocalReleaseFingerprint,
+  LOCAL_RUNTIME_TARGET,
+} from './src/backend/local-release-runtime.js';
+import { verifyLocalPromotionBundle } from './src/backend/local-promotion-evidence.js';
+import {
+  localLivePilotBinding,
+  localLivePilotCanPrepare,
+  localLivePilotCanStart,
+  assertLocalLivePilotRecoveryReleaseAllowed,
+  newLocalLivePilotCampaign,
+  validateLocalLivePilotActor,
+  type LocalLivePilotCampaign,
+  type LocalLivePilotStrategyId,
+} from './src/backend/local-live-pilot.js';
+import { getLocalLivePilotStore } from './src/backend/local-live-pilot-firestore-store.js';
+import type { LocalLivePilotStore } from './src/backend/local-live-pilot-store.js';
+import { buildLocalPilotGitEnvironment, localLivePilotReadiness } from './src/backend/local-live-pilot-readiness.js';
+import {
+  attestPreparedLocalPilot,
+  preparedLocalPilotMatches,
+} from './src/backend/local-pilot-preparation.js';
+import {
+  localLivePilotPolicySha256,
+  localLivePilotStrategySha256,
+} from './src/backend/local-release-runtime.js';
+import { localSecretSourceIdentity } from './src/backend/local-secret-manager.js';
 
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
+const LOCAL_ONLY = ['1', 'true', 'yes', 'on'].includes(
+  (process.env.LOCAL_ONLY || '').trim().toLowerCase(),
+);
+const RUNTIME_TARGET = LOCAL_ONLY ? LOCAL_RUNTIME_TARGET : 'CLOUD_RUN';
+const BIND_HOST = LOCAL_ONLY
+  ? '127.0.0.1'
+  : (process.env.BIND_HOST?.trim() || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1'));
 const CONTROL_PLANE_ONLY = ['1', 'true', 'yes', 'on'].includes(
   (process.env.CONTROL_PLANE_ONLY || '').trim().toLowerCase(),
 );
@@ -62,10 +125,56 @@ const RELEASE_CONTROLLER_SERVICE_ACCOUNT =
     `blessing-release-controller@${GCP_PROJECT_ID}.iam.gserviceaccount.com`).trim();
 const CONTROL_PLANE_URL = (process.env.CONTROL_PLANE_URL || '').trim().replace(/\/+$/, '');
 let releaseStore: ReleaseStore | null = null;
+let localReleaseStore: LocalReleaseStore | null = null;
+let localContinuationStore: LocalContinuationStore | null = null;
+let localLivePilotStore: LocalLivePilotStore | null = null;
+let localPilotTransitionBusy = false;
+function reserveLocalPilotTransition(): boolean {
+  if (localPilotTransitionBusy) return false;
+  localPilotTransitionBusy = true;
+  return true;
+}
+function rejectUnreadyLocalPilot(res: Response): boolean {
+  const readiness = currentPilotCapabilityReadiness();
+  if (readiness.status === 'READY') return false;
+  res.status(409).json({ error: 'LOCAL_PILOT_RUNTIME_NOT_READY', readiness, evidence_status: 'FAIL' });
+  return true;
+}
+
+function currentPilotCapabilityReadiness() {
+  try {
+    const fingerprint = currentLocalFingerprint(
+      (process.env.LOCAL_MAINNET_API_KEY_VERSION || '').trim(),
+      (process.env.LOCAL_MAINNET_API_SECRET_VERSION || '').trim(),
+    );
+    return localLivePilotReadiness({
+      root: process.cwd(),
+      fingerprint,
+      pilotPolicySha256: localLivePilotPolicySha256(),
+    });
+  } catch {
+    return localLivePilotReadiness();
+  }
+}
 
 function getServerReleaseStore(): ReleaseStore {
   if (!releaseStore) releaseStore = getReleaseStore();
   return releaseStore;
+}
+
+function getServerLocalReleaseStore(): LocalReleaseStore {
+  if (!localReleaseStore) localReleaseStore = getLocalReleaseStore();
+  return localReleaseStore;
+}
+
+function getServerLocalContinuationStore(): LocalContinuationStore {
+  if (!localContinuationStore) localContinuationStore = getLocalContinuationStore();
+  return localContinuationStore;
+}
+
+function getServerLocalLivePilotStore(): LocalLivePilotStore {
+  if (!localLivePilotStore) localLivePilotStore = getLocalLivePilotStore();
+  return localLivePilotStore;
 }
 
 function getFirebaseAdminApp() {
@@ -100,18 +209,35 @@ async function controlPlaneReadiness() {
   }
 
   try {
-    const candidate = await getServerReleaseStore().getCandidate(
-      'rc-00000000-0000-0000-0000-000000000000',
-    );
-    addCheck(
-      'RELEASE_STORE',
-      candidate === null,
-      candidate === null
-        ? 'Server-side release store is reachable'
-        : 'Release store returned an unexpected candidate',
-    );
+    if (LOCAL_ONLY) {
+      const candidate = await getServerLocalReleaseStore().getCandidate(
+        'local-rc-00000000-0000-4000-8000-000000000000',
+      );
+      addCheck(
+        'LOCAL_RELEASE_STORE',
+        candidate === null,
+        candidate === null
+          ? 'Firebase Local release store is reachable and isolated from Cloud Run approvals'
+          : 'Local release store returned an unexpected candidate',
+      );
+    } else {
+      const candidate = await getServerReleaseStore().getCandidate(
+        'rc-00000000-0000-0000-0000-000000000000',
+      );
+      addCheck(
+        'RELEASE_STORE',
+        candidate === null,
+        candidate === null
+          ? 'Server-side release store is reachable'
+          : 'Release store returned an unexpected candidate',
+      );
+    }
   } catch {
-    addCheck('RELEASE_STORE', false, 'Server-side release store is unavailable');
+    addCheck(
+      LOCAL_ONLY ? 'LOCAL_RELEASE_STORE' : 'RELEASE_STORE',
+      false,
+      LOCAL_ONLY ? 'Firebase Local release store is unavailable' : 'Server-side release store is unavailable',
+    );
   }
 
   try {
@@ -120,15 +246,24 @@ async function controlPlaneReadiness() {
     // detailed launch-evidence document and intentionally has no top-level
     // `status=ready` field.
     const worker = await forwardWorkerRequest('/ready');
+    const workerReady = worker.response.ok && worker.data?.status === 'ready';
     addCheck(
-      'WORKER_OIDC',
-      worker.response.ok && worker.data?.status === 'ready',
-      worker.response.ok && worker.data?.status === 'ready'
-        ? 'Worker readiness was read through the Google OIDC boundary'
-        : 'Worker readiness is unavailable through the Google OIDC boundary',
+      LOCAL_ONLY ? 'LOCAL_WORKER_IDENTITY' : 'WORKER_OIDC',
+      workerReady,
+      workerReady
+        ? LOCAL_ONLY
+          ? 'Worker readiness was read through the local loopback identity boundary'
+          : 'Worker readiness was read through the Google OIDC boundary'
+        : LOCAL_ONLY
+          ? 'Local Worker readiness is unavailable'
+          : 'Worker readiness is unavailable through the Google OIDC boundary',
     );
   } catch {
-    addCheck('WORKER_OIDC', false, 'Worker OIDC transport is unavailable');
+    addCheck(
+      LOCAL_ONLY ? 'LOCAL_WORKER_IDENTITY' : 'WORKER_OIDC',
+      false,
+      LOCAL_ONLY ? 'Local Worker identity transport is unavailable' : 'Worker OIDC transport is unavailable',
+    );
   }
 
   const passed = checks.length > 0 && checks.every((check) => check.status === 'PASS');
@@ -170,6 +305,26 @@ if (CONTROL_PLANE_ONLY) {
 
 app.use(express.json());
 
+// A Local runtime must never serve Cloud Run release-controller operations,
+// even if a valid trading_admin or Google service identity reaches localhost.
+// Local approvals use the separate /api/local/mainnet namespace and store.
+app.use('/api/release/mainnet', (req, res, next) => {
+  if (!LOCAL_ONLY) return next();
+  return res.status(404).json({
+    error: 'CLOUD_RELEASE_UNAVAILABLE_IN_LOCAL_RUNTIME',
+    runtimeTarget: 'LOCAL',
+    evidence_status: 'UNVERIFIED',
+  });
+});
+app.use('/internal/release', (req, res, next) => {
+  if (!LOCAL_ONLY) return next();
+  return res.status(404).json({
+    error: 'CLOUD_RELEASE_CONTROLLER_UNAVAILABLE_IN_LOCAL_RUNTIME',
+    runtimeTarget: 'LOCAL',
+    evidence_status: 'UNVERIFIED',
+  });
+});
+
 // The control-plane middleware is registered before any API route so the
 // Binance profile/balance endpoints cannot bypass server-side Firebase RBAC.
 // The implementation is declared below as a function declaration and is
@@ -178,6 +333,7 @@ app.use([
   '/api/system',
   '/api/quant',
   '/api/binance',
+  '/api/local',
   '/api/release',
   '/api/google',
   '/api/wealth',
@@ -1075,15 +1231,20 @@ const WORKER_URL = (process.env.WORKER_URL?.trim() || (process.env.NODE_ENV === 
 // mints a Google-signed OIDC token through ADC with the Worker URL as its
 // audience; Firebase user tokens never cross this service boundary.
 const LOCAL_WORKER_IDENTITY_TOKEN = process.env.WORKER_IDENTITY_TOKEN?.trim() || '';
+const LOCAL_RUN_ID = (process.env.LOCAL_RUN_ID || '').trim();
+const localWorkerSupervisor = LOCAL_ONLY
+  ? new LocalWorkerSupervisor({
+    workerUrl: WORKER_URL,
+    workerIdentityToken: LOCAL_WORKER_IDENTITY_TOKEN,
+    runId: LOCAL_RUN_ID,
+  })
+  : null;
 const workerGoogleAuth = new GoogleAuth();
 let workerIdentityClient: Awaited<ReturnType<GoogleAuth['getIdTokenClient']>> | null = null;
 
 async function workerAuthorizationHeader(): Promise<string | null> {
-  const localBypass = process.env.NODE_ENV !== 'production'
-    && ['1', 'true', 'yes', 'on'].includes((process.env.CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL || '').trim().toLowerCase());
-  if (localBypass) return null;
   if (!WORKER_URL) throw new Error('WORKER_URL is not configured');
-  if (process.env.NODE_ENV !== 'production' && LOCAL_WORKER_IDENTITY_TOKEN) {
+  if ((process.env.NODE_ENV !== 'production' || LOCAL_ONLY) && LOCAL_WORKER_IDENTITY_TOKEN) {
     return `Bearer ${LOCAL_WORKER_IDENTITY_TOKEN}`;
   }
   if (!workerIdentityClient) {
@@ -1459,6 +1620,8 @@ function sanitizeContinuationReadiness(value: unknown): {
   engineState: string;
   submittedOrders: number;
   reservedOrders: number;
+  firstOrderClientOrderId: string | null;
+  pendingOrderClientOrderId: string | null;
   preflightPassed: boolean;
   preflightOrderSubmissionAttempts: number;
   preflightOrderEndpointAttempts: number;
@@ -1504,6 +1667,8 @@ function sanitizeContinuationReadiness(value: unknown): {
     engineState: String(raw.engineState || '').trim(),
     submittedOrders: intOr(raw.submittedOrders, 0),
     reservedOrders: intOr(raw.reservedOrders, 0),
+    firstOrderClientOrderId: String(raw.firstOrderClientOrderId || '').trim() || null,
+    pendingOrderClientOrderId: String(raw.pendingOrderClientOrderId || '').trim() || null,
     preflightPassed: raw.preflightPassed === true,
     preflightOrderSubmissionAttempts: intOr(raw.preflightOrderSubmissionAttempts),
     preflightOrderEndpointAttempts: intOr(raw.preflightOrderEndpointAttempts),
@@ -1984,6 +2149,1217 @@ app.get('/api/release/mainnet/:candidateId', async (req: Request, res: Response)
   }
 });
 
+function localBindingFromFingerprint(
+  fingerprint: ReturnType<typeof computeLocalReleaseFingerprint>,
+  promotionEvidenceSha256: string,
+): LocalReleaseBinding {
+  return {
+    runtimeTarget: 'LOCAL',
+    runId: fingerprint.runId,
+    sourceFingerprint: fingerprint.sourceSha256,
+    dependencyFingerprint: fingerprint.dependencySha256,
+    migrationFingerprint: fingerprint.migrationSha256,
+    promotionEvidenceSha256,
+    apiKeyVersion: fingerprint.secretVersions.apiKey,
+    apiSecretVersion: fingerprint.secretVersions.apiSecret,
+    secretManagerProjectId: fingerprint.secretSource.secretManagerProjectId,
+    apiKeySecretVersionResource: fingerprint.secretSource.apiKeySecretVersionResource,
+    apiSecretSecretVersionResource: fingerprint.secretSource.apiSecretSecretVersionResource,
+    policyVersion: fingerprint.riskPolicyVersion as LocalReleaseBinding['policyVersion'],
+    policyHash: fingerprint.riskPolicySha256,
+  };
+}
+
+function currentLocalFingerprint(apiKeyVersion: string, apiSecretVersion: string) {
+  if (!LOCAL_ONLY || RUNTIME_TARGET !== 'LOCAL') throw new Error('LOCAL_RUNTIME_REQUIRED');
+  return computeLocalReleaseFingerprint({
+    root: process.cwd(),
+    runId: LOCAL_RUN_ID,
+    apiKeyVersion,
+    apiSecretVersion,
+    secretManagerProjectId: (process.env.LOCAL_SECRET_MANAGER_PROJECT_ID || GCP_PROJECT_ID).trim(),
+  });
+}
+
+function assertCommittedPilotCandidate(): void {
+  const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+    cwd: process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    env: buildLocalPilotGitEnvironment(process.env),
+  });
+  if (status.trim()) throw new Error('LOCAL_PILOT_REQUIRES_REVIEWED_CLEAN_COMMIT');
+}
+
+function localPromotionStatus(fingerprint: ReturnType<typeof computeLocalReleaseFingerprint>) {
+  return verifyLocalPromotionBundle(process.cwd(), fingerprint.gitSha, fingerprint.sourceSha256);
+}
+
+async function readLocalWorkerState() {
+  const result = await forwardWorkerRequest('/state');
+  if (!result.response.ok) throw new Error('LOCAL_WORKER_STATE_UNAVAILABLE');
+  return releaseRequestObject(result.data) || {};
+}
+
+async function confirmRunningLocalPilotCampaign(campaignId: string): Promise<Record<string, unknown> | null> {
+  const supervisor = localWorkerSupervisor?.status();
+  if (!supervisor?.workerRunning) return null;
+  if (supervisor.mode !== 'LIVE' || supervisor.pilotCampaignId !== campaignId) {
+    throw new Error('LOCAL_PILOT_WORKER_CAMPAIGN_MISMATCH');
+  }
+  const workerState = await readLocalWorkerState();
+  if (!localPilotWorkerStateMatchesCampaign(workerState, campaignId)) {
+    throw new Error('LOCAL_PILOT_WORKER_CAMPAIGN_MISMATCH');
+  }
+  return workerState;
+}
+
+function localWorkerIsPaperDisarmed(state: Record<string, unknown>): boolean {
+  return localPilotPaperWorkerIsDisarmed(state, localWorkerSupervisor?.status() ?? null, LOCAL_RUN_ID);
+}
+
+async function localPersistenceIsDurable(): Promise<boolean> {
+  try {
+    const result = await forwardWorkerRequest('/readiness');
+    const readiness = releaseRequestObject(result.data) || {};
+    const persistence = releaseRequestObject(readiness.persistence) || {};
+    return result.response.ok
+      && persistence.mode === 'REQUIRED'
+      && persistence.durable === true
+      && persistence.runtime_target === 'LOCAL'
+      && persistence.database_provider === 'POSTGRES_LOCAL'
+      && persistence.database_host === '127.0.0.1'
+      && Number(persistence.database_port) === 5433
+      && persistence.database_identity_verified === true
+      && Number(persistence.pending_outbox) === 0
+      && Number(persistence.failed_writes) === 0;
+  } catch {
+    return false;
+  }
+}
+
+async function localMainnetRiskLifecycleStatus(): Promise<{
+  ready: boolean;
+  missing: string[];
+}> {
+  try {
+    const result = await forwardWorkerRequest('/readiness');
+    const readiness = releaseRequestObject(result.data) || {};
+    const missing = Array.isArray(readiness.local_mainnet_risk_lifecycle_missing)
+      ? readiness.local_mainnet_risk_lifecycle_missing.map((item) => String(item))
+      : [];
+    return {
+      ready: result.response.ok && readiness.local_mainnet_risk_lifecycle_ready === true,
+      missing,
+    };
+  } catch {
+    return { ready: false, missing: ['Worker readiness is unavailable'] };
+  }
+}
+
+function localContinuationEvidenceHash(
+  evidence: ReturnType<typeof sanitizeContinuationReadiness>,
+  workerState: Record<string, unknown>,
+  binding: LocalReleaseBinding,
+): string {
+  return hashEvidence({
+    runtimeTarget: 'LOCAL',
+    runId: binding.runId,
+    candidateId: workerState.local_release_candidate_id || null,
+    initialApprovalId: workerState.mainnet_release_approval_id || null,
+    sourceFingerprint: binding.sourceFingerprint,
+    dependencyFingerprint: binding.dependencyFingerprint,
+    migrationFingerprint: binding.migrationFingerprint,
+    policyVersion: binding.policyVersion,
+    policyHash: binding.policyHash,
+    launchId: evidence.launchId,
+    launchPolicy: evidence.launchPolicy,
+    launchState: evidence.launchState,
+    submittedOrders: evidence.submittedOrders,
+    reservedOrders: evidence.reservedOrders,
+    firstOrderClientOrderId: evidence.firstOrderClientOrderId,
+    pendingOrderClientOrderId: evidence.pendingOrderClientOrderId,
+    engineState: evidence.engineState,
+    mainnetLiveApproved: evidence.mainnetLiveApproved,
+    persistenceDurable: evidence.persistenceDurable,
+    preflightPassed: evidence.preflightPassed,
+    preflightOrderSubmissionAttempts: evidence.preflightOrderSubmissionAttempts,
+    preflightOrderEndpointAttempts: evidence.preflightOrderEndpointAttempts,
+    reconciliationStatus: workerState.reconciliation_status || null,
+    killSwitchActive: workerState.kill_switch_active === true,
+    checks: evidence.checks.map((check) => ({ id: check.id, status: check.status })),
+  });
+}
+
+function safeLocalLivePilotCampaign(campaign: LocalLivePilotCampaign) {
+  const {
+    nonce: _nonce,
+    adminUid: _adminUid,
+    approvedByUid: _approvedByUid,
+    secretManagerProjectId: _secretManagerProjectId,
+    apiKeyVersion: _apiKeyVersion,
+    apiSecretVersion: _apiSecretVersion,
+    ...safe
+  } = campaign;
+  return safe;
+}
+
+function pilotActor(uid: string) {
+  const actor = { uid, role: 'trading_admin' as const };
+  validateLocalLivePilotActor(actor);
+  return actor;
+}
+
+const pilotAcceptanceInstanceId = crypto.randomUUID();
+let pilotAcceptanceRunning = false;
+app.get('/api/local/pilot/acceptance', async (_req: Request, res: Response) => {
+  if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  if (!res.locals.firebaseUid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  try {
+    assertCommittedPilotCandidate();
+    const fingerprint = currentLocalFingerprint(
+      (process.env.LOCAL_MAINNET_API_KEY_VERSION || '').trim(),
+      (process.env.LOCAL_MAINNET_API_SECRET_VERSION || '').trim());
+    const binding = { gitSha: fingerprint.gitSha, sourceSha256: fingerprint.sourceSha256,
+      dependencySha256: fingerprint.dependencySha256, migrationSha256: fingerprint.migrationSha256,
+      policySha256: localLivePilotPolicySha256() };
+    const firebaseApp = getApps()[0] || initializeApp({ credential: applicationDefault(), projectId: GCP_PROJECT_ID });
+    const audit = new FirestorePilotAcceptanceAudit(getFirestore(firebaseApp), pilotAcceptanceInstanceId,
+      res.locals.firebaseUid);
+    return res.json({ ...await audit.findRuns(binding), campaignAuthority: false, executionActivated: false });
+  } catch {
+    return res.status(503).json({ error: 'LOCAL_PILOT_ACCEPTANCE_UNKNOWN', evidence_status: 'UNVERIFIED' });
+  }
+});
+app.get('/api/local/pilot/acceptance/:runId', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  if (!res.locals.firebaseUid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  try {
+    assertCommittedPilotCandidate();
+    const fingerprint = currentLocalFingerprint(
+      (process.env.LOCAL_MAINNET_API_KEY_VERSION || '').trim(),
+      (process.env.LOCAL_MAINNET_API_SECRET_VERSION || '').trim(),
+    );
+    const expected = { gitSha: fingerprint.gitSha, sourceSha256: fingerprint.sourceSha256,
+      dependencySha256: fingerprint.dependencySha256, migrationSha256: fingerprint.migrationSha256,
+      policySha256: localLivePilotPolicySha256() };
+    const firebaseApp = getApps()[0] || initializeApp({ credential: applicationDefault(), projectId: GCP_PROJECT_ID });
+    const audit = new FirestorePilotAcceptanceAudit(getFirestore(firebaseApp), pilotAcceptanceInstanceId,
+      res.locals.firebaseUid);
+    const result = await audit.read(String(req.params.runId), expected);
+    return res.json({ ...result, campaignAuthority: false, executionActivated: false });
+  } catch {
+    return res.status(503).json({ error: 'LOCAL_PILOT_ACCEPTANCE_UNKNOWN', evidence_status: 'UNVERIFIED' });
+  }
+});
+app.post('/api/local/pilot/acceptance', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  const body = releaseRequestObject(req.body);
+  if (!body || Object.keys(body).some((key) => key !== 'check')
+    || !['TYPESCRIPT_TESTS', 'LINT', 'BUILD'].includes(String(body.check))) {
+    return res.status(400).json({ error: 'LOCAL_PILOT_CHECK_NOT_ALLOWED' });
+  }
+  if (!res.locals.firebaseUid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  if (pilotAcceptanceRunning) return res.status(409).json({ error: 'LOCAL_PILOT_ACCEPTANCE_BUSY' });
+  pilotAcceptanceRunning = true;
+  let scratch: string | undefined;
+  try {
+    assertCommittedPilotCandidate();
+    if (!localWorkerIsPaperDisarmed(await readLocalWorkerState()) || !(await localPersistenceIsDurable())) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_REQUIRES_PAPER_DISARMED_DURABLE_RUNTIME' });
+    }
+    const versions = [(process.env.LOCAL_MAINNET_API_KEY_VERSION || '').trim(),
+      (process.env.LOCAL_MAINNET_API_SECRET_VERSION || '').trim()] as const;
+    const bindingNow = () => {
+      const value = currentLocalFingerprint(...versions);
+      return { gitSha: value.gitSha, sourceSha256: value.sourceSha256,
+        dependencySha256: value.dependencySha256, migrationSha256: value.migrationSha256,
+        policySha256: localLivePilotPolicySha256() };
+    };
+    const binding = bindingNow();
+    const firebaseApp = getApps()[0] || initializeApp({ credential: applicationDefault(), projectId: GCP_PROJECT_ID });
+    const audit = new FirestorePilotAcceptanceAudit(getFirestore(firebaseApp), pilotAcceptanceInstanceId,
+      res.locals.firebaseUid);
+    scratch = mkdtempSync(path.join(tmpdir(), 'blessing-acceptance-'));
+    const result = await runPilotOfflineAcceptance({
+      root: process.cwd(), isolatedHome: scratch, check: body.check as PilotOfflineCheck, binding, audit,
+      assertBindingUnchanged: () => {
+        assertCommittedPilotCandidate();
+        if (JSON.stringify(bindingNow()) !== JSON.stringify(binding)) throw new Error('LOCAL_PILOT_FINGERPRINT_CHANGED');
+      },
+    });
+    return res.json({ ...result, executionActivated: false, campaignAuthority: false });
+  } catch (error) {
+    if (error instanceof PilotAcceptanceAcknowledgementError) {
+      return res.status(503).json({ error: error.message, runId: error.runId,
+        evidence_status: 'UNKNOWN', executionActivated: false, campaignAuthority: false });
+    }
+    return res.status(503).json({ error: 'LOCAL_PILOT_ACCEPTANCE_FAILED', evidence_status: 'UNVERIFIED' });
+  } finally {
+    pilotAcceptanceRunning = false;
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+app.post('/api/local/pilot/request', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'strategyId')) {
+    return res.status(400).json({ error: 'LOCAL_PILOT_REQUEST_INVALID' });
+  }
+  const strategyId = String(body.strategyId || '').trim().toLowerCase() as LocalLivePilotStrategyId;
+  if (!['grid', 'trend', 'shock', 'carry'].includes(strategyId)) {
+    return res.status(400).json({ error: 'LOCAL_PILOT_STRATEGY_REQUIRED' });
+  }
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  const apiKeyVersion = (process.env.LOCAL_MAINNET_API_KEY_VERSION || '').trim();
+  const apiSecretVersion = (process.env.LOCAL_MAINNET_API_SECRET_VERSION || '').trim();
+  try {
+    assertCommittedPilotCandidate();
+    const fingerprint = currentLocalFingerprint(apiKeyVersion, apiSecretVersion);
+    const workerState = await readLocalWorkerState();
+    if (!localWorkerIsPaperDisarmed(workerState) || !(await localPersistenceIsDurable())) {
+      return res.status(409).json({
+        error: 'LOCAL_PILOT_REQUIRES_PAPER_DISARMED_DURABLE_RUNTIME',
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const identity = localSecretSourceIdentity(
+      (process.env.LOCAL_SECRET_MANAGER_PROJECT_ID || GCP_PROJECT_ID).trim(),
+      apiKeyVersion,
+      apiSecretVersion,
+    );
+    const campaign = newLocalLivePilotCampaign({
+      campaignId: `pilot-${crypto.randomUUID()}`,
+      runId: fingerprint.runId,
+      adminUid: uid,
+      role: 'trading_admin',
+      gitSha: fingerprint.gitSha,
+      sourceHash: fingerprint.sourceSha256,
+      dependencyHash: fingerprint.dependencySha256,
+      migrationHash: fingerprint.migrationSha256,
+      strategyHash: localLivePilotStrategySha256(strategyId),
+      riskPolicyHash: localLivePilotPolicySha256(),
+      strategyId,
+      secretManagerProjectId: identity.secretManagerProjectId,
+      apiKeyVersion,
+      apiSecretVersion,
+      managementMode: 'QUICK',
+    });
+    const saved = await getServerLocalLivePilotStore().create({
+      campaignId: campaign.campaignId,
+      runId: campaign.runId,
+      adminUid: campaign.adminUid,
+      role: 'trading_admin',
+      gitSha: campaign.gitSha,
+      sourceHash: campaign.sourceHash,
+      dependencyHash: campaign.dependencyHash,
+      migrationHash: campaign.migrationHash,
+      strategyHash: campaign.strategyHash,
+      riskPolicyHash: campaign.riskPolicyHash,
+      strategyId: campaign.strategyId,
+      secretManagerProjectId: campaign.secretManagerProjectId,
+      apiKeyVersion: campaign.apiKeyVersion,
+      apiSecretVersion: campaign.apiSecretVersion,
+      managementMode: campaign.managementMode,
+    });
+    return res.status(201).json({ ...safeLocalLivePilotCampaign(saved), evidence_status: 'VERIFIED' });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'LOCAL_PILOT_REQUEST_FAILED';
+    return res.status(503).json({ error: 'LOCAL_PILOT_REQUEST_FAILED', reason, evidence_status: 'UNVERIFIED' });
+  }
+});
+
+app.get('/api/local/pilot/:campaignId', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  try {
+    const campaign = await getServerLocalLivePilotStore().get(String(req.params.campaignId));
+    if (!campaign) return res.status(404).json({ error: 'LOCAL_PILOT_NOT_FOUND' });
+    const supervisor = localWorkerSupervisor?.status();
+    const [workerState, workerReadiness, workerAccounting] = supervisor?.mode === 'LIVE'
+      ? await Promise.all([
+        forwardWorkerRequest('/state').catch(() => null),
+        forwardWorkerRequest('/readiness').catch(() => null),
+        forwardWorkerRequest('/local-pilot/accounting').catch(() => null),
+      ])
+      : [null, null, null];
+    const workerVerified = workerState?.response.ok === true && workerReadiness?.response.ok === true;
+    const pilotWorkerBound = workerVerified
+      && supervisor?.pilotCampaignId === campaign.campaignId
+      && supervisor.workerResponsiveness === 'RESPONSIVE'
+      && workerState?.data?.pilot_campaign_id === campaign.campaignId
+      && workerState?.data?.local_run_id === campaign.runId
+      && workerState?.data?.local_source_fingerprint === campaign.sourceHash
+      && workerState?.data?.local_supervisor_instance_id === supervisor?.supervisorInstanceId
+      && workerState?.data?.execution_mode === 'LIVE'
+      && workerState?.data?.mainnet_live_approved === true;
+    const prepared = pilotWorkerBound
+      && workerState?.data?.engine_state === 'DISARMED'
+      && workerState?.data?.order_submission_attempts === 0
+      && preparedLocalPilotMatches(campaign.preparation || null, {
+        campaignId: campaign.campaignId,
+        runId: campaign.runId,
+        sourceFingerprint: campaign.sourceHash,
+        approvalId: `local-approval-${campaign.campaignId.slice('pilot-'.length)}`,
+        workerGeneration: supervisor?.workerGeneration ?? -1,
+        supervisorInstanceId: supervisor?.supervisorInstanceId || '',
+      });
+    const accountingData = workerAccounting?.response.ok === true
+      && workerAccounting.data?.evidence_status === 'VERIFIED'
+      && workerAccounting.data?.campaign_id === campaign.campaignId
+      ? workerAccounting.data
+      : null;
+    return res.json({
+      ...safeLocalLivePilotCampaign(campaign),
+      readiness: currentPilotCapabilityReadiness(),
+      supervision: supervisor?.pilotCampaignId === campaign.campaignId ? {
+        workerResponsiveness: supervisor.workerResponsiveness,
+        workerStateObservedAt: supervisor.workerStateObservedAt,
+        workerHeartbeatAt: supervisor.workerHeartbeatAt,
+        pilotLifecycleMonitorStatus: supervisor.pilotLifecycleMonitorStatus,
+      } : 'UNKNOWN',
+      preparation: prepared ? {
+        status: 'PASS', observedAt: campaign.preparation?.preflightObservedAt || null,
+      } : { status: 'NOT_RUN', observedAt: null },
+      runtime: pilotWorkerBound ? {
+        executionMode: workerState?.data?.execution_mode || 'UNKNOWN',
+        engineState: workerState?.data?.engine_state || 'UNKNOWN',
+        mainnetLiveApproved: workerState?.data?.mainnet_live_approved === true,
+        orderSubmissionAttempts: typeof workerState?.data?.order_submission_attempts === 'number'
+          ? workerState.data.order_submission_attempts : 'UNKNOWN',
+        readiness: workerReadiness?.data || 'UNKNOWN',
+      } : 'UNKNOWN',
+      accounting: {
+        status: accountingData ? 'VERIFIED' : workerAccounting?.data?.status || 'UNKNOWN',
+        netPnlUsdc: accountingData?.net_pnl_usdc ?? 'UNKNOWN',
+        peakNetPnlUsdc: accountingData?.peak_net_pnl_usdc ?? 'UNKNOWN',
+        drawdownUsdc: accountingData?.drawdown_usdc ?? 'UNKNOWN',
+        realizedPnlUsdc: accountingData?.realized_pnl_usdc ?? 'UNKNOWN',
+        unrealizedPnlUsdc: accountingData?.unrealized_pnl_usdc ?? 'UNKNOWN',
+        feesUsdc: accountingData?.fees_usdc ?? 'UNKNOWN',
+        fundingUsdc: accountingData?.funding_usdc ?? 'UNKNOWN',
+        slippageUsdc: 'UNKNOWN',
+        lastEventAt: accountingData?.last_event_at || null,
+        reason: accountingData ? null : workerAccounting?.data?.reason || 'PILOT_ACCOUNTING_EVIDENCE_UNAVAILABLE',
+      },
+      evidence_status: pilotWorkerBound ? 'VERIFIED' : 'UNVERIFIED',
+    });
+  } catch {
+    return res.status(503).json({ error: 'LOCAL_PILOT_STORE_UNAVAILABLE', evidence_status: 'UNVERIFIED' });
+  }
+});
+
+app.post('/api/local/pilot/approve', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  if (rejectUnreadyLocalPilot(res)) return;
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
+    return res.status(400).json({ error: 'LOCAL_PILOT_APPROVAL_INVALID' });
+  }
+  const campaignId = String(body.campaignId || '').trim();
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  try {
+    assertCommittedPilotCandidate();
+    const store = getServerLocalLivePilotStore();
+    const pending = await store.get(campaignId);
+    if (!pending) return res.status(404).json({ error: 'LOCAL_PILOT_NOT_FOUND' });
+    const fingerprint = currentLocalFingerprint(pending.apiKeyVersion, pending.apiSecretVersion);
+    const currentBinding = {
+      ...localLivePilotBinding(pending),
+      gitSha: fingerprint.gitSha,
+      sourceHash: fingerprint.sourceSha256,
+      dependencyHash: fingerprint.dependencySha256,
+      migrationHash: fingerprint.migrationSha256,
+      strategyHash: localLivePilotStrategySha256(pending.strategyId),
+      riskPolicyHash: localLivePilotPolicySha256(),
+    };
+    if (JSON.stringify(currentBinding) !== JSON.stringify(localLivePilotBinding(pending))) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_FINGERPRINT_CHANGED', evidence_status: 'UNVERIFIED' });
+    }
+    const workerState = await readLocalWorkerState();
+    if (!localWorkerIsPaperDisarmed(workerState) || !(await localPersistenceIsDurable())) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_REQUIRES_PAPER_DISARMED_DURABLE_RUNTIME' });
+    }
+    const approved = await store.approve(campaignId, pilotActor(uid), localLivePilotBinding(pending));
+    return res.json({ ...safeLocalLivePilotCampaign(approved), evidence_status: 'VERIFIED', executionActivated: false });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'LOCAL_PILOT_APPROVAL_FAILED';
+    return res.status(/expired|binding|UID|pending/i.test(message) ? 409 : 503).json({
+      error: 'LOCAL_PILOT_APPROVAL_FAILED',
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
+app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  if (rejectUnreadyLocalPilot(res)) return;
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
+    return res.status(400).json({ error: 'LOCAL_PILOT_PREPARE_INVALID' });
+  }
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  if (!reserveLocalPilotTransition()) return res.status(409).json({ error: 'LOCAL_PILOT_TRANSITION_IN_PROGRESS' });
+  const campaignId = String(body.campaignId || '').trim();
+  const store = getServerLocalLivePilotStore();
+  let campaign: LocalLivePilotCampaign | null = null;
+  let workerReplacementStarted = false;
+  try {
+    assertCommittedPilotCandidate();
+    campaign = await store.get(campaignId);
+    if (!campaign) return res.status(404).json({ error: 'LOCAL_PILOT_NOT_FOUND' });
+    if (campaign.adminUid !== uid || campaign.approvedByUid !== uid
+      || !['APPROVED', 'ACTIVE'].includes(campaign.status)) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_APPROVAL_BINDING_INVALID' });
+    }
+    if (!localLivePilotCanPrepare(campaign)) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_APPROVAL_EXPIRED_OR_INVALID' });
+    }
+    const fingerprint = currentLocalFingerprint(campaign.apiKeyVersion, campaign.apiSecretVersion);
+    const currentBinding = {
+      ...localLivePilotBinding(campaign),
+      gitSha: fingerprint.gitSha,
+      sourceHash: fingerprint.sourceSha256,
+      dependencyHash: fingerprint.dependencySha256,
+      migrationHash: fingerprint.migrationSha256,
+      strategyHash: localLivePilotStrategySha256(campaign.strategyId),
+      riskPolicyHash: localLivePilotPolicySha256(),
+    };
+    if (JSON.stringify(currentBinding) !== JSON.stringify(localLivePilotBinding(campaign))) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_FINGERPRINT_CHANGED' });
+    }
+    if (!(await localPersistenceIsDurable())) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_DURABLE_POSTGRES_UNAVAILABLE' });
+    }
+    const workerBeforeStart = await readLocalWorkerState();
+    if (!localWorkerIsPaperDisarmed(workerBeforeStart)
+      || workerBeforeStart.order_submission_attempts !== 0) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_REQUIRES_UNUSED_PAPER_WORKER' });
+    }
+
+    // The only secret read in this route is after the persisted trading_admin approval.
+    const identity = localSecretSourceIdentity(
+      campaign.secretManagerProjectId,
+      campaign.apiKeyVersion,
+      campaign.apiSecretVersion,
+    );
+    const secrets = await accessPinnedLocalMainnetSecrets({
+      projectId: campaign.secretManagerProjectId,
+      apiKeyVersion: campaign.apiKeyVersion,
+      apiSecretVersion: campaign.apiSecretVersion,
+      identity,
+      campaign: {
+        campaignId: campaign.campaignId,
+        status: campaign.status === 'ACTIVE' ? 'ACTIVE' : 'APPROVED',
+        adminUid: campaign.adminUid,
+        approvedByUid: campaign.approvedByUid || '',
+        campaignExpiresAt: campaign.campaignExpiresAt || '',
+        secretManagerProjectId: campaign.secretManagerProjectId,
+        apiKeyVersion: campaign.apiKeyVersion,
+        apiSecretVersion: campaign.apiSecretVersion,
+      },
+    });
+    const approvalId = `local-approval-${campaign.campaignId.slice('pilot-'.length)}`;
+    workerReplacementStarted = true;
+    await localWorkerSupervisor.startApprovedPilotLive({
+      approvalId,
+      sourceFingerprint: fingerprint.sourceSha256,
+      apiKey: secrets.apiKey,
+      apiSecret: secrets.apiSecret,
+      apiKeyVersion: secrets.apiKeyVersion,
+      apiSecretVersion: secrets.apiSecretVersion,
+      campaignId: campaign.campaignId,
+      gitSha: campaign.gitSha,
+      sourceHash: campaign.sourceHash,
+      dependencyHash: campaign.dependencyHash,
+      migrationHash: campaign.migrationHash,
+      strategyHash: campaign.strategyHash,
+      riskPolicyHash: campaign.riskPolicyHash,
+      secretProjectId: campaign.secretManagerProjectId,
+      strategyId: campaign.strategyId,
+      expiresAt: campaign.campaignExpiresAt || '',
+    });
+    const preflight = await forwardWorkerRequest('/preflight/read-only', { method: 'POST' });
+    if (!preflight.response.ok) throw new Error('LOCAL_PILOT_READ_ONLY_PREFLIGHT_FAILED');
+    const finalState = await forwardWorkerRequest('/state');
+    if (!finalState.response.ok) throw new Error('LOCAL_PILOT_WORKER_STATE_UNAVAILABLE');
+    const supervisor = localWorkerSupervisor.status();
+    if (supervisor.pilotCampaignId !== campaign.campaignId
+      || supervisor.approvalId !== approvalId
+      || supervisor.sourceFingerprint !== fingerprint.sourceSha256
+      || supervisor.secretVersions?.apiKey !== campaign.apiKeyVersion
+      || supervisor.secretVersions?.apiSecret !== campaign.apiSecretVersion) {
+      throw new Error('LOCAL_PILOT_SUPERVISOR_BINDING_MISMATCH');
+    }
+    const preparation = attestPreparedLocalPilot({
+      campaignId: campaign.campaignId,
+      runId: campaign.runId,
+      sourceFingerprint: fingerprint.sourceSha256,
+      approvalId,
+      workerGeneration: supervisor.workerGeneration,
+      supervisorInstanceId: supervisor.supervisorInstanceId,
+      workerState: finalState.data,
+      preflight: preflight.data,
+    });
+    campaign = await store.recordPreparation(campaign.campaignId, localLivePilotBinding(campaign), preparation);
+    return res.json({
+      campaign: safeLocalLivePilotCampaign(campaign),
+      preflight: { status: 'PASS', observedAt: preparation.preflightObservedAt, sha256: preparation.preflightSha256 },
+      worker: { status: 'LIVE_DISARMED', mainnetLiveApproved: true, orderSubmissionAttempts: 0 },
+      evidence_status: 'VERIFIED',
+    });
+  } catch (error) {
+    if (workerReplacementStarted) {
+      try {
+        const state = campaign ? await confirmRunningLocalPilotCampaign(campaign.campaignId) : null;
+        if (state?.engine_state === 'DISARMED' && state.order_submission_attempts === 0) {
+          await localWorkerSupervisor.startPaper();
+        }
+      } catch { /* preserve the Worker for operator inspection when its state is ambiguous */ }
+    }
+    const message = error instanceof Error ? error.message : 'LOCAL_PILOT_PREPARE_FAILED';
+    return res.status(503).json({ error: 'LOCAL_PILOT_PREPARE_FAILED', reason: message, evidence_status: 'UNVERIFIED' });
+  } finally {
+    localPilotTransitionBusy = false;
+  }
+});
+
+app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  if (rejectUnreadyLocalPilot(res)) return;
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
+    return res.status(400).json({ error: 'LOCAL_PILOT_START_INVALID' });
+  }
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  if (!reserveLocalPilotTransition()) return res.status(409).json({ error: 'LOCAL_PILOT_TRANSITION_IN_PROGRESS' });
+  let campaign: LocalLivePilotCampaign | null = null;
+  let activated = false;
+  let armAttempted = false;
+  try {
+    assertCommittedPilotCandidate();
+    campaign = await getServerLocalLivePilotStore().get(String(body.campaignId || '').trim());
+    if (!campaign) return res.status(404).json({ error: 'LOCAL_PILOT_NOT_FOUND' });
+    if (campaign.adminUid !== uid || campaign.approvedByUid !== uid || !localLivePilotCanStart(campaign)) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_APPROVAL_BINDING_INVALID' });
+    }
+    const fingerprint = currentLocalFingerprint(campaign.apiKeyVersion, campaign.apiSecretVersion);
+    const currentBinding = {
+      ...localLivePilotBinding(campaign),
+      gitSha: fingerprint.gitSha,
+      sourceHash: fingerprint.sourceSha256,
+      dependencyHash: fingerprint.dependencySha256,
+      migrationHash: fingerprint.migrationSha256,
+      strategyHash: localLivePilotStrategySha256(campaign.strategyId),
+      riskPolicyHash: localLivePilotPolicySha256(),
+    };
+    if (JSON.stringify(currentBinding) !== JSON.stringify(localLivePilotBinding(campaign))) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_FINGERPRINT_CHANGED' });
+    }
+    if (!(await localPersistenceIsDurable())) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_DURABLE_POSTGRES_UNAVAILABLE' });
+    }
+    const supervisor = localWorkerSupervisor.status();
+    const approvalId = `local-approval-${campaign.campaignId.slice('pilot-'.length)}`;
+    if (supervisor.mode !== 'LIVE'
+      || supervisor.workerResponsiveness !== 'RESPONSIVE'
+      || supervisor.pilotCampaignId !== campaign.campaignId
+      || supervisor.approvalId !== approvalId
+      || supervisor.sourceFingerprint !== fingerprint.sourceSha256
+      || supervisor.secretVersions?.apiKey !== campaign.apiKeyVersion
+      || supervisor.secretVersions?.apiSecret !== campaign.apiSecretVersion
+      || supervisor.workerGeneration === null
+      || !preparedLocalPilotMatches(campaign.preparation || null, {
+        campaignId: campaign.campaignId,
+        runId: campaign.runId,
+        sourceFingerprint: fingerprint.sourceSha256,
+        approvalId,
+        workerGeneration: supervisor.workerGeneration,
+        supervisorInstanceId: supervisor.supervisorInstanceId,
+      })) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_PREPARE_REQUIRED' });
+    }
+    const beforeArm = await readLocalWorkerState();
+    if (beforeArm.engine_state !== 'DISARMED' || beforeArm.order_submission_attempts !== 0
+      || beforeArm.mainnet_live_approved !== true
+      || beforeArm.pilot_campaign_id !== campaign.campaignId
+      || beforeArm.local_run_id !== campaign.runId
+      || beforeArm.local_source_fingerprint !== campaign.sourceHash
+      || beforeArm.local_supervisor_instance_id !== supervisor.supervisorInstanceId) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_PREPARED_WORKER_CHANGED' });
+    }
+    const preflight = await forwardWorkerRequest('/preflight/read-only', { method: 'POST' });
+    const afterPreflight = await forwardWorkerRequest('/state');
+    if (!preflight.response.ok || !afterPreflight.response.ok) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_READ_ONLY_PREFLIGHT_FAILED', evidence_status: 'FAIL' });
+    }
+    const refreshedPreparation = attestPreparedLocalPilot({
+      campaignId: campaign.campaignId,
+      runId: campaign.runId,
+      sourceFingerprint: fingerprint.sourceSha256,
+      approvalId,
+      workerGeneration: supervisor.workerGeneration,
+      supervisorInstanceId: supervisor.supervisorInstanceId,
+      workerState: afterPreflight.data,
+      preflight: preflight.data,
+    });
+    campaign = await getServerLocalLivePilotStore().recordPreparation(
+      campaign.campaignId, localLivePilotBinding(campaign), refreshedPreparation,
+    );
+    // This CAS transition is immediately followed by the explicit ARM action.
+    campaign = await getServerLocalLivePilotStore().activate(campaign.campaignId, localLivePilotBinding(campaign));
+    activated = true;
+    const strategies = {
+      grid: campaign.strategyId === 'grid',
+      trend: campaign.strategyId === 'trend',
+      shock: campaign.strategyId === 'shock',
+      carry: campaign.strategyId === 'carry',
+    };
+    armAttempted = true;
+    const armed = await forwardWorkerRequest('/arm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        executionMode: 'LIVE', instruments: ['ETHUSDC'], strategies,
+        riskProfile: 'CONSERVATIVE', enforcePreflight: true,
+        releaseApprovalId: approvalId,
+        launchPolicy: 'LIVE_RESEARCH_PILOT',
+        pilotCampaignId: campaign.campaignId,
+      }),
+    });
+    if (!armed.response.ok) throw new Error('LOCAL_PILOT_WORKER_ARM_REJECTED');
+    const finalState = await forwardWorkerRequest('/state');
+    if (!finalState.response.ok || finalState.data?.execution_mode !== 'LIVE'
+      || !['ARMED', 'PAUSED_NEW_RISK'].includes(String(finalState.data?.engine_state))
+      || finalState.data?.mainnet_live_approved !== true
+      || finalState.data?.pilot_campaign_id !== campaign.campaignId
+      || finalState.data?.local_run_id !== campaign.runId
+      || finalState.data?.local_source_fingerprint !== campaign.sourceHash
+      || finalState.data?.local_supervisor_instance_id !== supervisor.supervisorInstanceId
+      || finalState.data?.mainnet_launch_policy !== 'LIVE_RESEARCH_PILOT'
+      || !Number.isSafeInteger(finalState.data?.order_submission_attempts)
+      || finalState.data?.order_submission_attempts < 0) {
+      throw new Error('LOCAL_PILOT_ARM_READBACK_FAILED');
+    }
+    return res.json({
+      campaign: safeLocalLivePilotCampaign(campaign),
+      preflight: { status: 'PASS', observedAt: preflight.data?.observedAt || null },
+      worker: {
+        status: String(finalState.data.engine_state),
+        orderSubmissionAttempts: finalState.data.order_submission_attempts ?? 'UNKNOWN',
+      },
+      evidence_status: 'VERIFIED',
+    });
+  } catch (error) {
+    if (activated && campaign) {
+      try {
+        await getServerLocalLivePilotStore().enterCloseOnly(campaign.campaignId, localLivePilotBinding(campaign));
+      } catch { /* retain fail-closed runtime for operator reconciliation */ }
+    }
+    if (armAttempted && campaign) {
+      try {
+        const state = await confirmRunningLocalPilotCampaign(campaign.campaignId);
+        if (state && ['ARMED', 'PAUSED_NEW_RISK'].includes(String(state.engine_state))) {
+          await forwardWorkerRequest('/recovery-only', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ active: true }),
+          });
+        }
+      } catch { /* keep the live Worker for inspection; never replace an ambiguous process */ }
+    }
+    const message = error instanceof Error ? error.message : 'LOCAL_PILOT_START_FAILED';
+    return res.status(503).json({ error: 'LOCAL_PILOT_START_FAILED', reason: message, evidence_status: 'UNVERIFIED' });
+  } finally {
+    localPilotTransitionBusy = false;
+  }
+});
+
+app.post('/api/local/pilot/close-only', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
+    return res.status(400).json({ error: 'LOCAL_PILOT_CLOSE_ONLY_INVALID' });
+  }
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  if (!reserveLocalPilotTransition()) return res.status(409).json({ error: 'LOCAL_PILOT_TRANSITION_IN_PROGRESS' });
+  try {
+    const store = getServerLocalLivePilotStore();
+    const campaign = await store.get(String(body.campaignId || '').trim());
+    if (!campaign) return res.status(404).json({ error: 'LOCAL_PILOT_NOT_FOUND' });
+    if (campaign.adminUid !== uid) return res.status(403).json({ error: 'LOCAL_PILOT_CLOSER_UID_MISMATCH' });
+    if (!['APPROVED', 'ACTIVE', 'EXPIRED'].includes(campaign.status)) {
+      return res.status(409).json({ error: 'LOCAL_PILOT_CANNOT_ENTER_CLOSE_ONLY_FROM_STATUS' });
+    }
+    const supervisor = localWorkerSupervisor?.status();
+    if (supervisor?.mode === 'LIVE') {
+      await confirmRunningLocalPilotCampaign(campaign.campaignId);
+      const closeOnly = await forwardWorkerRequest('/recovery-only', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: true }),
+      });
+      if (!closeOnly.response.ok || closeOnly.data?.active !== true) {
+        return res.status(503).json({ error: 'LOCAL_PILOT_WORKER_CLOSE_ONLY_UNCONFIRMED', evidence_status: 'UNVERIFIED' });
+      }
+    }
+    const closed = await store.enterCloseOnly(campaign.campaignId, localLivePilotBinding(campaign));
+    return res.json({ ...safeLocalLivePilotCampaign(closed), evidence_status: 'VERIFIED' });
+  } catch {
+    return res.status(409).json({ error: 'LOCAL_PILOT_CLOSE_ONLY_FAILED', evidence_status: 'UNVERIFIED' });
+  } finally {
+    localPilotTransitionBusy = false;
+  }
+});
+
+app.post('/api/local/pilot/revoke', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
+    return res.status(400).json({ error: 'LOCAL_PILOT_REVOCATION_INVALID' });
+  }
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  if (!reserveLocalPilotTransition()) return res.status(409).json({ error: 'LOCAL_PILOT_TRANSITION_IN_PROGRESS' });
+  let workerRecoveryConfirmed = false;
+  try {
+    const store = getServerLocalLivePilotStore();
+    const campaign = await store.get(String(body.campaignId || '').trim());
+    if (!campaign) return res.status(404).json({ error: 'LOCAL_PILOT_NOT_FOUND' });
+    if (campaign.adminUid !== uid) return res.status(403).json({ error: 'LOCAL_PILOT_REVOCER_UID_MISMATCH' });
+    if (campaign.status === 'COMPLETED') return res.status(409).json({ error: 'LOCAL_PILOT_ALREADY_COMPLETED' });
+    const supervisor = localWorkerSupervisor.status();
+    const revoked = await revokeLocalPilotWithWorkerGuard({
+      campaign,
+      actorUid: uid,
+      worker: supervisor,
+      requestRecoveryOnly: async () => {
+        const closeOnly = await forwardWorkerRequest('/recovery-only', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active: true }),
+        });
+        return { ok: closeOnly.response.ok, active: closeOnly.data?.active };
+      },
+      readWorkerState: readLocalWorkerState,
+      commitRevocation: () => store.revoke(
+        campaign.campaignId,
+        pilotActor(uid),
+        localLivePilotBinding(campaign),
+      ),
+      onWorkerRecoveryConfirmed: () => { workerRecoveryConfirmed = true; },
+    });
+    return res.json({ ...safeLocalLivePilotCampaign(revoked), evidence_status: 'VERIFIED' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    if (message === 'LOCAL_PILOT_WORKER_CLOSE_ONLY_UNCONFIRMED') {
+      return res.status(503).json({ error: message, evidence_status: 'UNVERIFIED' });
+    }
+    if (message === 'LOCAL_PILOT_WORKER_CAMPAIGN_MISMATCH') {
+      return res.status(409).json({ error: message, evidence_status: 'UNVERIFIED' });
+    }
+    return res.status(409).json({
+      error: 'LOCAL_PILOT_REVOCATION_FAILED',
+      workerRecoveryOnly: workerRecoveryConfirmed,
+      evidence_status: 'UNVERIFIED',
+    });
+  } finally {
+    localPilotTransitionBusy = false;
+  }
+});
+
+async function inspectLocalContinuationContext(
+  candidateId: string,
+  launchId: string,
+): Promise<{
+  candidate: LocalReleaseCandidate;
+  consumedApprovalId: string;
+  binding: LocalReleaseBinding;
+  evidenceHash: string;
+  failures: string[];
+}> {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) throw new Error('LOCAL_RUNTIME_REQUIRED');
+  const store = getServerLocalReleaseStore();
+  const candidate = await store.getCandidate(candidateId);
+  if (!candidate) throw new Error('LOCAL_RELEASE_CANDIDATE_NOT_FOUND');
+  if (candidate.status !== 'CONSUMED' || !candidate.approvalId) {
+    throw new Error('LOCAL_INITIAL_RELEASE_APPROVAL_NOT_CONSUMED');
+  }
+  const consumed = await store.getConsumedApproval(candidate.approvalId);
+  if (!consumed) throw new Error('LOCAL_INITIAL_RELEASE_APPROVAL_INVALID');
+
+  const fingerprint = currentLocalFingerprint(candidate.apiKeyVersion, candidate.apiSecretVersion);
+  const promotion = localPromotionStatus(fingerprint);
+  const binding = localBindingFromFingerprint(fingerprint, promotion.bundleSha256 || '');
+  assertExpectedLocalBinding(candidate, binding);
+  const supervisor = localWorkerSupervisor.status();
+  const [workerState, readinessResult, persistenceReady] = await Promise.all([
+    readLocalWorkerState(),
+    runContinuationReadiness(launchId),
+    localPersistenceIsDurable(),
+  ]);
+  const evidence = readinessResult.evidence;
+  const failures = [...promotion.failures];
+  if (!promotion.passed) failures.push('Local promotion evidence is not currently verified');
+  if (supervisor.mode !== 'LIVE'
+    || !supervisor.workerRunning
+    || supervisor.runId !== candidate.runId
+    || supervisor.approvalId !== candidate.approvalId
+    || supervisor.sourceFingerprint !== binding.sourceFingerprint
+    || supervisor.secretVersions?.apiKey !== candidate.apiKeyVersion
+    || supervisor.secretVersions?.apiSecret !== candidate.apiSecretVersion) {
+    failures.push('Local Worker supervisor identity does not match the consumed release approval');
+  }
+  if (!persistenceReady || evidence.persistenceDurable !== true) {
+    failures.push('Durable Local PostgreSQL persistence is not verified');
+  }
+  if (evidence.launchId !== launchId
+    || evidence.launchPolicy !== 'STAGED_FIRST_ORDER'
+    || evidence.launchState !== 'PAUSED_NEW_RISK'
+    || evidence.submittedOrders !== 1
+    || evidence.reservedOrders < 1
+    || evidence.engineState !== 'PAUSED_NEW_RISK') {
+    failures.push('Durable launch session is not paused after exactly one confirmed first risk-increasing order');
+  }
+  if (!evidence.firstOrderClientOrderId
+    || !/^[A-Za-z0-9_-]{1,64}$/.test(evidence.firstOrderClientOrderId)
+    || evidence.pendingOrderClientOrderId) {
+    failures.push('First-order client ID is missing or an exchange submission remains ambiguous');
+  }
+  if (evidence.mainnetLiveApproved !== true
+    || evidence.preflightPassed !== true
+    || evidence.preflightOrderSubmissionAttempts !== 0
+    || evidence.preflightOrderEndpointAttempts !== 0
+    || !evidence.continuationReady
+    || evidence.checks.some((check) => check.required && check.status !== 'PASS')) {
+    failures.push('Fresh read-only continuation preflight is not fully passing with zero preflight order attempts');
+  }
+  if (workerState.execution_mode !== 'LIVE'
+    || workerState.mainnet_live_approved !== true
+    || workerState.mainnet_launch_id !== launchId
+    || workerState.mainnet_launch_policy !== 'STAGED_FIRST_ORDER'
+    || workerState.mainnet_launch_state !== 'PAUSED_NEW_RISK'
+    || workerState.engine_state !== 'PAUSED_NEW_RISK'
+    || workerState.reconciliation_status !== 'IN_SYNC'
+    || workerState.kill_switch_active === true) {
+    failures.push('Worker state does not prove the approved Local staged launch is paused and reconciled');
+  }
+  return {
+    candidate,
+    consumedApprovalId: consumed.approvalId,
+    binding,
+    evidenceHash: localContinuationEvidenceHash(evidence, workerState, binding),
+    failures: [...new Set(failures)],
+  };
+}
+
+function safeLocalCandidate(candidate: LocalReleaseCandidate) {
+  return {
+    candidateId: candidate.candidateId,
+    runtimeTarget: candidate.runtimeTarget,
+    runId: candidate.runId,
+    status: candidate.status,
+    sourceFingerprint: candidate.sourceFingerprint,
+    dependencyFingerprint: candidate.dependencyFingerprint,
+    migrationFingerprint: candidate.migrationFingerprint,
+    promotionEvidenceSha256: candidate.promotionEvidenceSha256,
+    policyVersion: candidate.policyVersion,
+    policyHash: candidate.policyHash,
+    secretVersions: {
+      apiKey: candidate.apiKeyVersion,
+      apiSecret: candidate.apiSecretVersion,
+    },
+    createdAt: candidate.createdAt,
+    expiresAt: candidate.expiresAt,
+  };
+}
+
+app.get('/api/local/runtime', async (_req: Request, res: Response) => {
+  if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  try {
+    const [workerState, readiness] = await Promise.all([
+      readLocalWorkerState(),
+      forwardWorkerRequest('/readiness'),
+    ]);
+    const workerReadiness = releaseRequestObject(readiness.data) || {};
+    const persistence = releaseRequestObject(workerReadiness.persistence) || {};
+    const fingerprint = (() => {
+      try {
+        return currentLocalFingerprint(
+          process.env.LOCAL_MAINNET_API_KEY_VERSION || '',
+          process.env.LOCAL_MAINNET_API_SECRET_VERSION || '',
+        );
+      } catch {
+        return null;
+      }
+    })();
+    const promotion = fingerprint
+      ? localPromotionStatus(fingerprint)
+      : {
+          passed: false,
+          failures: ['Local release fingerprint is unavailable'],
+          totalClosedBaskets: 0,
+          cohorts: undefined,
+        };
+    return res.json({
+      runtimeTarget: RUNTIME_TARGET,
+      supervisor: localWorkerSupervisor?.status() || null,
+      executionMode: workerState.execution_mode || 'UNKNOWN',
+      engineState: workerState.engine_state || 'UNKNOWN',
+      mainnetLiveApproved: workerState.mainnet_live_approved === true,
+      orderSubmissionAttempts: Number(workerState.order_submission_attempts || 0),
+      orderEndpointAttempts: Number(workerState.order_endpoint_attempts || 0),
+      persistence: {
+        mode: persistence.mode || 'UNKNOWN',
+        ready: persistence.ready === true,
+        durable: persistence.durable === true,
+        runtimeTarget: persistence.runtime_target || 'UNKNOWN',
+        databaseProvider: persistence.database_provider || 'UNKNOWN',
+        databaseHost: persistence.database_host || null,
+        databasePort: persistence.database_port || null,
+        databaseIdentityVerified: persistence.database_identity_verified === true,
+      },
+      localMainnetRiskLifecycle: {
+        ready: workerReadiness.local_mainnet_risk_lifecycle_ready === true,
+        missing: Array.isArray(workerReadiness.local_mainnet_risk_lifecycle_missing)
+          ? workerReadiness.local_mainnet_risk_lifecycle_missing
+          : [],
+      },
+      promotionEvidence: {
+        passed: promotion.passed,
+        failures: promotion.failures,
+        totalClosedBaskets: promotion.totalClosedBaskets || 0,
+        cohorts: promotion.cohorts || null,
+      },
+      evidence_status: 'UNVERIFIED',
+    });
+  } catch {
+    return res.status(503).json({
+      error: 'LOCAL_RUNTIME_STATUS_UNAVAILABLE',
+      runtimeTarget: 'LOCAL',
+      evidence_status: 'UNVERIFIED',
+    });
+  }
+});
+
+app.post('/api/local/mainnet/candidate', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body) || Object.keys(body).length > 0) {
+    return res.status(400).json({ error: 'LOCAL_CANDIDATE_BODY_MUST_BE_EMPTY' });
+  }
+  const apiKeyVersion = (process.env.LOCAL_MAINNET_API_KEY_VERSION || '').trim();
+  const apiSecretVersion = (process.env.LOCAL_MAINNET_API_SECRET_VERSION || '').trim();
+  try {
+    const fingerprint = currentLocalFingerprint(apiKeyVersion, apiSecretVersion);
+    const promotion = localPromotionStatus(fingerprint);
+    if (!promotion.passed) {
+      return res.status(409).json({
+        error: 'LOCAL_PROMOTION_GATE_NOT_PASSED',
+        failures: promotion.failures,
+        totalClosedBaskets: promotion.totalClosedBaskets || 0,
+        cohorts: promotion.cohorts || null,
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const workerState = await readLocalWorkerState();
+    const localRiskLifecycle = await localMainnetRiskLifecycleStatus();
+    if (!localRiskLifecycle.ready) {
+      return res.status(409).json({
+        error: 'LOCAL_MAINNET_RISK_LIFECYCLE_UNAVAILABLE',
+        missing: localRiskLifecycle.missing,
+        message: 'Local release candidates stay blocked until durable basket-risk context and verified stop/target lifecycle are implemented.',
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    if (!localWorkerIsPaperDisarmed(workerState) || !(await localPersistenceIsDurable())) {
+      return res.status(409).json({
+        error: 'LOCAL_RUNTIME_NOT_PAPER_DISARMED_WITH_DURABLE_LOCAL_DATABASE',
+        message: 'Candidate creation requires the current Local Worker to be PAPER/DISARMED and the Local PostgreSQL ledger to be durable.',
+        evidence_status: 'UNVERIFIED',
+      });
+    }
+    const binding = localBindingFromFingerprint(fingerprint, promotion.bundleSha256 || '');
+    const candidate = newLocalReleaseCandidate({
+      runId: binding.runId,
+      sourceFingerprint: binding.sourceFingerprint,
+      dependencyFingerprint: binding.dependencyFingerprint,
+      migrationFingerprint: binding.migrationFingerprint,
+      promotionEvidenceSha256: binding.promotionEvidenceSha256,
+      apiKeyVersion: binding.apiKeyVersion,
+      apiSecretVersion: binding.apiSecretVersion,
+      secretManagerProjectId: binding.secretManagerProjectId,
+      apiKeySecretVersionResource: binding.apiKeySecretVersionResource,
+      apiSecretSecretVersionResource: binding.apiSecretSecretVersionResource,
+      policyVersion: binding.policyVersion,
+      policyHash: binding.policyHash,
+      nonce: crypto.randomBytes(24).toString('base64url'),
+    });
+    await getServerLocalReleaseStore().createCandidate(candidate);
+    return res.status(201).json({
+      ...safeLocalCandidate(candidate),
+      promotionEvidence: {
+        bundleSha256: promotion.bundleSha256,
+        totalClosedBaskets: promotion.totalClosedBaskets,
+        cohorts: promotion.cohorts,
+      },
+      evidence_status: 'VERIFIED',
+    });
+  } catch {
+    return res.status(503).json({ error: 'LOCAL_RELEASE_CANDIDATE_FAILED', evidence_status: 'UNVERIFIED' });
+  }
+});
+
+app.get('/api/local/mainnet/:candidateId', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  try {
+    const candidate = await getServerLocalReleaseStore().getCandidate(String(req.params.candidateId));
+    if (!candidate) return res.status(404).json({ error: 'LOCAL_RELEASE_CANDIDATE_NOT_FOUND' });
+    return res.json(safeLocalCandidate(candidate));
+  } catch {
+    return res.status(503).json({ error: 'LOCAL_RELEASE_STORE_UNAVAILABLE', evidence_status: 'UNVERIFIED' });
+  }
+});
+
+app.post('/api/local/mainnet/continuation/request', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) {
+    return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  }
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body)
+    || Object.keys(body).some((key) => !['candidateId', 'launchId'].includes(key))) {
+    return res.status(400).json({ error: 'LOCAL_CONTINUATION_PAYLOAD_INVALID' });
+  }
+  const candidateId = typeof body.candidateId === 'string' ? body.candidateId.trim() : '';
+  const launchId = typeof body.launchId === 'string' ? body.launchId.trim() : '';
+  if (!/^local-rc-[0-9a-f-]{36}$/i.test(candidateId)) {
+    return res.status(400).json({ error: 'LOCAL_RELEASE_CANDIDATE_ID_REQUIRED' });
+  }
+  if (!/^launch-[A-Za-z0-9-]{8,127}$/.test(launchId)) {
+    return res.status(400).json({ error: 'LAUNCH_ID_REQUIRED' });
+  }
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  try {
+    const context = await inspectLocalContinuationContext(candidateId, launchId);
+    if (context.failures.length) {
+      return res.status(409).json({
+        error: 'LOCAL_CONTINUATION_GATE_NOT_PASSED',
+        failures: context.failures,
+        evidence_status: 'UNVERIFIED',
+        executionActivated: false,
+      });
+    }
+    const approval = newLocalContinuationApproval({
+      continuationId: localContinuationIdFor(candidateId, launchId),
+      candidateId,
+      initialApprovalId: context.consumedApprovalId,
+      runId: context.binding.runId,
+      launchId,
+      sourceFingerprint: context.binding.sourceFingerprint,
+      dependencyFingerprint: context.binding.dependencyFingerprint,
+      migrationFingerprint: context.binding.migrationFingerprint,
+      firstOrderEvidenceHash: context.evidenceHash,
+      tradingAdminUid: uid,
+      nonce: crypto.randomBytes(24).toString('base64url'),
+      policyVersion: context.binding.policyVersion,
+      policyHash: context.binding.policyHash,
+    });
+    const savedApproval = await getServerLocalContinuationStore().createApproval(approval);
+    return res.status(201).json({
+      runtimeTarget: 'LOCAL',
+      continuationId: savedApproval.continuationId,
+      candidateId,
+      launchId,
+      initialApprovalId: context.consumedApprovalId,
+      firstOrderEvidenceHash: context.evidenceHash,
+      status: savedApproval.status,
+      expiresAt: savedApproval.expiresAt,
+      evidence_status: 'VERIFIED',
+      executionActivated: false,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Local continuation request failed';
+    const status = message.includes('NOT_FOUND') ? 404 : 503;
+    return res.status(status).json({
+      error: 'LOCAL_CONTINUATION_REQUEST_FAILED',
+      message,
+      evidence_status: 'UNVERIFIED',
+      executionActivated: false,
+    });
+  }
+});
+
+app.post('/api/local/mainnet/continuation/approve', async (req: Request, res: Response) => {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) {
+    return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  }
+  const body = releaseRequestObject(req.body) || {};
+  if (hasCredentialLikeKey(body)
+    || Object.keys(body).some((key) => key !== 'continuationId')) {
+    return res.status(400).json({ error: 'LOCAL_CONTINUATION_APPROVAL_PAYLOAD_INVALID' });
+  }
+  const continuationId = typeof body.continuationId === 'string' ? body.continuationId.trim() : '';
+  if (!/^local-continuation-[0-9a-f-]{36}$/i.test(continuationId)) {
+    return res.status(400).json({ error: 'LOCAL_CONTINUATION_ID_REQUIRED' });
+  }
+  const uid = res.locals.firebaseUid;
+  if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+  try {
+    const store = getServerLocalContinuationStore();
+    const pending = await store.getApproval(continuationId);
+    if (!pending) return res.status(404).json({ error: 'LOCAL_CONTINUATION_NOT_FOUND' });
+    if (pending.status !== 'PENDING_APPROVAL') {
+      return res.status(409).json({ error: 'LOCAL_CONTINUATION_NOT_PENDING', status: pending.status });
+    }
+    const context = await inspectLocalContinuationContext(pending.candidateId, pending.launchId);
+    if (context.failures.length || context.evidenceHash !== pending.firstOrderEvidenceHash) {
+      return res.status(409).json({
+        error: 'LOCAL_CONTINUATION_EVIDENCE_CHANGED',
+        failures: context.failures.length ? context.failures : ['First-order evidence no longer matches the pending request'],
+        evidence_status: 'UNVERIFIED',
+        executionActivated: false,
+      });
+    }
+    const approved = await store.approveContinuation(
+      continuationId,
+      { uid, role: 'trading_admin' },
+      localContinuationBinding(pending),
+    );
+    return res.json({
+      runtimeTarget: 'LOCAL',
+      continuationId,
+      approvalId: approved.approvalId,
+      candidateId: approved.candidateId,
+      launchId: approved.launchId,
+      status: approved.status,
+      expiresAt: approved.expiresAt,
+      firstOrderEvidenceHash: approved.firstOrderEvidenceHash,
+      evidence_status: 'VERIFIED',
+      executionActivated: false,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Local continuation approval failed';
+    const status = message.includes('not found') ? 404 : /binding|UID|expired|pending/i.test(message) ? 409 : 503;
+    return res.status(status).json({
+      error: 'LOCAL_CONTINUATION_APPROVAL_FAILED',
+      evidence_status: 'UNVERIFIED',
+      executionActivated: false,
+    });
+  }
+});
+
+app.post('/api/local/mainnet/approve', async (_req: Request, res: Response) => {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) {
+    return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+  }
+  return res.status(409).json({
+    error: 'LOCAL_PILOT_REQUIRED',
+    message: 'Use the campaign-bound Local Pilot request, approval, and prepare flow.',
+    evidence_status: 'NOT_RUN',
+  });
+});
+
 app.get('/api/system/readiness', async (req, res) => {
   try {
     const resp = await forwardWorkerRequest('/readiness');
@@ -2015,7 +3391,104 @@ app.post('/api/system/arm', async (req, res) => {
   };
 
   try {
-    if (requestedConfig.executionMode === 'LIVE') {
+    if (requestedConfig.executionMode === 'LIVE' && LOCAL_ONLY) {
+      if (
+        typeof requestedConfig.releaseApprovalId !== 'string'
+        || !/^local-approval-[0-9a-f-]{36}$/i.test(requestedConfig.releaseApprovalId)
+      ) {
+        return res.status(400).json({
+          error: 'LOCAL_RELEASE_APPROVAL_ID_REQUIRED',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+      let consumed;
+      try {
+        consumed = await getServerLocalReleaseStore().getConsumedApproval(
+          requestedConfig.releaseApprovalId,
+        );
+      } catch {
+        return res.status(503).json({ error: 'LOCAL_RELEASE_STORE_UNAVAILABLE', evidence_status: 'UNVERIFIED' });
+      }
+      if (!consumed) {
+        return res.status(409).json({
+          error: 'LOCAL_RELEASE_APPROVAL_NOT_CONSUMED',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+      const requestedInstruments = Array.isArray(requestedConfig.instruments)
+        ? requestedConfig.instruments.map((symbol) => String(symbol).trim().toUpperCase())
+        : [];
+      if (
+        consumed.runtimeTarget !== 'LOCAL'
+        || consumed.runId !== LOCAL_RUN_ID
+        || requestedConfig.launchPolicy !== 'STAGED_FIRST_ORDER'
+        || requestedConfig.enforcePreflight !== true
+        || requestedInstruments.length !== 1
+        || requestedInstruments[0] !== 'ETHUSDC'
+      ) {
+        return res.status(409).json({ error: 'LOCAL_RELEASE_APPROVAL_SCOPE_MISMATCH', evidence_status: 'UNVERIFIED' });
+      }
+      try {
+        const candidate = await getServerLocalReleaseStore().getCandidate(consumed.candidateId);
+        if (!candidate || candidate.approvalId !== consumed.approvalId || candidate.status !== 'CONSUMED') {
+          return res.status(409).json({ error: 'LOCAL_RELEASE_CANDIDATE_INVALID', evidence_status: 'UNVERIFIED' });
+        }
+        const current = currentLocalFingerprint(consumed.apiKeyVersion, consumed.apiSecretVersion);
+        const promotion = localPromotionStatus(current);
+        if (!promotion.passed) {
+          return res.status(409).json({
+            error: 'LOCAL_PROMOTION_GATE_NOT_PASSED',
+            failures: promotion.failures,
+            evidence_status: 'UNVERIFIED',
+          });
+        }
+        assertExpectedLocalBinding(candidate, localBindingFromFingerprint(current, promotion.bundleSha256 || ''));
+        const workerState = await readLocalWorkerState();
+        const supervisor = localWorkerSupervisor?.status();
+        if (
+          workerState.execution_mode !== 'LIVE'
+          || workerState.engine_state !== 'DISARMED'
+          || workerState.mainnet_live_approved !== true
+          || Number(workerState.order_submission_attempts || 0) !== 0
+          || supervisor?.mode !== 'LIVE'
+          || supervisor.approvalId !== consumed.approvalId
+          || supervisor.sourceFingerprint !== consumed.sourceFingerprint
+          || supervisor.secretVersions?.apiKey !== consumed.apiKeyVersion
+          || supervisor.secretVersions?.apiSecret !== consumed.apiSecretVersion
+        ) {
+          return res.status(409).json({
+            error: 'LOCAL_WORKER_NOT_LIVE_DISARMED',
+            evidence_status: 'UNVERIFIED',
+          });
+        }
+        const preflight = await forwardWorkerRequest('/preflight/read-only', { method: 'POST' });
+        const preflightData = releaseRequestObject(preflight.data) || {};
+        const checks = Array.isArray(preflightData.checks)
+          ? preflightData.checks.filter((check) => releaseRequestObject(check)?.status !== 'PASS')
+          : [];
+        const noOrders = Number(preflightData.orderSubmissionAttempts ?? preflightData.order_submission_attempts) === 0
+          && Number(preflightData.orderEndpointAttempts ?? preflightData.order_endpoint_attempts) === 0;
+        if (
+          !preflight.response.ok
+          || preflightData.preflightPassed !== true
+          || preflightData.canArm !== false
+          || !noOrders
+          || checks.length > 0
+        ) {
+          return res.status(409).json({
+            error: 'LOCAL_MAINNET_PREFLIGHT_FAILED',
+            failedCheckIds: checks.map((check) => String(releaseRequestObject(check)?.id || 'UNKNOWN')),
+            orderSubmissionAttempts: Number(preflightData.orderSubmissionAttempts ?? preflightData.order_submission_attempts ?? -1),
+            orderEndpointAttempts: Number(preflightData.orderEndpointAttempts ?? preflightData.order_endpoint_attempts ?? -1),
+            evidence_status: 'UNVERIFIED',
+          });
+        }
+        requestedConfig.releaseApprovalId = consumed.approvalId;
+        requestedConfig.instruments = requestedInstruments;
+      } catch {
+        return res.status(503).json({ error: 'LOCAL_RELEASE_VERIFICATION_FAILED', evidence_status: 'UNVERIFIED' });
+      }
+    } else if (requestedConfig.executionMode === 'LIVE') {
       // A browser may submit an approval id, but it cannot create or assert an
       // approval. The server must resolve the id to a consumed Firestore
       // record before the Worker can see an ARM request.
@@ -2162,6 +3635,13 @@ app.post('/api/system/arm', async (req, res) => {
 // the server-side approval and forwards a Google-authenticated request to the
 // Worker. No endpoint here can set MAINNET_LIVE_APPROVED itself.
 app.post('/api/system/continue', async (req: Request, res: Response) => {
+  if (LOCAL_ONLY) {
+    return res.status(409).json({
+      error: 'LOCAL_PILOT_CAMPAIGN_REQUIRED',
+      message: 'Legacy autonomous continuation is disabled for Local runtime.',
+      evidence_status: 'NOT_RUN',
+    });
+  }
   const body = releaseRequestObject(req.body) || {};
   if (hasCredentialLikeKey(body)) {
     return res.status(400).json({ error: 'CONTINUATION_PAYLOAD_CONTAINS_CREDENTIALS' });
@@ -2170,7 +3650,9 @@ app.post('/api/system/continue', async (req: Request, res: Response) => {
     ? body.continuationApprovalId.trim()
     : '';
   const launchId = typeof body.launchId === 'string' ? body.launchId.trim() : '';
-  if (!/^continuation-[0-9a-f-]{36}$/i.test(continuationApprovalId)) {
+  const localContinuationId = /^local-continuation-[0-9a-f-]{36}$/i.test(continuationApprovalId);
+  const cloudContinuationId = /^continuation-[0-9a-f-]{36}$/i.test(continuationApprovalId);
+  if ((LOCAL_ONLY && !localContinuationId) || (!LOCAL_ONLY && !cloudContinuationId)) {
     return res.status(400).json({ error: 'CONTINUATION_APPROVAL_ID_REQUIRED' });
   }
   if (!/^launch-[A-Za-z0-9-]{8,127}$/.test(launchId)) {
@@ -2205,6 +3687,178 @@ app.post('/api/system/continue', async (req: Request, res: Response) => {
   }
 
   try {
+    if (LOCAL_ONLY) {
+      if (!localWorkerSupervisor) {
+        return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
+      }
+      const uid = res.locals.firebaseUid;
+      if (typeof uid !== 'string' || !uid) {
+        return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
+      }
+      const store = getServerLocalContinuationStore();
+      const approval = await store.getApproval(continuationApprovalId);
+      if (!approval) return res.status(404).json({ error: 'LOCAL_CONTINUATION_NOT_FOUND' });
+      if (approval.launchId !== launchId || approval.tradingAdminUid !== uid) {
+        return res.status(409).json({ error: 'LOCAL_CONTINUATION_SCOPE_OR_APPROVER_MISMATCH' });
+      }
+      const candidate = await getServerLocalReleaseStore().getCandidate(approval.candidateId);
+      if (!candidate
+        || candidate.status !== 'CONSUMED'
+        || candidate.approvalId !== approval.initialApprovalId) {
+        return res.status(409).json({ error: 'LOCAL_INITIAL_RELEASE_APPROVAL_INVALID' });
+      }
+      const fingerprint = currentLocalFingerprint(candidate.apiKeyVersion, candidate.apiSecretVersion);
+      const promotion = localPromotionStatus(fingerprint);
+      if (!promotion.passed) {
+        return res.status(409).json({
+          error: 'LOCAL_PROMOTION_GATE_NOT_PASSED',
+          failures: promotion.failures,
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+      const releaseBinding = localBindingFromFingerprint(fingerprint, promotion.bundleSha256 || '');
+      assertExpectedLocalBinding(candidate, releaseBinding);
+      const supervisor = localWorkerSupervisor.status();
+      if (supervisor.mode !== 'LIVE'
+        || !supervisor.workerRunning
+        || supervisor.runId !== approval.runId
+        || supervisor.approvalId !== approval.initialApprovalId
+        || supervisor.sourceFingerprint !== approval.sourceFingerprint
+        || supervisor.secretVersions?.apiKey !== candidate.apiKeyVersion
+        || supervisor.secretVersions?.apiSecret !== candidate.apiSecretVersion
+        || !(await localPersistenceIsDurable())) {
+        return res.status(409).json({
+          error: 'LOCAL_CONTINUATION_RUNTIME_BINDING_FAILED',
+          evidence_status: 'UNVERIFIED',
+          executionActivated: false,
+        });
+      }
+
+      const activeState = await readLocalWorkerState();
+      const alreadyActive = approval.status === 'CONSUMED'
+        && activeState.execution_mode === 'LIVE'
+        && activeState.engine_state === 'ARMED'
+        && activeState.mainnet_live_approved === true
+        && activeState.mainnet_launch_id === launchId
+        && activeState.mainnet_launch_state === 'AUTONOMOUS_ACTIVE'
+        && activeState.mainnet_continuation_approval_id === approval.continuationId;
+      if (alreadyActive) {
+        projectWorkerState(activeState);
+        return res.json({
+          ...activeState,
+          runtimeTarget: 'LOCAL',
+          continuationId: approval.continuationId,
+          launchId,
+          status: 'AUTONOMOUS_ACTIVE',
+          idempotent: true,
+          evidence_status: 'VERIFIED',
+        });
+      }
+      if (approval.status === 'CONSUMED') {
+        return res.status(409).json({
+          error: 'LOCAL_CONTINUATION_CONSUMED_REQUIRES_RECONCILIATION',
+          message: 'This continuation was consumed; reconcile Worker state before creating a new approval. The same approval will not be replayed.',
+          executionActivated: 'UNKNOWN',
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+      if (approval.status !== 'APPROVED' || !approval.approvalId) {
+        return res.status(409).json({ error: 'LOCAL_CONTINUATION_NOT_APPROVED', status: approval.status });
+      }
+
+      const context = await inspectLocalContinuationContext(approval.candidateId, approval.launchId);
+      if (context.failures.length || context.evidenceHash !== approval.firstOrderEvidenceHash) {
+        return res.status(409).json({
+          error: 'LOCAL_CONTINUATION_EVIDENCE_CHANGED',
+          failures: context.failures.length ? context.failures : ['First-order evidence no longer matches the approved continuation'],
+          evidence_status: 'UNVERIFIED',
+          executionActivated: false,
+        });
+      }
+      const currentBinding = {
+        ...localContinuationBinding(approval),
+        runtimeTarget: 'LOCAL' as const,
+        candidateId: context.candidate.candidateId,
+        initialApprovalId: context.consumedApprovalId,
+        runId: context.binding.runId,
+        launchId,
+        sourceFingerprint: context.binding.sourceFingerprint,
+        dependencyFingerprint: context.binding.dependencyFingerprint,
+        migrationFingerprint: context.binding.migrationFingerprint,
+        policyVersion: context.binding.policyVersion,
+        policyHash: context.binding.policyHash,
+        firstOrderEvidenceHash: context.evidenceHash,
+        tradingAdminUid: uid,
+      };
+      const consumed = await store.consumeContinuation(approval.continuationId, currentBinding);
+      let forwarded: { response: globalThis.Response; data: any } | null = null;
+      try {
+        forwarded = await forwardWorkerRequest('/continue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            executionMode: 'LIVE',
+            instruments: ['ETHUSDC'],
+            strategies,
+            riskProfile,
+            enforcePreflight: true,
+            continuationApprovalId: consumed.continuationId,
+            launchId: consumed.launchId,
+            initialApprovalId: consumed.initialApprovalId,
+          }),
+        });
+      } catch {
+        // A consumed approval is never replayed after an uncertain Worker call.
+      }
+      const readback: Record<string, unknown> = await readLocalWorkerState().catch(() => ({}));
+      const readbackSupervisor = localWorkerSupervisor.status();
+      const activated = readback.execution_mode === 'LIVE'
+        && readback.engine_state === 'ARMED'
+        && readback.mainnet_live_approved === true
+        && readback.mainnet_launch_id === launchId
+        && readback.mainnet_launch_policy === 'AUTONOMOUS_AFTER_REVIEW'
+        && readback.mainnet_launch_state === 'AUTONOMOUS_ACTIVE'
+        && readback.mainnet_continuation_approval_id === consumed.continuationId
+        && readbackSupervisor.mode === 'LIVE'
+        && readbackSupervisor.workerRunning
+        && readbackSupervisor.approvalId === consumed.initialApprovalId
+        && readbackSupervisor.sourceFingerprint === consumed.sourceFingerprint;
+      if (!activated) {
+        const rollback = await rollbackAutonomousContinuation();
+        return res.status(409).json({
+          error: forwarded && !forwarded.response.ok
+            ? 'LOCAL_WORKER_REJECTED_CONTINUATION'
+            : 'LOCAL_CONTINUATION_READBACK_FAILED',
+          rollbackVerified: rollback.verified,
+          workerDisarmed: rollback.verified,
+          executionActivated: !rollback.verified,
+          evidence_status: 'UNVERIFIED',
+        });
+      }
+      projectWorkerState(readback);
+      await auditRepository.logEvent({
+        eventType: 'AUTONOMOUS_CONTINUATION_ACTIVATED',
+        previousState: 'PAUSED_NEW_RISK',
+        newState: 'ARMED',
+        executionMode: 'LIVE',
+        reason: 'Local first-order evidence and independent trading_admin continuation approval passed',
+        metadata: {
+          runtimeTarget: 'LOCAL',
+          launchId,
+          continuationId: consumed.continuationId,
+          initialApprovalId: consumed.initialApprovalId,
+          sourceFingerprint: consumed.sourceFingerprint,
+        },
+      });
+      return res.json({
+        ...readback,
+        runtimeTarget: 'LOCAL',
+        continuationId: consumed.continuationId,
+        launchId,
+        status: 'AUTONOMOUS_ACTIVE',
+        evidence_status: 'VERIFIED',
+      });
+    }
     const store = getServerReleaseStore();
     let approval = await store.getContinuationApproval(continuationApprovalId);
     if (!approval) return res.status(404).json({ error: 'CONTINUATION_APPROVAL_NOT_FOUND' });
@@ -2422,10 +4076,35 @@ app.post('/api/system/pause-new-risk', async (req, res) => {
 
 app.post('/api/system/recovery-only', async (req, res) => {
   try {
+    let recoveryBody = req.body;
+    const supervisor = localWorkerSupervisor?.status();
+    if (LOCAL_ONLY && supervisor?.workerRunning && supervisor.mode === 'LIVE'
+      && (supervisor.pilotCampaignId || typeof req.body?.campaignId === 'string')) {
+      const campaignId = typeof req.body?.campaignId === 'string' ? req.body.campaignId.trim() : '';
+      if (!campaignId || !supervisor.pilotCampaignId || campaignId !== supervisor.pilotCampaignId) {
+        return res.status(409).json({ error: 'LOCAL_PILOT_WORKER_CAMPAIGN_MISMATCH' });
+      }
+      await confirmRunningLocalPilotCampaign(campaignId);
+      if (req.body?.active !== true) {
+        // Release re-opens new-risk authority: bound admin + ACTIVE unexpired campaign only.
+        try {
+          assertLocalLivePilotRecoveryReleaseAllowed(
+            await getServerLocalLivePilotStore().get(campaignId),
+            typeof res.locals.firebaseUid === 'string' ? res.locals.firebaseUid : '',
+          );
+        } catch (releaseError) {
+          const code = releaseError instanceof Error ? releaseError.message : '';
+          if (code === 'LOCAL_PILOT_RELEASE_UID_MISMATCH') return res.status(403).json({ error: code });
+          if (code === 'LOCAL_PILOT_NOT_FOUND') return res.status(404).json({ error: code });
+          return res.status(409).json({ error: 'LOCAL_PILOT_NOT_ACTIVE' });
+        }
+      }
+      recoveryBody = { active: req.body?.active };
+    }
     const forwarded = await forwardWorkerRequest('/recovery-only', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
+      body: JSON.stringify(recoveryBody)
     });
     if (!forwarded.response.ok) {
       return res.status(forwarded.response.status).json({ error: 'WORKER_REJECTED_RECOVERY', detail: forwarded.data });
@@ -3588,6 +5267,15 @@ app.all('/api/{*splat}', (req: Request, res: Response) => {
 
 // Vite middleware in dev or static files in production
 async function startServer() {
+  if (LOCAL_ONLY) {
+    if (RUNTIME_TARGET !== 'LOCAL' || !LOCAL_RUN_ID || !LOCAL_WORKER_IDENTITY_TOKEN || !localWorkerSupervisor) {
+      throw new Error('LOCAL_RUNTIME_SUPERVISOR_CONFIGURATION_INVALID');
+    }
+    // Every Control Plane start creates a fresh Paper-only Worker. Approval
+    // records and environment flags are never replayed across process restarts.
+    await localWorkerSupervisor.startPaper();
+  }
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -3602,8 +5290,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Blessing AI v0.2 Server listening on http://0.0.0.0:${PORT}`);
+  const httpServer = app.listen(PORT, BIND_HOST, () => {
+    console.log('Blessing AI v0.2 Server listening on http://' + BIND_HOST + ':' + PORT);
 
     // Initial background sync from Binance
     const active = getActiveBinanceCredentials();
@@ -3646,6 +5334,19 @@ async function startServer() {
         .catch((e) => console.warn('[Binance] Initial balance sync failed:', e.message));
     }
   });
+
+  if (localWorkerSupervisor) {
+    let closing = false;
+    const shutdownLocalRuntime = () => {
+      if (closing) return;
+      closing = true;
+      void localWorkerSupervisor.close().finally(() => {
+        httpServer.close(() => process.exit(0));
+      });
+    };
+    process.once('SIGINT', shutdownLocalRuntime);
+    process.once('SIGTERM', shutdownLocalRuntime);
+  }
 }
 
 startServer().catch((err) => {

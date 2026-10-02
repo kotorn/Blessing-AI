@@ -37,6 +37,10 @@ COPY domain/ ./domain/
 COPY venues/ ./venues/
 COPY apps/trading_worker/ ./apps/trading_worker/
 COPY apps/learning_engine/ ./apps/learning_engine/
+COPY config/risk/ ./config/risk/
+COPY scripts/apply_local_postgres_migrations.py ./scripts/apply_local_postgres_migrations.py
+COPY scripts/verify_local_pilot_ci_attestation.py ./scripts/verify_local_pilot_ci_attestation.py
+COPY infra/postgres/migrations/ ./infra/postgres/migrations/
 
 # The worker starts its background loop and FastAPI health/control server in
 # one process. Cloud Run supplies PORT; defaults remain PAPER/DISARMED.
@@ -44,4 +48,5 @@ ENV EXECUTION_MODE=PAPER
 ENV MAINNET_LIVE_APPROVED=false
 ENV PERSISTENCE_MODE=REQUIRED
 ENV EXECUTION_LEASE_REQUIRED=true
+USER 10001:10001
 CMD ["python", "-m", "apps.trading_worker.main"]

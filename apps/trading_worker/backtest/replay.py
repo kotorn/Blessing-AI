@@ -652,13 +652,44 @@ class DeterministicReplay:
             return Decimal(0)
         return (mark_price - self._position.reference_entry_price) * self._position.signed_qty
 
-    def _current_equity(self, mark_price: Decimal) -> Decimal:
+    def _open_position_cost_liability(
+        self, event: HistoricalMarketEvent | None
+    ) -> Decimal:
+        position = self._position
+        if position is None:
+            return Decimal(0)
+        entry_costs = position.entry_notional * (
+            self.config.cost_model.taker_fee_rate
+            + position.entry_spread_bps / Decimal(20000)
+            + position.entry_slippage_bps / Decimal(10000)
+        )
+        if event is None:
+            return entry_costs
+        closing_quantity = abs(position.signed_qty)
+        close_is_sell = position.signed_qty > 0
+        close_fill = (
+            event.best_bid * (Decimal(1) - self.config.market_slippage_bps / Decimal(10000))
+            if close_is_sell
+            else event.best_ask * (Decimal(1) + self.config.market_slippage_bps / Decimal(10000))
+        )
+        close_notional = closing_quantity * close_fill
+        exit_costs = close_notional * (
+            self.config.cost_model.taker_fee_rate
+            + self._spread_bps(event) / Decimal(20000)
+            + self.config.market_slippage_bps / Decimal(10000)
+        )
+        return entry_costs + exit_costs
+
+    def _current_equity(
+        self, mark_price: Decimal, event: HistoricalMarketEvent | None = None
+    ) -> Decimal:
         open_funding = self._position.funding_pnl if self._position else Decimal(0)
         return (
             self.config.initial_capital
             + self._realized_net_pnl
             + open_funding
             + self._current_unrealized(mark_price)
+            - self._open_position_cost_liability(event)
         )
 
     def _equity_point(self, event: HistoricalMarketEvent) -> ReplayEquityPoint:
@@ -668,11 +699,11 @@ class DeterministicReplay:
             position_qty=self._position.signed_qty if self._position else Decimal(0),
             unrealized_pnl=self._current_unrealized(event.mark_price),
             open_funding_pnl=self._position.funding_pnl if self._position else Decimal(0),
-            equity=self._current_equity(event.mark_price),
+            equity=self._current_equity(event.mark_price, event),
         )
 
     def _risk_snapshot(self, event: HistoricalMarketEvent) -> RiskSnapshot:
-        equity = self._current_equity(event.mark_price)
+        equity = self._current_equity(event.mark_price, event)
         self._peak_equity = max(self._peak_equity, equity)
         drawdown = (
             Decimal(100) * (self._peak_equity - equity) / self._peak_equity
@@ -960,6 +991,10 @@ class DeterministicReplay:
                 self._position.entry_spread_bps * previous_notional
                 + self._spread_bps(event) * notional
             ) / self._position.entry_notional
+            self._position.entry_slippage_bps = (
+                self._position.entry_slippage_bps * previous_notional
+                + self.config.market_slippage_bps * notional
+            ) / self._position.entry_notional
             self._position.signed_qty += signed_qty
             self._position.source_intent_ids = list(
                 dict.fromkeys(self._position.source_intent_ids + list(order.source_intent_ids))
@@ -1213,7 +1248,7 @@ class DeterministicReplay:
             else None
         )
         final_event = normalized_events[-1]
-        final_equity = self._current_equity(final_event.mark_price)
+        final_equity = self._current_equity(final_event.mark_price, final_event)
         return ReplayResult(
             dataset_sha256=dataset_sha256,
             config_sha256=config_sha256,
