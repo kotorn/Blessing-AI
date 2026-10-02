@@ -14,6 +14,9 @@ type Campaign = {
 type PilotResponse = {
   campaign?: Campaign;
   campaignId?: string;
+  strategyId?: LocalLivePilotStrategyId;
+  campaignExpiresAt?: string;
+  version?: number;
   status?: string;
   error?: string;
   evidence_status?: string;
@@ -50,7 +53,13 @@ const STRATEGIES: Array<{ id: LocalLivePilotStrategyId; label: string }> = [
 function campaignFrom(value: PilotResponse): Campaign | null {
   if (value.campaign) return value.campaign;
   return typeof value.campaignId === 'string' && typeof value.status === 'string'
-    ? { campaignId: value.campaignId, status: value.status, strategyId: 'trend', version: 0 }
+    ? {
+        campaignId: value.campaignId,
+        status: value.status,
+        strategyId: value.strategyId || 'trend',
+        campaignExpiresAt: value.campaignExpiresAt,
+        version: value.version ?? 0,
+      }
     : null;
 }
 

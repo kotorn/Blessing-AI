@@ -2695,7 +2695,17 @@ app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
       expiresAt: campaign.campaignExpiresAt || '',
     });
     const preflight = await forwardWorkerRequest('/preflight/read-only', { method: 'POST' });
-    if (!preflight.response.ok) throw new Error('LOCAL_PILOT_READ_ONLY_PREFLIGHT_FAILED');
+    if (!preflight.response.ok) {
+      console.error('PILOT_PREPARE_READ_ONLY_PREFLIGHT_HTTP_ERROR:', preflight.data);
+      throw new Error(`LOCAL_PILOT_READ_ONLY_PREFLIGHT_FAILED: ${JSON.stringify(preflight.data)}`);
+    }
+    if (preflight.data?.preflightPassed !== true) {
+      const failed = Array.isArray(preflight.data?.checks)
+        ? preflight.data.checks.filter((c: any) => c.status !== 'PASS').map((c: any) => `${c.id}: ${c.message}`).join('; ')
+        : 'preflightPassed=false';
+      console.error('PILOT_PREPARE_PREFLIGHT_CHECKS_FAILED:', failed);
+      throw new Error(`LOCAL_PILOT_SIGNED_PREFLIGHT_FAILED: ${failed}`);
+    }
     const finalState = await forwardWorkerRequest('/state');
     if (!finalState.response.ok) throw new Error('LOCAL_PILOT_WORKER_STATE_UNAVAILABLE');
     const supervisor = localWorkerSupervisor.status();
@@ -2733,6 +2743,7 @@ app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
       } catch { /* preserve the Worker for operator inspection when its state is ambiguous */ }
     }
     const message = error instanceof Error ? error.message : 'LOCAL_PILOT_PREPARE_FAILED';
+    console.error('PILOT_PREPARE_FAILED:', message, error);
     return res.status(503).json({ error: 'LOCAL_PILOT_PREPARE_FAILED', reason: message, evidence_status: 'UNVERIFIED' });
   } finally {
     localPilotTransitionBusy = false;

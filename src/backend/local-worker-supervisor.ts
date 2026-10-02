@@ -168,6 +168,7 @@ export class LocalWorkerSupervisor {
   private workerApiSecretVersion: string | null = null;
   private workerPilotCampaignId: string | null = null;
   private workerGeneration = 0;
+  private lastWorkerStderr = '';
   private readonly supervisorInstanceId = randomUUID();
   private mode: 'STOPPED' | 'PAPER' | 'LIVE' = 'STOPPED';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -496,8 +497,17 @@ export class LocalWorkerSupervisor {
     const child = this.spawnProcess(this.dockerRuntime.executable, args, {
       cwd: this.root,
       env: dockerClientEnv,
-      stdio: ['pipe', 'ignore', 'ignore'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+    });
+    this.lastWorkerStderr = '';
+    child.stderr?.on('data', (chunk) => {
+      const text = chunk.toString();
+      this.lastWorkerStderr = (this.lastWorkerStderr + text).slice(-4000);
+      console.error('[Worker Container stderr]', text.trim());
+    });
+    child.stdout?.on('data', (chunk) => {
+      console.log('[Worker Container stdout]', chunk.toString().trim());
     });
     this.workerContainerName = containerName;
     const payload = Buffer.from(JSON.stringify({
@@ -624,7 +634,7 @@ export class LocalWorkerSupervisor {
     const headers = { Authorization: `Bearer ${this.options.workerIdentityToken}` };
     while (Date.now() < deadline) {
       if (!this.worker || !this.childIsRunning(this.worker)) {
-        throw new Error('LOCAL_WORKER_EXITED_BEFORE_READINESS');
+        throw new Error(`LOCAL_WORKER_EXITED_BEFORE_READINESS: exitCode=${this.worker?.exitCode ?? 'none'} signalCode=${this.worker?.signalCode ?? 'none'} stderr=${this.lastWorkerStderr || 'none'}`);
       }
       try {
         const [readyResponse, stateResponse] = await Promise.all([
