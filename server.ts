@@ -2193,6 +2193,50 @@ function assertCommittedPilotCandidate(): void {
   if (status.trim()) throw new Error('LOCAL_PILOT_REQUIRES_REVIEWED_CLEAN_COMMIT');
 }
 
+export function sanitizePilotPrepareReason(error: unknown): string {
+  if (!(error instanceof Error)) return 'LOCAL_PILOT_PREPARE_UNKNOWN_ERROR';
+  const raw = error.message.trim();
+
+  const KNOWN_CODES = [
+    'LOCAL_PILOT_REQUIRES_REVIEWED_CLEAN_COMMIT',
+    'LOCAL_PILOT_NOT_FOUND',
+    'LOCAL_PILOT_APPROVAL_BINDING_INVALID',
+    'LOCAL_PILOT_APPROVAL_EXPIRED_OR_INVALID',
+    'LOCAL_PILOT_FINGERPRINT_CHANGED',
+    'LOCAL_PILOT_DURABLE_POSTGRES_UNAVAILABLE',
+    'LOCAL_PILOT_REQUIRES_UNUSED_PAPER_WORKER',
+    'LOCAL_PILOT_READ_ONLY_PREFLIGHT_FAILED',
+    'LOCAL_WORKER_STATE_UNAVAILABLE',
+    'LOCAL_PILOT_SUPERVISOR_BINDING_MISMATCH',
+    'LOCAL_SECRET_ACCESS_DENIED',
+    'LOCAL_SECRET_VALUE_EMPTY',
+    'LOCAL_WORKER_EXITED_BEFORE_READINESS',
+    'LOCAL_DOCKER_WORKER_REQUIRED_SETTINGS_MISSING',
+    'LOCAL_WORKER_IMAGE_ID_UNAVAILABLE',
+  ];
+  for (const code of KNOWN_CODES) {
+    if (raw === code || raw.startsWith(`${code}:`)) {
+      if (raw === code) return code;
+      const suffix = raw.slice(code.length + 1).trim();
+      const checkMatches = suffix.match(/CHK-PREFLIGHT-[A-Z0-9-]+/g);
+      if (checkMatches && checkMatches.length > 0) {
+        return `${code}: ${[...new Set(checkMatches)].join(', ')}`;
+      }
+      return code;
+    }
+  }
+
+  if (raw.startsWith('LOCAL_PILOT_SIGNED_PREFLIGHT_FAILED')) {
+    const checkMatches = raw.match(/CHK-PREFLIGHT-[A-Z0-9-]+/g);
+    if (checkMatches && checkMatches.length > 0) {
+      return `LOCAL_PILOT_SIGNED_PREFLIGHT_FAILED: ${[...new Set(checkMatches)].join(', ')}`;
+    }
+    return 'LOCAL_PILOT_SIGNED_PREFLIGHT_FAILED';
+  }
+
+  return 'LOCAL_PILOT_PREPARE_INTERNAL_ERROR';
+}
+
 function localPromotionStatus(fingerprint: ReturnType<typeof computeLocalReleaseFingerprint>) {
   return verifyLocalPromotionBundle(process.cwd(), fingerprint.gitSha, fingerprint.sourceSha256);
 }
@@ -2742,9 +2786,9 @@ app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
         }
       } catch { /* preserve the Worker for operator inspection when its state is ambiguous */ }
     }
-    const message = error instanceof Error ? error.message : 'LOCAL_PILOT_PREPARE_FAILED';
+    const message = sanitizePilotPrepareReason(error);
     console.error('PILOT_PREPARE_FAILED:', message, error);
-    return res.status(503).json({ error: 'LOCAL_PILOT_PREPARE_FAILED', reason: message, evidence_status: 'UNVERIFIED' });
+    return res.status(503).json({ error: 'LOCAL_PILOT_PREPARE_FAILED', reason: sanitizePilotPrepareReason(error), evidence_status: 'UNVERIFIED' });
   } finally {
     localPilotTransitionBusy = false;
   }

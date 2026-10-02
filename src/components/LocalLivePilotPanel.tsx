@@ -117,7 +117,15 @@ export const LocalLivePilotPanel: React.FC = () => {
       if (refreshFailed) setMessage('Action ตอบกลับแล้ว แต่การอ่านสถานะล่าสุดล้มเหลว; ตรวจ Worker ก่อนดำเนินการต่อ');
     } catch (error) {
       setEvidence('FAIL');
-      setMessage(error instanceof Error ? error.message : 'ตรวจสอบไม่สำเร็จ');
+      const err = error as any;
+      const data = err?.data;
+      const reason = data?.reason;
+      const code = data?.error;
+      if (reason && code) {
+        setMessage(`${code} · ${reason}`);
+      } else {
+        setMessage(error instanceof Error ? error.message : 'ตรวจสอบไม่สำเร็จ');
+      }
     } finally {
       setBusy(false);
     }
@@ -140,7 +148,15 @@ export const LocalLivePilotPanel: React.FC = () => {
       setMessage(`สถานะแคมเปญ: ${next?.status || 'UNKNOWN'}`);
     } catch (error) {
       setEvidence('FAIL');
-      setMessage(error instanceof Error ? error.message : 'อ่านสถานะไม่สำเร็จ');
+      const err = error as any;
+      const data = err?.data;
+      const reason = data?.reason;
+      const code = data?.error;
+      if (reason && code) {
+        setMessage(`${code} · ${reason}`);
+      } else {
+        setMessage(error instanceof Error ? error.message : 'อ่านสถานะไม่สำเร็จ');
+      }
     } finally {
       setBusy(false);
     }
