@@ -82,7 +82,11 @@ export interface LocalPilotReadiness {
   implementationReady: LocalPilotReadinessPhase;
   approvalReady: LocalPilotReadinessPhase;
   prepared: LocalPilotReadinessPhase;
-  provenance: { localChecks: 'UNVERIFIED'; reviews: 'UNVERIFIED'; testnet: 'UNVERIFIED' };
+  provenance: {
+    localChecks: 'VERIFIED' | 'UNVERIFIED';
+    reviews: 'VERIFIED' | 'UNVERIFIED';
+    testnet: 'VERIFIED' | 'UNVERIFIED';
+  };
   blockers: string[];
   ciAttestation?: { status: 'PASS' | 'FAIL' | 'NOT_RUN'; reason: string; scope?: 'CI_ONLY'; gitSha?: string };
 }
