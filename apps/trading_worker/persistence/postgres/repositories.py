@@ -3818,7 +3818,7 @@ class PersistenceRepository:
                 OR (
                     runtime_target = 'LOCAL'
                     AND policy = 'LIVE_RESEARCH_PILOT'
-                    AND state = 'ACTIVE'
+                    AND state IN ('ACTIVE', 'PAUSED_NEW_RISK')
                 )
                 OR (
                     runtime_target = 'LOCAL'
