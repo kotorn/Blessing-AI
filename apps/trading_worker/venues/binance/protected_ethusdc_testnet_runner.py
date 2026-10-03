@@ -41,7 +41,7 @@ def _approved_testnet_runtime() -> None:
         raise RuntimeError("Protected Testnet trial requires a dedicated local database")
 
 
-async def _flat_testnet_baseline(adapter) -> int:
+async def _flat_testnet_baseline(adapter) -> dict[str, object]:
     if getattr(adapter, "env", None) != BinanceEnvironment.TESTNET:
         raise RuntimeError("Protected trial adapter is not Binance Testnet")
     positions = await adapter.rest_client.request(
@@ -70,7 +70,13 @@ async def _flat_testnet_baseline(adapter) -> int:
         raise RuntimeError("Testnet ETHUSDC leverage is unavailable") from exc
     if not 1 <= leverage <= 10:
         raise RuntimeError("Testnet ETHUSDC leverage exceeds the trial limit")
-    return leverage
+    return {
+        "position_mode": "ONE_WAY",
+        "leverage": leverage,
+        "nonzero_positions": 0,
+        "open_orders": len(orders),
+        "open_algo_orders": len(algos),
+    }
 
 
 async def run_protected_ethusdc_testnet_trial() -> dict[str, object]:
@@ -85,6 +91,10 @@ async def run_protected_ethusdc_testnet_trial() -> dict[str, object]:
         "reconciliation_status": "UNKNOWN", "diff_count": -1, "entry_fill_count": 0,
         "position_after": "UNKNOWN", "open_orders_after": "UNKNOWN",
         "open_algo_after": "UNKNOWN",
+        "account_baseline": {
+            "position_mode": "UNKNOWN", "leverage": 0, "nonzero_positions": -1,
+            "open_orders": -1, "open_algo_orders": -1,
+        },
         "entry_client_order_id": "", "close_client_order_id": "",
         "stop_client_algo_id": "", "target_client_algo_id": "",
     }
@@ -96,7 +106,9 @@ async def run_protected_ethusdc_testnet_trial() -> dict[str, object]:
         if not armed or worker.execution_adapter is None:
             raise RuntimeError("Protected ETHUSDC Testnet Worker did not ARM")
         adapter = worker.execution_adapter
-        leverage = await _flat_testnet_baseline(adapter)
+        baseline = await _flat_testnet_baseline(adapter)
+        artifact["account_baseline"] = baseline
+        leverage = int(baseline["leverage"])
         repository = getattr(worker.persistence, "repository", None)
         protections = getattr(repository, "algo_protections", None)
         if protections is None or await protections.list_active_protections(

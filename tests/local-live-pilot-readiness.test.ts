@@ -315,5 +315,5 @@ describe('Local live pilot capability gate', () => {
         expect(readiness.blockers).toContain(blocker);
       }
     }
-  });
+  }, 20_000);
 });

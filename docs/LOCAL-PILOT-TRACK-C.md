@@ -49,20 +49,42 @@ changed. No real signed Track C bundles have been produced or verified in
 this worktree. Unit fixtures establish rejection behavior, not real signing
 or exchange acceptance.
 
-This checkpoint deliberately stops before installing producer jobs. Those
-jobs need a pre-environment REST check so a missing Environment is never
-implicitly created by referencing it. The existing CI job also needs an
-explicit no-skip lease/protection acceptance step before a CHECKS producer
-can sign its schema. A Testnet producer must run the repository's durable
-loopback runner on a dedicated PostgreSQL service and capture the actual
-trial, not accept a supplied PASS JSON. These are remaining code tasks.
+The CI workflow now has an explicit no-skip lease/protection acceptance step.
+It runs nine named cases in two independent invocations and fails unless the
+exact expected pass count is reported; skipped, xfailed, deselected, warned,
+or otherwise unexpected summaries do not produce evidence. Its subprocess
+gets only an OS-path allowlist plus PAPER/DISARMED environment values, not
+Binance or cloud credentials. This is unit-level lease/order evidence; the
+separate PostgreSQL migration/restart acceptance remains authoritative for
+database behavior.
+
+The CHECKS producer is wired into the canonical main-push attestation job.
+The separate `local-pilot-track-c.yml` workflow supports one review domain or
+the protected Testnet trial per dispatch. Its first job reads the Environment
+and main-only branch policy through GitHub REST and fails before any protected
+job can reference a missing/unprotected Environment. Review subjects bind the
+authenticated run, commit identities, Environment approval history and
+reviewer. The Testnet job runs the repository lifecycle runner itself against
+a dedicated ephemeral PostgreSQL 17 service, passes only Testnet credentials,
+then binds the runner-created artifact and Testnet Environment approval
+history. The producer does not accept an arbitrary trial path or caller-supplied
+PASS JSON.
+
+These signed subjects prove source-bound CI outcomes, reviewer authorization,
+or one completed Testnet execution as recorded by the runner. They do not
+prove Mainnet behavior, strategy profitability, a campaign approval, or
+permission to ARM. The workflows have not run against GitHub in this branch;
+no real signed Track C subject or verifier certificate has yet been produced,
+so the certificate shape and external REST responses remain unverified.
 
 Human prerequisites are to configure main branch protection, pilot-review
 required user reviewers/prevent_self_review/main-only branch policy, and the
-protected testnet Environment. After authorized delivery of producer code,
-three independent non-author users must approve separate review dispatches,
-and an authorized Testnet lifecycle dispatch must generate its real bundle.
-No such dispatch or configuration change occurred in this worktree.
+protected testnet Environment. Three independent non-author users must
+approve separate review dispatches, and an authorized Testnet lifecycle
+dispatch must generate its real bundle. No such dispatch or configuration
+change occurred in this worktree. The prior environment/protection snapshot
+reported missing protections; it was not revalidated in this implementation
+turn and must not be treated as current evidence.
 
 Focused tests exercise shared complete TS/Python phase outputs, signed-class
 readiness wiring with an explicitly mocked cryptographic verifier, malformed

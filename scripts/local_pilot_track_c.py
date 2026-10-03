@@ -41,10 +41,14 @@ def validate_payload(statement: dict) -> None:
                 or job.get('conclusion') != 'success' or job.get('run_id') != int(statement['runId'])
                 or type(job.get('id')) is not int or job['id'] <= 0):
             raise ValueError('ATTESTATION_CHECK_JOB_INVALID')
-        steps = job.get('steps', [])
-        if any(len([s for s in steps if s.get('name') == name and
-                    s.get('conclusion') == 'success']) != 1 for name in CHECK_STEPS):
+        steps = job.get('steps')
+        if not isinstance(steps, list) or any(not isinstance(step, dict) for step in steps):
             raise ValueError('ATTESTATION_CHECK_STEPS_INCOMPLETE')
+        for name in CHECK_STEPS:
+            named = [step for step in steps if step.get('name') == name]
+            if (len(named) != 1 or named[0].get('status') != 'completed'
+                    or named[0].get('conclusion') != 'success'):
+                raise ValueError('ATTESTATION_CHECK_STEPS_INCOMPLETE')
     elif evidence_class.startswith('REVIEW_'):
         if set(payload) != {'reviewProof', 'reviewer', 'domain'} or payload['domain'] != evidence_class:
             raise ValueError('ATTESTATION_REVIEW_PAYLOAD_INVALID')
@@ -58,11 +62,25 @@ def validate_payload(statement: dict) -> None:
         if payload['reviewer'] != reviewer:
             raise ValueError('ATTESTATION_REVIEW_IDENTITY_INVALID')
     else:
-        if set(payload) != {'trial', 'environmentProof', 'run'}:
+        if set(payload) != {'trial', 'environmentProof', 'run', 'approvals'}:
             raise ValueError('ATTESTATION_TESTNET_PAYLOAD_INVALID')
         validate_run(payload['run'], statement)
-        environment_protection(payload['environmentProof']['environment'],
-                               payload['environmentProof']['branchPolicies'], 'testnet')
+        proof = payload['environmentProof']
+        reviewers = environment_protection(proof['environment'], proof['branchPolicies'], 'testnet')
+        approvals = payload['approvals']
+        environment_id = proof['environment']['id']
+        matching = [approval for approval in approvals if any(
+            environment.get('id') == environment_id and environment.get('name') == 'testnet'
+            for environment in approval.get('environments', [])
+        )] if isinstance(approvals, list) else []
+        run_actor = payload['run'].get('actor', {})
+        actor_id = run_actor.get('id') if isinstance(run_actor, dict) else None
+        user = matching[0].get('user', {}) if len(matching) == 1 else {}
+        reviewer_ids = {r['reviewer']['id'] for r in reviewers}
+        if (len(matching) != 1 or matching[0].get('state') != 'approved'
+                or user.get('type') != 'User' or type(user.get('id')) is not int
+                or user['id'] not in reviewer_ids or user['id'] == actor_id):
+            raise ValueError('TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN')
         trial = payload['trial']
         ids = [trial.get(key) for key in ('entry_client_order_id', 'close_client_order_id',
                                          'stop_client_algo_id', 'target_client_algo_id')]
@@ -76,13 +94,31 @@ def validate_payload(statement: dict) -> None:
                 or any(trial.get(key) != [] for key in ('position_after', 'open_orders_after', 'open_algo_after'))
                 or any(not isinstance(x, str) or not x for x in ids) or len(set(ids)) != 4):
             raise ValueError('ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE')
+        baseline = trial.get('account_baseline')
+        if (not isinstance(baseline, dict)
+                or set(baseline) != {'position_mode', 'leverage', 'nonzero_positions',
+                                     'open_orders', 'open_algo_orders'}
+                or baseline.get('position_mode') != 'ONE_WAY'
+                or type(baseline.get('leverage')) is not int
+                or not 1 <= baseline['leverage'] <= 10
+                or any(type(baseline.get(key)) is not int or baseline[key] != 0
+                       for key in ('nonzero_positions', 'open_orders', 'open_algo_orders'))):
+            raise ValueError('TESTNET_ACCOUNT_BASELINE_UNPROVEN')
 
 
 def validate_run(run: dict, statement: dict) -> None:
-    if (run.get('id') != int(statement['runId']) or run.get('run_attempt') != statement['runAttempt']
+    repository = run.get('repository') if isinstance(run, dict) else None
+    actor = run.get('actor') if isinstance(run, dict) else None
+    if (not isinstance(repository, dict) or type(repository.get('id')) is not int
+            or type(run.get('id')) is not int or run['id'] != int(statement['runId'])
+            or type(run.get('run_attempt')) is not int
+            or run['run_attempt'] != statement['runAttempt']
             or run.get('head_sha') != statement['gitSha'] or run.get('head_branch') != 'main'
             or run.get('event') != statement['eventName']
-            or run.get('repository', {}).get('id') != int(REPOSITORY_ID)):
+            or repository['id'] != int(REPOSITORY_ID)
+            or not isinstance(actor, dict) or type(actor.get('id')) is not int
+            or actor['id'] <= 0 or actor.get('type') != 'User'
+            or not isinstance(actor.get('login'), str) or not actor['login']):
         raise ValueError('ATTESTATION_REST_RUN_MISMATCH')
 
 

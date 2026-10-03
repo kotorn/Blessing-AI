@@ -49,7 +49,7 @@ def statement_fixture():
                          'TYPESCRIPT_TESTS', 'PYTHON_TESTS', 'LINT', 'BUILD',
                          'POSTGRES_17_MIGRATIONS_RESTART', 'LEASE_FENCING', 'PROTECTION_CLOSE')],
                          'job': {'id': 9, 'run_id': 123, 'name': 'build_and_test', 'conclusion': 'success',
-                                 'steps': [{'name': x, 'conclusion': 'success'} for x in (
+                                 'steps': [{'name': x, 'status': 'completed', 'conclusion': 'success'} for x in (
                                      'TypeScript Lint', 'TypeScript Unit Tests', 'TypeScript Build',
                                      'Python Unit Tests (coverage floor 65%)',
                                      'PostgreSQL 17 migration, crash and Worker startup acceptance (no skips)',
@@ -77,6 +77,74 @@ def test_statement_replay_rejected(mutation):
 def test_bound_statement_passes():
     statement, binding, cert = statement_fixture()
     validate_statement(statement, binding, 'CHECKS', cert, now='2026-10-03T00:00:00Z')
+
+
+def test_authenticated_workflow_run_requires_actor_identity():
+    from scripts.local_pilot_track_c import validate_run
+
+    statement = {
+        'runId': '123', 'runAttempt': 1, 'gitSha': 'a' * 40, 'eventName': 'push',
+    }
+    run = {
+        'id': 123, 'run_attempt': 1, 'head_sha': 'a' * 40, 'head_branch': 'main',
+        'event': 'push', 'repository': {'id': 1366161771},
+    }
+    with pytest.raises(ValueError, match='ATTESTATION_REST_RUN_MISMATCH'):
+        validate_run(run, statement)
+
+
+def test_testnet_payload_requires_its_authenticated_environment_approval():
+    from scripts.local_pilot_track_c import validate_payload
+
+    environment = {
+        'id': 33, 'name': 'testnet',
+        'protection_rules': [{'type': 'required_reviewers', 'prevent_self_review': True,
+                              'reviewers': [{'type': 'User', 'reviewer': {'id': 44}}]}],
+        'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True},
+    }
+    policies = {'total_count': 1, 'branch_policies': [{'name': 'main', 'type': 'branch'}]}
+    statement = {
+        'evidenceClass': 'TESTNET_ETHUSDC', 'runId': '123', 'runAttempt': 1,
+        'gitSha': 'a' * 40, 'eventName': 'workflow_dispatch',
+        'payload': {
+            'trial': {
+                'trial_type': 'PROTECTED_ETHUSDC_V1', 'build_sha': 'a' * 40,
+                'environment': 'BINANCE_TESTNET', 'symbol': 'ETHUSDC', 'status': 'PASS',
+                'protection_status': 'PROTECTED_VERIFIED', 'close_status': 'VERIFIED',
+                'reconciliation_status': 'IN_SYNC', 'diff_count': 0, 'entry_fill_count': 1,
+                'position_after': [], 'open_orders_after': [], 'open_algo_after': [],
+                'entry_client_order_id': 'entry', 'close_client_order_id': 'close',
+                'stop_client_algo_id': 'stop', 'target_client_algo_id': 'target',
+                'account_baseline': {
+                    'position_mode': 'ONE_WAY', 'leverage': 5,
+                    'nonzero_positions': 0, 'open_orders': 0, 'open_algo_orders': 0,
+                },
+            },
+            'environmentProof': {'environment': environment, 'branchPolicies': policies},
+            'run': {
+                'id': 123, 'run_attempt': 1, 'head_sha': 'a' * 40, 'head_branch': 'main',
+                'event': 'workflow_dispatch', 'repository': {'id': 1366161771},
+                    'actor': {'id': 55, 'login': 'workflow-actor', 'type': 'User'},
+            },
+            'approvals': [{
+                'state': 'approved', 'environments': [{'id': 33, 'name': 'testnet'}],
+                'user': {'id': 44, 'type': 'User', 'login': 'testnet-reviewer'},
+            }],
+        },
+    }
+
+    validate_payload(statement)
+    statement['payload']['approvals'] = []
+    with pytest.raises(ValueError, match='TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN'):
+        validate_payload(statement)
+
+    statement['payload']['approvals'] = [{
+        'state': 'approved', 'environments': [{'id': 33, 'name': 'testnet'}],
+        'user': {'id': 44, 'type': 'User', 'login': 'testnet-reviewer'},
+    }]
+    statement['payload']['trial']['account_baseline']['leverage'] = 11
+    with pytest.raises(ValueError, match='TESTNET_ACCOUNT_BASELINE_UNPROVEN'):
+        validate_payload(statement)
 
 
 def test_local_json_without_bundle_is_not_authority(tmp_path):

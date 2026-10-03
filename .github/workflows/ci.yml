@@ -6,6 +6,9 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   build_and_test:
     runs-on: ubuntu-latest
@@ -26,6 +29,8 @@ jobs:
     
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
     
     - name: Setup Node.js
       uses: actions/setup-node@v7
@@ -99,6 +104,9 @@ jobs:
             raise SystemExit('PostgreSQL acceptance failed or did not execute all three tests')
         print(summary)
         PY
+
+    - name: Pilot lease and protection regression (no skips)
+      run: python -m scripts.run_local_pilot_ci_regressions
       
     - name: Hygiene Check
       run: |
@@ -117,10 +125,17 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
 
     steps:
+    - name: Checkout exact tested source for Track C provenance
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+
     - name: Create CI evidence subject
       env:
         REPOSITORY: ${{ github.repository }}
@@ -199,5 +214,40 @@ jobs:
         path: |
           artifacts/local-pilot-ci-evidence.json
           artifacts/local-pilot-ci-attestation.bundle.json
+        if-no-files-found: error
+        retention-days: 30
+
+    - name: Create authenticated Track C CHECKS subject
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: python -m scripts.produce_local_pilot_track_c --root . --class CHECKS
+
+    - name: Generate signed Track C CHECKS attestation
+      id: attest_track_c
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+      with:
+        subject-path: artifacts/local-pilot-attestations/CHECKS.json
+
+    - name: Retain Track C CHECKS bundle
+      env:
+        BUNDLE_PATH: ${{ steps.attest_track_c.outputs.bundle-path }}
+      run: |
+        python - <<'PY'
+        import os
+        from pathlib import Path
+        from shutil import copyfile
+
+        source = Path(os.environ["BUNDLE_PATH"])
+        destination = Path("artifacts/local-pilot-attestations/CHECKS.bundle.json")
+        if not source.is_file() or source.stat().st_size == 0:
+            raise SystemExit("Track C CHECKS bundle was not produced")
+        copyfile(source, destination)
+        PY
+
+    - name: Retain signed Track C CHECKS evidence
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: local-pilot-track-c-checks-${{ github.sha }}
+        path: artifacts/local-pilot-attestations/CHECKS*.json
         if-no-files-found: error
         retention-days: 30
