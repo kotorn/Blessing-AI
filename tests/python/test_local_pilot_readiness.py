@@ -28,7 +28,10 @@ def test_live_pilot_readiness_stays_blocked_until_runtime_evidence_exists(monkey
     assert "LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN" in readiness["blockers"]
     assert "LOCAL_PILOT_CAPABILITY_EVIDENCE_MISSING_OR_STALE" in readiness["blockers"]
     assert readiness["implementation_ready"]["status"] in {"FAIL", "NOT_RUN"}
-    assert all(check["status"] == "NOT_RUN" for check in readiness["implementation_ready"]["checks"])
+    assert readiness['implementation_ready']['checks'][0] == {
+        'id': 'SOURCE_COMMIT', 'status': 'FAIL', 'reason': 'LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN',
+    }
+    assert all(check["status"] == "NOT_RUN" for check in readiness["implementation_ready"]["checks"][1:])
     assert readiness["approval_ready"]["status"] == "FAIL"
     assert readiness["prepared"]["status"] == "NOT_RUN"
 

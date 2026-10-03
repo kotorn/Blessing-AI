@@ -17,6 +17,9 @@ const SOURCE_PATHS = [
   'scripts/apply_local_postgres_migrations.py',
   LOCAL_RISK_POLICY_PATH,
   'config/risk/live_research_pilot.json',
+  'scripts/local_pilot_track_c.py', 'scripts/local_pilot_track_c_source.py',
+  'scripts/verify_local_pilot_track_c.py', 'scripts/produce_local_pilot_track_c.py',
+  '.github/workflows/ci.yml', '.github/workflows/local-pilot-track-c.yml',
 ];
 const DEPENDENCY_PATHS = [
   'package.json',

@@ -17,6 +17,8 @@ import subprocess
 from typing import Any
 
 from scripts.verify_local_pilot_ci_attestation import verify_ci_attestation
+from scripts.verify_local_pilot_track_c import verify_all
+from scripts.local_pilot_track_c import track_c_phases
 
 
 EVIDENCE_PATH = Path("artifacts/local-pilot-capability.json")
@@ -31,6 +33,9 @@ SOURCE_PATHS = (
     "server.ts", "Dockerfile.worker", "src/backend", "apps/trading_worker", "domain",
     "scripts/start-local.ps1", "scripts/apply_local_postgres_migrations.py",
     "config/risk/mainnet_local_policy.json", "config/risk/live_research_pilot.json",
+    'scripts/local_pilot_track_c.py', 'scripts/local_pilot_track_c_source.py',
+    'scripts/verify_local_pilot_track_c.py', 'scripts/produce_local_pilot_track_c.py',
+    '.github/workflows/ci.yml', '.github/workflows/local-pilot-track-c.yml',
 )
 DEPENDENCY_PATHS = ("package.json", "package-lock.json", "pyproject.toml", "requirements-worker.txt")
 HEX_SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -59,6 +64,7 @@ def _git(root: Path, *args: str) -> str | None:
         allowed = {"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP"}
         environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
         environment["GIT_CONFIG_NOSYSTEM"] = "1"
+        environment["GIT_NO_REPLACE_OBJECTS"] = "1"
         environment["GIT_CONFIG_GLOBAL"] = "NUL" if os.name == "nt" else "/dev/null"
         result = subprocess.run(
             ["git", *args], cwd=root, check=True, capture_output=True,
@@ -289,21 +295,31 @@ def local_live_pilot_readiness(root: str | Path | None = None, *, now: datetime 
     except Exception:
         # Unexpected parse/filesystem/tool failures are not evidence of readiness.
         blockers = ["LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED"]
+    source_clean = bool(head and GIT_SHA.fullmatch(head) and _git(
+        repo_root, 'status', '--porcelain', '--untracked-files=all') == '')
+    try:
+        track_c = verify_all(repo_root, now=observed_now.isoformat()) if source_clean else {}
+        verified_classes = [r['evidenceClass'] for r in track_c.get('classes', [])
+                            if r.get('status') == 'PASS' and r.get('reason') == 'TRACK_C_ATTESTATION_VERIFIED']
+        source_clean = source_clean and _git(repo_root, 'rev-parse', '--verify', 'HEAD') == head and _git(
+            repo_root, 'status', '--porcelain', '--untracked-files=all') == ''
+    except Exception:
+        verified_classes = []
+    phases = track_c_phases(verified_classes, source_clean)
+    if phases['status'] == 'READY':
+        blockers = []
+    else:
+        # Unsigned exports remain diagnostic; verified classes alone clear provenance.
+        blockers = [b for b in blockers if b not in provenance_blockers] + phases['blockers']
     return {
-        "status": "BLOCKED",
-        "can_approve": False,
-        "can_start": False,
-        "implementation_ready": {
-            "status": "FAIL" if "LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN" in blockers else "NOT_RUN",
-            "checks": [{
-                "id": check, "status": "NOT_RUN",
-                "reason": "LOCAL_PILOT_TRUSTED_CHECK_RUNNER_NOT_AVAILABLE",
-            } for check in REQUIRED_CHECKS],
-        },
+        "status": phases['status'],
+        "can_approve": phases['canApprove'],
+        "can_start": phases['canStart'],
+        "implementation_ready": phases['implementationReady'],
         "approval_ready": {
-            "status": "FAIL",
+            "status": phases['approvalReady']['status'],
             "checks": [{"id": reason, "status": "FAIL", "reason": reason}
-                       for reason in provenance_blockers],
+                       for reason in phases['blockers'] if 'PROVENANCE' in reason],
         },
         "prepared": {
             "status": "NOT_RUN",
@@ -313,6 +329,7 @@ def local_live_pilot_readiness(root: str | Path | None = None, *, now: datetime 
             }],
         },
         "ci_attestation": ci_attestation,
-        "provenance": {"local_checks": "UNVERIFIED", "reviews": "UNVERIFIED", "testnet": "UNVERIFIED"},
+        "provenance": {"local_checks": phases['provenance']['localChecks'],
+                       "reviews": phases['provenance']['reviews'], "testnet": phases['provenance']['testnet']},
         "blockers": list(dict.fromkeys(blockers)),
     }

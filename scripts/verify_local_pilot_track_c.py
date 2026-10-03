@@ -12,7 +12,8 @@ import sys
 
 # -I execution still imports only the script's explicitly resolved directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from local_pilot_track_c import CLASSES, REPOSITORY, WORKFLOW, REF, validate_statement
+from local_pilot_track_c import CLASSES, REPOSITORY, REF, validate_statement, workflow_for
+from local_pilot_track_c_source import source_binding
 from verify_local_pilot_ci_attestation import _trusted_gh_digest, _gh_digest
 
 
@@ -35,10 +36,11 @@ def verify_class(root: Path, binding: dict, evidence_class: str, now: str) -> di
         environment = {k: v for k, v in os.environ.items()
                        if k.upper() in {'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP'}}
         sha = binding['gitSha']
+        workflow = workflow_for(evidence_class)
         result = subprocess.run([
             gh, 'attestation', 'verify', str(subject), '--bundle', str(bundle),
-            '--repo', REPOSITORY, '--signer-workflow', WORKFLOW,
-            '--cert-identity', f'https://github.com/{WORKFLOW}@{REF}',
+            '--repo', REPOSITORY,
+            '--cert-identity', f'https://github.com/{workflow}@{REF}',
             '--source-ref', REF, '--source-digest', sha, '--signer-digest', sha,
             '--deny-self-hosted-runners', '--format', 'json',
         ], cwd=root, env=environment, capture_output=True, text=True, timeout=40,
@@ -52,32 +54,42 @@ def verify_class(root: Path, binding: dict, evidence_class: str, now: str) -> di
         validate_statement(statement, binding, evidence_class, certificate, now=now)
         if (_gh_digest(gh) != digest or subject.read_bytes() != raw or bundle.read_bytes() != bundle_raw):
             return failure
-        # Review API facts must be included in the signed producer subject.
-        if evidence_class.startswith('REVIEW_'):
-            from local_pilot_track_c import review_identity
-            proof = statement['reviewProof']
-            reviewer = review_identity(proof['environment'], proof['branchPolicies'],
-                                       proof['approvals'], proof['commit'], actor_id=proof['actorId'])
-            if statement.get('reviewer') != reviewer:
-                return failure
         return {'status': 'PASS', 'reason': 'TRACK_C_ATTESTATION_VERIFIED',
                 'evidenceClass': evidence_class, 'runId': statement['runId'],
-                'reviewer': statement.get('reviewer')}
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                'reviewer': statement['payload'].get('reviewer')}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return failure
+
+
+def verify_all(root: Path, binding: dict | None = None, *, now: str | None = None) -> dict:
+    """Recompute binding before and after verification; supplied binding is an assertion only."""
+    failed = {'classes': [], 'sourceClean': False, 'reason': 'LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN'}
+    try:
+        actual = source_binding(root)
+        if binding is not None and binding != actual:
+            return {**failed, 'reason': 'TRACK_C_BINDING_MISMATCH'}
+        results = [verify_class(root, actual, c, now or datetime.now(UTC).isoformat()) for c in CLASSES]
+        reviewers = [r['reviewer']['id'] for r in results
+                     if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS']
+        review_runs = [r['runId'] for r in results
+                       if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS']
+        if len(reviewers) != 3 or len(set(reviewers)) != 3 or len(set(review_runs)) != 3:
+            for result in results:
+                if result['evidenceClass'].startswith('REVIEW_'):
+                    result['status'] = 'FAIL'
+                    result['reason'] = 'TRACK_C_REVIEW_INDEPENDENCE_UNPROVEN'
+        if source_binding(root) != actual:
+            return {**failed, 'reason': 'TRACK_C_SOURCE_CHANGED'}
+        return {'classes': results, 'sourceClean': True, 'binding': actual}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return failed
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True)
-    parser.add_argument('--binding', required=True)
+    parser.add_argument('--binding')
+    parser.add_argument('--now')
     args = parser.parse_args()
-    now = datetime.now(UTC).isoformat()
-    results = [verify_class(args.root.resolve(), json.loads(args.binding), c, now) for c in CLASSES]
-    reviewers = [r.get('reviewer', {}).get('id') for r in results if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS']
-    if len(reviewers) != 3 or len(set(reviewers)) != 3:
-        for result in results:
-            if result['evidenceClass'].startswith('REVIEW_'):
-                result['status'] = 'FAIL'
-                result['reason'] = 'TRACK_C_REVIEW_INDEPENDENCE_UNPROVEN'
-    print(json.dumps({'classes': results}, sort_keys=True))
+    print(json.dumps(verify_all(args.root.resolve(), json.loads(args.binding) if args.binding else None,
+                                now=args.now), sort_keys=True))

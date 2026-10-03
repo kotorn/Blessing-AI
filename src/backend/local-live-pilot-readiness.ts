@@ -5,6 +5,7 @@ import path from 'node:path';
 
 import type { LocalReleaseFingerprint } from './local-release-runtime.js';
 import { buildTrustedPythonVerificationEnvironment, resolveTrustedLocalPythonRuntime } from './local-python-runtime.js';
+import { trackCPhases, verifiedTrackCClasses } from './local-pilot-attestation.js';
 
 export const LOCAL_PILOT_CAPABILITY_EVIDENCE_PATH = 'artifacts/local-pilot-capability.json';
 export const LOCAL_PILOT_CAPABILITY_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
@@ -240,7 +241,7 @@ export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): L
   // check, authored a review, or observed an exchange lifecycle. Disk JSON is
   // only an audit export and never authorizes a campaign by itself. In
   // particular, a logged-in admin identity is not provenance evidence.
-  const provenanceBlockers: string[] = [
+  let provenanceBlockers: string[] = [
     'LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED',
     'LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED',
     'LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED',
@@ -249,6 +250,7 @@ export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): L
   const implementationChecks: LocalPilotReadinessCheck[] = [{
     id: 'SOURCE_COMMIT', status: 'NOT_RUN', reason: 'LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED',
   }];
+  let attestedPhases: ReturnType<typeof trackCPhases> | undefined;
   // There is no trusted implementation runner yet. Receipt validation below
   // checks export integrity only; even a complete PASS export cannot fill this gap.
   implementationChecks.push(...REQUIRED_CHECKS.map((id): LocalPilotReadinessCheck => ({
@@ -267,6 +269,14 @@ export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): L
       reason: sourceVerified ? 'LOCAL_PILOT_SOURCE_COMMIT_CLEAN' : 'LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN',
     };
     if (!sourceVerified) capabilityBlockers.push('LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN');
+    const verifiedClasses = sourceVerified ? verifiedTrackCClasses(root, {
+      gitSha: expected.gitSha, sourceSha256: expected.sourceSha256,
+      dependencySha256: expected.dependencySha256, migrationSha256: expected.migrationSha256,
+      pilotPolicySha256: options.pilotPolicySha256,
+    }, now) : [];
+    // Source must still match after the external signature verifier returns.
+    attestedPhases = trackCPhases(verifiedClasses, sourceVerified && committedClean(root, expected.gitSha));
+    provenanceBlockers = attestedPhases.blockers.filter((b) => b.includes('PROVENANCE'));
     let evidence: LocalPilotCapabilityEvidence | null = null;
     try {
       const raw = readFileSync(path.resolve(root, LOCAL_PILOT_CAPABILITY_EVIDENCE_PATH), 'utf8');
@@ -339,6 +349,14 @@ export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): L
   }
 
   const blockers = [...new Set([...provenanceBlockers, ...capabilityBlockers])];
+  if (attestedPhases) {
+    // Signed, validated payloads replace unsigned exports as capability authority.
+    // Partial/missing attestations keep the legacy export diagnostics visible.
+    if (attestedPhases.status === 'READY') return { ...attestedPhases,
+      ciAttestation: options ? localPilotCiAttestation(path.resolve(options.root), options.fingerprint.gitSha) : undefined };
+    implementationChecks.splice(0, implementationChecks.length, ...attestedPhases.implementationReady.checks);
+    for (const blocker of attestedPhases.blockers) if (!blockers.includes(blocker)) blockers.push(blocker);
+  }
   return {
     status: 'BLOCKED' as const,
     canApprove: false,
@@ -354,7 +372,7 @@ export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): L
     ciAttestation: options
       ? localPilotCiAttestation(path.resolve(options.root), options.fingerprint.gitSha)
       : { status: 'NOT_RUN', reason: 'CI_ATTESTATION_SOURCE_NOT_VERIFIED' },
-    provenance: { localChecks: 'UNVERIFIED', reviews: 'UNVERIFIED', testnet: 'UNVERIFIED' } as const,
+    provenance: attestedPhases?.provenance || { localChecks: 'UNVERIFIED', reviews: 'UNVERIFIED', testnet: 'UNVERIFIED' } as const,
     blockers,
   };
 }
