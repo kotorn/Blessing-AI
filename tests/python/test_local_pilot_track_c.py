@@ -111,10 +111,21 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
                 'trial_type': 'PROTECTED_ETHUSDC_V1', 'build_sha': 'a' * 40,
                 'environment': 'BINANCE_TESTNET', 'symbol': 'ETHUSDC', 'status': 'PASS',
                 'protection_status': 'PROTECTED_VERIFIED', 'close_status': 'VERIFIED',
+                'close_order_type': 'MARKET', 'close_order_reduce_only': True,
                 'reconciliation_status': 'IN_SYNC', 'diff_count': 0, 'entry_fill_count': 1,
                 'position_after': [], 'open_orders_after': [], 'open_algo_after': [],
                 'entry_client_order_id': 'entry', 'close_client_order_id': 'close',
                 'stop_client_algo_id': 'stop', 'target_client_algo_id': 'target',
+                'protection_at_close': {
+                    'status': 'PROTECTED', 'observed_at': '2026-10-03T00:00:00.000Z',
+                    'close_submission_at': '2026-10-03T00:00:00.000Z',
+                    'stop': {'algo_id': '101', 'client_algo_id': 'stop',
+                             'order_type': 'STOP_MARKET', 'status': 'NEW',
+                             'close_position': True, 'reduce_only': False},
+                    'target': {'algo_id': '102', 'client_algo_id': 'target',
+                               'order_type': 'TAKE_PROFIT_MARKET', 'status': 'NEW',
+                               'close_position': True, 'reduce_only': False},
+                },
                 'account_baseline': {
                     'position_mode': 'ONE_WAY', 'leverage': 5,
                     'nonzero_positions': 0, 'open_orders': 0, 'open_algo_orders': 0,
@@ -134,6 +145,34 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
     }
 
     validate_payload(statement)
+    trial = statement['payload']['trial']
+    invalid_timestamp = dict(trial)
+    invalid_timestamp['protection_at_close'] = dict(trial['protection_at_close'])
+    invalid_timestamp['protection_at_close']['observed_at'] = '2026-02-30T00:00:00.000Z'
+    statement['payload']['trial'] = invalid_timestamp
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement)
+    stale_at_submission = dict(trial)
+    stale_at_submission['protection_at_close'] = dict(trial['protection_at_close'])
+    stale_at_submission['protection_at_close']['close_submission_at'] = '2026-10-03T00:00:05.001Z'
+    statement['payload']['trial'] = stale_at_submission
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement)
+    statement['payload']['trial'] = trial
+    missing_close_protection = dict(trial)
+    missing_close_protection.pop('protection_at_close')
+    statement['payload']['trial'] = missing_close_protection
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement)
+    trial['protection_at_close']['stop']['status'] = 'CANCELED'
+    statement['payload']['trial'] = trial
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement)
+    trial['protection_at_close']['stop']['status'] = 'NEW'
+    trial['protection_at_close']['target']['client_algo_id'] = 'other'
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement)
+    trial['protection_at_close']['target']['client_algo_id'] = 'target'
     statement['payload']['approvals'] = []
     with pytest.raises(ValueError, match='TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN'):
         validate_payload(statement)

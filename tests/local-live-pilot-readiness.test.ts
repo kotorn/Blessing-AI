@@ -151,12 +151,35 @@ describe('Local live pilot capability gate', () => {
       trial_type: 'PROTECTED_ETHUSDC_V1', build_sha: 'a'.repeat(40),
       environment: 'BINANCE_TESTNET', symbol: 'ETHUSDC', status: 'PASS',
       protection_status: 'PROTECTED_VERIFIED', close_status: 'VERIFIED',
+      close_order_type: 'MARKET', close_order_reduce_only: true,
       reconciliation_status: 'IN_SYNC', diff_count: 0, entry_fill_count: 1,
       position_after: [], open_orders_after: [], open_algo_after: [],
       entry_client_order_id: 'entry', close_client_order_id: 'close',
       stop_client_algo_id: 'stop', target_client_algo_id: 'target',
+      protection_at_close: {
+        status: 'PROTECTED', observed_at: '2026-10-03T00:00:00.000Z',
+        close_submission_at: '2026-10-03T00:00:00.000Z',
+        stop: { algo_id: '101', client_algo_id: 'stop', order_type: 'STOP_MARKET',
+          status: 'NEW', close_position: true, reduce_only: false },
+        target: { algo_id: '102', client_algo_id: 'target', order_type: 'TAKE_PROFIT_MARKET',
+          status: 'NEW', close_position: true, reduce_only: false },
+      },
     };
     expect(protectedEthTestnetTrialPassed(trial, 'a'.repeat(40))).toBe(true);
+    expect(protectedEthTestnetTrialPassed({ ...trial, protection_at_close: undefined }, 'a'.repeat(40))).toBe(false);
+    expect(protectedEthTestnetTrialPassed({ ...trial, protection_at_close: {
+      ...trial.protection_at_close, observed_at: '2026-02-30T00:00:00.000Z',
+    } }, 'a'.repeat(40))).toBe(false);
+    expect(protectedEthTestnetTrialPassed({ ...trial, protection_at_close: {
+      ...trial.protection_at_close, close_submission_at: '2026-10-03T00:00:05.001Z',
+    } }, 'a'.repeat(40))).toBe(false);
+    expect(protectedEthTestnetTrialPassed({ ...trial, close_order_reduce_only: false }, 'a'.repeat(40))).toBe(false);
+    expect(protectedEthTestnetTrialPassed({ ...trial, protection_at_close: {
+      ...trial.protection_at_close, stop: { ...trial.protection_at_close.stop, status: 'CANCELED' },
+    } }, 'a'.repeat(40))).toBe(false);
+    expect(protectedEthTestnetTrialPassed({ ...trial, protection_at_close: {
+      ...trial.protection_at_close, target: { ...trial.protection_at_close.target, client_algo_id: 'other' },
+    } }, 'a'.repeat(40))).toBe(false);
     expect(protectedEthTestnetTrialPassed({ ...trial, symbol: 'BTCUSDT' }, 'a'.repeat(40))).toBe(false);
     expect(protectedEthTestnetTrialPassed({ ...trial, stop_client_algo_id: '' }, 'a'.repeat(40))).toBe(false);
     expect(protectedEthTestnetTrialPassed({ ...trial, open_algo_after: [{}] }, 'a'.repeat(40))).toBe(false);

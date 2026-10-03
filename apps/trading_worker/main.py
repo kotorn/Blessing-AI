@@ -5087,6 +5087,20 @@ class TradingWorkerApp:
         close_orders = await adapter.close_owned_testnet_trial(owner, authority=self)
         if adapter.last_emergency_result.get("status") != "CONFIRMED" or len(close_orders) != 1:
             raise RuntimeError("Protected Testnet trial close outcome is unknown")
+        protection_at_close = adapter.last_emergency_result.get("protection_at_close")
+        if (not isinstance(protection_at_close, dict)
+                or protection_at_close.get("status") != "PROTECTED"
+                or not isinstance(protection_at_close.get("stop"), dict)
+                or not isinstance(protection_at_close.get("target"), dict)
+                or protection_at_close["stop"].get("client_algo_id") != owner["stop_client_algo_id"]
+                or protection_at_close["stop"].get("status") != "NEW"
+                or protection_at_close["stop"].get("close_position") is not True
+                or protection_at_close["stop"].get("reduce_only") is not False
+                or protection_at_close["target"].get("client_algo_id") != owner["take_profit_client_algo_id"]
+                or protection_at_close["target"].get("status") != "NEW"
+                or protection_at_close["target"].get("close_position") is not True
+                or protection_at_close["target"].get("reduce_only") is not False):
+            raise RuntimeError("Protected Testnet close lacks pre-submission stop/target read-back")
         close_id = str(close_orders[0].client_order_id or "")
         close_exchange_order_id = str(close_orders[0].exchange_order_id or "")
         close_readback = await adapter.query_order("ETHUSDC", close_id)
@@ -5133,6 +5147,9 @@ class TradingWorkerApp:
         return {
             "close_status": "VERIFIED",
             "close_client_order_id": close_id,
+            "close_order_type": "MARKET",
+            "close_order_reduce_only": True,
+            "protection_at_close": protection_at_close,
             "position_after": [], "open_orders_after": [], "open_algo_after": [],
             "reconciliation_status": "IN_SYNC", "diff_count": 0,
         }

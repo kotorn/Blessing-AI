@@ -154,6 +154,17 @@ async def test_protected_trial_worker_path_records_exchange_readback_shape(monke
         async def close_protected_ethusdc_testnet_trial(self, entry_id):
             return {
                 "close_status": "VERIFIED", "close_client_order_id": "close-1",
+                "close_order_type": "MARKET", "close_order_reduce_only": True,
+                "protection_at_close": {
+                    "status": "PROTECTED", "observed_at": "2026-10-03T00:00:00.000Z",
+                    "close_submission_at": "2026-10-03T00:00:00.000Z",
+                    "stop": {"algo_id": "101", "client_algo_id": "stop-1",
+                             "order_type": "STOP_MARKET", "status": "NEW",
+                             "close_position": True, "reduce_only": False},
+                    "target": {"algo_id": "102", "client_algo_id": "target-1",
+                               "order_type": "TAKE_PROFIT_MARKET", "status": "NEW",
+                               "close_position": True, "reduce_only": False},
+                },
                 "position_after": [], "open_orders_after": [], "open_algo_after": [],
                 "reconciliation_status": "IN_SYNC", "diff_count": 0,
             }
@@ -213,7 +224,19 @@ async def test_trial_close_persists_close_pending_before_one_reduction_and_verif
 
     adapter = SimpleNamespace(
         env=BinanceEnvironment.TESTNET,
-        last_emergency_result={"status": "CONFIRMED"},
+        last_emergency_result={
+            "status": "CONFIRMED",
+            "protection_at_close": {
+                "status": "PROTECTED", "observed_at": "2026-10-03T00:00:00.000Z",
+                "close_submission_at": "2026-10-03T00:00:00.000Z",
+                "stop": {"algo_id": "101", "client_algo_id": "stop-1",
+                         "order_type": "STOP_MARKET", "status": "NEW",
+                         "close_position": True, "reduce_only": False},
+                "target": {"algo_id": "102", "client_algo_id": "target-1",
+                           "order_type": "TAKE_PROFIT_MARKET", "status": "NEW",
+                           "close_position": True, "reduce_only": False},
+            },
+        },
         testnet_trial_close_client_order_id=lambda _entry: "close-1",
         close_owned_testnet_trial=close_owned,
         query_order=AsyncMock(return_value={
@@ -330,3 +353,108 @@ async def test_owned_testnet_close_refuses_quantity_or_direction_mismatch_before
     assert adapter.last_emergency_result["status"] == "UNKNOWN"
     assert adapter.last_emergency_result["reason"] == "trial_position_quantity_or_direction_mismatch"
     adapter._execute_decision.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protection_state", ["PROTECTED", "AMBIGUOUS"])
+async def test_owned_testnet_close_requires_fresh_open_protection_before_submission(protection_state):
+    events = []
+    entry_id = "entry-protected"
+    close_id = BinanceExecutionAdapter.testnet_trial_close_client_order_id(entry_id)
+    owner = {
+        "environment": "TESTNET", "venue": "binance_testnet", "symbol": "ETHUSDC",
+        "entry_client_order_id": entry_id, "state": "CLOSE_PENDING", "entry_side": "BUY",
+        "position_side": "BOTH", "requested_quantity": Decimal("0.01"),
+        "filled_quantity": Decimal("0.01"), "stop_trigger_price": Decimal("2400"),
+        "take_profit_trigger_price": Decimal("2600"), "stop_algo_id": "101",
+        "take_profit_algo_id": "102", "stop_client_algo_id": "stop-1",
+        "take_profit_client_algo_id": "target-1",
+        "state_reason": f"protected_ethusdc_testnet_trial_close:{close_id}:CLAIMED",
+    }
+    entry_exchange = {
+        "symbol": "ETHUSDC", "orderId": 77, "clientOrderId": entry_id, "side": "BUY",
+        "positionSide": "BOTH", "origQty": "0.01", "executedQty": "0.01", "status": "FILLED",
+    }
+    close_exchange = {
+        "symbol": "ETHUSDC", "orderId": 88, "clientOrderId": close_id, "side": "SELL",
+        "positionSide": "BOTH", "origQty": "0.01", "executedQty": "0.01", "status": "FILLED",
+        "type": "MARKET", "reduceOnly": "true",
+    }
+    fill = SimpleNamespace(
+        client_order_id=entry_id, exchange_order_id="77", symbol="ETHUSDC", side="BUY",
+        position_side="BOTH", quantity=Decimal("0.01"), price=Decimal("2500"),
+    )
+    local_entry = SimpleNamespace(
+        client_order_id=entry_id, exchange_order_id="77", symbol="ETHUSDC", side="BUY",
+    )
+    adapter = BinanceExecutionAdapter.__new__(BinanceExecutionAdapter)
+    adapter.env = BinanceEnvironment.TESTNET
+    adapter._worker_authorized = lambda _authority: True
+    adapter._mutation_lock = asyncio.Lock()
+    adapter.last_emergency_result = {}
+    adapter.query_order = AsyncMock(side_effect=[None, entry_exchange, close_exchange])
+    adapter.ledger = SimpleNamespace(
+        get_order_by_client_id=AsyncMock(return_value=local_entry),
+        get_fills=AsyncMock(return_value=[fill]), replace_positions=AsyncMock(),
+    )
+    adapter.reconciliation = SimpleNamespace(
+        _recover_order_fills=AsyncMock(), reconcile=AsyncMock(return_value="IN_SYNC"), last_diffs=[],
+    )
+    adapter.rest_client = SimpleNamespace(
+        portfolio_margin=False,
+        request=AsyncMock(side_effect=[
+            [{"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0.01"}],
+            [{"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0"}],
+        ]),
+    )
+    proof = {
+        "stop_order_id": 101, "stop_client_order_id": "stop-1", "stop_order_type": "STOP_MARKET",
+        "stop_status": "NEW", "stop_close_position": True, "stop_reduce_only": False,
+        "take_profit_order_id": 102, "take_profit_client_order_id": "target-1",
+        "take_profit_order_type": "TAKE_PROFIT_MARKET", "take_profit_status": "NEW",
+        "take_profit_close_position": True, "take_profit_reduce_only": False,
+        "position_side": "BOTH", "close_position": True, "reduce_only": False,
+    }
+
+    async def read_protection(intent, *, entry_client_order_id):
+        events.append("protection_readback")
+        assert entry_client_order_id == entry_id
+        assert intent.stop_algo_id == 101 and intent.take_profit_algo_id == 102
+        assert intent.stop_trigger == Decimal("2400")
+        return SimpleNamespace(
+            state=protection_state, evidence=proof if protection_state == "PROTECTED" else None,
+            reasons=() if protection_state == "PROTECTED" else ("stop_not_open",),
+        )
+
+    adapter.read_back_algo_protection = AsyncMock(side_effect=read_protection)
+
+    async def claim_submission(_owner, observed_close_id):
+        events.append("submission_claim")
+        assert observed_close_id == close_id
+        return {**owner, "state_reason": f"protected_ethusdc_testnet_trial_close:{close_id}:SUBMITTING"}
+
+    authority = SimpleNamespace(claim_testnet_trial_close_submission=AsyncMock(side_effect=claim_submission))
+
+    async def execute(decision, *, before_mutation, **_kwargs):
+        events.append("close_pre_send")
+        await before_mutation()
+        events.append("close_submission")
+        assert decision.orders[0].reduce_only is True
+        return [SimpleNamespace(client_order_id=close_id, exchange_order_id="88")]
+
+    adapter._execute_decision = AsyncMock(side_effect=execute)
+
+    orders = await adapter.close_owned_testnet_trial(owner, authority=authority)
+
+    if protection_state == "PROTECTED":
+        assert len(orders) == 1, adapter.last_emergency_result
+        assert events == ["submission_claim", "close_pre_send", "protection_readback", "close_submission"]
+        assert adapter.last_emergency_result["protection_at_close"]["stop"]["status"] == "NEW"
+        assert adapter.last_emergency_result["protection_at_close"]["target"]["status"] == "NEW"
+    else:
+        assert orders == []
+        assert events == ["submission_claim", "close_pre_send", "protection_readback"]
+        assert adapter.last_emergency_result["status"] == "UNKNOWN"
+        assert adapter.last_emergency_result["reason"] == "trial_protection_not_confirmed_before_close"
+        authority.claim_testnet_trial_close_submission.assert_awaited_once()
+        adapter._execute_decision.assert_awaited_once()

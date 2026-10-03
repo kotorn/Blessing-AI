@@ -88,6 +88,7 @@ async def run_protected_ethusdc_testnet_trial() -> dict[str, object]:
         "trial_type": "PROTECTED_ETHUSDC_V1", "build_sha": build_sha,
         "environment": "BINANCE_TESTNET", "symbol": "ETHUSDC", "status": "FAIL",
         "protection_status": "UNKNOWN", "close_status": "UNKNOWN",
+        "protection_at_close": None,
         "reconciliation_status": "UNKNOWN", "diff_count": -1, "entry_fill_count": 0,
         "position_after": "UNKNOWN", "open_orders_after": "UNKNOWN",
         "open_algo_after": "UNKNOWN",
@@ -96,6 +97,7 @@ async def run_protected_ethusdc_testnet_trial() -> dict[str, object]:
             "open_orders": -1, "open_algo_orders": -1,
         },
         "entry_client_order_id": "", "close_client_order_id": "",
+        "close_order_type": None, "close_order_reduce_only": None,
         "stop_client_algo_id": "", "target_client_algo_id": "",
     }
     try:

@@ -175,17 +175,48 @@ export function protectedEthTestnetTrialPassed(trial: Record<string, unknown>, g
   const closeId = trial.close_client_order_id;
   const stopId = trial.stop_client_algo_id;
   const targetId = trial.target_client_algo_id;
+  const closeProtection = trial.protection_at_close;
+  const validCloseProtection = (() => {
+    if (!closeProtection || typeof closeProtection !== 'object' || Array.isArray(closeProtection)) return false;
+    const proof = closeProtection as Record<string, unknown>;
+    const exactKeys = (value: Record<string, unknown>, keys: string[]) =>
+      Object.keys(value).sort().join('|') === [...keys].sort().join('|');
+    if (!exactKeys(proof, ['status', 'observed_at', 'close_submission_at', 'stop', 'target'])
+      || proof.status !== 'PROTECTED' || typeof proof.observed_at !== 'string'
+      || typeof proof.close_submission_at !== 'string'
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(proof.observed_at)
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(proof.close_submission_at)
+      || !Number.isFinite(Date.parse(proof.observed_at))
+      || !Number.isFinite(Date.parse(proof.close_submission_at))
+      || new Date(proof.observed_at).toISOString() !== proof.observed_at
+      || new Date(proof.close_submission_at).toISOString() !== proof.close_submission_at
+      || Date.parse(proof.close_submission_at) < Date.parse(proof.observed_at)
+      || Date.parse(proof.close_submission_at) - Date.parse(proof.observed_at) > 5000) return false;
+    const validAlgo = (value: unknown, expectedClientId: unknown, orderType: string): boolean => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+      const algo = value as Record<string, unknown>;
+      return exactKeys(algo, ['algo_id', 'client_algo_id', 'order_type', 'status', 'close_position', 'reduce_only'])
+        && typeof algo.algo_id === 'string' && /^[1-9][0-9]*$/.test(algo.algo_id)
+        && algo.client_algo_id === expectedClientId && algo.order_type === orderType
+        && algo.status === 'NEW' && algo.close_position === true && algo.reduce_only === false;
+    };
+    return validAlgo(proof.stop, stopId, 'STOP_MARKET')
+      && validAlgo(proof.target, targetId, 'TAKE_PROFIT_MARKET');
+  })();
   return trial.trial_type === 'PROTECTED_ETHUSDC_V1'
     && trial.build_sha === gitSha && trial.environment === 'BINANCE_TESTNET'
     && trial.symbol === 'ETHUSDC' && trial.status === 'PASS'
     && trial.protection_status === 'PROTECTED_VERIFIED'
     && trial.close_status === 'VERIFIED'
+    && trial.close_order_type === 'MARKET'
+    && trial.close_order_reduce_only === true
     && trial.reconciliation_status === 'IN_SYNC' && trial.diff_count === 0
     && typeof trial.entry_fill_count === 'number' && Number.isSafeInteger(trial.entry_fill_count)
     && trial.entry_fill_count >= 1
     && Array.isArray(trial.position_after) && trial.position_after.length === 0
     && Array.isArray(trial.open_orders_after) && trial.open_orders_after.length === 0
     && Array.isArray(trial.open_algo_after) && trial.open_algo_after.length === 0
+    && validCloseProtection
     && [entryId, closeId, stopId, targetId].every((id) => typeof id === 'string' && id.length > 0)
     && new Set([entryId, closeId, stopId, targetId]).size === 4;
 }

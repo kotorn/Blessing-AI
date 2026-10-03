@@ -1,5 +1,6 @@
 import asyncio
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -137,13 +138,68 @@ async def test_timeout_ambiguity_handling(adapter):
     authority = object()
     adapter.bind_worker_authority(authority)
     await adapter._execute_decision(decision, authority=authority)
-
     # The ambiguous POST is never blindly retried. A single authoritative query
     # confirms absence, then reconciliation is required before READY returns.
     assert adapter.state == ConnectionState.DEGRADED
     assert adapter.rest_client.calls.count(("POST", "/fapi/v1/order")) == 1
     assert adapter.rest_client.calls.count(("GET", "/fapi/v1/order")) == 3
     assert adapter.reconciliation.calls == 1
+
+
+@pytest.mark.parametrize("barrier_passes", [True, False])
+async def test_explicit_pre_mutation_barrier_is_lease_fenced_and_precedes_order_post(adapter, barrier_passes):
+    adapter.state = ConnectionState.READY
+    events = []
+
+    class Lease:
+        async def assert_valid(self):
+            events.append("lease")
+
+    adapter.execution_lease = Lease()
+    adapter.execution_lease_required = True
+    adapter.order_submission_attempts = 0
+    adapter.order_gate.check = AsyncMock(return_value=GateResult(
+        True, "passed", PreparedOrder(
+            symbol="BTCUSDT", order_type="MARKET", quantity=Decimal("0.001"),
+            price=None, estimated_price=Decimal("10000"), notional=Decimal("10"),
+        ),
+    ))
+    authority = object()
+    adapter.bind_worker_authority(authority)
+    intent = OrderIntent(
+        client_order_id="CLOSE-BARRIER-1", symbol="BTCUSDT",
+        market_type=MarketType.USDM_FUTURES, side=OrderSide.SELL,
+        position_side=PositionSide.BOTH, order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC, quantity=Decimal("0.001"), reduce_only=True,
+    )
+    decision = ExecutionDecision(
+        decision_id="CLOSE-BARRIER-D1", symbol="BTCUSDT", action="CLOSE_POSITION",
+        risk_class=EconomicRiskClass.EMERGENCY, orders=[intent],
+    )
+
+    async def barrier():
+        events.append("protection_readback")
+        if not barrier_passes:
+            raise RuntimeError("protection not proven")
+
+    async def request(method, path, **kwargs):
+        await kwargs["before_mutation"]()
+        events.append("post")
+        raise BinanceTransportAmbiguity("test stops after observing POST boundary")
+
+    adapter.rest_client.request = request
+    adapter._resolve_ambiguous_order = AsyncMock(return_value=None)
+    await adapter._execute_decision(
+        decision, authority=authority, allow_emergency_fallback=True,
+        before_mutation=barrier,
+    )
+
+    if barrier_passes:
+        assert events == ["lease", "protection_readback", "post"]
+        assert adapter.order_submission_attempts == 1
+    else:
+        assert events == ["lease", "protection_readback"]
+        assert adapter.order_submission_attempts == 0
 
 
 async def test_ambiguous_order_terminal_without_fill_is_not_confirmed(adapter):

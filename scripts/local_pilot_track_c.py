@@ -26,6 +26,47 @@ def workflow_for(evidence_class: str) -> str:
     return f'{REPOSITORY}/.github/workflows/ci.yml' if evidence_class == 'CHECKS' else WORKFLOW
 
 
+def _testnet_close_protection_is_proven(trial: dict) -> bool:
+    proof = trial.get('protection_at_close')
+    if (not isinstance(proof, dict) or set(proof) != {
+            'status', 'observed_at', 'close_submission_at', 'stop', 'target',
+    } or proof.get('status') != 'PROTECTED'
+            or not isinstance(proof.get('observed_at'), str)
+            or not isinstance(proof.get('close_submission_at'), str)):
+        return False
+    timestamp_pattern = r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z'
+    if any(re.fullmatch(timestamp_pattern, proof[key]) is None
+           for key in ('observed_at', 'close_submission_at')):
+        return False
+    try:
+        observed_at = datetime.fromisoformat(proof['observed_at'].replace('Z', '+00:00'))
+        close_submission_at = datetime.fromisoformat(
+            proof['close_submission_at'].replace('Z', '+00:00')
+        )
+    except ValueError:
+        return False
+    if (observed_at.tzinfo is None or close_submission_at.tzinfo is None
+            or any(value.strftime('%Y-%m-%dT%H:%M:%S.%f')[:23] + 'Z' != proof[key]
+                   for value, key in ((observed_at, 'observed_at'),
+                                      (close_submission_at, 'close_submission_at')))
+            or not 0 <= (close_submission_at - observed_at).total_seconds() <= 5):
+        return False
+
+    def valid_algo(value: object, expected_client_id: object, expected_type: str) -> bool:
+        if not isinstance(value, dict) or set(value) != {
+            'algo_id', 'client_algo_id', 'order_type', 'status', 'close_position', 'reduce_only',
+        }:
+            return False
+        algo_id = value.get('algo_id')
+        return (isinstance(algo_id, str) and re.fullmatch(r'[1-9][0-9]*', algo_id) is not None
+                and value.get('client_algo_id') == expected_client_id
+                and value.get('order_type') == expected_type and value.get('status') == 'NEW'
+                and value.get('close_position') is True and value.get('reduce_only') is False)
+
+    return (valid_algo(proof.get('stop'), trial.get('stop_client_algo_id'), 'STOP_MARKET')
+            and valid_algo(proof.get('target'), trial.get('target_client_algo_id'), 'TAKE_PROFIT_MARKET'))
+
+
 def validate_payload(statement: dict) -> None:
     evidence_class = statement['evidenceClass']
     payload = statement['payload']
@@ -89,8 +130,11 @@ def validate_payload(statement: dict) -> None:
                 or trial.get('environment') != 'BINANCE_TESTNET' or trial.get('symbol') != 'ETHUSDC'
                 or trial.get('status') != 'PASS' or trial.get('protection_status') != 'PROTECTED_VERIFIED'
                 or trial.get('close_status') != 'VERIFIED' or trial.get('reconciliation_status') != 'IN_SYNC'
+                or trial.get('close_order_type') != 'MARKET'
+                or trial.get('close_order_reduce_only') is not True
                 or type(trial.get('diff_count')) is not int or trial['diff_count'] != 0
                 or type(trial.get('entry_fill_count')) is not int or trial['entry_fill_count'] < 1
+                or not _testnet_close_protection_is_proven(trial)
                 or any(trial.get(key) != [] for key in ('position_after', 'open_orders_after', 'open_algo_after'))
                 or any(not isinstance(x, str) or not x for x in ids) or len(set(ids)) != 4):
             raise ValueError('ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE')

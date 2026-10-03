@@ -9,6 +9,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -2463,6 +2464,7 @@ class BinanceExecutionAdapter:
         allow_emergency_fallback: bool = False,
         authority: Optional[object] = None,
         enforce_testnet_protection: bool = False,
+        before_mutation: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> List[ExecutionOrder]:
         if self.preflight_only:
             logger.error("Blocked internal order submission from a read-only preflight adapter")
@@ -2738,6 +2740,12 @@ class BinanceExecutionAdapter:
                         await self._assert_execution_lease(decision.risk_class)
                     if enforce_testnet_protection:
                         await self._assert_testnet_entry_position_flat(intent)
+                    if before_mutation is not None:
+                        # An explicitly fenced mutation must revalidate a live
+                        # lease even when its risk class is EMERGENCY; the
+                        # ordinary close-only path may otherwise bypass it.
+                        await self._assert_execution_lease(EconomicRiskClass.NEW_RISK)
+                        await before_mutation()
                     # The REST client invokes this after throttle waits and
                     # immediately before its HTTP request. A pre-send fence
                     # failure therefore remains definitively not-submitted.
@@ -6317,6 +6325,7 @@ class BinanceExecutionAdapter:
             return []
         entry_id = str(owner.get("entry_client_order_id") or "")
         client_order_id = self.testnet_trial_close_client_order_id(entry_id) if entry_id else ""
+        protection_failure_reason: Optional[str] = None
         if (not client_order_id
                 or owner.get("state_reason") != f"protected_ethusdc_testnet_trial_close:{client_order_id}:CLAIMED"):
             self.last_emergency_result = {"status": "BLOCKED", "reason": "trial_close_id_mismatch"}
@@ -6406,6 +6415,37 @@ class BinanceExecutionAdapter:
                     "client_order_id": client_order_id,
                 }
                 return []
+            stop_algo_id_text = str(owner.get("stop_algo_id") or "")
+            target_algo_id_text = str(owner.get("take_profit_algo_id") or "")
+            stop_client_algo_id = str(owner.get("stop_client_algo_id") or "")
+            target_client_algo_id = str(owner.get("take_profit_client_algo_id") or "")
+            if (not re.fullmatch(r"[1-9][0-9]*", stop_algo_id_text)
+                    or not re.fullmatch(r"[1-9][0-9]*", target_algo_id_text)
+                    or not stop_client_algo_id or not target_client_algo_id
+                    or stop_client_algo_id == target_client_algo_id):
+                self.last_emergency_result = {
+                    "status": "UNKNOWN", "reason": "trial_protection_owner_identity_invalid",
+                    "client_order_id": client_order_id,
+                }
+                return []
+            try:
+                protection_intent = ProtectionIntent(
+                    symbol="ETHUSDC", entry_side=entry_side, position_side="BOTH",
+                    entry_qty=expected_qty,
+                    stop_trigger=self._decimal_value(owner.get("stop_trigger_price"), positive=True),
+                    take_profit_trigger=self._decimal_value(
+                        owner.get("take_profit_trigger_price"), positive=True
+                    ),
+                    stop_algo_id=int(stop_algo_id_text), stop_client_algo_id=stop_client_algo_id,
+                    take_profit_algo_id=int(target_algo_id_text),
+                    take_profit_client_algo_id=target_client_algo_id,
+                )
+            except Exception as exc:
+                self.last_emergency_result = {
+                    "status": "UNKNOWN", "reason": "trial_protection_owner_invalid",
+                    "client_order_id": client_order_id,
+                }
+                return []
             await self.ledger.replace_positions(positions, mark_initialized=False)
             mark_attempted = getattr(authority, "claim_testnet_trial_close_submission", None)
             if not callable(mark_attempted):
@@ -6441,8 +6481,59 @@ class BinanceExecutionAdapter:
                 risk_class=EconomicRiskClass.EMERGENCY,
                 orders=[intent],
             )
+
+            protection_at_close: Dict[str, Any] = {}
+
+            async def verify_protection_at_send_barrier() -> None:
+                nonlocal protection_failure_reason
+                observed_monotonic = time.monotonic()
+                protection_result = await self.read_back_algo_protection(
+                    protection_intent, entry_client_order_id=entry_id,
+                )
+                observed_at = datetime.now(timezone.utc)
+                evidence = getattr(protection_result, "evidence", None)
+                if (getattr(protection_result, "state", None) != "PROTECTED"
+                        or not isinstance(evidence, Mapping)
+                        or evidence.get("stop_order_id") != protection_intent.stop_algo_id
+                        or evidence.get("stop_client_order_id") != stop_client_algo_id
+                        or evidence.get("stop_order_type") != "STOP_MARKET"
+                        or evidence.get("stop_status") != "NEW"
+                        or evidence.get("take_profit_order_id") != protection_intent.take_profit_algo_id
+                        or evidence.get("take_profit_client_order_id") != target_client_algo_id
+                        or evidence.get("take_profit_order_type") != "TAKE_PROFIT_MARKET"
+                        or evidence.get("take_profit_status") != "NEW"
+                        or evidence.get("position_side") != "BOTH"
+                        or evidence.get("close_position") is not True
+                        or evidence.get("reduce_only") is not False):
+                    protection_failure_reason = "trial_protection_not_confirmed_before_close"
+                    raise RuntimeError("trial protection not confirmed at close submission barrier")
+                close_submission_at = datetime.now(timezone.utc)
+                if time.monotonic() - observed_monotonic > 5.0:
+                    protection_failure_reason = "trial_protection_readback_stale_before_close"
+                    raise RuntimeError("trial protection read-back exceeded freshness window")
+                protection_at_close.update({
+                    "status": "PROTECTED",
+                    "observed_at": observed_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    "close_submission_at": close_submission_at.isoformat(
+                        timespec="milliseconds"
+                    ).replace("+00:00", "Z"),
+                    "stop": {
+                        "algo_id": stop_algo_id_text,
+                        "client_algo_id": stop_client_algo_id,
+                        "order_type": "STOP_MARKET", "status": "NEW",
+                        "close_position": True, "reduce_only": False,
+                    },
+                    "target": {
+                        "algo_id": target_algo_id_text,
+                        "client_algo_id": target_client_algo_id,
+                        "order_type": "TAKE_PROFIT_MARKET", "status": "NEW",
+                        "close_position": True, "reduce_only": False,
+                    },
+                })
+
             submitted = await self._execute_decision(
                 decision, allow_emergency_fallback=True, authority=authority,
+                before_mutation=verify_protection_at_send_barrier,
             )
             if len(submitted) != 1 or submitted[0].client_order_id != client_order_id:
                 self.last_emergency_result = {
@@ -6484,11 +6575,12 @@ class BinanceExecutionAdapter:
             self.last_emergency_result = {
                 "status": "CONFIRMED", "submitted_orders": 1,
                 "reconciliation": sync, "client_order_id": client_order_id,
+                "protection_at_close": protection_at_close,
             }
             return submitted
         except Exception as exc:
             self.last_emergency_result = {
-                "status": "UNKNOWN", "reason": type(exc).__name__,
+                "status": "UNKNOWN", "reason": protection_failure_reason or type(exc).__name__,
                 "client_order_id": client_order_id or None,
             }
             return []

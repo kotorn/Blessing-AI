@@ -1506,14 +1506,12 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
             # No exchange adapter is involved: this proves durable POST authority.
             claim_entry = "pilot-concurrent-close-entry"
             claim_close = "pilot-concurrent-close"
-            await connection.execute(
-                "UPDATE mainnet_launch_sessions SET basket_id = $1 WHERE launch_id = $2",
-                "pilot-concurrent-close-basket", pilot_id,
-            )
             await protection_repository.upsert_protection({
                 **emergency_record,
                 "entry_client_order_id": claim_entry,
-                "basket_id": "pilot-concurrent-close-basket",
+                # A Local pilot launch is immutably bound to its first basket;
+                # exercise another owner under that same launch binding.
+                "basket_id": cancel_close_basket,
                 "mainnet_launch_id": pilot_id,
                 "stop_client_algo_id": "pilot-claim-stop",
                 "take_profit_client_algo_id": "pilot-claim-target",
@@ -1566,7 +1564,7 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
                 await protection_repository.upsert_protection({
                     **emergency_record,
                     "entry_client_order_id": transfer_entry,
-                    "basket_id": "pilot-concurrent-close-basket",
+                    "basket_id": cancel_close_basket,
                     "mainnet_launch_id": pilot_id,
                     "stop_client_algo_id": "pilot-expiry-stop",
                     "take_profit_client_algo_id": "pilot-expiry-target",
@@ -1960,8 +1958,20 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
             active_claim_owners = await protection_repository.list_active_protections(
                 "binance_mainnet", "ETHUSDC"
             )
-            assert {row["entry_client_order_id"] for row in active_claim_owners} == {claim_entry, transfer_entry}
-            assert all(row["state"] == "CLOSE_PENDING" for row in active_claim_owners)
+            active_claims_by_entry = {
+                row["entry_client_order_id"]: row for row in active_claim_owners
+            }
+            assert set(active_claims_by_entry) == {
+                "pilot-entry-cancel-close-entry", "pilot-confirmed-cancel-close-entry",
+                claim_entry, transfer_entry,
+            }
+            assert active_claims_by_entry["pilot-entry-cancel-close-entry"]["state"] == (
+                "PROTECTED" if cancel_won else "CLOSE_PENDING"
+            )
+            assert all(
+                active_claims_by_entry[entry_id]["state"] == "CLOSE_PENDING"
+                for entry_id in ("pilot-confirmed-cancel-close-entry", claim_entry, transfer_entry)
+            )
             assert len(
                 await protection_repository.list_active_protections(
                     "binance_testnet", "ETHUSDC"

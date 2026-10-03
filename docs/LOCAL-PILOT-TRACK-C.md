@@ -77,6 +77,19 @@ permission to ARM. The workflows have not run against GitHub in this branch;
 no real signed Track C subject or verifier certificate has yet been produced,
 so the certificate shape and external REST responses remain unverified.
 
+Protected Testnet lifecycle evidence additionally requires a fresh, signed
+read-back of the owned STOP_MARKET and TAKE_PROFIT_MARKET Algo orders in the
+REST client's final pre-mutation callback, after throttling and lease fencing
+and immediately before the single market-close request. The artifact binds
+the read-back time to the submission barrier within five seconds, and records
+the close as `MARKET` with `reduceOnly=true`, verified by exchange read-back.
+Binance USDⓈ-M conditional protections use `closePosition=true`, which is
+incompatible with `reduceOnly`; therefore those protection Algo records
+correctly report `reduceOnly=false`. This documents the exchange-supported
+order semantics, not a completed Testnet run. Until an authorized protected
+Environment dispatch produces a real signed artifact, Testnet evidence stays
+NOT_RUN.
+
 Human prerequisites are to configure main branch protection, pilot-review
 required user reviewers/prevent_self_review/main-only branch policy, and the
 protected testnet Environment. Three independent non-author users must
