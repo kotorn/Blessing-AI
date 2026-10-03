@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "identityCases": [
+    { "id": "empty", "adminUid": "" },
+    { "id": "whitespace", "adminUid": "   " },
+    { "id": "forged", "adminUid": "forged-admin-id" },
+    { "id": "operator-like", "adminUid": "admin-kotorn" }
+  ],
+  "expected": {
+    "status": "BLOCKED",
+    "canApprove": false,
+    "canStart": false,
+    "provenance": {
+      "localChecks": "UNVERIFIED",
+      "reviews": "UNVERIFIED",
+      "testnet": "UNVERIFIED"
+    },
+    "requiredBlockers": [
+      "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+      "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+      "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+    ]
+  }
+}
