@@ -195,6 +195,9 @@ class BinanceExecutionAdapter:
         self.on_local_mainnet_protection_update: Optional[
             Callable[[Dict[str, Any]], Awaitable[bool]]
         ] = None
+        self.on_local_mainnet_entry_cancel_claim: Optional[
+            Callable[[Dict[str, Any]], Awaitable[bool]]
+        ] = None
         self.on_local_mainnet_close_verified: Optional[
             Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[bool]]
         ] = None
@@ -4595,17 +4598,30 @@ class BinanceExecutionAdapter:
             # may already have been attempted; recover only by signed reads.
             if (
                 "entry_cancel=ATTEMPTED_UNKNOWN" not in str(record.get("state_reason") or "")
+                and "entry_cancel=CONFIRMED" not in str(record.get("state_reason") or "")
                 and self._local_close_id_from_reason(record.get("state_reason")) is None
             ):
                 record = dict(record)
-                record["state_reason"] = self._local_recovery_reason(record, entry_cancel="ATTEMPTED_UNKNOWN")
-                if not await self._persist_local_mainnet_protection(record):
+                claim_cancel = getattr(self, "on_local_mainnet_entry_cancel_claim", None)
+                if not callable(claim_cancel):
                     await self._degrade_local_mainnet_protection(worker)
                     return None
-                cancel_kwargs = {"authority": authority}
-                if getattr(self, "state", ConnectionState.READY) != ConnectionState.READY or getattr(authority, "kill_switch_active", False):
-                    cancel_kwargs["allow_emergency_fallback"] = True
-                await self.cancel_order(symbol, client_order_id, **cancel_kwargs)
+                try:
+                    claimed = await claim_cancel(record)
+                except Exception:
+                    # The durable claim may have committed despite a lost
+                    # acknowledgement. Resolve only by exact-ID read-back.
+                    claimed = False
+                if claimed is True:
+                    record["state_reason"] = self._local_recovery_reason(
+                        record, entry_cancel="ATTEMPTED_UNKNOWN"
+                    )
+                    cancel_kwargs = {"authority": authority}
+                    if getattr(self, "state", ConnectionState.READY) != ConnectionState.READY or getattr(authority, "kill_switch_active", False):
+                        cancel_kwargs["allow_emergency_fallback"] = True
+                    await self.cancel_order(symbol, client_order_id, **cancel_kwargs)
+                else:
+                    await self._degrade_local_mainnet_protection(worker)
             try:
                 after = await self.query_order(symbol, client_order_id)
             except Exception:

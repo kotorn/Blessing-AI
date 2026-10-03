@@ -1399,6 +1399,67 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
             active_pilot = await pilot_repository.get_mainnet_launch(pilot_id)
             assert active_pilot["state"] == "ACTIVE"
             assert active_pilot["pilot_campaign_id"] == campaign_id
+            # Entry cancellation and emergency close must serialize on the
+            # same durable owner row. They may not both authorize mutations.
+            cancel_close_basket = "pilot-entry-cancel-close-basket"
+            assert await pilot_repository.bind_mainnet_launch_basket(
+                pilot_id, cancel_close_basket
+            ) is True
+            cancel_close_owner = {
+                "environment": "MAINNET", "venue": "binance_mainnet", "symbol": "ETHUSDC",
+                "entry_client_order_id": "pilot-entry-cancel-close-entry",
+                "basket_id": cancel_close_basket, "mainnet_launch_id": pilot_id,
+                "entry_side": "BUY", "position_side": "BOTH",
+                "requested_quantity": "0.1", "filled_quantity": "0.1",
+                "entry_average_price": "2000", "stop_trigger_price": "1900",
+                "take_profit_trigger_price": "2200", "stop_algo_id": "71011",
+                "take_profit_algo_id": "71012", "stop_client_algo_id": "pilot-cancel-stop",
+                "take_profit_client_algo_id": "pilot-cancel-target", "management_mode": "QUICK",
+                "state": "PROTECTED",
+            }
+            await pilot_repository.algo_protections.upsert_protection(cancel_close_owner)
+            cancel_race_connection = await connect()
+            try:
+                other_cancel_race = PersistenceRepository(cancel_race_connection).algo_protections
+
+                async def try_close_claim():
+                    try:
+                        result = await other_cancel_race.claim_local_emergency_close(
+                            "ETHUSDC", cancel_close_owner["entry_client_order_id"],
+                            "pilot-cancel-close-order", claimant_id="pilot-close-worker",
+                        )
+                        return bool(result["claimed"])
+                    except RuntimeError as exc:
+                        if "entry cancellation" in str(exc):
+                            return False
+                        raise
+
+                concurrent_mutations = await asyncio.gather(
+                    pilot_repository.algo_protections.claim_mainnet_entry_cancel(cancel_close_owner),
+                    try_close_claim(),
+                )
+                cancel_won = concurrent_mutations[0] is not None
+                close_won = concurrent_mutations[1] is True
+                assert cancel_won != close_won
+                final_owner = await pilot_repository.algo_protections.get_protection(
+                    "binance_mainnet", "ETHUSDC", cancel_close_owner["entry_client_order_id"]
+                )
+                close_claim = await connection.fetchrow(
+                    "SELECT status FROM binance_emergency_close_claims WHERE entry_client_order_id = $1",
+                    cancel_close_owner["entry_client_order_id"],
+                )
+                if cancel_won:
+                    assert "entry_cancel=ATTEMPTED_UNKNOWN" in final_owner["state_reason"]
+                    assert final_owner["state"] == "PROTECTED"
+                    assert close_claim is None
+                else:
+                    assert final_owner["state"] == "CLOSE_PENDING"
+                    assert close_claim["status"] == "RESERVED"
+                    assert await pilot_repository.algo_protections.claim_mainnet_entry_cancel(
+                        cancel_close_owner
+                    ) is None
+            finally:
+                await cancel_race_connection.close()
             # Two real database connections race for the same close identity.
             # No exchange adapter is involved: this proves durable POST authority.
             claim_entry = "pilot-concurrent-close-entry"

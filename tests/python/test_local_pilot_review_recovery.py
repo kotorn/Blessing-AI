@@ -14,6 +14,7 @@ from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.ledger import InMemoryLedger
 from apps.trading_worker.venues.binance.models import ConnectionState
+from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
 from domain.enums import MarketType, OrderSide, OrderType, PositionSide, TimeInForce
 from domain.models import ExecutionOrder, OrderIntent
 
@@ -58,6 +59,7 @@ class OwnerRepository:
         self.claims = []
         self.writes = []
         self.reservation = None
+        self.cancel_claim_lock = asyncio.Lock()
 
     async def get_protection(self, venue, symbol, entry_client_order_id):
         assert (venue, symbol, entry_client_order_id) == (
@@ -72,6 +74,20 @@ class OwnerRepository:
         self.writes.append(deepcopy(row))
         self.row = deepcopy(row)
         return True
+
+    async def claim_mainnet_entry_cancel(self, record):
+        async with self.cancel_claim_lock:
+            reason = str(self.row.get("state_reason") or "")
+            if (self.row.get("state") not in {"PENDING", "PROTECTED", "UNKNOWN"}
+                    or "entry_cancel=" in reason or "local_close_client_order_id=" in reason
+                    or any(self.row.get(key) != record.get(key) for key in (
+                        "environment", "venue", "symbol", "entry_client_order_id",
+                        "basket_id", "mainnet_launch_id", "entry_side", "position_side",
+                    ))):
+                return None
+            self.row["state_reason"] = "entry_cancel=ATTEMPTED_UNKNOWN"
+            self.writes.append(deepcopy(self.row))
+            return deepcopy(self.row)
 
     async def claim_local_emergency_close(self, symbol, entry_id, close_id, *, claimant_id, lease_seconds=30):
         self.claims.append({"expected_state_reason": self.row["state_reason"]})
@@ -169,6 +185,11 @@ def make_adapter(row=None):
     adapter._verify_local_mainnet_close = AsyncMock(return_value=False)
     adapter._execute_decision = AsyncMock(return_value=[])
     adapter.on_local_mainnet_protection_update = repository.persist
+
+    async def claim_entry_cancel(record):
+        return await repository.claim_mainnet_entry_cancel(record) is not None
+
+    adapter.on_local_mainnet_entry_cancel_claim = claim_entry_cancel
     adapter.on_local_mainnet_close_verified = AsyncMock(return_value=True)
     adapter._last_local_mainnet_risk_evidence = None
     return adapter, authority, repository
@@ -176,6 +197,42 @@ def make_adapter(row=None):
 
 def entry_objects(adapter, row):
     return adapter._reconstruct_intent_and_order_from_record(row)
+
+
+@pytest.mark.asyncio
+async def test_worker_cancel_claim_requires_durable_local_pilot_binding(monkeypatch):
+    monkeypatch.setenv("LOCAL_ONLY", "true")
+    monkeypatch.setenv("LOCAL_RUNTIME_TARGET", "LOCAL")
+    record = owner_record()
+    repository = SimpleNamespace(
+        claim_mainnet_entry_cancel=AsyncMock(return_value={
+            **record, "state_reason": "entry_cancel=ATTEMPTED_UNKNOWN",
+        })
+    )
+    worker = TradingWorkerApp.__new__(TradingWorkerApp)
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    worker._mainnet_launch_id = "launch-review"
+    worker._mainnet_launch_session = {
+        "launch_id": "launch-review", "policy": "LIVE_RESEARCH_PILOT",
+        "runtime_target": "LOCAL", "pilot_campaign_id": "pilot-review-001",
+    }
+    worker.persistence = SimpleNamespace(
+        mode="REQUIRED", is_connected=True, readiness=lambda: {"durable": True},
+        repository=SimpleNamespace(algo_protections=repository),
+    )
+
+    assert await worker._claim_local_mainnet_entry_cancel(record) is True
+    repository.claim_mainnet_entry_cancel.assert_awaited_once_with(record)
+
+    repository.claim_mainnet_entry_cancel = AsyncMock(return_value={
+        **record, "basket_id": "other-basket",
+        "state_reason": "entry_cancel=ATTEMPTED_UNKNOWN",
+    })
+    assert await worker._claim_local_mainnet_entry_cancel(record) is False
+
+    worker._mainnet_launch_session["policy"] = "STAGED_FIRST_ORDER"
+    assert await worker._claim_local_mainnet_entry_cancel(record) is False
+    repository.claim_mainnet_entry_cancel.assert_awaited_once()
 
 
 @pytest.mark.asyncio

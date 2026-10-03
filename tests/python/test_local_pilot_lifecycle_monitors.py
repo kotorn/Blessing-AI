@@ -763,6 +763,23 @@ def _pilot_cancel_adapter(monkeypatch, before, after, fills=(), cancel_result=Tr
         return True
 
     adapter._persist_local_mainnet_protection = persist
+    cancel_claim_lock = asyncio.Lock()
+    cancel_claimed = False
+
+    async def claim_cancel(record):
+        nonlocal cancel_claimed
+        async with cancel_claim_lock:
+            if cancel_claimed or "entry_cancel=" in str(record.get("state_reason") or ""):
+                return False
+            cancel_claimed = True
+            claimed = dict(record)
+            claimed["state_reason"] = adapter._local_recovery_reason(
+                claimed, entry_cancel="ATTEMPTED_UNKNOWN"
+            )
+            persisted.append(claimed)
+            return True
+
+    adapter.on_local_mainnet_entry_cancel_claim = claim_cancel
     order = SimpleNamespace()
     adapter.ledger = SimpleNamespace(
         get_order_by_client_id=lambda _client_id: _async_value(order),
@@ -869,3 +886,71 @@ async def test_ambiguous_entry_cancel_is_read_back_once_and_never_retried(monkey
     recovered = {**owner, **persisted[0]}
     assert await adapter._cancel_and_read_back_pilot_entry(recovered, authority=authority) is None
     assert len(cancellations) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_entry_cancel_claim_has_one_mutation_winner(monkeypatch):
+    owner = _pilot_entry_owner()
+    open_order = {
+        "clientOrderId": owner["entry_client_order_id"], "symbol": "ETHUSDC",
+        "side": "BUY", "origQty": "0.5", "executedQty": "0",
+        "status": "NEW", "orderId": 104,
+    }
+    terminal_order = {**open_order, "status": "CANCELED"}
+    adapter, authority, cancellations, persisted = _pilot_cancel_adapter(
+        monkeypatch, open_order, terminal_order
+    )
+    second_adapter, second_authority, _, _ = _pilot_cancel_adapter(
+        monkeypatch, open_order, terminal_order
+    )
+    read_count = 0
+    read_lock = asyncio.Lock()
+    both_initial_reads = asyncio.Event()
+
+    async def query_order(_symbol, _client_order_id):
+        nonlocal read_count
+        async with read_lock:
+            read_count += 1
+            current = read_count
+            if current == 2:
+                both_initial_reads.set()
+        if current <= 2:
+            # Distinct Worker instances both observe the live order before
+            # racing for the durable PostgreSQL claim.
+            await both_initial_reads.wait()
+            return open_order
+        return terminal_order
+
+    adapter.query_order = query_order
+    second_adapter.query_order = query_order
+    claim_lock = asyncio.Lock()
+    claim_calls = 0
+    claim_won = False
+
+    async def claim_cancel(record):
+        nonlocal claim_calls, claim_won
+        claim_calls += 1
+        async with claim_lock:
+            if claim_won or "entry_cancel=ATTEMPTED_UNKNOWN" in str(record.get("state_reason") or ""):
+                return False
+            claim_won = True
+            claimed = dict(record)
+            claimed["state_reason"] = adapter._local_recovery_reason(
+                claimed, entry_cancel="ATTEMPTED_UNKNOWN"
+            )
+            persisted.append(claimed)
+            return True
+
+    adapter.on_local_mainnet_entry_cancel_claim = claim_cancel
+    second_adapter.on_local_mainnet_entry_cancel_claim = claim_cancel
+    second_adapter.cancel_order = adapter.cancel_order
+
+    outcomes = await asyncio.gather(
+        adapter._cancel_and_read_back_pilot_entry(owner, authority=authority),
+        second_adapter._cancel_and_read_back_pilot_entry(owner, authority=second_authority),
+    )
+
+    assert claim_calls == 2
+    assert len(cancellations) == 1
+    assert all(outcome is None or outcome["state"] == "CLOSED" for outcome in outcomes)
+    assert read_count >= 4  # loser resolves only with exact order read-back
