@@ -2538,7 +2538,6 @@ class BinanceReconciliation:
             if o.get("clientOrderId")
         }
         diffs: List[ReconciliationDiff] = [*self._unattributed_fill_diffs, *self._history_diffs]
-        recovered_position_symbols: set[str] = set()
         recovered_reduction_symbols: set[str] = set()
         terminal_executed_quantities: dict[int, Decimal] = {}
         get_all_orders = getattr(self.ledger, "get_all_orders", None)
@@ -2685,7 +2684,6 @@ class BinanceReconciliation:
                     order_status.get("orderId") or local_order.exchange_order_id or ""
                 )
                 await self.ledger.upsert_order(local_order)
-                recovered_position_symbols.add(str(local_order.symbol).upper())
                 if local_order.reduce_only or local_order.risk_class in {
                     "REDUCE_RISK",
                     "RECOVERY",
@@ -2729,7 +2727,6 @@ class BinanceReconciliation:
                     )
                     await self.ledger.upsert_order(local_order)
                     if executed_qty > 0:
-                        recovered_position_symbols.add(str(local_order.symbol).upper())
                         if local_order.reduce_only or local_order.risk_class in {
                             "REDUCE_RISK", "RECOVERY", "CLOSE", "EMERGENCY",
                         }:
@@ -2773,15 +2770,6 @@ class BinanceReconciliation:
                 # A terminal local record cannot coexist with an exchange
                 # order that is still open, even when the IDs match.
                 diffs.extend(self._compare_open_order(local_match, exchange_order))
-
-        # A locally tracked order can disappear from openOrders after a fill
-        # before its private-stream position event arrives. Once the order
-        # status and canonical userTrades have both been recovered, seed only
-        # that symbol from the authoritative positionRisk response. Other
-        # symbols remain subject to the normal mismatch checks below.
-        for position in exchange_positions:
-            if str(position.get("symbol", "")).upper() in recovered_position_symbols:
-                await self.ledger.upsert_position(position)
 
         exchange_position_map = self._active_position_map(exchange_positions)
         for symbol in recovered_reduction_symbols:

@@ -369,6 +369,22 @@ async def test_terminal_execution_missing_delayed_fill_cannot_pass():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("position_amount", ["0.2", "-0.1"])
+async def test_recovered_owned_fill_does_not_adopt_unowned_exchange_position(position_amount):
+    reconciliation, _, diffs = await terminal_scenario(
+        "CANCELED", quantity="0.1", trades=[trade_row(quantity="0.1", side="BUY")],
+    )
+    diffs.extend(await reconciliation._collect_diffs(
+        [{"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": position_amount,
+          "entryPrice": "1900", "markPrice": "1900", "leverage": "1"}],
+        [],
+    ))
+
+    assert "EXCHANGE_POSITION_UNKNOWN_LOCALLY" in {diff.code for diff in diffs}
+    assert await reconciliation.ledger.get_positions() == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("quantity", [None, "NaN", "-0.1", "0.3"])
 async def test_terminal_invalid_executed_quantity_cannot_pass(quantity):
     _, _, diffs = await terminal_scenario("CANCELED", quantity=quantity, trades=[])
