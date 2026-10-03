@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -16,7 +17,8 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -31,6 +33,14 @@ from domain.enums import RiskState
 from domain.models import Instrument, MarketEvent, MarketType, OrderSide, OrderType, RiskSnapshot, utc_now
 
 from apps.trading_worker import mainnet_preflight
+from apps.trading_worker.local_runtime import (
+    clear_local_container_secrets,
+    clear_local_mainnet_secrets,
+    local_container_runtime,
+    local_postgres_host,
+    mainnet_secret_value,
+    worker_identity_token_value,
+)
 from apps.trading_worker.engines.exposure_recovery import ExposureRecoveryEngine
 from apps.trading_worker.engines.funding_carry import (
     FundingCarryCostInputs,
@@ -53,6 +63,7 @@ from apps.trading_worker.venues.binance.config import (
 )
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.gates import DecisionExecutionGate
+from apps.trading_worker.venues.binance.local_pilot_readiness import local_live_pilot_readiness
 from apps.trading_worker.venues.binance.models import (
     BinanceAuthenticationError,
     ConnectionState,
@@ -94,7 +105,8 @@ class ArmRequest(BaseModel):
     # LIVE ARM is accepted only with a release-controller approval that has
     # already been consumed. This is an identifier, never a token or secret.
     releaseApprovalId: Optional[str] = None
-    launchPolicy: Literal["STAGED_FIRST_ORDER"] = "STAGED_FIRST_ORDER"
+    launchPolicy: Literal["STAGED_FIRST_ORDER", "LIVE_RESEARCH_PILOT"] = "STAGED_FIRST_ORDER"
+    pilotCampaignId: Optional[str] = None
 
     @field_validator("instruments")
     @classmethod
@@ -166,6 +178,95 @@ class WorkerEngineState(str, Enum):
 
 MAINNET_LAUNCH_STAGED = "STAGED_FIRST_ORDER"
 MAINNET_LAUNCH_AUTONOMOUS = "AUTONOMOUS_AFTER_REVIEW"
+LOCAL_SUPERVISOR_HEARTBEAT_TTL_SECONDS = 15.0
+LOCAL_MAINNET_RISK_LIFECYCLE_METHODS = (
+    "get_local_mainnet_risk_context",
+    "verify_local_mainnet_protection",
+)
+
+
+def local_mainnet_risk_lifecycle_status(
+    adapter: Any = None,
+) -> tuple[bool, list[str]]:
+    """Require fresh correlated runtime proof, not adapter method presence."""
+
+    unavailable = [
+        name
+        for name in LOCAL_MAINNET_RISK_LIFECYCLE_METHODS
+        if not callable(getattr(adapter, name, None))
+    ]
+    has_evidence = getattr(adapter, "has_fresh_local_mainnet_lifecycle_evidence", None)
+    if unavailable or not callable(has_evidence):
+        return False, list(LOCAL_MAINNET_RISK_LIFECYCLE_METHODS)
+    try:
+        if has_evidence() is True:
+            return True, []
+    except Exception as exc:
+        logger.warning("Local Mainnet lifecycle evidence check failed: %s", type(exc).__name__)
+    return False, list(LOCAL_MAINNET_RISK_LIFECYCLE_METHODS)
+
+
+def local_mainnet_preflight_lifecycle_status(
+    result: Any,
+    persistence: Any,
+    adapter_factory: Any = BinanceExecutionAdapter,
+) -> tuple[bool, list[str]]:
+    """Evaluate lifecycle readiness from this read-only preflight, not stale runtime events."""
+    missing = [
+        name
+        for name in LOCAL_MAINNET_RISK_LIFECYCLE_METHODS
+        if not callable(getattr(adapter_factory, name, None))
+    ]
+    if not isinstance(result, dict):
+        return False, ["read_only_preflight"]
+    persistence_readiness = persistence.readiness() if callable(
+        getattr(persistence, "readiness", None)
+    ) else {}
+    local_identity = isinstance(persistence_readiness, dict) and all(
+        persistence_readiness.get(key) == expected
+        for key, expected in {
+            "mode": "REQUIRED",
+            "durable": True,
+            "runtime_target": "LOCAL",
+            "database_provider": "POSTGRES_LOCAL",
+            "database_host": local_postgres_host(),
+            "database_port": 5433,
+            "database_identity_verified": True,
+            "schema_verified": True,
+        }.items()
+    )
+    if not local_identity:
+        missing.append("verified_local_postgres_identity")
+    checks = {
+        str(check.get("id")): check
+        for check in result.get("checks", [])
+        if isinstance(check, dict)
+    }
+    required_preflight_checks = (
+        "CHK-PREFLIGHT-PERSISTENCE",
+        "CHK-PREFLIGHT-DURABLE-LEDGER",
+        "CHK-PREFLIGHT-KILL-SWITCH",
+        "CHK-PREFLIGHT-CONNECTION",
+        "CHK-PREFLIGHT-AUTH",
+        "CHK-PREFLIGHT-CAN-TRADE",
+        "CHK-PREFLIGHT-POSITION-MODE",
+        "CHK-PREFLIGHT-RULES",
+        "CHK-PREFLIGHT-RECONCILIATION",
+        "CHK-PREFLIGHT-PRIVATE-STREAM",
+        "CHK-PREFLIGHT-ACCOUNT-RISK",
+        "CHK-PREFLIGHT-MARKET",
+    )
+    missing.extend(
+        check_id
+        for check_id in required_preflight_checks
+        if checks.get(check_id, {}).get("status") != "PASS"
+    )
+    if result.get("orderSubmissionAttempts") != 0:
+        missing.append("zero_order_submission_attempts")
+    if result.get("orderEndpointAttempts") != 0:
+        missing.append("zero_order_endpoint_attempts")
+    unique_missing = list(dict.fromkeys(missing))
+    return not unique_missing, unique_missing
 
 
 # These states may process an already-approved decision.  The decision gate
@@ -219,6 +320,8 @@ class LaunchReadiness(BaseModel):
     mainnet_launch_id: Optional[str] = None
     mainnet_launch_state: Optional[str] = None
     mainnet_continuation_approval_id: Optional[str] = None
+    local_mainnet_risk_lifecycle_ready: bool = False
+    local_mainnet_risk_lifecycle_missing: List[str] = Field(default_factory=list)
     persistence: Dict[str, Any] = Field(default_factory=dict)
 
 class WorkerRuntimeState(BaseModel):
@@ -243,6 +346,15 @@ class WorkerRuntimeState(BaseModel):
     # Numeric Secret Manager version metadata only.  Values are never exposed
     # and the secret payloads remain injected directly by Cloud Run.
     secret_versions: Dict[str, str] = Field(default_factory=dict)
+    # Non-secret Local supervisor identity is present even while DISARMED.
+    # The Control Plane must bind a read-only preflight to this exact process.
+    local_run_id: str = ""
+    pilot_campaign_id: str = ""
+    local_source_fingerprint: str = ""
+    local_supervisor_instance_id: str = ""
+    # This is deliberately separate from the general heartbeat: a fresh
+    # process heartbeat does not prove the Local Pilot lifecycle monitor ran.
+    pilot_lifecycle_monitor: Dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="ignore")
 
@@ -361,6 +473,7 @@ WORKER_ENGINE: Optional[Any] = None
 
 # Global background heartbeat tracking for Control Plane liveness monitoring
 _GLOBAL_HEARTBEAT_TASK: Optional[asyncio.Task] = None
+_ACTIVE_UVICORN_SERVER: Optional[uvicorn.Server] = None
 _DEFAULT_HEARTBEAT_AT: datetime = utc_now()
 
 def update_default_heartbeat() -> datetime:
@@ -398,6 +511,14 @@ async def _global_heartbeat_loop(interval_sec: float = 1.0):
         update_default_heartbeat()
         if WORKER_ENGINE is not None and hasattr(WORKER_ENGINE, "record_heartbeat"):
             WORKER_ENGINE.record_heartbeat()
+            try:
+                await WORKER_ENGINE.enforce_local_supervisor_liveness()
+            except Exception as e:
+                logger.error("Local supervisor liveness enforcement failed: %s", type(e).__name__)
+            try:
+                WORKER_ENGINE.enforce_local_pilot_monitor_liveness()
+            except Exception as e:
+                logger.error("Local Pilot monitor watchdog failed: %s", type(e).__name__)
         try:
             await asyncio.sleep(interval_sec)
         except asyncio.CancelledError:
@@ -478,6 +599,50 @@ def get_default_state() -> WorkerRuntimeState:
 # FastAPI Control Plane API
 app = FastAPI(title="Blessing AI Worker Control API", lifespan=lifespan)
 
+
+def _env_enabled(name: str, environ: Optional[Mapping[str, str]] = None) -> bool:
+    values = environ if environ is not None else os.environ
+    return str(values.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def worker_bind_host(environ: Optional[Mapping[str, str]] = None) -> str:
+    """Keep a host-run local Worker private while preserving container/Cloud Run binds."""
+
+    values = environ if environ is not None else os.environ
+    if _env_enabled("LOCAL_ONLY", values):
+        return "0.0.0.0" if local_container_runtime(values) else "127.0.0.1"
+    configured = str(values.get("BIND_HOST", "")).strip()
+    if configured:
+        return configured
+    return "0.0.0.0" if values.get("K_SERVICE") else "127.0.0.1"
+
+
+def local_worker_identity_matches(expected_token: str, authorization: str) -> bool:
+    expected = expected_token.strip()
+    if not expected:
+        return False
+    return hmac.compare_digest(authorization, "Bearer " + expected)
+
+
+@app.middleware("http")
+async def require_local_worker_identity(request: Request, call_next):
+    """Add a per-launch local service boundary; Cloud Run IAM remains authoritative in prod."""
+
+    if not (
+        _env_enabled("LOCAL_WORKER_AUTH_REQUIRED")
+        or _env_enabled("LOCAL_ONLY")
+    ):
+        return await call_next(request)
+    expected = worker_identity_token_value()
+    authorization = request.headers.get("authorization", "")
+    if not local_worker_identity_matches(expected, authorization):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Local control-plane identity is required"},
+        )
+    return await call_next(request)
+
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "timestamp": utc_now()}
@@ -523,6 +688,19 @@ def get_state() -> WorkerRuntimeState:
         return WORKER_ENGINE.get_state()
     return get_default_state()
 
+@app.post("/supervisor/heartbeat")
+def local_supervisor_heartbeat():
+    """Accept a per-launch heartbeat only from the authenticated Local parent."""
+    if not (
+        _env_enabled("LOCAL_ONLY")
+        and str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+    ):
+        raise HTTPException(status_code=404, detail="Local supervisor heartbeat is unavailable")
+    if WORKER_ENGINE is None:
+        raise HTTPException(status_code=503, detail="Worker is not initialized")
+    WORKER_ENGINE.record_local_supervisor_heartbeat()
+    return {"status": "ok", "runtimeTarget": "LOCAL"}
+
 @app.get("/capabilities")
 def get_capabilities():
     if not WORKER_ENGINE:
@@ -545,6 +723,12 @@ def get_readiness_endpoint():
     if not WORKER_ENGINE:
         raise HTTPException(status_code=503, detail="Worker not initialized")
     return WORKER_ENGINE.get_launch_readiness()
+
+@app.get("/local-pilot/accounting")
+async def local_pilot_accounting_endpoint():
+    if not WORKER_ENGINE:
+        raise HTTPException(status_code=503, detail="Worker not initialized")
+    return await WORKER_ENGINE.get_local_live_pilot_accounting()
 
 @app.post("/continuation/readiness")
 async def continuation_readiness_endpoint(launch_id: Optional[str] = None):
@@ -732,6 +916,12 @@ class TradingWorkerApp:
         self.heartbeat_at = utc_now()
         self.heartbeat_interval_sec: float = 1.0
         self.heartbeat_task: Optional[asyncio.Task] = None
+        self._local_supervisor_heartbeat_monotonic: Optional[float] = None
+        self._local_supervisor_shutdown_started = False
+        self._pilot_lifecycle_monitor_started_at: Optional[datetime] = None
+        self._pilot_lifecycle_monitor_completed_at: Optional[datetime] = None
+        self._pilot_lifecycle_monitor_last_success_at: Optional[datetime] = None
+        self._pilot_lifecycle_monitor_last_error: Optional[str] = None
         self.execution_mode = WorkerExecutionMode.PAPER
         self.engine_state = WorkerEngineState.DISARMED
         self.connection_state = "DISCONNECTED"
@@ -741,6 +931,7 @@ class TradingWorkerApp:
         self.reconciliation_status = "UNKNOWN"
         self.kill_switch_active = False
         self.pause_new_risk = False
+        self._pilot_accounting_pause_active = False
         self.recovery_only = False
         self.active_configuration = None
         self.updated_at = utc_now()
@@ -848,7 +1039,7 @@ class TradingWorkerApp:
 
     def get_trade_lineages(self, limit: int = 50) -> List[Dict[str, Any]]:
         lineages = list(self.wealth_evaluator.lineages.values())
-        return [l.to_dict() for l in lineages[-limit:]]
+        return [lineage.to_dict() for lineage in lineages[-limit:]]
 
     def get_pdca_status(self) -> Dict[str, Any]:
         strategies = ["trend_breakout", "range_fade", "shock_momentum", "structural_grid"]
@@ -882,8 +1073,22 @@ class TradingWorkerApp:
 
     def _set_mainnet_launch_session(self, session: Optional[dict[str, Any]]) -> None:
         """Project durable launch identity into the process-local API state."""
-
+        previous_launch_id = getattr(self, "_mainnet_launch_id", None)
+        previous_accounting_pause = bool(
+            getattr(self, "_pilot_accounting_pause_active", False)
+        )
         self._mainnet_launch_session = dict(session) if session else None
+        self._pilot_accounting_pause_active = bool(
+            session
+            and (
+                session.get("pilot_accounting_resume_eligible") is True
+                or (
+                    previous_accounting_pause
+                    and str(session.get("launch_id") or "") == str(previous_launch_id or "")
+                    and session.get("policy") == "LIVE_RESEARCH_PILOT"
+                )
+            )
+        )
         if session:
             launch_id = session.get("launch_id")
             self._mainnet_launch_id = str(launch_id) if launch_id else None
@@ -960,6 +1165,68 @@ class TradingWorkerApp:
         self.heartbeat_at = utc_now()
         return self.heartbeat_at
 
+    def record_local_supervisor_heartbeat(self) -> None:
+        """Record an authenticated heartbeat from the Local Control Plane."""
+        self._local_supervisor_heartbeat_monotonic = time.monotonic()
+
+    def local_supervisor_heartbeat_is_fresh(self) -> bool:
+        if not (
+            _env_enabled("LOCAL_ONLY")
+            and str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+            and self.execution_mode == WorkerExecutionMode.LIVE
+        ):
+            return True
+        last = self._local_supervisor_heartbeat_monotonic
+        return bool(
+            last is not None
+            and 0 <= time.monotonic() - last <= LOCAL_SUPERVISOR_HEARTBEAT_TTL_SECONDS
+        )
+
+    async def enforce_local_supervisor_liveness(self) -> None:
+        """Disarm and stop Local LIVE if its authenticated parent disappears."""
+        if self.local_supervisor_heartbeat_is_fresh() or self._local_supervisor_shutdown_started:
+            return
+        if not (
+            _env_enabled("LOCAL_ONLY")
+            and str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+            and self.execution_mode == WorkerExecutionMode.LIVE
+        ):
+            return
+
+        self._local_supervisor_shutdown_started = True
+        logger.critical(
+            "monitor_event=local_supervisor_heartbeat_lost action=disarm_and_exit"
+        )
+        # Prevent another risk-increasing decision while the adapter is being
+        # closed and the durable launch state is fenced.
+        self.pause_new_risk = True
+        self.engine_state = WorkerEngineState.DISARMED
+        os.environ["MAINNET_LIVE_APPROVED"] = "false"
+        try:
+            await self.disarm()
+        except Exception as exc:
+            logger.error("Local supervisor-loss disarm failed: %s", type(exc).__name__)
+        finally:
+            for name in (
+                "BINANCE_MAINNET_API_KEY",
+                "BINANCE_MAINNET_API_SECRET",
+                "BINANCE_MAINNET_API_KEY_FILE",
+                "BINANCE_MAINNET_API_SECRET_FILE",
+                "WORKER_IDENTITY_TOKEN_FILE",
+                "POSTGRES_PASSWORD_FILE",
+                "MAINNET_RELEASE_APPROVAL_ID",
+                "MAINNET_CONTINUATION_APPROVAL_ID",
+                "LOCAL_SOURCE_FINGERPRINT",
+            ):
+                os.environ[name] = ""
+            clear_local_container_secrets()
+            os.environ["EXECUTION_MODE"] = "PAPER"
+            self.execution_mode = WorkerExecutionMode.PAPER
+            self.is_running = False
+            server = _ACTIVE_UVICORN_SERVER
+            if server is not None:
+                server.should_exit = True
+
     def start_heartbeat(self, interval_sec: Optional[float] = None) -> asyncio.Task:
         """Start or restart the background heartbeat loop task."""
         if interval_sec is not None:
@@ -990,11 +1257,11 @@ class TradingWorkerApp:
 
     @classmethod
     def _mainnet_configured(cls) -> bool:
-        """Return true only when the explicit Secret Manager env injection exists."""
+        """Return true only when the approved Worker secret source is available."""
 
         return bool(
-            os.getenv("BINANCE_MAINNET_API_KEY", "").strip()
-            and os.getenv("BINANCE_MAINNET_API_SECRET", "").strip()
+            mainnet_secret_value("BINANCE_MAINNET_API_KEY").strip()
+            and mainnet_secret_value("BINANCE_MAINNET_API_SECRET").strip()
         )
 
     async def _before_order_submission(self, order: Any) -> bool:
@@ -1030,7 +1297,7 @@ class TradingWorkerApp:
                 launch_state or "unknown",
             )
             return False
-        if launch_policy not in {MAINNET_LAUNCH_STAGED, MAINNET_LAUNCH_AUTONOMOUS}:
+        if launch_policy not in {MAINNET_LAUNCH_STAGED, MAINNET_LAUNCH_AUTONOMOUS, "LIVE_RESEARCH_PILOT"}:
             self.pause_new_risk = True
             self._refresh_engine_state()
             logger.error(
@@ -1038,7 +1305,11 @@ class TradingWorkerApp:
             )
             return False
         try:
-            reserved = await self.persistence.reserve_mainnet_risk_order(self._mainnet_launch_id)
+            reserved = await self.persistence.reserve_mainnet_risk_order(
+                self._mainnet_launch_id,
+                str(getattr(order, "client_order_id", "") or ""),
+                str(getattr(order, "basket_id", "") or ""),
+            )
         except Exception as exc:
             self.pause_new_risk = True
             self._refresh_engine_state()
@@ -1058,6 +1329,722 @@ class TradingWorkerApp:
             return False
         return True
 
+    async def _persist_testnet_protection_update(self, record: Dict[str, Any]) -> bool:
+        """Read back the durable Testnet bracket owner before each lifecycle step."""
+        if self.execution_mode != WorkerExecutionMode.TESTNET:
+            logger.error("Testnet protection persistence rejected outside Testnet mode")
+            return False
+        mode = str(getattr(self.persistence.mode, "value", self.persistence.mode)).upper()
+        readiness = self.persistence.readiness()
+        repository = getattr(self.persistence, "repository", None)
+        protections = getattr(repository, "algo_protections", None)
+        if (
+            mode != "REQUIRED"
+            or not self.persistence.is_connected
+            or readiness.get("durable") is not True
+            or protections is None
+            or str(record.get("environment", "")).upper() != "TESTNET"
+            or str(record.get("venue", "")).lower() != "binance_testnet"
+        ):
+            logger.error("Testnet protection persistence is unavailable or mis-scoped")
+            return False
+        try:
+            stored = await protections.upsert_protection(record)
+        except Exception as exc:
+            logger.error(
+                "Testnet protection persistence failed: %s", type(exc).__name__
+            )
+            return False
+        return bool(
+            stored
+            and stored.get("environment") == "TESTNET"
+            and stored.get("venue") == "binance_testnet"
+            and stored.get("symbol") == str(record.get("symbol", "")).upper()
+            and stored.get("entry_client_order_id") == record.get("entry_client_order_id")
+            and stored.get("state") == record.get("state", "PENDING")
+        )
+
+    async def _claim_local_mainnet_entry_cancel(
+        self, record: Dict[str, Any]
+    ) -> bool:
+        """Win the durable one-shot cancellation claim before an entry DELETE."""
+        launch = getattr(self, "_mainnet_launch_session", None)
+        if (
+            self.execution_mode != WorkerExecutionMode.LIVE
+            or os.getenv("LOCAL_ONLY", "").strip().lower() not in {"1", "true", "yes", "on"}
+            or os.getenv("LOCAL_RUNTIME_TARGET", "").strip().upper() != "LOCAL"
+            or not isinstance(launch, dict)
+            or launch.get("policy") != "LIVE_RESEARCH_PILOT"
+            or launch.get("runtime_target") != "LOCAL"
+            or launch.get("launch_id") != str(self._mainnet_launch_id or "")
+            or not str(launch.get("pilot_campaign_id") or "").strip()
+            or str(record.get("environment", "")).upper() != "MAINNET"
+            or str(record.get("venue", "")).lower() != "binance_mainnet"
+            or str(record.get("symbol", "")).upper() != "ETHUSDC"
+            or str(record.get("mainnet_launch_id", "")) != str(self._mainnet_launch_id or "")
+            or not str(record.get("basket_id") or "").strip()
+        ):
+            return False
+        mode = str(getattr(self.persistence.mode, "value", self.persistence.mode)).upper()
+        readiness = self.persistence.readiness()
+        repository = getattr(self.persistence, "repository", None)
+        protections = getattr(repository, "algo_protections", None)
+        claim = getattr(protections, "claim_mainnet_entry_cancel", None)
+        if (
+            mode != "REQUIRED" or not self.persistence.is_connected
+            or readiness.get("durable") is not True or not callable(claim)
+        ):
+            return False
+        try:
+            stored = await claim(record)
+        except Exception as exc:
+            logger.error("Local Mainnet entry cancel claim failed: %s", type(exc).__name__)
+            return False
+        identity_fields = (
+            "environment", "venue", "symbol", "mainnet_launch_id", "basket_id",
+            "entry_client_order_id", "entry_side", "position_side",
+            "requested_quantity", "management_mode",
+        )
+        return bool(
+            isinstance(stored, dict)
+            and all(stored.get(key) == record.get(key) for key in identity_fields)
+            and "entry_cancel=ATTEMPTED_UNKNOWN" in str(stored.get("state_reason") or "")
+        )
+
+    async def _persist_local_mainnet_protection_update(
+        self, record: Dict[str, Any]
+    ) -> bool:
+        """Read back the Local Mainnet Algo owner at every lifecycle boundary."""
+        if (
+            self.execution_mode != WorkerExecutionMode.LIVE
+            or os.getenv("LOCAL_ONLY", "").strip().lower() not in {"1", "true", "yes", "on"}
+            or os.getenv("LOCAL_RUNTIME_TARGET", "").strip().upper() != "LOCAL"
+        ):
+            logger.error("Local Mainnet protection persistence rejected outside Local LIVE")
+            return False
+        mode = str(getattr(self.persistence.mode, "value", self.persistence.mode)).upper()
+        readiness = self.persistence.readiness()
+        repository = getattr(self.persistence, "repository", None)
+        protections = getattr(repository, "algo_protections", None)
+        if (
+            mode != "REQUIRED"
+            or not self.persistence.is_connected
+            or readiness.get("durable") is not True
+            or protections is None
+            or str(record.get("environment", "")).upper() != "MAINNET"
+            or str(record.get("venue", "")).lower() != "binance_mainnet"
+            or str(record.get("symbol", "")).upper() != "ETHUSDC"
+        ):
+            logger.error("Local Mainnet protection persistence is unavailable or mis-scoped")
+            return False
+        launch_id = str(self._mainnet_launch_id or "").strip()
+        basket_id = str(record.get("basket_id") or "").strip()
+        if not launch_id or not basket_id:
+            logger.error("Local Mainnet protection owner has no durable launch/basket identity")
+            return False
+        is_unfilled_close = (
+            str(record.get("state", "")).upper() == "CLOSED"
+            and isinstance(record.get("unfilled_order_proof"), dict)
+        )
+        if is_unfilled_close and not callable(
+            getattr(protections, "close_mainnet_unfilled_protection_with_proof", None)
+        ):
+            logger.error("Local Mainnet zero-fill closure proof persistence is unavailable")
+            return False
+        try:
+            if not await self.persistence.bind_mainnet_launch_basket(launch_id, basket_id):
+                logger.error("Local Mainnet launch could not bind the protection basket")
+                return False
+        except Exception as exc:
+            logger.error("Local Mainnet launch/basket binding failed: %s", type(exc).__name__)
+            return False
+        record = dict(record)
+        record["mainnet_launch_id"] = launch_id
+        unfilled_proof = record.pop("unfilled_order_proof", None)
+        try:
+            if str(record.get("state", "")).upper() == "CLOSED" and isinstance(unfilled_proof, dict):
+                stored = await protections.close_mainnet_unfilled_protection_with_proof(
+                    str(record["symbol"]),
+                    str(record["entry_client_order_id"]),
+                    unfilled_proof,
+                )
+            else:
+                stored = await protections.upsert_protection(record)
+        except Exception as exc:
+            logger.error(
+                "Local Mainnet protection persistence failed: %s", type(exc).__name__
+            )
+            return False
+        if not isinstance(stored, dict):
+            return False
+        identity_fields = (
+            "environment",
+            "venue",
+            "symbol",
+            "entry_client_order_id",
+            "basket_id",
+            "mainnet_launch_id",
+            "entry_side",
+            "position_side",
+            "requested_quantity",
+            "stop_client_algo_id",
+            "take_profit_client_algo_id",
+            "management_mode",
+            "state",
+            "state_reason",
+            "filled_quantity",
+            "entry_average_price",
+            "stop_algo_id",
+            "take_profit_algo_id",
+            "first_fill_at",
+            "protection_verified_at",
+            "last_reconciled_at",
+            "closed_at",
+        )
+        return all(stored.get(key) == record.get(key) for key in identity_fields) and (
+            not is_unfilled_close
+            or (
+                isinstance(stored.get("closure_evidence"), dict)
+                and stored["closure_evidence"].get("kind") == "UNFILLED_ENTRY_TERMINAL"
+                and stored["closure_evidence"].get("client_order_id")
+                == record.get("entry_client_order_id")
+            )
+        )
+
+    def _merge_local_pilot_session_readback(self, result: Mapping[str, Any]) -> None:
+        """Refresh monitor inputs without discarding the active approval binding."""
+        session = getattr(self, "_mainnet_launch_session", None)
+        if (
+            isinstance(session, dict)
+            and str(session.get("launch_id") or "") == str(result.get("launch_id") or "")
+            and session.get("policy") == "LIVE_RESEARCH_PILOT"
+        ):
+            session.update(dict(result))
+
+    async def _persist_local_live_pilot_fill(self, fill: Any) -> bool:
+        """Persist realized fill PnL and its fee from the authenticated user stream.
+
+        Commission is accepted only in the ETHUSDC quote asset. Other fee
+        assets require an independently sourced conversion and therefore
+        quarantine accounting instead of silently using a zero conversion.
+        """
+        session = self._mainnet_launch_session
+        repository = getattr(self.persistence, "repository", None)
+        append_event = getattr(repository, "append_local_live_pilot_event", None)
+        was_paused_before_fill = bool(self.pause_new_risk)
+        if (
+            self.execution_mode != WorkerExecutionMode.LIVE
+            or os.getenv("LOCAL_ONLY", "").strip().lower() not in {"1", "true", "yes", "on"}
+            or os.getenv("LOCAL_RUNTIME_TARGET", "").strip().upper() != "LOCAL"
+            or not isinstance(session, dict)
+            or session.get("policy") != "LIVE_RESEARCH_PILOT"
+            or not str(session.get("pilot_campaign_id") or "")
+            or not str(session.get("launch_id") or "")
+            or not self.persistence.is_connected
+            or not callable(append_event)
+        ):
+            logger.error("Local Pilot fill accounting has no valid durable campaign binding")
+            self.pause_new_risk = True
+            self.engine_state = WorkerEngineState.DEGRADED
+            return False
+
+        if (
+            str(getattr(fill, "symbol", "")).upper() != "ETHUSDC"
+            or str(getattr(fill, "commission_asset", "")).upper() != "USDC"
+        ):
+            logger.error("Local Pilot fill fee currency is not directly denominated in USDC")
+            self.pause_new_risk = True
+            self.engine_state = WorkerEngineState.DEGRADED
+            return False
+        launch_id = str(session["launch_id"])
+        campaign_id = str(session["pilot_campaign_id"])
+        try:
+            observed_at = datetime.fromtimestamp(
+                float(fill.transaction_time) / 1000.0,
+                tz=timezone.utc,
+            )
+            common = {
+                "run_id": launch_id,
+                "campaign_id": campaign_id,
+                "launch_id": launch_id,
+                "symbol": "ETHUSDC",
+                "source": "BINANCE",
+                "observed_at": observed_at,
+            }
+            # Fee first: if the process fails between the two idempotent
+            # writes, replay can safely complete the missing realized event.
+            fee_result = await append_event(
+                **common,
+                event_key=f"FEE:{fill.exchange_trade_id}",
+                event_type="FEE",
+                net_pnl_delta_usdc=-abs(Decimal(str(fill.commission))),
+                payload={
+                    "run_id": launch_id,
+                    "exchange_event_id": str(fill.exchange_trade_id),
+                    "exchange_order_id": str(fill.exchange_order_id),
+                    "commission_usdc": str(abs(Decimal(str(fill.commission)))),
+                    "asset": "USDC",
+                },
+            )
+            fill_result = await append_event(
+                **common,
+                event_key=f"FILL:{fill.exchange_trade_id}",
+                event_type="FILL",
+                net_pnl_delta_usdc=Decimal(str(fill.realized_pnl)),
+                payload={
+                    "run_id": launch_id,
+                    "exchange_event_id": str(fill.exchange_trade_id),
+                    "exchange_order_id": str(fill.exchange_order_id),
+                    "client_order_id": str(fill.client_order_id),
+                    "quantity": str(fill.quantity),
+                    "price": str(fill.price),
+                    "realized_pnl_usdc": str(fill.realized_pnl),
+                    "side": str(getattr(fill.side, "value", fill.side)),
+                    "position_side": str(getattr(fill.position_side, "value", fill.position_side)),
+                },
+            )
+            if not isinstance(fee_result, dict) or not isinstance(fill_result, dict):
+                raise RuntimeError("durable pilot event read-back failed")
+            self._merge_local_pilot_session_readback(fee_result)
+            self._merge_local_pilot_session_readback(fill_result)
+            if "pilot_accounting_resume_eligible" in fill_result:
+                self._pilot_accounting_pause_active = bool(
+                    fill_result["pilot_accounting_resume_eligible"]
+                    and (
+                        self._pilot_accounting_pause_active
+                        or not was_paused_before_fill
+                    )
+                )
+            if (
+                fee_result.get("pilot_drawdown_triggered") is True
+                or fill_result.get("pilot_drawdown_triggered") is True
+                or fill_result.get("pilot_status") == "CLOSE_ONLY"
+                or fill_result.get("state") == "PAUSED_NEW_RISK"
+            ):
+                # A fill invalidates the marked unrealized component until a
+                # fresh exchange position snapshot arrives. Keep the process
+                # fence aligned with the durable recoverable pause.
+                self.pause_new_risk = True
+                self.engine_state = WorkerEngineState.PAUSED_NEW_RISK
+            return True
+        except Exception as exc:
+            logger.error("Local Pilot fill accounting failed: %s", type(exc).__name__)
+            self.pause_new_risk = True
+            self.engine_state = WorkerEngineState.DEGRADED
+            return False
+
+    async def _persist_local_live_pilot_mark(
+        self,
+        symbol: str,
+        event_id: str,
+        unrealized_pnl_usdc: Decimal,
+        observed_at_ms: object,
+        *,
+        snapshot_scope: str = "ETHUSDC_POSITION_ACCOUNT_UPDATE",
+    ) -> bool:
+        """Replace the Pilot's unrealized component from a Binance position event."""
+        session = self._mainnet_launch_session
+        repository = getattr(self.persistence, "repository", None)
+        append_event = getattr(repository, "append_local_live_pilot_event", None)
+        try:
+            event_ms = int(str(observed_at_ms))
+            pnl = Decimal(str(unrealized_pnl_usdc))
+            if (
+                str(symbol).upper() != "ETHUSDC"
+                or event_ms <= 0
+                or not pnl.is_finite()
+                or not isinstance(session, dict)
+                or session.get("policy") != "LIVE_RESEARCH_PILOT"
+                or not self.persistence.is_connected
+                or not callable(append_event)
+            ):
+                raise ValueError("position mark lacks a valid Pilot binding")
+            observed_at = datetime.fromtimestamp(event_ms / 1000.0, tz=timezone.utc)
+            mark_age = (utc_now() - observed_at).total_seconds()
+            if mark_age < -2 or mark_age > 60:
+                raise ValueError("position mark is stale or from the future")
+            launch_id = str(session["launch_id"])
+            result = await append_event(
+                run_id=launch_id,
+                campaign_id=str(session["pilot_campaign_id"]),
+                launch_id=launch_id,
+                symbol="ETHUSDC",
+                event_key=f"MARK:{event_id}",
+                event_type="MARK",
+                source="BINANCE",
+                observed_at=observed_at,
+                net_pnl_delta_usdc=None,
+                payload={
+                    "run_id": launch_id,
+                    "account_snapshot_id": str(event_id),
+                    "position_side": "BOTH",
+                    "unrealized_pnl_usdc": str(pnl),
+                    "snapshot_scope": snapshot_scope,
+                },
+            )
+            if not isinstance(result, dict):
+                raise RuntimeError("position mark was not durably read back")
+            self._merge_local_pilot_session_readback(result)
+            if result.get("pilot_drawdown_triggered") is True:
+                self.pause_new_risk = True
+                self.engine_state = WorkerEngineState.PAUSED_NEW_RISK
+                adapter = getattr(self, "execution_adapter", None)
+                if adapter and hasattr(adapter, "check_and_enforce_pilot_protections"):
+                    try:
+                        await adapter.check_and_enforce_pilot_protections(authority=self)
+                    except Exception as exc:
+                        logger.error("Pilot drawdown protection enforcement error: %s", type(exc).__name__)
+            elif (
+                result.get("pilot_accounting_resumed") is True
+                and getattr(self, "_pilot_accounting_pause_active", False)
+                and not bool(getattr(self, "kill_switch_active", False))
+                and str(getattr(self, "reconciliation_status", "IN_SYNC")).upper() == "IN_SYNC"
+                and str(
+                    getattr(
+                        getattr(getattr(self, "execution_adapter", None), "reconciliation", None),
+                        "last_status",
+                        "UNKNOWN",
+                    )
+                ).upper() == "IN_SYNC"
+            ):
+                self._pilot_accounting_pause_active = False
+                self.pause_new_risk = False
+                refresh_state = getattr(self, "_refresh_engine_state", None)
+                if callable(refresh_state):
+                    refresh_state()
+                else:
+                    self.engine_state = WorkerEngineState.ARMED
+            return True
+        except Exception as exc:
+            logger.error("Local Pilot position mark rejected: %s", type(exc).__name__)
+            self.pause_new_risk = True
+            self.engine_state = WorkerEngineState.DEGRADED
+            return False
+
+    async def get_local_live_pilot_accounting(self) -> dict[str, Any]:
+        """Expose durable event-ledger accounting only with fresh reconciled evidence."""
+        unknown = {
+            "status": "UNKNOWN",
+            "evidence_status": "UNVERIFIED",
+            "net_pnl_usdc": "UNKNOWN",
+            "peak_net_pnl_usdc": "UNKNOWN",
+            "drawdown_usdc": "UNKNOWN",
+            "realized_pnl_usdc": "UNKNOWN",
+            "unrealized_pnl_usdc": "UNKNOWN",
+            "fees_usdc": "UNKNOWN",
+            "funding_usdc": "UNKNOWN",
+            "slippage_usdc": "UNKNOWN",
+            "mark_observed_at": None,
+            "mark_age_seconds": None,
+            "last_event_at": None,
+            "reason": "PILOT_ACCOUNTING_EVIDENCE_UNAVAILABLE",
+        }
+        session = self._mainnet_launch_session
+        adapter = self.execution_adapter
+        if (
+            self.execution_mode != WorkerExecutionMode.LIVE
+            or not _env_enabled("LOCAL_ONLY")
+            or str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() != "LOCAL"
+            or not isinstance(session, dict)
+            or session.get("policy") != "LIVE_RESEARCH_PILOT"
+            or session.get("runtime_target") != "LOCAL"
+            or not self.persistence.is_connected
+            or not callable(getattr(self.persistence, "get_local_live_pilot_accounting", None))
+            or adapter is None
+            or adapter.env != BinanceEnvironment.MAINNET
+        ):
+            return unknown
+        try:
+            snapshot = await self.persistence.get_local_live_pilot_accounting(
+                str(session["launch_id"])
+            )
+            if not isinstance(snapshot, dict):
+                return unknown
+            last_mark_at = snapshot.get("pilot_last_account_snapshot_at")
+            if not isinstance(last_mark_at, datetime):
+                return {**unknown, "status": "NOT_STARTED", "reason": "NO_AUTHORITATIVE_MARK"}
+            if last_mark_at.tzinfo is None:
+                last_mark_at = last_mark_at.replace(tzinfo=timezone.utc)
+            mark_age = (utc_now() - last_mark_at).total_seconds()
+            if mark_age < -2 or mark_age > 5:
+                return {**unknown, "status": "STALE", "reason": "AUTHORITATIVE_MARK_STALE"}
+            financial_id = snapshot.get("last_financial_event_id")
+            mark_id = snapshot.get("last_mark_event_id")
+            if financial_id is not None and (
+                mark_id is None or int(financial_id) > int(mark_id)
+            ):
+                return {**unknown, "status": "PENDING_RECONCILIATION", "reason": "FINANCIAL_EVENT_AFTER_MARK"}
+            if (
+                self.reconciliation_status != "IN_SYNC"
+                or adapter.reconciliation.last_status != "IN_SYNC"
+                or not self.authenticated
+                or not adapter.private_stream_healthy
+            ):
+                return {**unknown, "status": "RECONCILIATION_UNKNOWN", "reason": "EXCHANGE_STATE_NOT_IN_SYNC"}
+
+            net = Decimal(str(snapshot["pilot_net_pnl_usdc"]))
+            peak = Decimal(str(snapshot["pilot_peak_pnl_usdc"]))
+            realized = Decimal(str(snapshot["realized_pnl_usdc"]))
+            unrealized = Decimal(str(snapshot["unrealized_pnl_usdc"]))
+            fees = Decimal(str(snapshot["fees_usdc"]))
+            funding = Decimal(str(snapshot["funding_usdc"]))
+            values = (net, peak, realized, unrealized, fees, funding)
+            if any(not value.is_finite() for value in values):
+                raise ValueError("accounting aggregate is not finite")
+            # Independently verify the ledger identity before publishing values.
+            if abs(net - (realized + unrealized - fees + funding)) > Decimal("0.00000001"):
+                return {**unknown, "status": "MISMATCH", "reason": "PNL_COMPONENTS_DO_NOT_RECONCILE"}
+            return {
+                "status": "VERIFIED",
+                "evidence_status": "VERIFIED",
+                "campaign_id": str(session["pilot_campaign_id"]),
+                "launch_id": str(session["launch_id"]),
+                "net_pnl_usdc": str(net),
+                "peak_net_pnl_usdc": str(peak),
+                "drawdown_usdc": str(max(Decimal("0"), peak - net)),
+                "realized_pnl_usdc": str(realized),
+                "unrealized_pnl_usdc": str(unrealized),
+                "fees_usdc": str(fees),
+                "funding_usdc": str(funding),
+                "mark_observed_at": last_mark_at.isoformat(),
+                "mark_age_seconds": max(0.0, mark_age),
+                # No source-backed reference-price model is currently stored.
+                "slippage_usdc": "UNKNOWN",
+                "last_event_at": snapshot.get("last_event_at").isoformat()
+                if isinstance(snapshot.get("last_event_at"), datetime) else None,
+                "reason": None,
+            }
+        except Exception as exc:
+            logger.error("Local Pilot accounting readback failed: %s", type(exc).__name__)
+            return unknown
+
+    async def _reconcile_local_live_pilot_funding(
+        self, trigger_symbol: object, trigger_time_ms: object
+    ) -> bool:
+        """Reconcile funding-triggered USDC income against durable exposure owners."""
+        session = self._mainnet_launch_session
+        adapter = self.execution_adapter
+        persistence_repository = getattr(self.persistence, "repository", None)
+        owner_repository = getattr(persistence_repository, "algo_protections", None)
+        append_event = getattr(persistence_repository, "append_local_live_pilot_event", None)
+        if (
+            self.execution_mode != WorkerExecutionMode.LIVE
+            or os.getenv("LOCAL_ONLY", "").strip().lower() not in {"1", "true", "yes", "on"}
+            or os.getenv("LOCAL_RUNTIME_TARGET", "").strip().upper() != "LOCAL"
+            or not isinstance(session, dict)
+            or session.get("policy") != "LIVE_RESEARCH_PILOT"
+            or not self.persistence.is_connected
+            or not callable(getattr(owner_repository, "list_protections", None))
+            or not callable(append_event)
+            or adapter is None
+            or getattr(adapter, "env", None) != BinanceEnvironment.MAINNET
+        ):
+            self.pause_new_risk = True
+            self.engine_state = WorkerEngineState.DEGRADED
+            return False
+        try:
+            trigger_ms = int(str(trigger_time_ms))
+            if str(trigger_symbol or "").strip().upper() != "ETHUSDC":
+                raise ValueError("funding trigger symbol is outside the approved pilot instrument")
+            now = utc_now()
+            now_ms = int(now.timestamp() * 1000)
+            launch_started = self._session_timestamp(session.get("created_at"))
+            if (
+                trigger_ms <= 0
+                or trigger_ms > now_ms + 2_000
+                or launch_started is None
+                or launch_started > now
+                or (now - launch_started).total_seconds() > 90 * 24 * 60 * 60
+            ):
+                raise ValueError("Pilot funding history window is invalid or outside Binance retention")
+            launch_id = str(session["launch_id"])
+            campaign_id = str(session["pilot_campaign_id"])
+            owners = await owner_repository.list_protections("binance_mainnet", "ETHUSDC")
+            owners = [
+                row for row in owners
+                if isinstance(row, dict)
+                and str(row.get("mainnet_launch_id") or "") == launch_id
+                and Decimal(str(row.get("filled_quantity") or "0")) > 0
+            ]
+            if not owners:
+                raise ValueError("Pilot has no durable filled position owner for funding attribution")
+
+            reconciliation = getattr(adapter, "reconciliation", None)
+            income_path = getattr(reconciliation, "_income_path", None)
+            rest_client = getattr(adapter, "rest_client", None)
+            if not isinstance(income_path, str) or not callable(getattr(rest_client, "request", None)):
+                raise ValueError("signed Binance income-history route is unavailable")
+            seen: dict[str, tuple[int, Decimal]] = {}
+            attributable = 0
+            max_pages = 10
+            for page in range(1, max_pages + 1):
+                rows = await rest_client.request(
+                    "GET",
+                    income_path,
+                    signed=True,
+                    params={
+                        "symbol": "ETHUSDC",
+                        "incomeType": "FUNDING_FEE",
+                        "startTime": int(launch_started.timestamp() * 1000),
+                        "endTime": now_ms,
+                        "page": page,
+                        "limit": 1000,
+                    },
+                )
+                if not isinstance(rows, list):
+                    raise ValueError("signed income-history response is not a list")
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise ValueError("income-history row is invalid")
+                    tran_id = str(row.get("tranId") or "")
+                    income_time = int(row.get("time"))
+                    amount = Decimal(str(row.get("income")))
+                    if (
+                        str(row.get("incomeType") or "").upper() != "FUNDING_FEE"
+                        or str(row.get("symbol") or "").upper() != "ETHUSDC"
+                        or str(row.get("asset") or "").upper() != "USDC"
+                        or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", tran_id)
+                        or income_time < int(launch_started.timestamp() * 1000)
+                        or income_time > now_ms
+                        or not amount.is_finite()
+                    ):
+                        raise ValueError("funding income row lacks a verified ETHUSDC/USDC identity")
+                    prior = seen.get(tran_id)
+                    identity = (income_time, amount)
+                    if prior is not None and prior != identity:
+                        raise ValueError("Binance funding tranId was returned with conflicting values")
+                    if prior is not None:
+                        continue
+                    seen[tran_id] = identity
+                    income_at = datetime.fromtimestamp(income_time / 1000.0, tz=timezone.utc)
+                    matching_owners = []
+                    earliest_fill: datetime | None = None
+                    for owner in owners:
+                        filled_at = self._session_timestamp(owner.get("first_fill_at"))
+                        closed_at = self._session_timestamp(owner.get("closed_at"))
+                        if filled_at is None:
+                            raise ValueError("funding owner is missing its durable first-fill timestamp")
+                        earliest_fill = min(earliest_fill, filled_at) if earliest_fill else filled_at
+                        if filled_at <= income_at and (closed_at is None or income_at <= closed_at):
+                            matching_owners.append(owner)
+                    if not matching_owners and earliest_fill is not None and income_at < earliest_fill:
+                        # Account income before this launch's first fill cannot
+                        # belong to this campaign and is intentionally ignored.
+                        continue
+                    if len(matching_owners) != 1:
+                        raise ValueError("funding income cannot be uniquely matched to one durable exposure owner")
+                    owner = matching_owners[0]
+                    saved = await append_event(
+                        run_id=launch_id,
+                        campaign_id=campaign_id,
+                        launch_id=launch_id,
+                        symbol="ETHUSDC",
+                        event_key=f"FUNDING:{tran_id}",
+                        event_type="FUNDING",
+                        source="BINANCE",
+                        observed_at=income_at,
+                        net_pnl_delta_usdc=amount,
+                        payload={
+                            "run_id": launch_id,
+                            "exchange_event_id": tran_id,
+                            "income_type": "FUNDING_FEE",
+                            "asset": "USDC",
+                            "income_usdc": str(amount),
+                            "owner_entry_client_order_id": str(owner["entry_client_order_id"]),
+                        },
+                    )
+                    if not isinstance(saved, dict):
+                        raise RuntimeError("funding event write was not durably confirmed")
+                    self._merge_local_pilot_session_readback(saved)
+                    attributable += 1
+                    if saved.get("pilot_drawdown_triggered") is True:
+                        self.pause_new_risk = True
+                        self.engine_state = WorkerEngineState.PAUSED_NEW_RISK
+                if len(rows) < 1000:
+                    break
+            else:
+                raise ValueError("income-history pagination exceeded its bounded page limit")
+            if attributable == 0:
+                raise ValueError("funding trigger has no attributable durable USDC income row")
+            return True
+        except Exception as exc:
+            logger.error("Local Pilot funding accounting is unknown: %s", type(exc).__name__)
+            self.pause_new_risk = True
+            self.engine_state = WorkerEngineState.DEGRADED
+            return False
+
+    async def _on_account_snapshot_update(self, snapshot: Any) -> None:
+        """Handle authoritative account snapshot update for pilot mark accounting."""
+        if (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and isinstance(self._mainnet_launch_session, dict)
+            and self._mainnet_launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
+            and getattr(snapshot, "valid", False)
+            and getattr(snapshot, "unrealized_pnl", None) is not None
+        ):
+            ts = getattr(snapshot, "timestamp", utc_now())
+            ts_ms = int(ts.timestamp() * 1000)
+            await self._persist_local_live_pilot_mark(
+                "ETHUSDC",
+                f"{ts_ms}:ETHUSDC:REST_SNAPSHOT",
+                Decimal(str(snapshot.unrealized_pnl)),
+                ts_ms,
+            )
+
+    async def _persist_local_mainnet_close_verified(
+        self, record: Dict[str, Any], proof: Dict[str, Any]
+    ) -> bool:
+        """Persist and read back proof for a verified Local Mainnet emergency close."""
+        if (
+            self.execution_mode != WorkerExecutionMode.LIVE
+            or os.getenv("LOCAL_ONLY", "").strip().lower() not in {"1", "true", "yes", "on"}
+            or os.getenv("LOCAL_RUNTIME_TARGET", "").strip().upper() != "LOCAL"
+        ):
+            logger.error("Local Mainnet close proof rejected outside Local LIVE")
+            return False
+        readiness = self.persistence.readiness()
+        repository = getattr(getattr(self.persistence, "repository", None), "algo_protections", None)
+        if (
+            str(getattr(self.persistence.mode, "value", self.persistence.mode)).upper() != "REQUIRED"
+            or not self.persistence.is_connected
+            or readiness.get("durable") is not True
+            or not callable(getattr(repository, "close_mainnet_protection_with_proof", None))
+            or str(record.get("environment", "")).upper() != "MAINNET"
+            or str(record.get("venue", "")).lower() != "binance_mainnet"
+            or str(record.get("symbol", "")).upper() != "ETHUSDC"
+            or str(record.get("mainnet_launch_id") or self._mainnet_launch_id or "")
+            != str(self._mainnet_launch_id or "")
+            or not str(record.get("basket_id") or "").strip()
+            or str(proof.get("algo_id") or "") != "LOCAL_EMERGENCY_CLOSE"
+        ):
+            logger.error("Local Mainnet close proof persistence is unavailable or mis-scoped")
+            return False
+        try:
+            stored = await repository.close_mainnet_protection_with_proof(
+                str(record["symbol"]),
+                str(record["entry_client_order_id"]),
+                proof,
+            )
+        except Exception as exc:
+            logger.error("Local Mainnet close proof write failed: %s", type(exc).__name__)
+            return False
+        evidence = stored.get("closure_evidence") if isinstance(stored, dict) else None
+        return bool(
+            isinstance(stored, dict)
+            and str(stored.get("state", "")).upper() == "CLOSED"
+            and str(stored.get("environment", "")).upper() == "MAINNET"
+            and str(stored.get("venue", "")).lower() == "binance_mainnet"
+            and str(stored.get("symbol", "")).upper() == "ETHUSDC"
+            and str(stored.get("entry_client_order_id") or "")
+            == str(record.get("entry_client_order_id") or "")
+            and str(stored.get("mainnet_launch_id") or "") == str(self._mainnet_launch_id or "")
+            and str(stored.get("basket_id") or "") == str(record.get("basket_id") or "")
+            and isinstance(evidence, dict)
+            and evidence.get("kind") == "LOCAL_EMERGENCY_CLOSE_VERIFIED"
+            and evidence.get("client_order_id") == proof.get("client_order_id")
+            and evidence.get("order_id") == str(proof.get("order_id"))
+        )
+
     async def _on_order_submission_result(self, order: Any, outcome: str) -> None:
         """Persist order outcome and preserve the autonomous lifecycle."""
 
@@ -1069,10 +2056,16 @@ class TradingWorkerApp:
             return
         normalized = str(outcome).upper()
         if normalized == "REJECTED":
-            await self.persistence.release_mainnet_risk_order_reservation(self._mainnet_launch_id)
+            await self.persistence.release_mainnet_risk_order_reservation(
+                self._mainnet_launch_id,
+                str(getattr(order, "client_order_id", "") or ""),
+            )
             return
         if normalized == "CONFIRMED":
-            marked = await self.persistence.mark_mainnet_risk_order_submitted(self._mainnet_launch_id)
+            marked = await self.persistence.mark_mainnet_risk_order_submitted(
+                self._mainnet_launch_id,
+                str(getattr(order, "client_order_id", "") or ""),
+            )
             if not marked:
                 self.kill_switch_active = True
                 self.connection_state = ConnectionState.DEGRADED.value
@@ -1082,7 +2075,25 @@ class TradingWorkerApp:
                 )
                 logger.error("LIVE order was not durably marked; local kill switch is active")
                 return
-            if self._launch_session_value("policy", MAINNET_LAUNCH_STAGED) == MAINNET_LAUNCH_STAGED:
+            launch_policy = self._launch_session_value("policy", MAINNET_LAUNCH_STAGED)
+            if launch_policy == "LIVE_RESEARCH_PILOT":
+                # Serialize a pilot entry lifecycle until its fill accounting
+                # has been reconciled by a fresh position snapshot. Keep the
+                # reason separate so an operator/reconciliation pause is never
+                # accidentally cleared by that snapshot.
+                accounting_pause_eligible = not self.pause_new_risk
+                self.pause_new_risk = True
+                if self._mainnet_launch_id:
+                    try:
+                        refreshed = await self.persistence.get_mainnet_launch_session(self._mainnet_launch_id)
+                        if refreshed:
+                            self._set_mainnet_launch_session(refreshed)
+                    except Exception as exc:
+                        logger.warning("Could not refresh pilot launch session after submission: %s", type(exc).__name__)
+                self._pilot_accounting_pause_active = accounting_pause_eligible
+                self._refresh_engine_state()
+                logger.warning("monitor_event=pilot_order_confirmed pause_new_risk=true")
+            elif launch_policy == MAINNET_LAUNCH_STAGED:
                 self.pause_new_risk = True
                 if self._mainnet_launch_id:
                     try:
@@ -1093,9 +2104,9 @@ class TradingWorkerApp:
                         logger.warning("Could not refresh launch session after submission: %s", exc)
                 self._refresh_engine_state()
                 logger.warning(
-                    "monitor_event=staged_first_order_confirmed pause_new_risk=true"
+                    "monitor_event=bounded_launch_order_confirmed pause_new_risk=true"
                 )
-                logger.warning("LIVE staged first risk-increasing order confirmed; new risk is paused")
+                logger.warning("LIVE bounded launch risk-increasing order confirmed; new risk is paused")
             else:
                 self.pause_new_risk = False
                 self._refresh_engine_state()
@@ -1655,6 +2666,75 @@ class TradingWorkerApp:
             and getattr(getattr(adapter, "capabilities", None), "trade_authorized", False)
         )
 
+    def _local_pilot_lifecycle_monitor_state(self, now: Optional[datetime] = None) -> Dict[str, Any]:
+        launch_session = self._mainnet_launch_session
+        campaign_binding = str(os.getenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "")).strip()
+        pilot_bound = (
+            isinstance(launch_session, dict)
+            and launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
+        ) or bool(campaign_binding)
+        if not (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and pilot_bound
+        ):
+            return {"status": "NOT_APPLICABLE"}
+        observed_at = now or utc_now()
+        started = self._pilot_lifecycle_monitor_started_at
+        completed = self._pilot_lifecycle_monitor_completed_at
+        last_success = self._pilot_lifecycle_monitor_last_success_at
+        status = "NOT_RUN"
+        if started is not None and (completed is None or started > completed):
+            status = "STALLED" if (observed_at - started).total_seconds() > 10 else "RUNNING"
+        elif self._pilot_lifecycle_monitor_last_error:
+            status = "DEGRADED"
+        elif last_success is not None:
+            age = (observed_at - last_success).total_seconds()
+            status = "HEALTHY" if 0 <= age <= 15 else "STALE"
+        return {
+            "status": status,
+            "last_started_at": started.isoformat() if started else None,
+            "last_completed_at": completed.isoformat() if completed else None,
+            "last_success_at": last_success.isoformat() if last_success else None,
+            "last_error": self._pilot_lifecycle_monitor_last_error,
+        }
+
+    def _degrade_after_pilot_monitor_failure(self, adapter: Any) -> None:
+        """Stop risk increases when a monitor cycle cannot prove its work."""
+        self.pause_new_risk = True
+        self.engine_state = WorkerEngineState.DEGRADED
+        try:
+            adapter.state = ConnectionState.DEGRADED
+            reconciliation = getattr(adapter, "reconciliation", None)
+            if reconciliation is not None:
+                reconciliation.last_status = "UNKNOWN"
+        except Exception:
+            # The separate monitor status remains degraded even when the
+            # adapter cannot expose a mutable connection state.
+            pass
+
+    def local_pilot_monitor_allows_new_risk(self) -> bool:
+        """Require a recent successful monitor; allow only a bounded active cycle."""
+        monitor = self._local_pilot_lifecycle_monitor_state()
+        if monitor.get("status") == "HEALTHY":
+            return True
+        if monitor.get("status") != "RUNNING":
+            return False
+        try:
+            last_success = datetime.fromisoformat(str(monitor["last_success_at"]))
+            started = datetime.fromisoformat(str(monitor["last_started_at"]))
+            now = utc_now()
+            success_age = (now - last_success).total_seconds()
+            run_age = (now - started).total_seconds()
+            return 0 <= success_age <= 15 and 0 <= run_age <= 10
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def enforce_local_pilot_monitor_liveness(self) -> None:
+        """Independent heartbeat-loop watchdog blocks risk if pilot monitoring stalls."""
+        monitor = self._local_pilot_lifecycle_monitor_state()
+        if monitor.get("status") in {"STALLED", "STALE", "DEGRADED"}:
+            self._degrade_after_pilot_monitor_failure(self.execution_adapter)
+
     def _refresh_engine_state(self) -> None:
         """Derive the single operational state from canonical control flags."""
         if self.kill_switch_active:
@@ -1735,6 +2815,11 @@ class TradingWorkerApp:
             worker_image_digest=os.getenv("WORKER_IMAGE_DIGEST", "").strip(),
             worker_revision=configured_worker_revision(),
             secret_versions=configured_secret_versions(),
+            local_run_id=os.getenv("LOCAL_RUN_ID", "").strip() if _env_enabled("LOCAL_ONLY") else "",
+            pilot_campaign_id=os.getenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "").strip() if _env_enabled("LOCAL_ONLY") else "",
+            local_source_fingerprint=os.getenv("LOCAL_SOURCE_FINGERPRINT", "").strip() if _env_enabled("LOCAL_ONLY") else "",
+            local_supervisor_instance_id=os.getenv("LOCAL_SUPERVISOR_INSTANCE_ID", "").strip() if _env_enabled("LOCAL_ONLY") else "",
+            pilot_lifecycle_monitor=self._local_pilot_lifecycle_monitor_state(),
             engine_state=self.engine_state,
             connection_state=self.connection_state,
             market_data_healthy=self.market_data_healthy,
@@ -1947,6 +3032,9 @@ class TradingWorkerApp:
         persistence_required_ready = (
             self.persistence.mode.value != "REQUIRED" or persistence["durable"]
         )
+        local_risk_lifecycle_ready, local_risk_lifecycle_missing = (
+            local_mainnet_risk_lifecycle_status(self.execution_adapter)
+        )
 
         readiness = LaunchReadiness(
             paper_ready=not self.kill_switch_active and persistence_required_ready,
@@ -1994,6 +3082,8 @@ class TradingWorkerApp:
                 if isinstance(launch_session, dict) and launch_session.get("continuation_approval_id")
                 else None
             ),
+            local_mainnet_risk_lifecycle_ready=local_risk_lifecycle_ready,
+            local_mainnet_risk_lifecycle_missing=local_risk_lifecycle_missing,
             persistence=persistence,
         )
         
@@ -2037,6 +3127,14 @@ class TradingWorkerApp:
             and readiness.symbol_rules_ready
             and readiness.market_data_fresh
             and persistence_required_ready
+            and (
+                str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() != "LOCAL"
+                or (
+                    self._env_flag("LOCAL_ONLY", False)
+                    and readiness.local_mainnet_risk_lifecycle_ready
+                )
+            )
+            and self.local_supervisor_heartbeat_is_fresh()
             and not self.kill_switch_active
         )
         # A successful read-only preflight is not autonomous authorization.
@@ -2157,7 +3255,7 @@ class TradingWorkerApp:
                     "name": "Required SQL Outbox",
                     "required": True,
                     "status": "PASS" if persistence["durable"] else "FAIL",
-                    "message": "Cloud SQL transactional outbox is durable"
+                    "message": "Required durable PostgreSQL transactional outbox is ready"
                     if persistence["durable"]
                     else "LIVE requires PERSISTENCE_MODE=REQUIRED and a durable outbox",
                 },
@@ -2169,6 +3267,24 @@ class TradingWorkerApp:
                     "message": "Kill switch is active" if self.kill_switch_active else "Kill switch inactive",
                 },
             ]
+            if str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL":
+                risk_lifecycle_ready, missing_methods = local_mainnet_risk_lifecycle_status(
+                    self.execution_adapter
+                )
+                checks.append(
+                    {
+                        "id": "CHK-LOCAL-MAINNET-RISK-LIFECYCLE",
+                        "name": "Local Basket Risk and Protection Lifecycle",
+                        "required": True,
+                        "status": "PASS" if risk_lifecycle_ready else "FAIL",
+                        "message": (
+                            "Fresh Local PostgreSQL risk and signed stop/target evidence are verified"
+                            if risk_lifecycle_ready
+                            else "Local Mainnet remains blocked; fresh correlated runtime evidence is missing: "
+                            + ", ".join(missing_methods)
+                        ),
+                    }
+                )
             return {
                 "executionMode": "LIVE",
                 "canArm": all(check["status"] == "PASS" for check in checks if check["required"]),
@@ -2355,7 +3471,7 @@ class TradingWorkerApp:
         # class is resolved from this module's namespace at call time so that
         # monkeypatching apps.trading_worker.main.BinanceExecutionAdapter keeps
         # intercepting disposable preflight adapter creation.
-        return await mainnet_preflight.run_mainnet_read_only_preflight(
+        result = await mainnet_preflight.run_mainnet_read_only_preflight(
             mainnet_preflight.MainnetPreflightContext(
                 worker=self,
                 adapter_factory=BinanceExecutionAdapter,
@@ -2364,9 +3480,47 @@ class TradingWorkerApp:
                 env_flag=self._env_flag,
             )
         )
+        if (
+            isinstance(result, dict)
+            and str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+        ):
+            lifecycle_ready, blockers = local_mainnet_preflight_lifecycle_status(
+                result, self.persistence, BinanceExecutionAdapter
+            )
+            lifecycle_check = next(
+                (
+                    check
+                    for check in result.get("checks", [])
+                    if isinstance(check, dict)
+                    and check.get("id") == "CHK-PREFLIGHT-LOCAL-RISK-LIFECYCLE"
+                ),
+                None,
+            )
+            if lifecycle_check is not None:
+                lifecycle_check["status"] = "PASS" if lifecycle_ready else "FAIL"
+                lifecycle_check["message"] = (
+                    "This read-only preflight verified Local PostgreSQL, launch-history reconciliation, and the stop/target verifier before any order"
+                    if lifecycle_ready
+                    else "Read-only Local Mainnet lifecycle preflight is incomplete: "
+                    + ", ".join(blockers)
+                )
+            required_checks = [
+                check
+                for check in result.get("checks", [])
+                if isinstance(check, dict) and check.get("required")
+            ]
+            result["preflightPassed"] = bool(
+                required_checks
+                and all(check.get("status") == "PASS" for check in required_checks)
+            )
+            result["canArm"] = False
+        return result
 
     async def set_pause_new_risk(self, active: bool) -> bool:
         """Toggle the deterministic risk pause without bypassing launch gates."""
+
+        if active:
+            self._pilot_accounting_pause_active = False
 
         if not active and self.execution_mode == WorkerExecutionMode.LIVE:
             autonomous = (
@@ -2523,23 +3677,43 @@ class TradingWorkerApp:
             self.reconciliation_status = res
             self._sync_adapter_state()
             if res == "IN_SYNC" and self._mainnet_launch_id:
-                restore = getattr(self.persistence, "mark_mainnet_launch_reconciled", None)
-                if callable(restore):
-                    try:
-                        await restore(self._mainnet_launch_id)
-                        getter = getattr(self.persistence, "get_mainnet_launch_session", None)
-                        if callable(getter):
-                            self._set_mainnet_launch_session(
-                                await getter(self._mainnet_launch_id)
+                session = self._mainnet_launch_session
+                is_pilot = isinstance(session, dict) and session.get("policy") == "LIVE_RESEARCH_PILOT"
+                if is_pilot:
+                    resume = getattr(self.persistence, "resume_mainnet_pilot_campaign", None)
+                    if callable(resume):
+                        try:
+                            resumed = await resume(self._mainnet_launch_id)
+                            if resumed:
+                                getter = getattr(self.persistence, "get_mainnet_launch_session", None)
+                                if callable(getter):
+                                    self._set_mainnet_launch_session(
+                                        await getter(self._mainnet_launch_id)
+                                    )
+                                logger.info("Local Live Pilot campaign resumed successfully after reconciliation")
+                        except Exception as exc:
+                            logger.error(
+                                "Pilot campaign restart resume failed: %s",
+                                type(exc).__name__,
                             )
-                    except Exception as exc:
-                        # A failed durable state transition must not clear a
-                        # launch fence or claim autonomous authorization was
-                        # restored.
-                        logger.error(
-                            "Launch reconciliation state update failed: %s",
-                            type(exc).__name__,
-                        )
+                else:
+                    restore = getattr(self.persistence, "mark_mainnet_launch_reconciled", None)
+                    if callable(restore):
+                        try:
+                            await restore(self._mainnet_launch_id)
+                            getter = getattr(self.persistence, "get_mainnet_launch_session", None)
+                            if callable(getter):
+                                self._set_mainnet_launch_session(
+                                    await getter(self._mainnet_launch_id)
+                                )
+                        except Exception as exc:
+                            # A failed durable state transition must not clear a
+                            # launch fence or claim autonomous authorization was
+                            # restored.
+                            logger.error(
+                                "Launch reconciliation state update failed: %s",
+                                type(exc).__name__,
+                            )
             return res
             
         if self.execution_mode in {
@@ -2667,8 +3841,8 @@ class TradingWorkerApp:
 
         self.engine_state = WorkerEngineState.ARMING
         exchange_environment = BinanceEnvironment.MAINNET
-        api_key = "".join(str(os.getenv("BINANCE_MAINNET_API_KEY", "")).split())
-        api_secret = "".join(str(os.getenv("BINANCE_MAINNET_API_SECRET", "")).split())
+        api_key = "".join(mainnet_secret_value("BINANCE_MAINNET_API_KEY").split())
+        api_secret = "".join(mainnet_secret_value("BINANCE_MAINNET_API_SECRET").split())
         self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
             exchange_environment
         ).max_leverage
@@ -2694,6 +3868,7 @@ class TradingWorkerApp:
                 self.execution_adapter.ledger.on_order_update = self.persistence.enqueue_order
                 self.execution_adapter.ledger.on_fill_update = self.persistence.enqueue_fill
                 self.execution_adapter.ledger.on_position_update = self.persistence.enqueue_position
+                self.execution_adapter.ledger.on_account_snapshot_update = self._on_account_snapshot_update
             self.execution_adapter.before_order_submission = self._before_order_submission
             self.execution_adapter.on_order_submission_result = self._on_order_submission_result
             self.execution_adapter.bind_worker_authority(self)
@@ -2800,6 +3975,12 @@ class TradingWorkerApp:
         state = str(session.get("state", "")) if session else ""
         submitted_orders = int(session.get("submitted_orders", 0) or 0) if session else 0
         reserved_orders = int(session.get("reserved_orders", 0) or 0) if session else 0
+        first_order_client_order_id = str(
+            session.get("first_order_client_order_id", "") or ""
+        ).strip() if session else ""
+        pending_order_client_order_id = str(
+            session.get("pending_order_client_order_id", "") or ""
+        ).strip() if session else ""
         expected_state = (
             policy == MAINNET_LAUNCH_STAGED and state == "PAUSED_NEW_RISK"
         ) or (
@@ -2812,6 +3993,18 @@ class TradingWorkerApp:
             "Durable launch session contains the verified first-order pause"
             if session and expected_state and submitted_orders >= 1 and reserved_orders >= submitted_orders
             else "Launch session is missing, not paused, or has no durable first-order evidence",
+        )
+        first_order_identity_ready = bool(
+            re.fullmatch(r"[A-Za-z0-9_-]{1,64}", first_order_client_order_id)
+            and not pending_order_client_order_id
+        )
+        add_check(
+            "CHK-CONTINUATION-ORDER-IDENTITY",
+            "Durable First-Order Client Identity",
+            first_order_identity_ready,
+            "The first risk-increasing order is bound to a durable client order ID and no ambiguous order remains"
+            if first_order_identity_ready
+            else "First-order client ID is missing or an exchange order remains ambiguous",
         )
         lifecycle_safe = self.engine_state in {
             WorkerEngineState.PAUSED_NEW_RISK,
@@ -2836,15 +4029,32 @@ class TradingWorkerApp:
         image_digest = os.getenv("WORKER_IMAGE_DIGEST", "").strip()
         add_check(
             "CHK-CONTINUATION-DIGEST",
-            "Immutable Worker Digest",
+            "Immutable Cloud Image or Local Runtime Fingerprint",
             bool(
                 session
-                and re.fullmatch(r".+@sha256:[0-9a-fA-F]{64}", image_digest)
-                and session.get("image_digest") == image_digest
+                and (
+                    (
+                        str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+                        and session.get("runtime_target") == "LOCAL"
+                        and session.get("image_digest") is None
+                        and re.fullmatch(
+                            r"[0-9a-fA-F]{64}",
+                            str(os.getenv("LOCAL_SOURCE_FINGERPRINT", "")).strip(),
+                        )
+                        and session.get("runtime_fingerprint")
+                        == os.getenv("LOCAL_SOURCE_FINGERPRINT", "").strip().lower()
+                    )
+                    or (
+                        str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() != "LOCAL"
+                        and session.get("runtime_target", "CLOUD_RUN") == "CLOUD_RUN"
+                        and re.fullmatch(r".+@sha256:[0-9a-fA-F]{64}", image_digest)
+                        and session.get("image_digest") == image_digest
+                    )
+                )
             ),
-            "Durable session is bound to this immutable Worker image"
-            if session and session.get("image_digest") == image_digest
-            else "Worker image digest is missing or differs from the launch session",
+            "Durable session is bound to this exact runtime target"
+            if session
+            else "Runtime fingerprint or immutable Cloud image does not match the launch session",
         )
         initial_approval = os.getenv("MAINNET_RELEASE_APPROVAL_ID", "").strip()
         approval_bound = bool(session and session.get("approval_id"))
@@ -2869,18 +4079,37 @@ class TradingWorkerApp:
             else "LIVE Mainnet approval is not active for this revision",
         )
         persistence = self.persistence.readiness()
+        local_runtime = str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+        local_persistence_identity = (
+            persistence.get("runtime_target") == "LOCAL"
+            and persistence.get("database_provider") == "POSTGRES_LOCAL"
+            and persistence.get("database_host") == local_postgres_host()
+            and persistence.get("database_port") == 5433
+            and persistence.get("database_identity_verified") is True
+            and self._env_flag("LOCAL_ONLY", False)
+        )
         persistence_ready = (
             persistence.get("mode") == "REQUIRED"
             and persistence.get("durable") is True
+            and (not local_runtime or local_persistence_identity)
         )
         add_check(
             "CHK-CONTINUATION-PERSISTENCE",
             "Required Durable Persistence",
             persistence_ready,
-            "Required Cloud SQL persistence is durable"
+            "Required durable PostgreSQL persistence is ready"
             if persistence_ready
             else "Continuation requires durable REQUIRED persistence",
         )
+        if local_runtime:
+            add_check(
+                "CHK-CONTINUATION-LOCAL-IDENTITY",
+                "Local Runtime and PostgreSQL Identity",
+                local_persistence_identity,
+                "Local-only runtime is bound to loopback PostgreSQL"
+                if local_persistence_identity
+                else "Local Mainnet continuation requires LOCAL_ONLY and the approved Local PostgreSQL route on port 5433",
+            )
         secret_versions = configured_secret_versions()
         secret_versions_ready = all(
             re.fullmatch(r"[1-9][0-9]*", value or "")
@@ -2979,6 +4208,8 @@ class TradingWorkerApp:
             "secretVersions": secret_versions,
             "submittedOrders": submitted_orders,
             "reservedOrders": reserved_orders,
+            "firstOrderClientOrderId": first_order_client_order_id or None,
+            "pendingOrderClientOrderId": pending_order_client_order_id or None,
             "persistenceDurable": persistence_ready,
             "preflightPassed": preflight.get("preflightPassed") is True,
             "preflightOrderSubmissionAttempts": int(preflight.get("orderSubmissionAttempts", -1)),
@@ -2995,6 +4226,8 @@ class TradingWorkerApp:
 
         if self.kill_switch_active:
             return False, "Cannot continue: Kill switch is active"
+        if str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL":
+            return False, "Legacy autonomous continuation is unavailable on Local; use the active campaign workflow."
         try:
             req = config if isinstance(config, ContinuationRequest) else ContinuationRequest.model_validate(config)
         except ValidationError as exc:
@@ -3031,11 +4264,24 @@ class TradingWorkerApp:
             return False, "Launch session is not awaiting a verified continuation"
         if int(session.get("submitted_orders", 0) or 0) < 1:
             return False, "Continuation requires durable first-order evidence"
-        image_digest = os.getenv("WORKER_IMAGE_DIGEST", "").strip()
-        if not re.fullmatch(r".+@sha256:[0-9a-fA-F]{64}", image_digest):
-            return False, "Autonomous continuation requires an immutable WORKER_IMAGE_DIGEST"
-        if session.get("image_digest") != image_digest:
-            return False, "Continuation approval does not match the current Worker image"
+        local_runtime = str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+        runtime_target = "LOCAL" if local_runtime else "CLOUD_RUN"
+        runtime_fingerprint = os.getenv("LOCAL_SOURCE_FINGERPRINT", "").strip().lower() if local_runtime else None
+        image_digest = os.getenv("WORKER_IMAGE_DIGEST", "").strip() if not local_runtime else None
+        if local_runtime:
+            if (
+                not re.fullmatch(r"[0-9a-f]{64}", runtime_fingerprint or "")
+                or session.get("runtime_target") != "LOCAL"
+                or session.get("image_digest") is not None
+                or session.get("runtime_fingerprint") != runtime_fingerprint
+            ):
+                return False, "Continuation approval does not match the current Local runtime fingerprint"
+        elif (
+            not re.fullmatch(r".+@sha256:[0-9a-fA-F]{64}", image_digest or "")
+            or session.get("runtime_target", "CLOUD_RUN") != "CLOUD_RUN"
+            or session.get("image_digest") != image_digest
+        ):
+            return False, "Continuation approval does not match the current immutable Worker image"
         initial_approval = os.getenv("MAINNET_RELEASE_APPROVAL_ID", "").strip()
         if initial_approval and session.get("approval_id") != initial_approval:
             return False, "Continuation is not bound to the current initial release approval"
@@ -3074,6 +4320,8 @@ class TradingWorkerApp:
                 continuation_approval_id=req.continuationApprovalId,
                 first_order_verified_at=verified_at,
                 image_digest=image_digest,
+                runtime_target=runtime_target,
+                runtime_fingerprint=runtime_fingerprint,
             )
         except Exception as exc:
             logger.error("Autonomous continuation transaction failed: %s", type(exc).__name__)
@@ -3119,12 +4367,38 @@ class TradingWorkerApp:
                 return False, "Mainnet remains disarmed until MAINNET_LIVE_APPROVED=true is set by the release gate."
             if not req.enforcePreflight:
                 return False, "LIVE ARM requires enforcePreflight=true and a fresh read-only Mainnet preflight."
-            if req.launchPolicy != MAINNET_LAUNCH_STAGED:
-                return False, "LIVE ARM requires the STAGED_FIRST_ORDER launch policy."
+            if req.launchPolicy not in {MAINNET_LAUNCH_STAGED, "LIVE_RESEARCH_PILOT"}:
+                return False, "LIVE ARM launch policy is unsupported."
             release_approval_id = (
                 (req.releaseApprovalId or os.getenv("MAINNET_RELEASE_APPROVAL_ID", "")).strip()
             )
-            if not re.fullmatch(r"approval-[A-Za-z0-9-]{16,120}", release_approval_id):
+            local_runtime = str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+            bound_pilot_campaign = str(os.getenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "")).strip()
+            if local_runtime and not bound_pilot_campaign:
+                return False, "Local Mainnet LIVE requires a server-bound Research Pilot campaign."
+            if bound_pilot_campaign and req.launchPolicy != "LIVE_RESEARCH_PILOT":
+                return False, "A pilot-bound Worker cannot use a non-pilot LIVE launch policy."
+            if req.launchPolicy == "LIVE_RESEARCH_PILOT":
+                pilot_readiness = local_live_pilot_readiness()
+                if pilot_readiness["can_start"] is not True:
+                    return False, "LIVE_RESEARCH_PILOT_RUNTIME_NOT_READY: " + ",".join(pilot_readiness["blockers"])
+                if not local_runtime or os.getenv("LOCAL_ONLY", "").strip().lower() not in {"1", "true", "yes", "on"}:
+                    return False, "Live Research Pilot is restricted to LOCAL_ONLY Local runtime."
+                if not re.fullmatch(r"pilot-[A-Za-z0-9][A-Za-z0-9_-]{7,126}", req.pilotCampaignId or ""):
+                    return False, "LIVE_RESEARCH_PILOT requires a server-bound campaign id."
+                if os.getenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "").strip() != req.pilotCampaignId:
+                    return False, "Live Research Pilot campaign does not match the supervisor binding."
+                if req.strategies.model_dump(exclude_unset=False) != {
+                    key: key == os.getenv("LOCAL_LIVE_PILOT_STRATEGY_ID", "")
+                    for key in ("grid", "trend", "shock", "carry")
+                } or sum(req.strategies.model_dump().values()) != 1:
+                    return False, "Live Research Pilot must enable only its approved strategy."
+            approval_pattern = (
+                r"local-approval-[0-9a-f-]{36}"
+                if local_runtime
+                else r"approval-[A-Za-z0-9-]{16,120}"
+            )
+            if not re.fullmatch(approval_pattern, release_approval_id, flags=re.IGNORECASE):
                 return False, "LIVE ARM requires a consumed release approval identifier."
         else:
             release_approval_id = ""
@@ -3183,8 +4457,8 @@ class TradingWorkerApp:
                 else BinanceEnvironment.TESTNET
             )
             if mode == "LIVE":
-                api_key = "".join(str(os.getenv("BINANCE_MAINNET_API_KEY", "")).split())
-                api_secret = "".join(str(os.getenv("BINANCE_MAINNET_API_SECRET", "")).split())
+                api_key = "".join(mainnet_secret_value("BINANCE_MAINNET_API_KEY").split())
+                api_secret = "".join(mainnet_secret_value("BINANCE_MAINNET_API_SECRET").split())
                 self.risk_governor.max_leverage = TestnetSafetyLimits.from_environment(
                     exchange_environment
                 ).max_leverage
@@ -3202,9 +4476,9 @@ class TradingWorkerApp:
                 ):
                     await self.execution_adapter.close()
                     self.execution_adapter = None
-                # LIVE must always start from the scoped Cloud SQL ledger
-                # loaded for BINANCE_MAINNET. Reusing a process-local or
-                # Testnet ledger would make restart/reconciliation evidence
+                # LIVE must always start from the scoped durable PostgreSQL
+                # ledger loaded for BINANCE_MAINNET. Reusing a process-local
+                # or Testnet ledger would make restart/reconciliation evidence
                 # non-authoritative.
                 if mode == "LIVE" and self.execution_adapter is not None:
                     await self.execution_adapter.close()
@@ -3238,6 +4512,7 @@ class TradingWorkerApp:
                     self.execution_adapter.ledger.on_order_update = self.persistence.enqueue_order
                     self.execution_adapter.ledger.on_fill_update = self.persistence.enqueue_fill
                     self.execution_adapter.ledger.on_position_update = self.persistence.enqueue_position
+                    self.execution_adapter.ledger.on_account_snapshot_update = self._on_account_snapshot_update
                 # Risk-increasing exchange mutations must have a durable
                 # transactional-outbox acknowledgement before REST POST.
                 self.execution_adapter.before_order_submission = (
@@ -3246,6 +4521,73 @@ class TradingWorkerApp:
                 self.execution_adapter.on_order_submission_result = (
                     self._on_order_submission_result
                 )
+                self.execution_adapter.on_testnet_protection_update = (
+                    self._persist_testnet_protection_update
+                    if mode == "TESTNET"
+                    else None
+                )
+                local_mainnet_runtime = bool(
+                    mode == "LIVE"
+                    and exchange_environment == BinanceEnvironment.MAINNET
+                    and os.getenv("LOCAL_ONLY", "").strip().lower()
+                    in {"1", "true", "yes", "on"}
+                    and os.getenv("LOCAL_RUNTIME_TARGET", "").strip().upper() == "LOCAL"
+                )
+                self.execution_adapter.on_local_mainnet_protection_update = (
+                    self._persist_local_mainnet_protection_update
+                    if local_mainnet_runtime
+                    else None
+                )
+                self.execution_adapter.on_local_mainnet_entry_cancel_claim = (
+                    self._claim_local_mainnet_entry_cancel
+                    if local_mainnet_runtime
+                    else None
+                )
+                self.execution_adapter.on_local_mainnet_close_verified = (
+                    self._persist_local_mainnet_close_verified
+                    if local_mainnet_runtime
+                    else None
+                )
+                pilot_runtime = bool(
+                    local_mainnet_runtime
+                    and isinstance(self._mainnet_launch_session, dict)
+                    and self._mainnet_launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
+                )
+                self.execution_adapter.on_local_live_pilot_fill = (
+                    self._persist_local_live_pilot_fill if pilot_runtime else None
+                )
+                self.execution_adapter.on_local_live_pilot_mark = (
+                    self._persist_local_live_pilot_mark if pilot_runtime else None
+                )
+                self.execution_adapter.on_local_live_pilot_funding_reconcile = (
+                    self._reconcile_local_live_pilot_funding if pilot_runtime else None
+                )
+                if mode == "TESTNET":
+                    self.execution_adapter.require_testnet_protection = True
+                    repository = getattr(self.persistence, "repository", None)
+                    self.execution_adapter.reconciliation.algo_protection_repository = (
+                        getattr(repository, "algo_protections", None)
+                    )
+                    self.execution_adapter.reconciliation.require_testnet_algo_ownership = True
+                    history_repository = getattr(repository, "binance_history", None)
+                    register_anchor = getattr(history_repository, "register_testnet_anchor", None)
+                    if not callable(register_anchor):
+                        await self._reset_after_failed_exchange_arm()
+                        return False, "Testnet execution requires durable read-only history anchoring."
+                    testnet_run_id = f"testnet-readonly-{uuid.uuid4().hex}"
+                    try:
+                        await register_anchor(
+                            run_id=testnet_run_id,
+                            symbol="ETHUSDC",
+                            anchor_at=datetime.now(timezone.utc),
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Testnet durable history anchor failed: %s", type(exc).__name__
+                        )
+                        await self._reset_after_failed_exchange_arm()
+                        return False, "Testnet history anchor is unavailable; execution remains disarmed."
+                    self.execution_adapter.reconciliation.testnet_history_run_id = testnet_run_id
                 
                 self.execution_adapter.bind_worker_authority(self)
                 connected = await self.execution_adapter.connect()
@@ -3294,19 +4636,51 @@ class TradingWorkerApp:
                 return False, f"{mode} runtime preflight failed: {'; '.join(failures)}"
 
             if mode == "LIVE":
-                image_digest = os.getenv("WORKER_IMAGE_DIGEST", "").strip()
-                if not re.fullmatch(r".+@sha256:[0-9a-fA-F]{64}", image_digest):
+                local_runtime = str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+                runtime_target = "LOCAL" if local_runtime else "CLOUD_RUN"
+                runtime_fingerprint = os.getenv("LOCAL_SOURCE_FINGERPRINT", "").strip().lower() if local_runtime else None
+                image_digest = os.getenv("WORKER_IMAGE_DIGEST", "").strip() if not local_runtime else None
+                if local_runtime:
+                    if not re.fullmatch(r"[0-9a-f]{64}", runtime_fingerprint or ""):
+                        await self._reset_after_failed_exchange_arm()
+                        return False, "Local LIVE ARM requires the approved source fingerprint."
+                elif not re.fullmatch(r".+@sha256:[0-9a-fA-F]{64}", image_digest or ""):
                     await self._reset_after_failed_exchange_arm()
                     return False, "LIVE ARM requires the immutable WORKER_IMAGE_DIGEST release input."
                 try:
+                    pilot_binding = None
+                    launch_policy = "STAGED_FIRST_ORDER"
+                    max_order_count: int | None = 1
+                    if req.launchPolicy == "LIVE_RESEARCH_PILOT":
+                        launch_policy = "LIVE_RESEARCH_PILOT"
+                        max_order_count = None
+                        pilot_binding = {
+                            "campaign_id": req.pilotCampaignId,
+                            "git_sha": os.getenv("LOCAL_LIVE_PILOT_GIT_SHA", "").strip().lower(),
+                            "source_hash": os.getenv("LOCAL_LIVE_PILOT_SOURCE_HASH", "").strip().lower(),
+                            "dependency_hash": os.getenv("LOCAL_LIVE_PILOT_DEPENDENCY_HASH", "").strip().lower(),
+                            "migration_hash": os.getenv("LOCAL_LIVE_PILOT_MIGRATION_HASH", "").strip().lower(),
+                            "strategy_hash": os.getenv("LOCAL_LIVE_PILOT_STRATEGY_HASH", "").strip().lower(),
+                            "secret_project_id": os.getenv("LOCAL_LIVE_PILOT_SECRET_PROJECT_ID", "").strip(),
+                            "api_key_version": os.getenv("BINANCE_MAINNET_API_KEY_VERSION", "").strip(),
+                            "api_secret_version": os.getenv("BINANCE_MAINNET_API_SECRET_VERSION", "").strip(),
+                            "management_mode": os.getenv("LOCAL_LIVE_PILOT_MANAGEMENT_MODE", "").strip(),
+                            "expires_at": os.getenv("LOCAL_LIVE_PILOT_EXPIRES_AT", "").strip(),
+                            "risk_policy_hash": os.getenv("LOCAL_LIVE_PILOT_RISK_POLICY_HASH", "").strip().lower(),
+                        }
                     session = await self.persistence.create_mainnet_launch_session(
                         approval_id=release_approval_id,
                         image_digest=image_digest,
                         symbol="ETHUSDC",
+                        runtime_target=runtime_target,
+                        runtime_fingerprint=runtime_fingerprint,
+                        policy=launch_policy,
+                        max_risk_increasing_orders=max_order_count,
+                        pilot_binding=pilot_binding,
                     )
                 except Exception as exc:
                     error_msg = str(exc)
-                    logger.error("Mainnet staged launch session unavailable: %s (%s)", type(exc).__name__, exc)
+                    logger.error("Mainnet launch session unavailable: %s (%s)", type(exc).__name__, exc)
                     await self._reset_after_failed_exchange_arm()
                     if "submitted order pending review" in error_msg:
                         return False, "LIVE staged launch failed: existing session has a submitted order pending review."
@@ -3355,6 +4729,15 @@ class TradingWorkerApp:
         # down the local adapter so the same process cannot resume risk without
         # a fresh continuation approval.  The local DISARM remains fail-closed
         # even if the database is temporarily unavailable.
+        self.pause_new_risk = True
+        self.engine_state = WorkerEngineState.DISARMED
+        local_live = (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and _env_enabled("LOCAL_ONLY")
+            and str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+        )
+        if local_live:
+            os.environ["MAINNET_LIVE_APPROVED"] = "false"
         await self._fence_autonomous_launch("disarm")
 
         if self.execution_adapter is not None:
@@ -3378,6 +4761,18 @@ class TradingWorkerApp:
             if self.kill_switch_active
             else WorkerEngineState.DISARMED
         )
+        if local_live:
+            for name in (
+                "BINANCE_MAINNET_API_KEY",
+                "BINANCE_MAINNET_API_SECRET",
+                "BINANCE_MAINNET_API_KEY_FILE",
+                "BINANCE_MAINNET_API_SECRET_FILE",
+                "MAINNET_RELEASE_APPROVAL_ID",
+                "MAINNET_CONTINUATION_APPROVAL_ID",
+                "LOCAL_SOURCE_FINGERPRINT",
+            ):
+                os.environ[name] = ""
+            clear_local_mainnet_secrets()
         logger.info("Worker DISARMED")
 
     def _clamp_order_notional_if_needed(
@@ -3527,6 +4922,14 @@ class TradingWorkerApp:
 
     async def execute_manual_decision(self, decision):
         """Worker-owned manual Testnet path used by the controlled trial only."""
+        if (
+            self.execution_mode == WorkerExecutionMode.TESTNET
+            and str(getattr(decision.risk_class, "value", decision.risk_class)).upper()
+            in {"NEW_RISK", "INCREASE_RISK"}
+        ):
+            # Normal strategy events must use the same guarded lifecycle as
+            # the explicit Testnet runner; no risk-increasing bypass remains.
+            return await self.execute_protected_testnet_decision(decision)
         allowed, reason = self._evaluate_execution_gate(decision)
         if not allowed or self.execution_adapter is None:
             raise RuntimeError(f"Decision execution gate blocked manual order: {reason}")
@@ -3543,6 +4946,47 @@ class TradingWorkerApp:
         ):
             await self._fail_closed_after_autonomous_execution_error(
                 RuntimeError("Testnet execution did not finish READY and IN_SYNC")
+            )
+        return executed
+
+    async def execute_protected_testnet_decision(self, decision):
+        """Worker-owned Testnet market entry with mandatory post-fill protection."""
+        if self.execution_mode != WorkerExecutionMode.TESTNET or self.execution_adapter is None:
+            raise RuntimeError("Protected entry execution is available only in an armed Testnet worker")
+        repository = getattr(self.persistence, "repository", None)
+        protection_store = getattr(repository, "algo_protections", None)
+        if protection_store is not None:
+            try:
+                active_protections = await protection_store.list_active_protections(
+                    venue="binance_testnet", symbol="ETHUSDC"
+                )
+            except Exception as exc:
+                await self._fail_closed_after_autonomous_execution_error(
+                    RuntimeError(
+                        f"Testnet protection ownership could not be read: {type(exc).__name__}"
+                    )
+                )
+                return []
+            if active_protections:
+                await self._fail_closed_after_autonomous_execution_error(
+                    RuntimeError("An unresolved Testnet protection chain already exists")
+                )
+                return []
+        allowed, reason = self._evaluate_execution_gate(decision)
+        if not allowed:
+            raise RuntimeError(f"Protected Testnet execution gate blocked entry: {reason}")
+        adapter = self.execution_adapter
+        adapter.bind_worker_authority(self)
+        executed = await adapter.execute_protected_testnet_decision(
+            decision, authority=self,
+        )
+        if (
+            adapter.connection_state != ConnectionState.READY
+            or getattr(adapter.reconciliation, "last_status", "UNKNOWN") != "IN_SYNC"
+            or adapter.last_testnet_protection.get("status") != "PROTECTED"
+        ):
+            await self._fail_closed_after_autonomous_execution_error(
+                RuntimeError("Protected Testnet entry did not finish protected, READY and IN_SYNC")
             )
         return executed
 
@@ -3595,6 +5039,152 @@ class TradingWorkerApp:
         self._refresh_engine_state()
         self.execution_adapter.bind_worker_authority(self)
         return await self.execution_adapter.emergency_flatten(symbol, authority=self)
+
+    async def close_protected_ethusdc_testnet_trial(self, entry_client_order_id: str) -> Dict[str, Any]:
+        """Close one owned Testnet trial and read back the exchange and durable owner."""
+        adapter = self.execution_adapter
+        if (self.execution_mode != WorkerExecutionMode.TESTNET or adapter is None
+                or getattr(adapter, "env", None) != BinanceEnvironment.TESTNET):
+            raise RuntimeError("Protected Testnet trial close requires an armed Testnet Worker")
+        repository = getattr(self.persistence, "repository", None)
+        protections = getattr(repository, "algo_protections", None)
+        if protections is None or not entry_client_order_id:
+            raise RuntimeError("Protected Testnet trial owner is unavailable")
+        owners = await protections.list_active_protections(
+            venue="binance_testnet", symbol="ETHUSDC"
+        )
+        if len(owners) != 1 or owners[0].get("entry_client_order_id") != entry_client_order_id:
+            raise RuntimeError("Protected Testnet trial owner is ambiguous")
+        owner = dict(owners[0])
+        if owner.get("state") != "PROTECTED" or not all(
+            owner.get(key) for key in (
+                "stop_client_algo_id", "take_profit_client_algo_id",
+                "stop_algo_id", "take_profit_algo_id",
+            )
+        ):
+            raise RuntimeError("Protected Testnet trial bracket is unverified")
+        close_id = adapter.testnet_trial_close_client_order_id(entry_client_order_id)
+        self.pause_new_risk = True
+        self._refresh_engine_state()
+        claimed_reason = f"protected_ethusdc_testnet_trial_close:{close_id}:CLAIMED"
+        claimed = await protections.claim_testnet_protection_close(
+            venue="binance_testnet",
+            symbol="ETHUSDC",
+            entry_client_order_id=entry_client_order_id,
+            entry_side=owner["entry_side"],
+            position_side=owner["position_side"],
+            filled_quantity=Decimal(str(owner["filled_quantity"])),
+            stop_algo_id=str(owner["stop_algo_id"]),
+            take_profit_algo_id=str(owner["take_profit_algo_id"]),
+            state_reason=claimed_reason,
+        )
+        if not isinstance(claimed, dict):
+            raise RuntimeError("Protected Testnet trial close was already claimed or changed")
+        owner = dict(claimed)
+
+        # The repository changes CLAIMED -> SUBMITTING with compare-and-swap
+        # immediately before the sole POST. An ambiguous result is never retried.
+        close_orders = await adapter.close_owned_testnet_trial(owner, authority=self)
+        if adapter.last_emergency_result.get("status") != "CONFIRMED" or len(close_orders) != 1:
+            raise RuntimeError("Protected Testnet trial close outcome is unknown")
+        protection_at_close = adapter.last_emergency_result.get("protection_at_close")
+        if (not isinstance(protection_at_close, dict)
+                or protection_at_close.get("status") != "PROTECTED"
+                or not isinstance(protection_at_close.get("stop"), dict)
+                or not isinstance(protection_at_close.get("target"), dict)
+                or protection_at_close["stop"].get("client_algo_id") != owner["stop_client_algo_id"]
+                or protection_at_close["stop"].get("status") != "NEW"
+                or protection_at_close["stop"].get("close_position") is not True
+                or protection_at_close["stop"].get("reduce_only") is not False
+                or protection_at_close["target"].get("client_algo_id") != owner["take_profit_client_algo_id"]
+                or protection_at_close["target"].get("status") != "NEW"
+                or protection_at_close["target"].get("close_position") is not True
+                or protection_at_close["target"].get("reduce_only") is not False):
+            raise RuntimeError("Protected Testnet close lacks pre-submission stop/target read-back")
+        close_id = str(close_orders[0].client_order_id or "")
+        close_exchange_order_id = str(close_orders[0].exchange_order_id or "")
+        close_readback = await adapter.query_order("ETHUSDC", close_id)
+        close_side = "SELL" if str(owner["entry_side"]).upper() == "BUY" else "BUY"
+        expected_quantity = Decimal(str(owner["filled_quantity"]))
+        if (not close_id or not close_exchange_order_id or not isinstance(close_readback, dict)
+                or str(close_readback.get("orderId", "")) != close_exchange_order_id
+                or str(close_readback.get("clientOrderId", "")) != close_id
+                or str(close_readback.get("symbol", "")).upper() != "ETHUSDC"
+                or str(close_readback.get("side", "")).upper() != close_side
+                or str(close_readback.get("positionSide", "")).upper() != "BOTH"
+                or str(close_readback.get("type", "")).upper() != "MARKET"
+                or str(close_readback.get("reduceOnly", "")).lower() != "true"
+                or Decimal(str(close_readback.get("origQty", "0"))) != expected_quantity
+                or str(close_readback.get("status", "")).upper() != "FILLED"
+                or Decimal(str(close_readback.get("executedQty", "0"))) != expected_quantity):
+            raise RuntimeError("Protected Testnet trial close order was not verified")
+        if not await adapter._cancel_local_mainnet_owned_algos(owner):
+            raise RuntimeError("Protected Testnet trial Algo cancellation is unknown")
+
+        positions = await adapter.rest_client.request(
+            "GET", adapter._position_risk_path, signed=True
+        )
+        open_orders = await adapter.rest_client.request(
+            "GET", "/fapi/v1/openOrders", signed=True, params={"symbol": "ETHUSDC"}
+        )
+        open_algos = await adapter.rest_client.request(
+            "GET", adapter._open_algo_orders_path, signed=True,
+            params={"symbol": "ETHUSDC", "algoType": "CONDITIONAL"},
+        )
+        if not isinstance(positions, list) or not isinstance(open_orders, list) or not isinstance(open_algos, list):
+            raise RuntimeError("Protected Testnet trial final exchange read-back is invalid")
+        if any(
+            isinstance(row, dict) and row.get("symbol") == "ETHUSDC"
+            and Decimal(str(row.get("positionAmt", "0"))) != 0
+            for row in positions
+        ) or open_orders or open_algos:
+            raise RuntimeError("Protected Testnet trial left exchange risk open")
+        if await adapter.reconciliation.reconcile() != "IN_SYNC" or adapter.reconciliation.last_diffs:
+            raise RuntimeError("Protected Testnet trial final reconciliation is unknown")
+        owner.update(state="CLOSED", state_reason="protected_ethusdc_testnet_trial_verified")
+        if not await self._persist_testnet_protection_update(owner):
+            raise RuntimeError("Protected Testnet trial closure was not durable")
+        return {
+            "close_status": "VERIFIED",
+            "close_client_order_id": close_id,
+            "close_order_type": "MARKET",
+            "close_order_reduce_only": True,
+            "protection_at_close": protection_at_close,
+            "position_after": [], "open_orders_after": [], "open_algo_after": [],
+            "reconciliation_status": "IN_SYNC", "diff_count": 0,
+        }
+
+    async def claim_testnet_trial_close_submission(
+        self, owner: Dict[str, Any], client_order_id: str,
+    ) -> Dict[str, Any] | None:
+        """Consume the durable one-use close submission marker using CAS."""
+        if (self.execution_mode != WorkerExecutionMode.TESTNET
+                or self.execution_adapter is None
+                or getattr(self.execution_adapter, "env", None) != BinanceEnvironment.TESTNET
+                or not isinstance(owner, dict) or owner.get("state") != "CLOSE_PENDING"):
+            return None
+        expected = f"protected_ethusdc_testnet_trial_close:{client_order_id}:CLAIMED"
+        if owner.get("state_reason") != expected:
+            return None
+        repository = getattr(getattr(self.persistence, "repository", None), "algo_protections", None)
+        marker = getattr(repository, "mark_testnet_protection_close_submitting", None)
+        if not callable(marker):
+            return None
+        submitting_reason = f"protected_ethusdc_testnet_trial_close:{client_order_id}:SUBMITTING"
+        try:
+            stored = await marker(
+                venue="binance_testnet", symbol="ETHUSDC",
+                entry_client_order_id=str(owner.get("entry_client_order_id") or ""),
+                claimed_reason=expected, submitting_reason=submitting_reason,
+            )
+        except Exception as exc:
+            logger.error("Testnet close attempt fence failed: %s", type(exc).__name__)
+            return None
+        if (not isinstance(stored, dict) or stored.get("state") != "CLOSE_PENDING"
+                or stored.get("state_reason") != submitting_reason
+                or stored.get("entry_client_order_id") != owner.get("entry_client_order_id")):
+            return None
+        return dict(stored)
 
     async def handle_market_event(self, event: MarketEvent):
         if not hasattr(self, "last_market_event_at"):
@@ -4005,6 +5595,38 @@ class TradingWorkerApp:
                     adapter.state = ConnectionState.DEGRADED
                     adapter.reconciliation.last_status = "UNKNOWN"
                     logger.error("Execution lease renewal failed: %s", type(exc).__name__)
+            if (
+                adapter is not None
+                and self.execution_mode == WorkerExecutionMode.LIVE
+                and isinstance(self._mainnet_launch_session, dict)
+                and self._mainnet_launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
+                and hasattr(adapter, "check_and_enforce_pilot_protections")
+            ):
+                monitor_started_at = utc_now()
+                self._pilot_lifecycle_monitor_started_at = monitor_started_at
+                try:
+                    actions = await adapter.check_and_enforce_pilot_protections(authority=self)
+                    self._pilot_lifecycle_monitor_completed_at = utc_now()
+                    failure_count = actions.get("failed_action_count") if isinstance(actions, dict) else None
+                    unmatched_count = actions.get("unmatched_owner_count") if isinstance(actions, dict) else None
+                    valid_monitor_counts = all(
+                        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                        for value in (failure_count, unmatched_count)
+                    )
+                    if not valid_monitor_counts:
+                        self._pilot_lifecycle_monitor_last_error = "MONITOR_RESULT_INVALID"
+                        self._degrade_after_pilot_monitor_failure(adapter)
+                    elif failure_count or unmatched_count:
+                        self._pilot_lifecycle_monitor_last_error = "MONITOR_ACTION_UNVERIFIED"
+                        self._degrade_after_pilot_monitor_failure(adapter)
+                    else:
+                        self._pilot_lifecycle_monitor_last_error = None
+                        self._pilot_lifecycle_monitor_last_success_at = self._pilot_lifecycle_monitor_completed_at
+                except Exception as exc:
+                    self._pilot_lifecycle_monitor_completed_at = utc_now()
+                    self._pilot_lifecycle_monitor_last_error = type(exc).__name__
+                    self._degrade_after_pilot_monitor_failure(adapter)
+                    logger.error("Pilot lifecycle monitor error: %s", type(exc).__name__)
             try:
                 await asyncio.sleep(self.heartbeat_interval_sec)
             except asyncio.CancelledError:
@@ -4033,6 +5655,36 @@ class TradingWorkerApp:
         logger.info("Gracefully stopping Trading Worker...")
         self.is_running = False
         self.stop_heartbeat()
+        local_live = (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and _env_enabled("LOCAL_ONLY")
+            and str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+        )
+        if self.execution_mode == WorkerExecutionMode.LIVE:
+            self.pause_new_risk = True
+            self.engine_state = WorkerEngineState.DISARMED
+            if local_live:
+                os.environ["MAINNET_LIVE_APPROVED"] = "false"
+            try:
+                await self.disarm()
+            except Exception as exc:
+                logger.error("Worker stop disarm failed: %s", type(exc).__name__)
+            finally:
+                if local_live:
+                    for name in (
+                        "BINANCE_MAINNET_API_KEY",
+                        "BINANCE_MAINNET_API_SECRET",
+                        "BINANCE_MAINNET_API_KEY_FILE",
+                        "BINANCE_MAINNET_API_SECRET_FILE",
+                        "MAINNET_RELEASE_APPROVAL_ID",
+                        "MAINNET_CONTINUATION_APPROVAL_ID",
+                        "LOCAL_SOURCE_FINGERPRINT",
+                    ):
+                        os.environ[name] = ""
+                    clear_local_mainnet_secrets()
+                    os.environ["EXECUTION_MODE"] = "PAPER"
+                    self.execution_mode = WorkerExecutionMode.PAPER
+                    self.pause_new_risk = True
         if self.scan_task and not self.scan_task.done():
             self.scan_task.cancel()
         if self.ws_client:
@@ -4042,22 +5694,61 @@ class TradingWorkerApp:
                 pass
         await self.persistence.stop()
 
-def serve_api(app_instance):
+async def serve_api(app_instance):
+    global _ACTIVE_UVICORN_SERVER
     set_worker_engine(app_instance)
     try:
         port = int(os.getenv("PORT", "8080"))
     except ValueError:
         port = 8080
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    config = uvicorn.Config(app, host=worker_bind_host(), port=port, log_level="info")
     server = uvicorn.Server(config)
-    return server.serve()
+    _ACTIVE_UVICORN_SERVER = server
+    try:
+        await server.serve()
+    finally:
+        if _ACTIVE_UVICORN_SERVER is server:
+            _ACTIVE_UVICORN_SERVER = None
 
 async def main():
     app_instance = TradingWorkerApp()
-    await app_instance.start()
-    
-    # Run API server
-    await serve_api(app_instance)
+    local_runtime = (
+        _env_enabled("LOCAL_ONLY")
+        and str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+    )
+    try:
+        await app_instance.start()
+        await serve_api(app_instance)
+    finally:
+        if local_runtime:
+            # A normal shutdown must be just as fail-closed as heartbeat loss.
+            os.environ["MAINNET_LIVE_APPROVED"] = "false"
+            if app_instance.execution_mode == WorkerExecutionMode.LIVE:
+                app_instance.pause_new_risk = True
+                app_instance.engine_state = WorkerEngineState.DISARMED
+                try:
+                    await app_instance.disarm()
+                except Exception as exc:
+                    logger.error("Local shutdown disarm failed: %s", type(exc).__name__)
+            for name in (
+                "BINANCE_MAINNET_API_KEY",
+                "BINANCE_MAINNET_API_SECRET",
+                "BINANCE_MAINNET_API_KEY_FILE",
+                "BINANCE_MAINNET_API_SECRET_FILE",
+                "WORKER_IDENTITY_TOKEN_FILE",
+                "POSTGRES_PASSWORD_FILE",
+                "MAINNET_RELEASE_APPROVAL_ID",
+                "MAINNET_CONTINUATION_APPROVAL_ID",
+                "LOCAL_SOURCE_FINGERPRINT",
+            ):
+                os.environ[name] = ""
+            clear_local_container_secrets()
+            os.environ["EXECUTION_MODE"] = "PAPER"
+            app_instance.execution_mode = WorkerExecutionMode.PAPER
+        try:
+            await app_instance.stop()
+        except Exception as exc:
+            logger.error("Worker shutdown cleanup failed: %s", type(exc).__name__)
 
 if __name__ == "__main__":
     try:

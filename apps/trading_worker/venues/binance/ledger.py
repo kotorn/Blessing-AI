@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal, InvalidOperation
 from typing import Protocol, List, Optional, Union
 from domain.enums import EconomicRiskClass
@@ -73,9 +74,16 @@ class InMemoryLedger:
         self.on_order_update = None
         self.on_fill_update = None
         self.on_position_update = None
+        self.on_account_snapshot_update = None
 
     async def set_account_snapshot(self, snapshot: Optional[ExchangeAccountSnapshot]) -> None:
         self.account_snapshot = snapshot
+        if self.on_account_snapshot_update is not None and snapshot is not None:
+            callback = self.on_account_snapshot_update
+            if asyncio.iscoroutinefunction(callback):
+                await callback(snapshot)
+            else:
+                callback(snapshot)
 
     async def get_account_snapshot(self) -> Optional[ExchangeAccountSnapshot]:
         return self.account_snapshot

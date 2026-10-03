@@ -5,6 +5,7 @@ import { ExposureAttributionCard } from '../components/ExposureAttributionCard';
 import { InstrumentsPanel } from '../components/InstrumentsPanel';
 import { BasketManager } from '../components/BasketManager';
 import { RiskGovernorMonitor } from '../components/RiskGovernorMonitor';
+import { LocalLivePilotPanel } from '../components/LocalLivePilotPanel';
 import { AccountData, BasketItem, InstrumentData, RiskRuleItem, TradingSystemState } from '../types';
 import { AppRoute } from '../contracts/system';
 import { AlertCircle, ArrowUpRight,  } from 'lucide-react';
@@ -52,6 +53,8 @@ export const CommandCenterPage: React.FC<CommandCenterPageProps> = ({
 
   return (
     <div className="space-y-6">
+      <LocalLivePilotPanel />
+
       {/* 1. Primary KPI Strip */}
       <AccountOverview
         account={account}

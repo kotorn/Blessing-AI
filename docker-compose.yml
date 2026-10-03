@@ -7,8 +7,8 @@ services:
     container_name: blessing-nats
     command: ["-js", "-m", "8222"]
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
     volumes:
       - nats_data:/data
     restart: unless-stopped
@@ -21,9 +21,31 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init_schema.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Isolated local-only database. It uses a distinct container and volume so
+  # local readiness work never applies migrations to the general Compose DB.
+  postgres-local:
+    profiles: ["local"]
+    image: postgres:17-alpine
+    container_name: blessing-postgres-local
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER must be set}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_local_data:/var/lib/postgresql/data
       - ./infra/postgres/init_schema.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     restart: unless-stopped
     healthcheck:
@@ -36,7 +58,7 @@ services:
     image: redis:7.4-alpine
     container_name: blessing-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -76,10 +98,11 @@ services:
     container_name: blessing-trader
     command: ["python", "-m", "apps.trading_worker.main"]
     ports:
-      - "8000:8080"
+      - "127.0.0.1:8000:8080"
     environment:
       - EXECUTION_MODE=PAPER
       - MAINNET_LIVE_APPROVED=false
+      - BIND_HOST=0.0.0.0
       - NATS_URL=nats://nats:4222
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=${POSTGRES_PORT:?POSTGRES_PORT must be set}
@@ -116,7 +139,7 @@ services:
       dockerfile: Dockerfile.control-plane
     container_name: blessing-dashboard
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - PORT=3000
       - GEMINI_API_KEY=${GEMINI_API_KEY}
@@ -129,7 +152,7 @@ services:
     image: ghcr.io/mlflow/mlflow:v2.18.0
     container_name: blessing-mlflow
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
     command: ["mlflow", "server", "--backend-store-uri", "sqlite:////mlflow/mlflow.db", "--default-artifact-root", "/mlflow/artifacts", "--host", "0.0.0.0", "--port", "5000"]
     volumes:
       - mlflow_data:/mlflow
@@ -139,7 +162,7 @@ services:
     image: prom/prometheus:v2.55.0
     container_name: blessing-prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     restart: unless-stopped
@@ -148,7 +171,7 @@ services:
     image: grafana/grafana:11.3.0
     container_name: blessing-grafana
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     volumes:
       - grafana_data:/var/lib/grafana
     depends_on:
@@ -158,6 +181,7 @@ services:
 volumes:
   nats_data:
   postgres_data:
+  postgres_local_data:
   redis_data:
   mlflow_data:
   grafana_data:

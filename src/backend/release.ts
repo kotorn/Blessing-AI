@@ -13,6 +13,7 @@ export interface SecretVersionSet {
 
 export interface ReleaseCandidate {
   candidateId: string;
+  runtimeTarget?: 'CLOUD_RUN' | 'LOCAL';
   repoSha: string;
   imageDigest: string;
   workerRevision: string;
@@ -275,6 +276,7 @@ export function newReleaseCandidate(
 ): ReleaseCandidate {
   const candidate: ReleaseCandidate = {
     candidateId: `rc-${crypto.randomUUID()}`,
+    runtimeTarget: 'CLOUD_RUN',
     repoSha: asString(input.repoSha),
     imageDigest: asString(input.imageDigest),
     workerRevision: asString(input.workerRevision),
@@ -316,6 +318,9 @@ export function validateReleaseCandidate(
   const failures: string[] = [];
   if (!/^rc-[0-9a-f-]{36}$/i.test(asString(candidate.candidateId))) {
     failures.push('candidateId is invalid');
+  }
+  if (candidate.runtimeTarget !== undefined && candidate.runtimeTarget !== 'CLOUD_RUN') {
+    failures.push('Cloud release candidate runtimeTarget must be CLOUD_RUN');
   }
   if (!/^[0-9a-f]{40}$/i.test(asString(candidate.repoSha)) && !SHA256_RE.test(asString(candidate.repoSha))) {
     failures.push('repoSha must be a commit or SHA-256 hex');

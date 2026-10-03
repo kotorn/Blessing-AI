@@ -96,6 +96,9 @@ class ScriptedRest:
         self.calls = []
 
     async def request(self, method, path, **kwargs):
+        before_mutation = kwargs.get("before_mutation")
+        if callable(before_mutation):
+            await before_mutation()
         self.calls.append((method, path, kwargs))
         return await self.handler(method, path, kwargs)
 
@@ -147,6 +150,7 @@ async def make_adapter(rest=None):
         env=BinanceEnvironment.TESTNET,
         ledger=ledger,
     )
+    adapter.require_testnet_protection = False
     adapter.state = ConnectionState.READY
     adapter.capabilities.account_request_succeeded = True
     adapter.capabilities.authenticated = True
@@ -183,9 +187,9 @@ def make_mainnet_adapter():
     return adapter
 
 
-async def execute_internal(adapter, decision):
+async def execute_internal(adapter, decision, authority=None):
     """Exercise the adapter's private path with an explicit test authority."""
-    authority = object()
+    authority = authority or object()
     adapter.bind_worker_authority(authority)
     return await adapter._execute_decision(decision, authority=authority)
 
@@ -587,6 +591,12 @@ async def test_mainnet_submission_uses_deterministic_decision_scoped_client_orde
 
     adapter = make_mainnet_adapter()
     adapter.rest_client = ScriptedRest(handler)
+    class DecisionGateAuthority:
+        @staticmethod
+        def _evaluate_execution_gate(_decision):
+            return True, "unit-test decision gate approved"
+
+    authority = DecisionGateAuthority()
     lease = InMemoryExecutionLease("binance:BINANCE_MAINNET:unit-test", "worker-under-test")
     assert await lease.acquire() is True
     adapter.set_execution_lease(lease)
@@ -613,7 +623,7 @@ async def test_mainnet_submission_uses_deterministic_decision_scoped_client_orde
         ],
     )
 
-    executed = await execute_internal(adapter, decision)
+    executed = await execute_internal(adapter, decision, authority=authority)
 
     assert len(executed) == 2
     first_cid = adapter._generate_client_order_id("DEC-IDEM-1", "ETHUSDC", 0)
@@ -905,8 +915,31 @@ async def test_emergency_flatten_flat_account_reports_confirmed():
         "status": "CONFIRMED",
         "submitted_orders": 0,
         "reconciliation": "IN_SYNC",
+        "positions_flat_verified": True,
     }
     assert adapter.state == ConnectionState.READY
+
+
+@pytest.mark.asyncio
+async def test_emergency_flatten_does_not_confirm_without_post_action_flat_readback():
+    reads = 0
+
+    async def handler(method, path, kwargs):
+        nonlocal reads
+        if method == "GET" and path == "/fapi/v2/positionRisk":
+            reads += 1
+            return [] if reads == 1 else [{
+                "symbol": "BTCUSDT", "positionSide": "BOTH", "positionAmt": "0.001",
+            }]
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    authority = object()
+    adapter.bind_worker_authority(authority)
+
+    assert await adapter.emergency_flatten(authority=authority) == []
+    assert adapter.last_emergency_result["status"] == "UNKNOWN"
+    assert adapter.last_emergency_result["positions_flat_verified"] is False
 
 
 # ---------------------------------------------------------------------------

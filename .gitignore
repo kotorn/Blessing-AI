@@ -7,6 +7,7 @@ coverage/
 *.log
 .env*
 !.env.example
+.local-secrets/
 # Temporary AI patch scripts
 patch_*.cjs
 patch_*.js
@@ -31,6 +32,7 @@ __pycache__/
 .pytest-tmp*/
 .pytest_temp/
 .pytest_temp-*/
+.pytest_temp_*/
 .ruff_cache/
 .mypy_cache/
 src/dataconnect-generated/.guides/

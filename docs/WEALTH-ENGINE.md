@@ -58,9 +58,9 @@ Mainnet progression requires rigorous, evidence-based qualification. Skipping st
 | Stage | Name | Key Verification Requirement | Promotion Gate Criteria |
 |---|---|---|---|
 | **Stage 1** | `OBSERVE_ONLY` | Read-only preflight passing 16/16 checks, signed account snapshot verified | Base telemetry confirmed |
-| **Stage 2** | `SHADOW_TRADING` | Simulated orders against real orderbook without exchange dispatch | $\ge 10$ trades, MaxDD $\le 5\%$, Profit Factor $\ge 1.0$, 0 Rule #0 violations |
-| **Stage 3** | `STAGED_FIRST_ORDER` | 1 real micro-lot order on `ETHUSDC`, manual release approval ID | $\ge 25$ trades, MaxDD $\le 4\%$, Sharpe $\ge 0.8$, 0 Rule #0 violations |
-| **Stage 4** | `SMALL_LIVE` | Live trading capped at 0.5x leverage, 1 symbol | $\ge 50$ trades, MaxDD $\le 3.5\%$, Sharpe $\ge 1.0$, WinRate $\ge 50\%$ |
+| **Stage 2** | `SHADOW_TRADING` | Simulated orders against real orderbook without exchange dispatch | OOS and Shadow: at least 50 closed baskets combined; each cohort independently MaxDD $\le 3.5\%$, Sharpe $\ge 1.0$, Win Rate $\ge 50\%$, 0 Rule #0 violations |
+| **Stage 3** | `STAGED_FIRST_ORDER` | Local or Cloud release approval is runtime-target-specific; first order is separately gated | Same OOS/Shadow gate, authentic provenance, read-only preflight, durable persistence, authorization, lease/fencing, and zero prior order attempts |
+| **Stage 4** | `SMALL_LIVE` | `ETHUSDC`, one active exposure chain; configured and effective leverage at most 10x, read but never set automatically | Basket budget 250 USDC, basket DD 125 USDC, daily loss 5 USDC, collateral 250 USDC, gross exposure 1,000 USDC, first order 50 USDC, net risk:reward at least 1:2 |
 | **Stage 5** | `CONSTRAINED_AUTONOMOUS` | Autonomous trading across 3 symbols with strict exposure caps | $\ge 100$ trades, MaxDD $\le 3.0\%$, Sharpe $\ge 1.3$, Growth Score $\ge 70$ |
 | **Stage 6** | `PORTFOLIO_AUTONOMOUS` | Full multi-symbol portfolio rebalancing | $\ge 250$ trades, MaxDD $\le 2.5\%$, Sharpe $\ge 1.6$, Sortino $\ge 2.0$ |
 

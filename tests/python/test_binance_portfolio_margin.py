@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -56,7 +57,7 @@ async def test_rest_client_read_only_blocks_papi_order():
     client = BinanceRestClient(
         "key", "secret", BinanceEnvironment.MAINNET, read_only=True, portfolio_margin=True
     )
-    with pytest.raises(PermissionError, match="Read-only Binance client cannot call the order endpoint"):
+    with pytest.raises(PermissionError, match="Read-only Binance client cannot mutate an order endpoint"):
         await client.request("POST", "/papi/v1/um/order", signed=True)
     assert client.order_endpoint_attempts == 1
 
@@ -207,6 +208,7 @@ async def test_reconciliation_snapshot_portfolio_margin():
     assert positions[0]["symbol"] == "ETHUSDC"
     assert positions[0]["leverage"] == "2"
 
+    observed_at = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
     snapshot = build_account_snapshot(
         account,
         positions,
@@ -216,7 +218,9 @@ async def test_reconciliation_snapshot_portfolio_margin():
         daily_loss_asset="USDC",
         daily_pnl_includes_fees=True,
         daily_pnl_includes_funding=True,
+        observed_at=observed_at,
     )
+    assert snapshot.timestamp == observed_at
     assert snapshot.margin_mode == "CROSS"
     assert snapshot.margin_mode_known is True
     assert snapshot.collateral_asset == "USDC"
@@ -371,5 +375,3 @@ async def test_portfolio_margin_synthesizes_margin_balance_with_unrealized_pnl()
     # marginBalance = 100.0 + (-15.5) = 84.5 (not 100.0)
     assert usdc_asset["marginBalance"] == "84.5"
     assert usdc_asset["unrealizedProfit"] == "-15.5"
-
-

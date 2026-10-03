@@ -1,0 +1,17 @@
+{
+  "version": "local-live-research-pilot-v1",
+  "target": "LOCAL",
+  "symbol": "ETHUSDC",
+  "market": "USD_M_FUTURES",
+  "position_notional_usdc": "50",
+  "order_notional_usdc": "50",
+  "total_exposure_usdc": "50",
+  "planned_stop_risk_usdc": "2",
+  "campaign_drawdown_usdc": "5",
+  "max_leverage": "10",
+  "quick_target_net_usdc": "0.25",
+  "quick_max_hold_seconds": 86400,
+  "min_net_reward_usdc": "0.25",
+  "min_reward_to_risk": "0.125",
+  "management_mode": "QUICK"
+}

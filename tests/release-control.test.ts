@@ -123,6 +123,9 @@ describe('mainnet release control boundary', () => {
 
   it('rejects stale, mismatched, or already-approved release evidence', () => {
     const release = candidate();
+    expect(validateReleaseCandidate({ ...release, runtimeTarget: 'LOCAL' }, NOW)).toContain(
+      'Cloud release candidate runtimeTarget must be CLOUD_RUN',
+    );
     expect(validateApprovalPrerequisites(release, passingSnapshot(), NOW)).toEqual([]);
     expect(validateApprovalPrerequisites(release, { ...passingSnapshot(), currentImageDigest: IMAGE.replace(/a/g, 'b') }, NOW)).toContain(
       'worker image digest does not match candidate',

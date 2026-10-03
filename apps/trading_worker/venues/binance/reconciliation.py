@@ -1,5 +1,7 @@
 """Authoritative Binance USDⓈ-M account, order, fill, and position reconciliation."""
 
+import hashlib
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -16,6 +18,18 @@ from .models import BinanceAuthenticationError, ExchangeAccountSnapshot
 from .rest_client import BinanceRestClient
 
 logger = logging.getLogger("blessing.binance.reconciliation")
+
+# FAPI time-filtered history queries accept at most a seven-day interval.
+# Use six-day chunks with an inclusive one-millisecond overlap, then recursively
+# split saturated pages. History older than each endpoint's proven retention
+# is never treated as covered by a short page.
+_HISTORY_WINDOW_MS = 6 * 24 * 60 * 60 * 1000
+_HISTORY_OVERLAP_MS = 1
+_ALL_ORDERS_RETENTION = timedelta(days=30)  # zero-fill canceled/expired rows may disappear sooner
+_USER_TRADES_RETENTION = timedelta(days=90)
+_ALL_ALGO_RETENTION = timedelta(days=3)
+_HISTORY_PAGE_LIMIT = 1000
+_HISTORY_MAX_SPLIT_DEPTH = 32
 
 
 def _exchange_bool(value: object) -> bool:
@@ -231,6 +245,7 @@ def build_account_snapshot(
     daily_loss_window_end: datetime | None = None,
     configured_leverage: Decimal | None = None,
     configured_symbol: str = "ETHUSDC",
+    observed_at: datetime | None = None,
 ) -> ExchangeAccountSnapshot:
     """Build a truthful snapshot from current Binance v2 account and position responses."""
 
@@ -241,6 +256,8 @@ def build_account_snapshot(
         raise ValueError("Account snapshots are accepted only from fixed Binance environments")
     if not isinstance(account, dict) or not isinstance(position_risk, list):
         raise ValueError("Binance account snapshot payload is invalid")
+    if observed_at is not None and observed_at.tzinfo is None:
+        raise ValueError("Binance account snapshot observation time must be timezone-aware")
 
     collateral_asset = (
         "USDC"
@@ -398,7 +415,7 @@ def build_account_snapshot(
         margin_mode=margin_mode,
         margin_mode_known=margin_mode_known,
         valid=True,
-        timestamp=utc_now(),
+        timestamp=observed_at or utc_now(),
     )
 
 
@@ -496,9 +513,353 @@ class BinanceReconciliation:
         self.last_status = "UNKNOWN"
         self.authentication_failed = False
         self._unattributed_fill_diffs: List[ReconciliationDiff] = []
+        self._history_diffs: List[ReconciliationDiff] = []
         self._recovered_trade_ids: set[str] = set()
         self.daily_loss_window_start: datetime | None = None
         self.daily_loss_window_end: datetime | None = None
+        self.algo_protection_repository: Any = None
+        self.history_repository: Any = None
+        # A Testnet baseline is usable only when a separate caller establishes
+        # a durable run anchor and explicitly selects that run here.
+        self.testnet_history_run_id: str | None = None
+        self.require_testnet_algo_ownership = False
+
+    def _resolve_history_repository(self) -> Any:
+        if self.history_repository is not None:
+            return self.history_repository
+        callbacks = (
+            getattr(self.ledger, "on_order_update", None),
+            getattr(self.ledger, "on_fill_update", None),
+            getattr(self.ledger, "on_position_update", None),
+        )
+        for callback in callbacks:
+            manager = getattr(callback, "__self__", None)
+            persistence = getattr(manager, "repository", None)
+            history = getattr(persistence, "binance_history", None)
+            if history is not None:
+                self.history_repository = history
+                return history
+        return None
+
+    @staticmethod
+    def _history_timestamp(row: Dict[str, Any], fields: tuple[str, ...]) -> datetime:
+        raw = next((row.get(field) for field in fields if row.get(field) not in (None, "")), None)
+        if isinstance(raw, datetime):
+            parsed = raw
+        elif isinstance(raw, (int, float, Decimal)) and not isinstance(raw, bool):
+            number = float(raw)
+            if not number.is_integer() or number <= 0:
+                raise FillRecoveryError("Binance history timestamp is invalid")
+            if number > 100_000_000_000:
+                number /= 1000.0
+            try:
+                parsed = datetime.fromtimestamp(number, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError) as exc:
+                raise FillRecoveryError("Binance history timestamp is invalid") from exc
+        elif isinstance(raw, str):
+            normalized = raw.strip()
+            if normalized.endswith("Z"):
+                normalized = normalized[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError as exc:
+                raise FillRecoveryError("Binance history timestamp is invalid") from exc
+        else:
+            raise FillRecoveryError("Binance history row has no usable event timestamp")
+        if parsed.tzinfo is None:
+            raise FillRecoveryError("Binance history timestamp is not timezone-aware")
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _history_item(
+        cls,
+        row: Dict[str, Any],
+        *,
+        history_kind: str,
+        id_field: str,
+        client_field: str,
+        time_fields: tuple[str, ...],
+    ) -> dict[str, Any]:
+        try:
+            item_id = int(row[id_field])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FillRecoveryError(f"{history_kind} item ID is invalid") from exc
+        if isinstance(row.get(id_field), bool) or item_id <= 0:
+            raise FillRecoveryError(f"{history_kind} item ID is invalid")
+        try:
+            canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise FillRecoveryError(f"{history_kind} row cannot be fingerprinted") from exc
+        client_id = str(row.get(client_field) or "").strip() or None
+        return {
+            "item_id": item_id,
+            "client_id": client_id,
+            "event_at": cls._history_timestamp(row, time_fields),
+            "payload_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "payload": dict(row),
+        }
+
+    @staticmethod
+    def _history_millis(value: datetime) -> int:
+        if value.tzinfo is None:
+            raise FillRecoveryError("Binance history window timestamp is not timezone-aware")
+        return int(value.astimezone(timezone.utc).timestamp() * 1000)
+
+    @classmethod
+    def _bounded_history_windows(cls, start_ms: int, end_ms: int) -> list[tuple[int, int]]:
+        if start_ms <= 0 or end_ms <= start_ms:
+            raise FillRecoveryError("Binance history coverage window did not advance")
+        windows: list[tuple[int, int]] = []
+        cursor = start_ms
+        while cursor < end_ms:
+            window_end = min(cursor + _HISTORY_WINDOW_MS, end_ms)
+            if window_end <= cursor:
+                raise FillRecoveryError("Binance history window cursor did not advance")
+            windows.append((cursor, window_end))
+            if window_end == end_ms:
+                break
+            cursor = window_end - _HISTORY_OVERLAP_MS
+        return windows
+
+    async def _scan_history_window(
+        self,
+        *,
+        repository: Any,
+        checkpoint: dict[str, Any],
+        symbol: str,
+        history_kind: str,
+        path: str,
+        start_ms: int,
+        end_ms: int,
+        cursor_id: int,
+        depth: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        if end_ms <= start_ms:
+            raise FillRecoveryError("Binance history sub-window did not advance")
+        response = await self.rest_client.request(
+            "GET",
+            path,
+            signed=True,
+            params={
+                "symbol": symbol,
+                "startTime": start_ms,
+                "endTime": end_ms,
+                "limit": _HISTORY_PAGE_LIMIT,
+            },
+        )
+        if not isinstance(response, list) or len(response) > _HISTORY_PAGE_LIMIT:
+            raise FillRecoveryError(f"{history_kind} bounded time-window response is invalid")
+        if len(response) == _HISTORY_PAGE_LIMIT:
+            midpoint = start_ms + (end_ms - start_ms) // 2
+            if depth >= _HISTORY_MAX_SPLIT_DEPTH or midpoint <= start_ms or midpoint >= end_ms:
+                raise FillRecoveryError(
+                    f"{history_kind} saturated at an unsplittable timestamp interval"
+                )
+            left, cursor_id = await self._scan_history_window(
+                repository=repository,
+                checkpoint=checkpoint,
+                symbol=symbol,
+                history_kind=history_kind,
+                path=path,
+                start_ms=start_ms,
+                end_ms=midpoint,
+                cursor_id=cursor_id,
+                depth=depth + 1,
+            )
+            right_start = max(start_ms, midpoint - _HISTORY_OVERLAP_MS)
+            right, cursor_id = await self._scan_history_window(
+                repository=repository,
+                checkpoint=checkpoint,
+                symbol=symbol,
+                history_kind=history_kind,
+                path=path,
+                start_ms=right_start,
+                end_ms=end_ms,
+                cursor_id=cursor_id,
+                depth=depth + 1,
+            )
+            return [*left, *right], cursor_id
+
+        normalized_symbol = str(symbol).upper()
+        rows: list[dict[str, Any]] = []
+        items: list[dict[str, Any]] = []
+        id_field, client_field, time_fields = {
+            "ALL_ORDERS": ("orderId", "clientOrderId", ("time", "updateTime")),
+            "USER_TRADES": ("id", "clientOrderId", ("time",)),
+            "ALL_ALGO_ORDERS": ("algoId", "clientAlgoId", ("createTime", "time", "updateTime")),
+        }[history_kind]
+        for raw in response:
+            if not isinstance(raw, dict) or str(raw.get("symbol", "")).upper() != normalized_symbol:
+                raise FillRecoveryError(f"{history_kind} row has an invalid symbol")
+            item = self._history_item(
+                raw,
+                history_kind=history_kind,
+                id_field=id_field,
+                client_field=client_field,
+                time_fields=time_fields,
+            )
+            event_ms = self._history_millis(item["event_at"])
+            if event_ms < start_ms or event_ms > end_ms:
+                raise FillRecoveryError(f"{history_kind} row escaped its requested time window")
+            items.append(item)
+            rows.append(raw)
+
+        try:
+            cursor_id = await repository.persist_history_page(
+                checkpoint=checkpoint,
+                expected_cursor_id=cursor_id,
+                items=items,
+                observed_at=datetime.now(timezone.utc),
+            )
+        except Exception as exc:
+            raise FillRecoveryError(f"{history_kind} page could not be durably deduplicated") from exc
+        return rows, cursor_id
+
+    async def _scan_launch_history(
+        self, *, symbol: str, history_kind: str, path: str, retention: timedelta
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        repository = self._resolve_history_repository()
+        if repository is None:
+            raise FillRecoveryError("durable Binance launch-history repository is unavailable")
+        now = datetime.now(timezone.utc)
+        try:
+            if self.environment == environment_label(BinanceEnvironment.TESTNET):
+                if not self.testnet_history_run_id:
+                    raise RuntimeError("Testnet caller did not select a durable run anchor")
+                checkpoint = await repository.begin_testnet_scan(
+                    run_id=self.testnet_history_run_id,
+                    symbol=symbol,
+                    history_kind=history_kind,
+                    retention_seconds=int(retention.total_seconds()),
+                    now=now,
+                )
+            else:
+                checkpoint = await repository.begin_mainnet_scan(
+                    symbol=symbol,
+                    history_kind=history_kind,
+                    retention_seconds=int(retention.total_seconds()),
+                    now=now,
+                )
+        except Exception as exc:
+            raise FillRecoveryError("durable Binance launch-history anchor/checkpoint is unavailable") from exc
+        try:
+            start_ms = self._history_millis(checkpoint["scan_from_at"])
+            end_ms = self._history_millis(checkpoint["scan_to_at"])
+            windows = self._bounded_history_windows(start_ms, end_ms)
+            cursor_id = int(checkpoint["cursor_id"])
+            rows: list[dict[str, Any]] = []
+            for window_start, window_end in windows:
+                page_rows, cursor_id = await self._scan_history_window(
+                    repository=repository,
+                    checkpoint=checkpoint,
+                    symbol=symbol,
+                    history_kind=history_kind,
+                    path=path,
+                    start_ms=window_start,
+                    end_ms=window_end,
+                    cursor_id=cursor_id,
+                )
+                rows.extend(page_rows)
+            await repository.complete_history_scan(checkpoint)
+            persisted = await repository.list_history_items(checkpoint)
+        except FillRecoveryError:
+            raise
+        except Exception as exc:
+            raise FillRecoveryError(f"{history_kind} coverage could not be completed") from exc
+        # Downstream ownership/trigger/fill linkage must survive an empty
+        # overlap scan after restart. The repository returns the latest durable
+        # observation per exchange ID, including rows from earlier scans.
+        durable_rows = self._durable_history_payloads(persisted, history_kind, symbol)
+        id_field = {"ALL_ORDERS": "orderId", "USER_TRADES": "id", "ALL_ALGO_ORDERS": "algoId"}[history_kind]
+        durable_by_id = {str(row[id_field]): row for row in durable_rows}
+        for row in rows:
+            if durable_by_id.get(str(row.get(id_field))) != row:
+                raise FillRecoveryError("latest exchange history page is missing from durable read-back")
+        return checkpoint, durable_rows, persisted
+
+    @staticmethod
+    def _durable_history_payloads(items: list[dict[str, Any]], kind: str, symbol: str) -> list[dict[str, Any]]:
+        id_field, client_field = {
+            "ALL_ORDERS": ("orderId", "clientOrderId"),
+            "USER_TRADES": ("id", "clientOrderId"),
+            "ALL_ALGO_ORDERS": ("algoId", "clientAlgoId"),
+        }[kind]
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                raise FillRecoveryError("durable history observation has no payload")
+            item_id = str(item.get("item_id") or "")
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            if (
+                not item_id.isdigit() or int(item_id) <= 0 or item_id in seen
+                or str(payload.get(id_field)) != item_id
+                or str(payload.get("symbol") or "").upper() != symbol.upper()
+                or (str(payload.get(client_field) or "") != str(item.get("client_id") or ""))
+                or hashlib.sha256(canonical.encode("utf-8")).hexdigest() != item.get("payload_sha256")
+            ):
+                raise FillRecoveryError("durable history observation identity or fingerprint is invalid")
+            seen.add(item_id)
+            result.append(dict(payload))
+        return result
+
+    async def _persist_exact_history_rows(
+        self, checkpoint: dict[str, Any], rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Persist exact-ID refreshes without moving time-window coverage."""
+        repository = self._resolve_history_repository()
+        observe = getattr(repository, "record_history_observation", None)
+        if not callable(observe):
+            raise FillRecoveryError("durable exact-order/trade observation storage is unavailable")
+        kind = checkpoint["history_kind"]
+        id_field, client_field, time_fields = {
+            "ALL_ORDERS": ("orderId", "clientOrderId", ("time", "updateTime")),
+            "USER_TRADES": ("id", "clientOrderId", ("time",)),
+        }[kind]
+        persisted_rows = []
+        for row in rows:
+            item = self._history_item(
+                row, history_kind=kind, id_field=id_field,
+                client_field=client_field, time_fields=time_fields,
+            )
+            try:
+                persisted = await observe(
+                    checkpoint=checkpoint, item=item, observed_at=utc_now(),
+                )
+                payloads = self._durable_history_payloads(
+                    [persisted], kind, str(checkpoint["symbol"]),
+                )
+            except Exception as exc:
+                raise FillRecoveryError("exact-order/trade observation read-back failed") from exc
+            if payloads != [row]:
+                raise FillRecoveryError("exact-order/trade observation read-back differs from exchange")
+            persisted_rows.extend(payloads)
+        return persisted_rows
+
+    async def _fetch_exact_order_trades(
+        self, symbol: str, order_id: str
+    ) -> list[dict[str, Any]]:
+        """Recover delayed executions independently of a covered time window."""
+        trades = await self.rest_client.request(
+            "GET", self._user_trades_path, signed=True,
+            params={"symbol": symbol, "orderId": order_id, "limit": _HISTORY_PAGE_LIMIT},
+        )
+        if not isinstance(trades, list) or len(trades) >= _HISTORY_PAGE_LIMIT:
+            raise FillRecoveryError("exact-order userTrades response is invalid or incomplete")
+        seen: set[str] = set()
+        for trade in trades:
+            if (
+                not isinstance(trade, dict)
+                or str(trade.get("orderId")) != str(order_id)
+                or str(trade.get("symbol", "")).upper() != symbol.upper()
+            ):
+                raise FillRecoveryError("exact-order userTrades row has a foreign identity")
+            trade_id = self._positive_exchange_id(trade.get("id"), field="trade ID")
+            if trade_id in seen:
+                raise FillRecoveryError("exact-order userTrades contains duplicate trade IDs")
+            seen.add(trade_id)
+        return trades
 
     @property
     def portfolio_margin(self) -> bool:
@@ -519,6 +880,1178 @@ class BinanceReconciliation:
     @property
     def _user_trades_path(self) -> str:
         return "/papi/v1/um/userTrades" if self.portfolio_margin else "/fapi/v1/userTrades"
+
+    @property
+    def _all_orders_path(self) -> str:
+        return "/papi/v1/um/allOrders" if self.portfolio_margin else "/fapi/v1/allOrders"
+
+    @property
+    def _open_algo_orders_path(self) -> str:
+        return "/papi/v1/um/algo/openAlgoOrders" if self.portfolio_margin else "/fapi/v1/openAlgoOrders"
+
+    @property
+    def _algo_order_query_path(self) -> str:
+        return "/papi/v1/um/algo/algoOrder" if self.portfolio_margin else "/fapi/v1/algoOrder"
+
+    @property
+    def _all_algo_orders_path(self) -> str:
+        return "/papi/v1/um/algo/allAlgoOrders" if self.portfolio_margin else "/fapi/v1/allAlgoOrders"
+
+    @staticmethod
+    def _testnet_algo_row_matches_owner(
+        order: Any, owner: dict[str, Any], *, source: str
+    ) -> bool:
+        record = owner["record"]
+        role = owner["role"]
+        try:
+            algo_id = order.get("algoId")
+            valid_algo_id = (
+                not isinstance(algo_id, bool)
+                and str(int(algo_id)) == owner["algo_id"]
+            )
+            actual_trigger = Decimal(str(order.get("triggerPrice")))
+            expected_trigger = Decimal(str(record[f"{role}_trigger_price"]))
+            valid_trigger = (
+                actual_trigger.is_finite()
+                and expected_trigger.is_finite()
+                and actual_trigger == expected_trigger
+            )
+        except (AttributeError, InvalidOperation, TypeError, ValueError):
+            return False
+        expected_type = "STOP_MARKET" if role == "stop" else "TAKE_PROFIT_MARKET"
+        expected_side = "SELL" if record["entry_side"] == "BUY" else "BUY"
+        return bool(
+            valid_algo_id
+            and order.get("clientAlgoId") == owner["client_algo_id"]
+            and str(order.get("symbol", "")).upper() == str(record["symbol"]).upper()
+            and order.get("algoType") == "CONDITIONAL"
+            and order.get("orderType") == expected_type
+            and order.get("algoStatus") == "NEW"
+            and order.get("positionSide") == record["position_side"]
+            and order.get("side") == expected_side
+            and order.get("workingType") == "MARK_PRICE"
+            and valid_trigger
+            and _exchange_bool(order.get("closePosition"))
+            and not _exchange_bool(order.get("reduceOnly"))
+            and source in {"open", "query"}
+        )
+
+    @staticmethod
+    def _testnet_algo_history_row_matches_owner(
+        order: Any, owner: dict[str, Any]
+    ) -> bool:
+        """Match a completed or open Testnet Algo row to its durable owner."""
+        record = owner["record"]
+        role = owner["role"]
+        try:
+            algo_id = order.get("algoId")
+            valid_algo_id = (
+                not isinstance(algo_id, bool)
+                and str(int(algo_id)) == owner["algo_id"]
+            )
+            actual_trigger = Decimal(str(order.get("triggerPrice")))
+            expected_trigger = Decimal(str(record[f"{role}_trigger_price"]))
+            valid_trigger = (
+                actual_trigger.is_finite()
+                and expected_trigger.is_finite()
+                and actual_trigger == expected_trigger
+            )
+        except (AttributeError, InvalidOperation, TypeError, ValueError):
+            return False
+        expected_type = "STOP_MARKET" if role == "stop" else "TAKE_PROFIT_MARKET"
+        expected_side = "SELL" if record["entry_side"] == "BUY" else "BUY"
+        return bool(
+            valid_algo_id
+            and order.get("clientAlgoId") == owner["client_algo_id"]
+            and str(order.get("symbol", "")).upper() == str(record["symbol"]).upper()
+            and order.get("algoType") == "CONDITIONAL"
+            and order.get("orderType") == expected_type
+            and str(order.get("algoStatus", "")).upper()
+            in {"NEW", "CANCELED", "CANCELLED", "EXPIRED", "TRIGGERED", "FINISHED", "REJECTED"}
+            and order.get("positionSide") == record["position_side"]
+            and order.get("side") == expected_side
+            and order.get("workingType") == "MARK_PRICE"
+            and valid_trigger
+            and _exchange_bool(order.get("closePosition"))
+            and not _exchange_bool(order.get("reduceOnly"))
+        )
+
+    @classmethod
+    def _testnet_algo_row_matches_baseline(
+        cls, order: Any, baseline: dict[str, Any]
+    ) -> bool:
+        """Match only the exact immutable, terminal read-only baseline fact."""
+        try:
+            algo_id = order.get("algoId")
+            created_at = cls._history_timestamp(
+                order, ("createTime", "time", "updateTime")
+            )
+            expected_created_at = baseline["algo_created_at"]
+            anchor_at = baseline["anchor_at"]
+            if not isinstance(expected_created_at, datetime) or not isinstance(anchor_at, datetime):
+                return False
+            if expected_created_at.tzinfo is None or anchor_at.tzinfo is None:
+                return False
+        except (AttributeError, KeyError, FillRecoveryError, TypeError, ValueError):
+            return False
+        status = str(order.get("algoStatus") or "").strip().upper()
+        try:
+            valid_algo_id = (
+                not isinstance(algo_id, bool)
+                and str(int(algo_id)) == str(int(baseline["algo_id"]))
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return bool(
+            valid_algo_id
+            and str(order.get("clientAlgoId") or "") == str(baseline["client_algo_id"])
+            and str(order.get("symbol") or "").upper() == str(baseline["symbol"]).upper()
+            and status == str(baseline["terminal_status"]).upper()
+            and created_at == expected_created_at.astimezone(timezone.utc)
+            and created_at < anchor_at.astimezone(timezone.utc)
+        )
+
+    async def _audit_algo_orders(
+        self,
+        tracked_orders: List[Any],
+        *,
+        exchange_positions: List[Dict[str, Any]] | None = None,
+        exchange_open_orders: List[Dict[str, Any]] | None = None,
+    ) -> None:
+        """Fence Mainnet when conditional orders exist or their history is incomplete.
+
+        Algo orders are separate from ordinary openOrders/allOrders. This
+        launch does not own an Algo order, so any observed one is unowned.
+        """
+        if (
+            self.environment == environment_label(BinanceEnvironment.TESTNET)
+            and self.require_testnet_algo_ownership
+        ):
+            repository = self.algo_protection_repository
+            open_orders = await self.rest_client.request(
+                "GET", self._open_algo_orders_path, signed=True,
+            )
+            if not isinstance(open_orders, list) or any(
+                not isinstance(row, dict) for row in open_orders
+            ):
+                raise FillRecoveryError("Testnet openAlgoOrders response is invalid")
+            if repository is None and open_orders:
+                raise FillRecoveryError(
+                    "Testnet open Algo orders exist without durable ownership storage"
+                )
+            active_records = (
+                await repository.list_active_protections(venue="binance_testnet")
+                if repository is not None else []
+            )
+            list_all = getattr(repository, "list_protections", None)
+            history_records = (
+                await list_all(venue="binance_testnet")
+                if callable(list_all) else active_records
+            )
+            expected: dict[tuple[str, str], dict[str, Any]] = {}
+            for record in active_records:
+                if record.get("environment") != "TESTNET" or record.get("state") != "PROTECTED":
+                    raise FillRecoveryError("Testnet Algo lifecycle is not durably PROTECTED")
+                for role in ("stop", "take_profit"):
+                    algo_id = record.get(f"{role}_algo_id")
+                    client_id = record.get(f"{role}_client_algo_id")
+                    if algo_id in (None, "") or not client_id:
+                        raise FillRecoveryError("Testnet protection identity is incomplete")
+                    owner_key = (str(record["symbol"]).upper(), str(client_id))
+                    if owner_key in expected:
+                        raise FillRecoveryError("Testnet protection client identity is duplicated")
+                    expected[owner_key] = {
+                        "algo_id": str(algo_id),
+                        "client_algo_id": str(client_id),
+                        "record": record,
+                        "role": role,
+                    }
+            history_expected: dict[tuple[str, str], dict[str, Any]] = {}
+            for record in history_records:
+                if record.get("environment") != "TESTNET":
+                    raise FillRecoveryError("Testnet Algo history owner has an invalid environment")
+                for role in ("stop", "take_profit"):
+                    client_id = record.get(f"{role}_client_algo_id")
+                    algo_id = record.get(f"{role}_algo_id")
+                    if not client_id:
+                        raise FillRecoveryError("Testnet Algo history owner identity is incomplete")
+                    owner_key = (str(record["symbol"]).upper(), str(client_id))
+                    if owner_key in history_expected:
+                        raise FillRecoveryError("Testnet Algo history owner identity is duplicated")
+                    history_expected[owner_key] = {
+                        "algo_id": str(algo_id) if algo_id not in (None, "") else None,
+                        "client_algo_id": str(client_id),
+                        "record": record,
+                        "role": role,
+                    }
+            seen: set[tuple[str, str]] = set()
+            for order in open_orders:
+                symbol = str(order.get("symbol") or "").upper()
+                client_id = str(order.get("clientAlgoId") or "")
+                key = (symbol, client_id)
+                owner = expected.get(key)
+                if owner is None or key in seen:
+                    raise FillRecoveryError("Testnet open Algo order is unowned or duplicated")
+                seen.add(key)
+                if not self._testnet_algo_row_matches_owner(order, owner, source="open"):
+                    raise FillRecoveryError("Testnet open Algo order differs from durable protection")
+            if seen != set(expected):
+                raise FillRecoveryError("Testnet durable protection is missing an open Algo order")
+            if active_records:
+                positions = await self.rest_client.request(
+                    "GET", self._position_risk_path, signed=True,
+                )
+                if not isinstance(positions, list):
+                    raise FillRecoveryError("Testnet position-risk snapshot is invalid")
+                for record in active_records:
+                    symbol = str(record["symbol"]).upper()
+                    position_side = str(record["position_side"]).upper()
+                    matching_positions = [
+                        row for row in positions
+                        if isinstance(row, dict)
+                        and str(row.get("symbol", "")).upper() == symbol
+                        and str(row.get("positionSide", "BOTH")).upper() == position_side
+                    ]
+                    if len(matching_positions) != 1:
+                        raise FillRecoveryError("Testnet protected position identity is not unique")
+                    try:
+                        amount = Decimal(str(matching_positions[0]["positionAmt"]))
+                        filled = Decimal(str(record["filled_quantity"]))
+                    except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+                        raise FillRecoveryError("Testnet protected position quantity is invalid") from exc
+                    positive_position = (
+                        position_side == "LONG"
+                        or (position_side == "BOTH" and record["entry_side"] == "BUY")
+                    )
+                    if (
+                        not amount.is_finite()
+                        or not filled.is_finite()
+                        or amount == 0
+                        or abs(amount) != filled
+                        or (amount > 0) != positive_position
+                    ):
+                        raise FillRecoveryError("Testnet position no longer matches the protected fill")
+
+                for key, owner in expected.items():
+                    query = await self.rest_client.request(
+                        "GET", self._algo_order_query_path, signed=True,
+                        params={"symbol": key[0], "algoId": owner["algo_id"]},
+                    )
+                    if (
+                        not isinstance(query, dict)
+                        or not self._testnet_algo_row_matches_owner(
+                            query, owner, source="query"
+                        )
+                    ):
+                        raise FillRecoveryError(
+                            "Testnet Algo query differs from durable protection"
+                        )
+            history_repository = self._resolve_history_repository()
+            if history_repository is None or not self.testnet_history_run_id:
+                raise FillRecoveryError(
+                    "Testnet Algo history requires a durable run anchor and checkpoint repository"
+                )
+            try:
+                checkpoint, raw_history, persisted_history = await self._scan_launch_history(
+                    symbol="ETHUSDC",
+                    history_kind="ALL_ALGO_ORDERS",
+                    path=self._all_algo_orders_path,
+                    retention=_ALL_ALGO_RETENTION,
+                )
+                baselines = await history_repository.list_preexisting_algo_baselines(
+                    run_id=self.testnet_history_run_id,
+                    symbol="ETHUSDC",
+                )
+            except Exception as exc:
+                if isinstance(exc, FillRecoveryError):
+                    raise
+                raise FillRecoveryError("Testnet Algo history anchor or baseline is invalid") from exc
+
+            baselines_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+            for baseline in baselines:
+                key = (str(baseline["symbol"]).upper(), str(baseline["client_algo_id"]))
+                if key in baselines_by_key:
+                    raise FillRecoveryError("Testnet Algo baseline identity is duplicated")
+                baselines_by_key[key] = baseline
+
+            # Endpoint rows are not ordered reliably: this account returned
+            # newest-first despite the inclusive algoId cursor. Deduplicate by
+            # ID and normalize before comparing owners or recording coverage.
+            history_by_id: dict[str, dict[str, Any]] = {}
+            for row in raw_history:
+                algo_id = str(int(row["algoId"]))
+                previous = history_by_id.get(algo_id)
+                if previous is not None and previous != row:
+                    raise FillRecoveryError("Testnet Algo page repeats an ID with conflicting data")
+                history_by_id[algo_id] = row
+            history_seen: set[tuple[str, str]] = set()
+            history_ids: dict[str, str] = {}
+            for row in (history_by_id[key] for key in sorted(history_by_id, key=int)):
+                algo_id = str(int(row["algoId"]))
+                client_id = str(row.get("clientAlgoId") or "")
+                key = ("ETHUSDC", client_id)
+                owner = history_expected.get(key)
+                baseline = baselines_by_key.get(key)
+                previous_id = history_ids.get(client_id)
+                if not client_id or key in history_seen or (
+                    previous_id is not None and previous_id != algo_id
+                ):
+                    raise FillRecoveryError("Testnet Algo history is duplicated or has no client identity")
+                if owner is not None:
+                    if (
+                        owner["algo_id"] is None
+                        or owner["algo_id"] != algo_id
+                        or not self._testnet_algo_history_row_matches_owner(row, owner)
+                    ):
+                        raise FillRecoveryError("Testnet Algo history differs from durable ownership")
+                elif baseline is None or not self._testnet_algo_row_matches_baseline(row, baseline):
+                    raise FillRecoveryError("Testnet Algo history is unowned and has no exact baseline proof")
+                history_seen.add(key)
+                history_ids[client_id] = algo_id
+
+            # Previously validated rows remain durable across restarts and
+            # beyond Binance's short Algo-history retention, but only the exact
+            # exchange ID/client ID pair can satisfy an existing owner.
+            durable_history = {
+                (str(item["client_id"]), str(item["item_id"]))
+                for item in persisted_history
+                if item.get("client_id") not in (None, "")
+            }
+            expected_history = {
+                key for key, owner in history_expected.items()
+                if owner["algo_id"] is not None
+            }
+            for key in expected_history - history_seen:
+                owner = history_expected[key]
+                if (key[1], owner["algo_id"]) not in durable_history:
+                    raise FillRecoveryError("Testnet durable Algo owner is missing from history")
+            return
+        if self.environment != environment_label(BinanceEnvironment.MAINNET):
+            return
+        open_algo_orders = await self.rest_client.request(
+            "GET", self._open_algo_orders_path, signed=True,
+        )
+        if not isinstance(open_algo_orders, list) or any(
+            not isinstance(row, dict) for row in open_algo_orders
+        ):
+            raise FillRecoveryError("openAlgoOrders response is invalid")
+        if (
+            self.algo_protection_repository is not None
+            and (exchange_positions is None or exchange_open_orders is None)
+        ):
+            _, fetched_positions, fetched_orders = (
+                await self._fetch_reconciliation_snapshot_inputs()
+            )
+            exchange_positions = fetched_positions
+            exchange_open_orders = fetched_orders
+        await self._audit_mainnet_algo_lifecycle(
+            open_algo_orders,
+            exchange_positions=exchange_positions or [],
+            exchange_open_orders=exchange_open_orders or [],
+        )
+
+    @staticmethod
+    def _positive_exchange_id(value: object, *, field: str) -> str:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise FillRecoveryError(f"Binance {field} is missing or invalid") from exc
+        if isinstance(value, bool) or parsed <= 0 or str(parsed) != str(value):
+            raise FillRecoveryError(f"Binance {field} is missing or invalid")
+        return str(parsed)
+
+    @classmethod
+    def _triggered_algo_order_id(cls, algo: Dict[str, Any]) -> str:
+        values = [
+            algo.get(field)
+            for field in ("actualOrderId", "orderId")
+            if algo.get(field) not in (None, "", 0, "0")
+        ]
+        normalized = {
+            cls._positive_exchange_id(value, field="triggered Algo order ID")
+            for value in values
+        }
+        if len(normalized) != 1:
+            raise FillRecoveryError(
+                "triggered Algo history does not identify exactly one normal order"
+            )
+        return next(iter(normalized))
+
+    @staticmethod
+    def _matching_position_amount(
+        positions: List[Dict[str, Any]], *, symbol: str, position_side: str
+    ) -> Decimal:
+        matches = [
+            row for row in positions
+            if isinstance(row, dict)
+            and str(row.get("symbol", "")).upper() == symbol.upper()
+            and str(row.get("positionSide", "")).upper() == position_side.upper()
+        ]
+        if len(matches) != 1:
+            raise FillRecoveryError("Algo owner position snapshot is missing or ambiguous")
+        try:
+            amount = Decimal(str(matches[0]["positionAmt"]))
+        except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+            raise FillRecoveryError("Algo owner position quantity is invalid") from exc
+        if not amount.is_finite():
+            raise FillRecoveryError("Algo owner position quantity is non-finite")
+        return amount
+
+    @staticmethod
+    def _mainnet_closure_proof_matches_owner(
+        record: Dict[str, Any], *, launch_id: str
+    ) -> bool:
+        raw = record.get("closure_evidence")
+        try:
+            evidence = json.loads(raw) if isinstance(raw, str) else dict(raw) if isinstance(raw, dict) else raw
+            if not isinstance(evidence, dict) or evidence.get("kind") not in {
+                "BINANCE_ALGO_CLOSE_VERIFIED",
+                "LOCAL_EMERGENCY_CLOSE_VERIFIED",
+            }:
+                return False
+            emergency_close = evidence.get("kind") == "LOCAL_EMERGENCY_CLOSE_VERIFIED"
+            proof_sha256 = str(evidence.pop("proof_sha256", ""))
+            canonical = json.dumps(
+                evidence, sort_keys=True, separators=(",", ":"), allow_nan=False
+            )
+            if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != proof_sha256:
+                return False
+            return (
+                evidence.get("symbol") == str(record.get("symbol", "")).upper()
+                and evidence.get("entry_client_order_id")
+                == str(record.get("entry_client_order_id", ""))
+                and evidence.get("mainnet_launch_id") == launch_id
+                and evidence.get("basket_id") == record.get("basket_id")
+                and (
+                    evidence.get("algo_id") == "LOCAL_EMERGENCY_CLOSE"
+                    if emergency_close
+                    else str(evidence.get("algo_id", ""))
+                    in {
+                        str(record.get("stop_algo_id") or ""),
+                        str(record.get("take_profit_algo_id") or ""),
+                    }
+                )
+                and evidence.get("order_status") == "FILLED"
+                and Decimal(str(evidence.get("executed_quantity")))
+                == Decimal(str(record.get("filled_quantity")))
+                and Decimal(str(evidence.get("trade_quantity")))
+                == Decimal(str(record.get("filled_quantity")))
+                and Decimal(str(evidence.get("position_quantity"))) == 0
+                and evidence.get("open_child_order_ids") == []
+                and evidence.get("open_owner_algo_ids") == []
+            )
+        except (InvalidOperation, TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+    async def _mainnet_unfilled_entry_proof_matches_owner(
+        self, record: Dict[str, Any], *, launch_id: str
+    ) -> bool:
+        """Verify a durable zero-fill terminal entry using its exact exchange order."""
+        try:
+            if (
+                str(record.get("environment") or "").upper() != "MAINNET"
+                or str(record.get("venue") or "").lower() != "binance_mainnet"
+                or str(record.get("mainnet_launch_id") or "") != launch_id
+                or Decimal(str(record.get("filled_quantity"))) != 0
+                or record.get("entry_average_price") is not None
+            ):
+                return False
+            proof_fields = {}
+            for part in str(record.get("state_reason") or "").split(";"):
+                if "=" not in part:
+                    return False
+                key, value = part.split("=", 1)
+                if key in proof_fields:
+                    return False
+                proof_fields[key] = value
+            if set(proof_fields) != {
+                "unfilled_entry_order_id",
+                "unfilled_entry_status",
+                "unfilled_entry_executed_qty",
+            } or proof_fields["unfilled_entry_executed_qty"] != "0":
+                return False
+            terminal = {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
+            order_id = proof_fields["unfilled_entry_order_id"]
+            status = proof_fields["unfilled_entry_status"].upper()
+            if not order_id.isdigit() or int(order_id) <= 0 or status not in terminal:
+                return False
+            client_id = str(record.get("entry_client_order_id") or "")
+            symbol = str(record.get("symbol") or "").upper()
+            owner_order = await self.ledger.get_order_by_client_id(client_id)
+            if (
+                owner_order is None
+                or str(getattr(owner_order, "exchange_order_id", "") or "") != order_id
+                or str(getattr(owner_order, "status", "")).upper() != status
+                or str(getattr(owner_order, "client_order_id", "")) != client_id
+                or str(getattr(owner_order, "symbol", "")).upper() != symbol
+                or str(getattr(
+                    getattr(owner_order, "side", ""), "value", getattr(owner_order, "side", "")
+                )).upper() != str(record.get("entry_side") or "").upper()
+                or str(getattr(
+                    getattr(owner_order, "position_side", ""),
+                    "value",
+                    getattr(owner_order, "position_side", ""),
+                )).upper() != str(record.get("position_side") or "").upper()
+                or Decimal(str(getattr(owner_order, "quantity", "NaN")))
+                != Decimal(str(record.get("requested_quantity")))
+            ):
+                return False
+            response = await self.rest_client.request(
+                "GET", self._order_path, signed=True,
+                params={"symbol": symbol, "orderId": int(order_id)},
+            )
+            if not isinstance(response, dict):
+                return False
+            executed = Decimal(str(response.get("executedQty")))
+            original = Decimal(str(response.get("origQty")))
+            return bool(
+                str(response.get("symbol") or "").upper() == symbol
+                and str(response.get("orderId") or "") == order_id
+                and str(response.get("clientOrderId") or "") == client_id
+                and str(response.get("side") or "").upper()
+                == str(record.get("entry_side") or "").upper()
+                and str(response.get("positionSide") or "BOTH").upper()
+                == str(record.get("position_side") or "").upper()
+                and str(response.get("status") or "").upper() == status
+                and status in terminal
+                and executed.is_finite()
+                and executed == 0
+                and original.is_finite()
+                and original > 0
+                and original == Decimal(str(record.get("requested_quantity")))
+                and not any(
+                    str(getattr(fill, "client_order_id", "")) == client_id
+                    or str(getattr(fill, "exchange_order_id", "")) == order_id
+                    for fill in await self.ledger.get_fills()
+                )
+            )
+        except (InvalidOperation, TypeError, ValueError, KeyError):
+            return False
+
+    async def _audit_mainnet_algo_lifecycle(
+        self,
+        open_algo_orders: List[Dict[str, Any]],
+        *,
+        exchange_positions: List[Dict[str, Any]],
+        exchange_open_orders: List[Dict[str, Any]],
+    ) -> None:
+        """Reconcile Local Mainnet Algo owners and close only proven-flat chains.
+
+        This routine is read-only against Binance. It can append an exchange
+        child order to the local ledger only after the durable Algo owner and
+        Binance's linked order ID agree exactly; this gives subsequent fill
+        recovery a durable lineage rather than silently adopting an unknown
+        account order.
+        """
+        repository = self.algo_protection_repository
+        if repository is None:
+            if open_algo_orders:
+                raise FillRecoveryError(
+                    "unowned open Mainnet Algo orders exist without durable owner storage"
+                )
+            checkpoint, _, persisted = await self._scan_launch_history(
+                symbol="ETHUSDC",
+                history_kind="ALL_ALGO_ORDERS",
+                path=self._all_algo_orders_path,
+                retention=_ALL_ALGO_RETENTION,
+            )
+            anchor_at = checkpoint["anchor_at"].astimezone(timezone.utc)
+            if any(
+                isinstance(row.get("event_at"), datetime)
+                and row["event_at"].astimezone(timezone.utc) >= anchor_at
+                for row in persisted
+            ):
+                raise FillRecoveryError("unowned Algo order history exists")
+            return
+
+        list_all = getattr(repository, "list_protections", None)
+        list_active = getattr(repository, "list_active_protections", None)
+        if not callable(list_all) or not callable(list_active):
+            raise FillRecoveryError("Mainnet Algo repository cannot enumerate durable owners")
+        checkpoint, algo_history, persisted_history = await self._scan_launch_history(
+            symbol="ETHUSDC",
+            history_kind="ALL_ALGO_ORDERS",
+            path=self._all_algo_orders_path,
+            retention=_ALL_ALGO_RETENTION,
+        )
+        mainnet_launch_id = str(checkpoint.get("run_id") or "")
+        if not mainnet_launch_id:
+            raise FillRecoveryError("Mainnet Algo reconciliation has no durable launch identity")
+        anchor_at = checkpoint["anchor_at"].astimezone(timezone.utc)
+        all_records = await list_all(venue="binance_mainnet")
+        all_active_records = await list_active(venue="binance_mainnet")
+        if any(
+            not isinstance(record, dict)
+            or record.get("environment") != "MAINNET"
+            or str(record.get("symbol", "")).upper() != "ETHUSDC"
+            for record in all_records
+        ):
+            raise FillRecoveryError("Mainnet Algo owner scope or environment is invalid")
+        if any(
+            str(record.get("mainnet_launch_id") or "") != mainnet_launch_id
+            for record in all_active_records
+        ):
+            raise FillRecoveryError("active Mainnet Algo owner belongs to a different or unbound launch")
+        # Closed history from earlier launches remains auditable in PostgreSQL,
+        # but it must not be mixed into this launch's owner map.
+        all_records = [
+            record
+            for record in all_records
+            if str(record.get("mainnet_launch_id") or "") == mainnet_launch_id
+        ]
+        active_records = [
+            record
+            for record in all_active_records
+            if str(record.get("mainnet_launch_id") or "") == mainnet_launch_id
+        ]
+
+        owners: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        owners_by_entry: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for record in all_records:
+            owner_entry = (
+                str(record["symbol"]).upper(),
+                str(record["entry_client_order_id"]),
+            )
+            if owner_entry in owners_by_entry:
+                raise FillRecoveryError("Mainnet Algo entry owner identity is duplicated")
+            owners_by_entry[owner_entry] = record
+            for role in ("stop", "take_profit"):
+                client_id = str(record.get(f"{role}_client_algo_id") or "")
+                algo_id = record.get(f"{role}_algo_id")
+                if not client_id:
+                    raise FillRecoveryError("Mainnet Algo protection client identity is missing")
+                key = (owner_entry[0], client_id)
+                if key in owners:
+                    raise FillRecoveryError("Mainnet Algo protection identity is duplicated")
+                owners[key] = {
+                    "algo_id": str(algo_id) if algo_id not in (None, "") else None,
+                    "client_algo_id": client_id,
+                    "record": record,
+                    "role": role,
+                }
+        active_keys = {
+            (str(record.get("symbol", "")).upper(), str(record.get("entry_client_order_id", "")))
+            for record in active_records
+        }
+        if not active_keys.issubset(owners_by_entry):
+            raise FillRecoveryError("active Mainnet Algo owner is missing from owner history")
+
+        launch_rows: Dict[str, Dict[str, Any]] = {}
+        launch_clients: Dict[Tuple[str, str], str] = {}
+        triggered_by_entry: Dict[Tuple[str, str], List[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+        for row in algo_history:
+            algo_id = self._positive_exchange_id(row.get("algoId"), field="Algo ID")
+            previous = launch_rows.get(algo_id)
+            if previous is not None and previous != row:
+                raise FillRecoveryError("Mainnet Algo history repeats an ID with conflicting data")
+            launch_rows[algo_id] = row
+        for row in launch_rows.values():
+            client_id = str(row.get("clientAlgoId") or "")
+            symbol = str(row.get("symbol") or "").upper()
+            owner_key = (symbol, client_id)
+            owner = owners.get(owner_key)
+            if owner is None:
+                raise FillRecoveryError("unowned Algo order history exists")
+            if owner["algo_id"] != str(int(row["algoId"])) or not self._testnet_algo_history_row_matches_owner(row, owner):
+                raise FillRecoveryError("Mainnet Algo history differs from its durable owner")
+            previous_id = launch_clients.get(owner_key)
+            if previous_id is not None and previous_id != owner["algo_id"]:
+                raise FillRecoveryError("Mainnet Algo client ID maps to multiple exchange IDs")
+            launch_clients[owner_key] = owner["algo_id"]
+            status = str(row.get("algoStatus") or "").strip().upper()
+            if status in {"TRIGGERED", "FINISHED"}:
+                entry_key = (symbol, str(owner["record"]["entry_client_order_id"]))
+                triggered_by_entry.setdefault(entry_key, []).append((row, owner))
+
+        # allAlgoOrders is a create-time history route: an Algo created before
+        # the last durable checkpoint can trigger later and never appear in a
+        # subsequent create-time window. Query every active owned Algo by its
+        # exact exchange ID so the lifecycle uses a fresh exchange state.
+        for record in active_records:
+            owner_state = str(record.get("state") or "").upper()
+            try:
+                owner_filled = Decimal(str(record.get("filled_quantity")))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise FillRecoveryError("active Mainnet Algo owner fill quantity is invalid") from exc
+            if not owner_filled.is_finite() or owner_filled < 0:
+                raise FillRecoveryError("active Mainnet Algo owner fill quantity is invalid")
+            if owner_state == "PENDING" and owner_filled == 0:
+                if record.get("stop_algo_id") or record.get("take_profit_algo_id"):
+                    raise FillRecoveryError("unfilled Mainnet PENDING owner has assigned protection IDs")
+                continue
+            for role in ("stop", "take_profit"):
+                owner_key = (
+                    str(record["symbol"]).upper(),
+                    str(record[f"{role}_client_algo_id"]),
+                )
+                owner = owners.get(owner_key)
+                if owner is None or owner["algo_id"] is None:
+                    raise FillRecoveryError("active Mainnet Algo owner has no assigned exchange ID")
+                try:
+                    current_row = await self.rest_client.request(
+                        "GET",
+                        self._algo_order_query_path,
+                        signed=True,
+                        params={"symbol": owner_key[0], "algoId": owner["algo_id"]},
+                    )
+                except Exception as exc:
+                    raise FillRecoveryError(
+                        "active Mainnet Algo state could not be refreshed by exact exchange ID"
+                    ) from exc
+                if (
+                    not isinstance(current_row, dict)
+                    or not self._testnet_algo_history_row_matches_owner(current_row, owner)
+                ):
+                    raise FillRecoveryError(
+                        "fresh Mainnet Algo state differs from its durable owner"
+                    )
+                history_repository = self._resolve_history_repository()
+                observe = getattr(history_repository, "record_algo_history_observation", None)
+                if not callable(observe):
+                    raise FillRecoveryError("durable exact-ID Algo observation storage is unavailable")
+                exact_item = self._history_item(
+                    current_row,
+                    history_kind="ALL_ALGO_ORDERS",
+                    id_field="algoId",
+                    client_field="clientAlgoId",
+                    time_fields=("createTime", "time", "updateTime"),
+                )
+                exact_item["payload"] = current_row
+                try:
+                    await observe(
+                        checkpoint=checkpoint,
+                        item=exact_item,
+                        observed_at=datetime.now(timezone.utc),
+                    )
+                except Exception as exc:
+                    raise FillRecoveryError(
+                        "fresh exact-ID Algo state could not be durably recorded"
+                    ) from exc
+                launch_rows[owner["algo_id"]] = current_row
+
+        # Rebuild trigger ownership from the latest exact-ID snapshots above;
+        # historical pages alone may contain only the original NEW state.
+        triggered_by_entry.clear()
+        for row in launch_rows.values():
+            status = str(row.get("algoStatus") or "").strip().upper()
+            if status not in {"TRIGGERED", "FINISHED"}:
+                continue
+            owner = owners.get(
+                (str(row.get("symbol") or "").upper(), str(row.get("clientAlgoId") or ""))
+            )
+            if owner is None:
+                raise FillRecoveryError("triggered Mainnet Algo has no durable owner")
+            entry_key = (
+                str(owner["record"]["symbol"]).upper(),
+                str(owner["record"]["entry_client_order_id"]),
+            )
+            triggered_by_entry.setdefault(entry_key, []).append((row, owner))
+
+        # Every currently open Algo must map back to one exact, still-open
+        # owner. The matcher also compares side, position side, trigger,
+        # closePosition semantics, and conditional type.
+        open_by_owner: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for row in open_algo_orders:
+            key = (
+                str(row.get("symbol") or "").upper(),
+                str(row.get("clientAlgoId") or ""),
+            )
+            owner = owners.get(key)
+            if owner is None or key in open_by_owner:
+                raise FillRecoveryError("open Mainnet Algo order is unowned or duplicated")
+            if owner["algo_id"] is None or not self._testnet_algo_row_matches_owner(
+                row, owner, source="open"
+            ):
+                raise FillRecoveryError("open Mainnet Algo order differs from durable protection")
+            open_by_owner[key] = row
+
+        for entry_key, record in owners_by_entry.items():
+            state = str(record.get("state") or "").upper()
+            try:
+                filled_quantity = Decimal(str(record.get("filled_quantity")))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise FillRecoveryError("Mainnet Algo owner fill quantity is invalid") from exc
+            if not filled_quantity.is_finite() or filled_quantity < 0:
+                raise FillRecoveryError("Mainnet Algo owner fill quantity is invalid")
+            if state in {"DEGRADED", "UNKNOWN"}:
+                raise FillRecoveryError("Mainnet Algo owner is degraded or unknown")
+            triggered = triggered_by_entry.get(entry_key, [])
+            if state == "PENDING" and filled_quantity == 0:
+                if triggered:
+                    raise FillRecoveryError("unfilled Mainnet owner has a triggered Algo order")
+                if any(key[0] == entry_key[0] and owner["record"] is record and key in open_by_owner
+                       for key, owner in owners.items()):
+                    raise FillRecoveryError("unfilled Mainnet Algo owner unexpectedly has open protection")
+                continue
+            if filled_quantity > 0 and state == "PENDING":
+                raise FillRecoveryError("filled Mainnet Algo owner has no verified protection state")
+            if state == "PROTECTED" and not triggered:
+                expected_keys = {
+                    (entry_key[0], str(record[f"{role}_client_algo_id"]))
+                    for role in ("stop", "take_profit")
+                }
+                if not expected_keys.issubset(open_by_owner):
+                    raise FillRecoveryError("durable Mainnet protection is missing an open Algo")
+            if state == "CLOSE_PENDING" and not triggered:
+                self._history_diffs.append(ReconciliationDiff(
+                    code="ALGO_OWNER_CLOSE_PENDING",
+                    symbol=entry_key[0],
+                    local_value=entry_key[1],
+                ))
+            if state == "CLOSED" and not triggered:
+                closure_proven = (
+                    await self._mainnet_unfilled_entry_proof_matches_owner(
+                        record, launch_id=mainnet_launch_id
+                    )
+                    if filled_quantity == 0
+                    else self._mainnet_closure_proof_matches_owner(
+                        record, launch_id=mainnet_launch_id
+                    )
+                )
+                if not closure_proven:
+                    raise FillRecoveryError(
+                        "Mainnet CLOSED owner has no valid launch-scoped reconciliation proof"
+                    )
+                owner_open_algos = [
+                    key for key in open_by_owner
+                    if key[0] == entry_key[0] and owners[key]["record"] is record
+                ]
+                current_amount = self._matching_position_amount(
+                    exchange_positions,
+                    symbol=entry_key[0],
+                    position_side=str(record["position_side"]),
+                )
+                if owner_open_algos or (filled_quantity > 0 and current_amount != 0):
+                    raise FillRecoveryError(
+                        "CLOSED Mainnet Algo owner still has exchange protection or position exposure"
+                    )
+            if state == "CLOSED" and triggered:
+                # A previously closed chain is still re-verified below; a
+                # reopened position or surviving protection will invalidate it.
+                pass
+
+        if not triggered_by_entry:
+            if any(
+                isinstance(item.get("event_at"), datetime)
+                and item["event_at"].astimezone(timezone.utc) >= anchor_at
+                and (str(item.get("client_id") or ""), str(item.get("item_id") or ""))
+                not in {
+                    (owner["client_algo_id"], str(owner["algo_id"]))
+                    for owner in owners.values() if owner["algo_id"] is not None
+                }
+                for item in persisted_history
+            ):
+                raise FillRecoveryError("Mainnet durable Algo history contains an unowned identity")
+            return
+
+        all_order_checkpoint, all_order_history, _ = await self._scan_launch_history(
+            symbol="ETHUSDC",
+            history_kind="ALL_ORDERS",
+            path=self._all_orders_path,
+            retention=_ALL_ORDERS_RETENTION,
+        )
+        trade_checkpoint, trade_history, _ = await self._scan_launch_history(
+            symbol="ETHUSDC",
+            history_kind="USER_TRADES",
+            path=self._user_trades_path,
+            retention=_USER_TRADES_RETENTION,
+        )
+        if any(
+            current.get(field) != checkpoint.get(field)
+            for current in (all_order_checkpoint, trade_checkpoint)
+            for field in ("anchor_at", "runtime_target", "run_id", "symbol")
+        ):
+            raise FillRecoveryError("Mainnet Algo/order/fill history anchors differ")
+
+        get_protection = getattr(repository, "get_protection", None)
+        set_state = getattr(repository, "set_protection_state", None)
+        close_with_proof = getattr(repository, "close_mainnet_protection_with_proof", None)
+        if not callable(get_protection) or not callable(set_state) or not callable(close_with_proof):
+            raise FillRecoveryError("Mainnet Algo repository cannot durably transition owner state")
+
+        for entry_key, triggered in triggered_by_entry.items():
+            if len(triggered) != 1:
+                for row, owner in triggered:
+                    record = owner["record"]
+                    if str(record.get("state", "")).upper() not in {"CLOSED", "DEGRADED", "UNKNOWN"}:
+                        await set_state(
+                            "binance_mainnet", entry_key[0], entry_key[1], "CLOSE_PENDING",
+                            reason=f"multiple Algo triggers; algo {row.get('algoId')}",
+                        )
+                raise FillRecoveryError("multiple Algo protections triggered for one owner")
+            algo_row, owner = triggered[0]
+            record = owner["record"]
+            state = str(record.get("state") or "").upper()
+            algo_id = self._positive_exchange_id(algo_row.get("algoId"), field="Algo ID")
+            if state not in {"CLOSED", "CLOSE_PENDING"}:
+                pending = await set_state(
+                    "binance_mainnet", entry_key[0], entry_key[1], "CLOSE_PENDING",
+                    reason=f"Algo {algo_id} triggered; child order pending verification",
+                )
+                if pending is None or str(pending.get("state", "")).upper() != "CLOSE_PENDING":
+                    raise FillRecoveryError("Mainnet Algo owner did not durably enter CLOSE_PENDING")
+            owner_readback = await get_protection("binance_mainnet", entry_key[0], entry_key[1])
+            if owner_readback is None or str(owner_readback.get("state", "")).upper() not in {
+                "CLOSE_PENDING", "CLOSED"
+            }:
+                raise FillRecoveryError("Mainnet CLOSE_PENDING owner read-back failed")
+            order_id = self._triggered_algo_order_id(algo_row)
+            if state == "PENDING" or Decimal(str(record.get("filled_quantity", "0"))) <= 0:
+                raise FillRecoveryError("triggered Algo has no durable entry fill owner")
+
+            linked_history = [
+                row for row in all_order_history
+                if str(row.get("orderId")) == order_id
+                and str(row.get("symbol", "")).upper() == entry_key[0]
+            ]
+            if len(linked_history) > 1:
+                raise FillRecoveryError("triggered Algo normal order is duplicated in allOrders")
+            normal_order = await self.rest_client.request(
+                "GET", self._order_path, signed=True,
+                params={"symbol": entry_key[0], "orderId": order_id},
+            )
+            if not isinstance(normal_order, dict):
+                raise FillRecoveryError("triggered Algo normal order query is invalid")
+            expected_side = "SELL" if str(record["entry_side"]).upper() == "BUY" else "BUY"
+            for row in [*linked_history, normal_order]:
+                if (
+                    self._positive_exchange_id(row.get("orderId"), field="triggered order ID") != order_id
+                    or str(row.get("symbol", "")).upper() != entry_key[0]
+                    or str(row.get("side", "")).upper() != expected_side
+                    or str(row.get("positionSide", "")).upper() != str(record["position_side"]).upper()
+                    or not str(row.get("clientOrderId") or "")
+                ):
+                    raise FillRecoveryError("triggered Algo child order differs from its durable owner")
+            if linked_history and (
+                str(linked_history[0].get("clientOrderId"))
+                != str(normal_order.get("clientOrderId"))
+            ):
+                raise FillRecoveryError(
+                    "triggered Algo order query differs from durable allOrders history"
+                )
+            try:
+                original_quantity = Decimal(str(normal_order["origQty"]))
+                executed_quantity = Decimal(str(normal_order["executedQty"]))
+            except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+                raise FillRecoveryError("triggered Algo child order quantity is invalid") from exc
+            if (
+                not original_quantity.is_finite()
+                or not executed_quantity.is_finite()
+                or original_quantity <= 0
+                or executed_quantity < 0
+                or executed_quantity > original_quantity
+            ):
+                raise FillRecoveryError("triggered Algo child order quantity is outside bounds")
+            order_status = str(normal_order.get("status") or "").upper()
+            if order_status not in {"NEW", "PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED", "REJECTED"}:
+                raise FillRecoveryError("triggered Algo child order status is unknown")
+            # allOrders is filtered by creation time. A child captured as NEW
+            # can fill after that window closes; persist its exact-ID refresh
+            # before lifecycle comparison or ledger adoption, even on restart.
+            normal_order = (await self._persist_exact_history_rows(
+                all_order_checkpoint, [normal_order],
+            ))[0]
+
+            child_trades = [
+                row for row in trade_history
+                if str(row.get("orderId")) == order_id
+                and str(row.get("symbol", "")).upper() == entry_key[0]
+            ]
+            try:
+                history_quantity = sum(
+                    (Decimal(str(trade["qty"])) for trade in child_trades), Decimal(0)
+                )
+            except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+                raise FillRecoveryError("triggered Algo fill quantity is invalid") from exc
+            if history_quantity != executed_quantity:
+                exact_trades = await self._fetch_exact_order_trades(entry_key[0], order_id)
+                exact_trades = await self._persist_exact_history_rows(
+                    trade_checkpoint, exact_trades,
+                )
+                # Keep earlier durable trades if the exact query is lagging;
+                # canonical trade IDs prevent overlap from double-counting.
+                by_trade_id = {str(trade.get("id")): trade for trade in child_trades}
+                by_trade_id.update({str(trade["id"]): trade for trade in exact_trades})
+                child_trades = list(by_trade_id.values())
+            trade_ids: set[str] = set()
+            trade_quantity = Decimal("0")
+            for trade in child_trades:
+                trade_id = self._positive_exchange_id(trade.get("id"), field="triggered trade ID")
+                if trade_id in trade_ids:
+                    raise FillRecoveryError("triggered Algo child order has duplicate trade IDs")
+                trade_ids.add(trade_id)
+                if (
+                    str(trade.get("side", "")).upper() != expected_side
+                    or str(trade.get("positionSide", "")).upper()
+                    != str(record["position_side"]).upper()
+                ):
+                    raise FillRecoveryError("triggered Algo fill differs from its owner side")
+                try:
+                    qty = Decimal(str(trade["qty"]))
+                except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+                    raise FillRecoveryError("triggered Algo fill quantity is invalid") from exc
+                if not qty.is_finite() or qty <= 0:
+                    raise FillRecoveryError("triggered Algo fill quantity is invalid")
+                trade_quantity += qty
+            if trade_quantity != executed_quantity:
+                raise FillRecoveryError("triggered Algo fills do not equal the child order execution quantity")
+
+            # This is the one narrowly authorized local adoption path: exact
+            # owner -> Algo ID -> child order ID -> allOrders proof. It lets
+            # the ordinary durable fill-recovery pipeline attach the child
+            # fills to a local order and rejects any alternate lineage.
+            if not hasattr(self.ledger, "upsert_raw_exchange_order"):
+                raise FillRecoveryError("execution ledger cannot persist a triggered Algo child order")
+            await self.ledger.upsert_raw_exchange_order(normal_order)
+
+            open_child = any(
+                str(row.get("orderId")) == order_id
+                or str(row.get("clientOrderId")) == str(normal_order.get("clientOrderId"))
+                for row in exchange_open_orders
+            )
+            current_amount = self._matching_position_amount(
+                exchange_positions,
+                symbol=entry_key[0],
+                position_side=str(record["position_side"]),
+            )
+            try:
+                owner_filled_quantity = Decimal(str(record.get("filled_quantity")))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise FillRecoveryError("Mainnet Algo owner fill quantity is invalid") from exc
+            owner_open_algos = [
+                key for key in open_by_owner
+                if key[0] == entry_key[0]
+                and owners[key]["record"] is record
+            ]
+            closed = (
+                order_status == "FILLED"
+                and executed_quantity > 0
+                and owner_filled_quantity.is_finite()
+                and executed_quantity == owner_filled_quantity
+                and not open_child
+                and current_amount == 0
+                and not owner_open_algos
+            )
+            if not closed:
+                self._history_diffs.append(ReconciliationDiff(
+                    code="ALGO_TRIGGER_REMAINS_CLOSE_ONLY",
+                    symbol=entry_key[0],
+                    local_value=entry_key[1],
+                    exchange_value={
+                        "order_status": order_status,
+                        "executed_quantity": str(executed_quantity),
+                        "owner_filled_quantity": str(owner_filled_quantity),
+                        "position_amount": str(current_amount),
+                        "open_child_order": open_child,
+                        "open_owner_algos": len(owner_open_algos),
+                    },
+                ))
+                continue
+
+            if state != "CLOSED":
+                closed_record = await close_with_proof(
+                    entry_key[0],
+                    entry_key[1],
+                    {
+                        "algo_id": algo_id,
+                        "order_id": order_id,
+                        "client_order_id": str(normal_order["clientOrderId"]),
+                        "order_status": order_status,
+                        "executed_quantity": str(executed_quantity),
+                        "trade_quantity": str(trade_quantity),
+                        "position_quantity": str(current_amount),
+                        "open_child_order_ids": [],
+                        "open_owner_algo_ids": [],
+                        "verified_at": datetime.now(timezone.utc),
+                    },
+                )
+                if closed_record is None or str(closed_record.get("state", "")).upper() != "CLOSED":
+                    raise FillRecoveryError("Mainnet Algo owner could not durably transition to CLOSED")
+            closed_readback = await get_protection("binance_mainnet", entry_key[0], entry_key[1])
+            if (
+                closed_readback is None
+                or str(closed_readback.get("state", "")).upper() != "CLOSED"
+                or str(closed_readback.get("entry_client_order_id")) != entry_key[1]
+                or not self._mainnet_closure_proof_matches_owner(
+                    closed_readback, launch_id=mainnet_launch_id
+                )
+            ):
+                raise FillRecoveryError("Mainnet Algo CLOSED owner read-back failed")
+
+    async def _audit_exchange_order_history(self, tracked_orders: List[Any]) -> List[ReconciliationDiff]:
+        """Fail closed if Mainnet order history cannot prove tracked exchange identity."""
+        if self.environment != environment_label(BinanceEnvironment.MAINNET):
+            return []
+        by_symbol: Dict[str, List[Any]] = {}
+        for order in tracked_orders:
+            symbol = str(getattr(order, "symbol", "")).upper()
+            if not symbol:
+                raise FillRecoveryError("allOrders symbol is unavailable")
+            by_symbol.setdefault(symbol, []).append(order)
+            if (
+                str(getattr(order, "status", "")).upper() == "REJECTED"
+                and not getattr(order, "exchange_order_id", None)
+            ):
+                # A definitive pre-acceptance rejection has no exchange
+                # identity to match, but still establishes a symbol whose
+                # complete exchange history must be scanned. PENDING and
+                # ambiguous records are never omitted.
+                continue
+            if not getattr(order, "exchange_order_id", None):
+                raise FillRecoveryError(
+                    f"allOrders anchor for {symbol} is unavailable for a non-terminal order"
+                )
+        if not by_symbol:
+            by_symbol["ETHUSDC"] = []
+        for symbol, local_orders in sorted(by_symbol.items()):
+            expected = {
+                str(order.client_order_id): str(order.exchange_order_id)
+                for order in local_orders
+                if order.client_order_id and getattr(order, "exchange_order_id", None)
+            }
+            checkpoint, _, persisted = await self._scan_launch_history(
+                symbol=symbol,
+                history_kind="ALL_ORDERS",
+                path=self._all_orders_path,
+                retention=_ALL_ORDERS_RETENTION,
+            )
+            anchor_at = checkpoint["anchor_at"].astimezone(timezone.utc)
+            launch_items = [
+                item for item in persisted
+                if isinstance(item.get("event_at"), datetime)
+                and item["event_at"].astimezone(timezone.utc) >= anchor_at
+            ]
+            seen_clients: Dict[str, str] = {}
+            for item in launch_items:
+                order_id = str(item["item_id"])
+                client_id = str(item.get("client_id") or "")
+                if not client_id:
+                    raise FillRecoveryError(f"allOrders client ID for {symbol} is missing")
+                previous_id = seen_clients.get(client_id)
+                if previous_id is not None and previous_id != order_id:
+                    self._history_diffs.append(ReconciliationDiff(
+                        code="DUPLICATE_EXCHANGE_CLIENT_ORDER_ID", symbol=symbol,
+                        local_value=previous_id, exchange_value=order_id,
+                    ))
+                seen_clients[client_id] = order_id
+                expected_id = expected.get(client_id)
+                if expected_id is not None and expected_id != order_id:
+                    self._history_diffs.append(ReconciliationDiff(
+                        code="EXCHANGE_ORDER_ID_MISMATCH", symbol=symbol,
+                        local_value=expected_id, exchange_value=order_id,
+                    ))
+                elif expected_id is None:
+                    self._history_diffs.append(ReconciliationDiff(
+                        code="EXCHANGE_ORDER_UNKNOWN_LOCALLY", symbol=symbol,
+                        exchange_value=order_id,
+                    ))
+            for client_id, expected_id in expected.items():
+                if seen_clients.get(client_id) != expected_id:
+                    self._history_diffs.append(ReconciliationDiff(
+                        code="TRACKED_ORDER_MISSING_FROM_HISTORY", symbol=symbol,
+                        local_value=expected_id,
+                    ))
+        return self._history_diffs
 
     @property
     def _income_path(self) -> str:
@@ -640,11 +2173,11 @@ class BinanceReconciliation:
                 )
 
     async def _daily_realized_pnl(self) -> tuple[Decimal | None, bool]:
-        """Read restart-safe UTC-day net PnL for the exact Mainnet launch pair.
+        """Read restart-safe account-wide UTC-day USDC trading PnL.
 
         Binance exposes pagination by ``page`` and returns all income types when
-        ``incomeType`` is omitted.  We deliberately include only realized PnL,
-        commissions, and funding for USDC/ETHUSDC.  A short page is complete;
+        ``incomeType`` is omitted. We deliberately include realized PnL,
+        commissions, and funding for every USDC-settled contract. A short page is complete;
         a full page at the configured safety bound is unknown and therefore
         blocks Mainnet rather than silently under-counting loss.
         """
@@ -665,7 +2198,6 @@ class BinanceReconciliation:
                     self._income_path,
                     signed=True,
                     params={
-                        "symbol": "ETHUSDC",
                         "startTime": int(start.timestamp() * 1000),
                         "endTime": int(query_end.timestamp() * 1000),
                         "page": page,
@@ -678,12 +2210,10 @@ class BinanceReconciliation:
                     if not isinstance(item, dict):
                         return None, False
                     item_asset = str(item.get("asset", "")).strip().upper()
-                    item_symbol = str(item.get("symbol", "")).strip().upper()
                     item_type = str(item.get("incomeType", "")).strip().upper()
-                    if item_asset != "USDC" or item_symbol != "ETHUSDC":
-                        # The server-side symbol filter is an optimization,
-                        # not an authorization boundary.  Ignore unrelated
-                        # rows, but never let them enter USDC pair PnL.
+                    if item_asset != "USDC":
+                        # Daily loss is account-wide but denominated in the
+                        # policy collateral. Never assume parity for other assets.
                         continue
                     if item_type not in {"REALIZED_PNL", "COMMISSION", "FUNDING_FEE"}:
                         continue
@@ -741,27 +2271,53 @@ class BinanceReconciliation:
                     logger.debug("Pre-trade recovery order query skipped for %s: %s", order.client_order_id, exc)
 
     async def _recover_recent_trades(
-        self, symbols: set[str]
+        self, symbols: set[str], tracked_orders: List[Any] | None = None
     ) -> List[ReconciliationDiff]:
         """Recover only fills with local lineage and report foreign fills."""
         diffs: List[ReconciliationDiff] = []
         for symbol in sorted({str(item).upper() for item in symbols if item}):
-            trades = await self.rest_client.request(
-                "GET",
-                self._user_trades_path,
-                signed=True,
-                params={"symbol": symbol, "limit": 1000},
-            )
-            if not isinstance(trades, list):
-                raise FillRecoveryError(f"userTrades response for {symbol} is invalid")
+            trades = await self._fetch_user_trade_history(symbol)
+            exchange_orders_by_client_id: Dict[str, str] = {}
             for trade in trades:
+                client_id = str(trade.get("clientOrderId") or "")
+                exchange_order_id = str(trade.get("orderId") or "")
+                previous_exchange_order_id = exchange_orders_by_client_id.get(client_id)
+                if client_id and previous_exchange_order_id and previous_exchange_order_id != exchange_order_id:
+                    diffs.append(
+                        ReconciliationDiff(
+                            code="DUPLICATE_EXCHANGE_CLIENT_ORDER_ID",
+                            symbol=str(trade.get("symbol") or symbol).upper(),
+                            local_value=previous_exchange_order_id,
+                            exchange_value=exchange_order_id,
+                        )
+                    )
+                    continue
+                if client_id:
+                    exchange_orders_by_client_id[client_id] = exchange_order_id
                 local_order = await self.ledger.get_order_by_exchange_id(
-                    str(trade.get("orderId"))
+                    exchange_order_id
                 )
                 if local_order is None and trade.get("clientOrderId"):
                     local_order = await self.ledger.get_order_by_client_id(
                         str(trade["clientOrderId"])
                     )
+                if (
+                    local_order is not None
+                    and local_order.exchange_order_id
+                    and str(local_order.exchange_order_id) != str(trade.get("orderId"))
+                ):
+                    # Client order IDs are only unique among open exchange orders.
+                    # A later execution may reuse one; never assign that fill to
+                    # a different exchange order in the durable ledger.
+                    diffs.append(
+                        ReconciliationDiff(
+                            code="EXCHANGE_ORDER_ID_MISMATCH",
+                            symbol=str(trade.get("symbol") or symbol).upper(),
+                            local_value=str(local_order.exchange_order_id),
+                            exchange_value=str(trade.get("orderId")),
+                        )
+                    )
+                    continue
                 if local_order is None:
                     # Binance userTrades does not always return clientOrderId.
                     # An exchange fill with no local order lineage is an
@@ -782,19 +2338,31 @@ class BinanceReconciliation:
         self._unattributed_fill_diffs = diffs
         return diffs
 
+    async def _fetch_user_trade_history(self, symbol: str) -> List[Dict[str, Any]]:
+        """Read per-symbol trades through durable Mainnet launch coverage."""
+        if self.environment != environment_label(BinanceEnvironment.MAINNET):
+            page = await self.rest_client.request(
+                "GET", self._user_trades_path, signed=True,
+                params={"symbol": symbol, "limit": 1000},
+            )
+            if not isinstance(page, list):
+                raise FillRecoveryError(f"userTrades response for {symbol} is invalid")
+            if len(page) >= 1000:
+                raise FillRecoveryError(f"userTrades history for {symbol} is incomplete")
+            return page
+        _, trades, _ = await self._scan_launch_history(
+            symbol=str(symbol).upper(),
+            history_kind="USER_TRADES",
+            path=self._user_trades_path,
+            retention=_USER_TRADES_RETENTION,
+        )
+        return trades
+
     async def _recover_order_fills(self, local_order: Any, order_status: Dict[str, Any]) -> int:
         order_id = order_status.get("orderId") or local_order.exchange_order_id
         if not order_id:
             raise FillRecoveryError("Filled order has no exchange order ID")
-        trades = await self.rest_client.request(
-            "GET",
-            self._user_trades_path,
-            signed=True,
-            params={"symbol": local_order.symbol, "orderId": order_id, "limit": 1000},
-        )
-        if not isinstance(trades, list):
-            raise FillRecoveryError("userTrades recovery response is invalid")
-        matching_trades = [t for t in trades if str(t.get("orderId")) == str(order_id)]
+        matching_trades = await self._fetch_exact_order_trades(local_order.symbol, str(order_id))
         if not matching_trades:
             raise FillRecoveryError(
                 f"No fills recovered for exchange order {order_id} reported {order_status.get('status')}"
@@ -969,9 +2537,9 @@ class BinanceReconciliation:
             for o in exchange_open_orders
             if o.get("clientOrderId")
         }
-        diffs: List[ReconciliationDiff] = list(self._unattributed_fill_diffs)
-        recovered_position_symbols: set[str] = set()
+        diffs: List[ReconciliationDiff] = [*self._unattributed_fill_diffs, *self._history_diffs]
         recovered_reduction_symbols: set[str] = set()
+        terminal_executed_quantities: dict[int, Decimal] = {}
         get_all_orders = getattr(self.ledger, "get_all_orders", None)
         all_orders = (
             await get_all_orders()
@@ -1116,7 +2684,6 @@ class BinanceReconciliation:
                     order_status.get("orderId") or local_order.exchange_order_id or ""
                 )
                 await self.ledger.upsert_order(local_order)
-                recovered_position_symbols.add(str(local_order.symbol).upper())
                 if local_order.reduce_only or local_order.risk_class in {
                     "REDUCE_RISK",
                     "RECOVERY",
@@ -1125,7 +2692,26 @@ class BinanceReconciliation:
                 }:
                     recovered_reduction_symbols.add(str(local_order.symbol).upper())
             elif status in ("CANCELED", "CANCELLED", "EXPIRED", "REJECTED"):
-                if terminal_execution:
+                try:
+                    executed_qty = _required_decimal(order_status, "executedQty")
+                    if executed_qty < 0 or executed_qty > local_order.quantity:
+                        raise FillRecoveryError("terminal executedQty is outside order bounds")
+                    if executed_qty > 0:
+                        await self._recover_order_fills(local_order, order_status)
+                    terminal_executed_quantities[id(local_order)] = executed_qty
+                except BinanceAuthenticationError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Terminal fill verification failed for %s: %s",
+                        local_order.client_order_id, exc,
+                    )
+                    diffs.append(ReconciliationDiff(
+                        code="FILL_RECOVERY_FAILED", symbol=local_order.symbol,
+                        local_value=local_order.client_order_id, exchange_value=str(exc),
+                    ))
+                    continue
+                if local_status == "FILLED":
                     diffs.append(
                         ReconciliationDiff(
                             code="TERMINAL_ORDER_STATUS_MISMATCH",
@@ -1134,9 +2720,17 @@ class BinanceReconciliation:
                             exchange_value=status,
                         )
                     )
-                elif active_local_order:
+                else:
                     local_order.status = status
+                    local_order.exchange_order_id = str(
+                        order_status.get("orderId") or local_order.exchange_order_id or ""
+                    )
                     await self.ledger.upsert_order(local_order)
+                    if executed_qty > 0:
+                        if local_order.reduce_only or local_order.risk_class in {
+                            "REDUCE_RISK", "RECOVERY", "CLOSE", "EMERGENCY",
+                        }:
+                            recovered_reduction_symbols.add(str(local_order.symbol).upper())
             else:
                 diffs.append(
                     ReconciliationDiff(
@@ -1176,15 +2770,6 @@ class BinanceReconciliation:
                 # A terminal local record cannot coexist with an exchange
                 # order that is still open, even when the IDs match.
                 diffs.extend(self._compare_open_order(local_match, exchange_order))
-
-        # A locally tracked order can disappear from openOrders after a fill
-        # before its private-stream position event arrives. Once the order
-        # status and canonical userTrades have both been recovered, seed only
-        # that symbol from the authoritative positionRisk response. Other
-        # symbols remain subject to the normal mismatch checks below.
-        for position in exchange_positions:
-            if str(position.get("symbol", "")).upper() in recovered_position_symbols:
-                await self.ledger.upsert_position(position)
 
         exchange_position_map = self._active_position_map(exchange_positions)
         for symbol in recovered_reduction_symbols:
@@ -1238,15 +2823,15 @@ class BinanceReconciliation:
                     )
                 )
 
-        # A terminal local order is not proof of execution. Every FILLED or
-        # PARTIALLY_FILLED record must have at least one canonical ExchangeFill
-        # linked by exchange order ID or client order ID before reconciliation
-        # can report IN_SYNC.
+        # A status alone is not execution proof. Filled/partial orders require
+        # canonical fills; canceled/expired/rejected orders also require their
+        # canonical totals to equal the freshly queried executedQty.
         get_fills = getattr(self.ledger, "get_fills", None)
         fills = await get_fills() if callable(get_fills) else []
         for local_order in all_orders:
             local_status = str(local_order.status).upper()
-            if local_status not in {"FILLED", "PARTIALLY_FILLED"}:
+            terminal_executed_qty = terminal_executed_quantities.get(id(local_order))
+            if local_status not in {"FILLED", "PARTIALLY_FILLED"} and terminal_executed_qty is None:
                 continue
             linked_fills = [
                 fill
@@ -1261,7 +2846,7 @@ class BinanceReconciliation:
                 )
             ]
             has_linked_fill = bool(linked_fills)
-            if not has_linked_fill:
+            if not has_linked_fill and terminal_executed_qty != 0:
                 diffs.append(
                     ReconciliationDiff(
                         code="TERMINAL_ORDER_FILL_MISSING",
@@ -1274,7 +2859,12 @@ class BinanceReconciliation:
             recovered_quantity = sum(
                 (fill.quantity for fill in linked_fills), Decimal("0")
             )
-            if local_status == "FILLED" and recovered_quantity != local_order.quantity:
+            if terminal_executed_qty is not None and recovered_quantity != terminal_executed_qty:
+                diffs.append(ReconciliationDiff(
+                    code="FILL_QUANTITY_MISMATCH", symbol=str(local_order.symbol).upper(),
+                    local_value=str(terminal_executed_qty), exchange_value=str(recovered_quantity),
+                ))
+            elif local_status == "FILLED" and recovered_quantity != local_order.quantity:
                 diffs.append(
                     ReconciliationDiff(
                         code="FILL_QUANTITY_MISMATCH",
@@ -1300,8 +2890,10 @@ class BinanceReconciliation:
         """Fetch, seed, compare, and only then mark the ledger synchronized."""
         self.authentication_failed = False
         self._unattributed_fill_diffs = []
+        self._history_diffs = []
         self._set_status("RECONCILING", [])
         try:
+            snapshot_observed_at = utc_now()
             account, positions, open_orders = (
                 await self._fetch_reconciliation_snapshot_inputs()
             )
@@ -1321,6 +2913,7 @@ class BinanceReconciliation:
                 daily_pnl_includes_funding=(daily_loss_known and self.environment == environment_label(BinanceEnvironment.MAINNET)),
                 daily_loss_window_start=self.daily_loss_window_start,
                 daily_loss_window_end=self.daily_loss_window_end,
+                observed_at=snapshot_observed_at,
             )
 
             active_positions = [p for p in positions if _position_amount(p) != 0]
@@ -1367,13 +2960,21 @@ class BinanceReconciliation:
                 if callable(get_all_orders)
                 else await self.ledger.get_open_orders()
             )
+            await self._audit_algo_orders(
+                tracked_orders,
+                exchange_positions=positions,
+                exchange_open_orders=open_orders,
+            )
+            if callable(get_all_orders):
+                tracked_orders = await get_all_orders()
             await self._resolve_missing_exchange_order_ids(tracked_orders)
+            await self._audit_exchange_order_history(tracked_orders)
             symbols.update(
                 str(order.symbol)
                 for order in tracked_orders
                 if getattr(order, "symbol", None)
             )
-            await self._recover_recent_trades(symbols)
+            await self._recover_recent_trades(symbols, tracked_orders)
 
             diffs = await self._collect_diffs(positions, open_orders)
             if diffs:
@@ -1420,8 +3021,10 @@ class BinanceReconciliation:
             return self.last_status
 
         self._unattributed_fill_diffs = []
+        self._history_diffs = []
         self._set_status("RECONCILING", [])
         try:
+            snapshot_observed_at = utc_now()
             account, exchange_positions, exchange_open_orders = (
                 await self._fetch_reconciliation_snapshot_inputs()
             )
@@ -1440,6 +3043,7 @@ class BinanceReconciliation:
                 daily_pnl_includes_funding=(daily_loss_known and self.environment == environment_label(BinanceEnvironment.MAINNET)),
                 daily_loss_window_start=self.daily_loss_window_start,
                 daily_loss_window_end=self.daily_loss_window_end,
+                observed_at=snapshot_observed_at,
             )
 
             symbols = {
@@ -1458,13 +3062,21 @@ class BinanceReconciliation:
                 if callable(get_all_orders)
                 else await self.ledger.get_open_orders()
             )
+            await self._audit_algo_orders(
+                tracked_orders,
+                exchange_positions=exchange_positions,
+                exchange_open_orders=exchange_open_orders,
+            )
+            if callable(get_all_orders):
+                tracked_orders = await get_all_orders()
             await self._resolve_missing_exchange_order_ids(tracked_orders)
+            await self._audit_exchange_order_history(tracked_orders)
             symbols.update(
                 str(order.symbol)
                 for order in tracked_orders
                 if getattr(order, "symbol", None)
             )
-            await self._recover_recent_trades(symbols)
+            await self._recover_recent_trades(symbols, tracked_orders)
             diffs = await self._collect_diffs(exchange_positions, exchange_open_orders)
             if diffs:
                 self._set_status("MISMATCH", diffs)

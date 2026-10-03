@@ -97,13 +97,9 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
-function isTruthy(value: string | undefined): boolean {
-  return ['1', 'true', 'yes', 'on'].includes((value || '').trim().toLowerCase());
-}
-
 export interface BigQueryAuthResult {
   ok: boolean;
-  mode: 'FIREBASE_ID_TOKEN' | 'LOCAL_DEV_ONLY';
+  mode: 'FIREBASE_ID_TOKEN';
   uid?: string;
   claims?: Record<string, unknown>;
   roles?: ControlPlaneRole[];
@@ -120,18 +116,11 @@ export interface BigQueryAuthResult {
 export async function authorizeFirebaseRequest(
   req: Request,
   options: {
-    localBypassEnv?: string;
     requireOperator?: boolean;
     requiredRole?: ControlPlaneRole;
     requireTelemetryProducer?: boolean;
   } = {},
 ): Promise<BigQueryAuthResult> {
-  const localBypassEnv = options.localBypassEnv || 'BIGQUERY_ALLOW_LOCAL_UNAUTHENTICATED';
-  const runningOnCloudRun = Boolean(process.env.K_SERVICE);
-  if (!runningOnCloudRun && process.env.NODE_ENV !== 'production' && isTruthy(process.env[localBypassEnv])) {
-    return { ok: true, mode: 'LOCAL_DEV_ONLY' };
-  }
-
   const authorization = req.header('authorization') || '';
   const match = /^Bearer\s+([^\s]+)$/i.exec(authorization);
   if (!match) {
@@ -143,10 +132,10 @@ export async function authorizeFirebaseRequest(
       credential: applicationDefault(),
       projectId: BIGQUERY_PROJECT_ID,
     });
-    const decoded = await getAuth(app).verifyIdToken(match[1]);
+    const requiredRole = options.requiredRole || (options.requireOperator ? 'operator' : 'viewer');
+    const decoded = await getAuth(app).verifyIdToken(match[1], requiredRole === 'trading_admin');
     const claims: Record<string, unknown> = { ...decoded };
     const roles = controlPlaneRoles(claims);
-    const requiredRole = options.requiredRole || (options.requireOperator ? 'operator' : 'viewer');
     if (!hasControlPlaneRole(roles, requiredRole)) {
       if (requiredRole) {
         return {
@@ -162,7 +151,7 @@ export async function authorizeFirebaseRequest(
       }
     }
     const signInProvider = (decoded as { firebase?: { sign_in_provider?: string } }).firebase?.sign_in_provider;
-    if (requiredRole === 'trading_admin' && signInProvider === 'custom') {
+    if (requiredRole === 'trading_admin' && signInProvider !== 'google.com') {
       return {
         ok: false,
         mode: 'FIREBASE_ID_TOKEN',
@@ -171,8 +160,21 @@ export async function authorizeFirebaseRequest(
         roles,
         role: highestControlPlaneRole(roles),
         forbidden: true,
-        error: 'Interactive Google sign-in is required for trading_admin actions; custom token authentication is rejected',
+        error: 'Interactive Google sign-in is required for trading_admin actions',
       };
+    }
+    if (requiredRole === 'trading_admin') {
+      const currentUser = await getAuth(app).getUser(decoded.uid);
+      const currentRoles = controlPlaneRoles(currentUser.customClaims || {});
+      if (currentUser.disabled || !hasControlPlaneRole(currentRoles, 'trading_admin')) {
+        return {
+          ok: false,
+          mode: 'FIREBASE_ID_TOKEN',
+          uid: decoded.uid,
+          forbidden: true,
+          error: 'Current trading_admin authorization is required',
+        };
+      }
     }
     if (options.requireTelemetryProducer) {
       const isTelemetryProducer = claims.telemetryProducer === true || claims.bigqueryTelemetryProducer === true;
@@ -208,7 +210,6 @@ export async function authorizeBigQueryRequest(
   options: { requireTelemetryProducer?: boolean } = {},
 ): Promise<BigQueryAuthResult> {
   return authorizeFirebaseRequest(req, {
-    localBypassEnv: 'BIGQUERY_ALLOW_LOCAL_UNAUTHENTICATED',
     requiredRole: 'viewer',
     requireTelemetryProducer: options.requireTelemetryProducer,
   });
@@ -219,7 +220,6 @@ export async function authorizeOperatorRequest(
   options: { requiredRole?: ControlPlaneRole } = {},
 ): Promise<BigQueryAuthResult> {
   return authorizeFirebaseRequest(req, {
-    localBypassEnv: 'CONTROL_PLANE_ALLOW_UNAUTHENTICATED_LOCAL',
     requiredRole: options.requiredRole || 'operator',
   });
 }

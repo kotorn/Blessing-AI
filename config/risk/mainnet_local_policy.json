@@ -1,0 +1,18 @@
+{
+  "version": "local-mainnet-risk-v1",
+  "target": "LOCAL",
+  "symbol": "ETHUSDC",
+  "basket_budget_usdc": "250",
+  "basket_drawdown_usdc": "125",
+  "daily_loss_usdc": "5",
+  "collateral_usdc": "250",
+  "gross_exposure_usdc": "1000",
+  "first_order_notional_usdc": "50",
+  "active_exposure_chains": 1,
+  "max_leverage": "10",
+  "risk_reward": {
+    "risk": "1",
+    "reward": "2",
+    "net_of_costs": true
+  }
+}

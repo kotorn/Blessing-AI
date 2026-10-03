@@ -1,5 +1,7 @@
 import asyncio
-from datetime import timedelta, timezone, UTC
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone, UTC
 from decimal import Decimal
 
 import pytest
@@ -20,6 +22,7 @@ from apps.trading_worker.venues.binance.manual_testnet import (
     _passive_order,
     _require_current_readonly_evidence,
 )
+from apps.trading_worker.venues.binance import manual_testnet as manual_testnet_module
 from apps.trading_worker.venues.binance.models import (
     BinanceAuthenticationError,
     BinanceDefinitiveRejection,
@@ -32,6 +35,8 @@ from apps.trading_worker.venues.binance.models import (
 )
 from apps.trading_worker.venues.binance.reconciliation import (
     BinanceReconciliation,
+    FillRecoveryError,
+    ReconciliationDiff,
     build_account_snapshot,
 )
 from apps.trading_worker.venues.binance.soak_runner import run_supervised_soak
@@ -118,6 +123,121 @@ class ScriptedRest:
         return None
 
 
+class MemoryHistoryRepository:
+    """Small durable-history contract double for bounded reconciliation tests."""
+
+    def __init__(self, *, anchor_age: timedelta = timedelta(minutes=5), run_id: str = "launch-test"):
+        self.run_id = run_id
+        self.anchor_at = datetime.now(timezone.utc) - anchor_age
+        self.checkpoints = {}
+        self.items = {}
+        self.baselines = []
+        self.observations = []
+
+    def _begin(self, target, run_id, symbol, history_kind, now):
+        key = (target, run_id, symbol, history_kind)
+        checkpoint = self.checkpoints.setdefault(
+            key,
+            {
+                "runtime_target": target,
+                "run_id": run_id,
+                "symbol": symbol,
+                "history_kind": history_kind,
+                "anchor_at": self.anchor_at,
+                "coverage_status": "NEW",
+                "covered_through": None,
+                "cursor_id": 0,
+            },
+        )
+        scan_from = checkpoint["covered_through"] or checkpoint["anchor_at"]
+        checkpoint.update(
+            {
+                "coverage_status": "SCANNING",
+                "scan_from_at": scan_from,
+                "scan_to_at": now,
+                "scan_started_at": now,
+            }
+        )
+        return checkpoint
+
+    async def begin_mainnet_scan(self, *, symbol, history_kind, retention_seconds, now):
+        if (now - self.anchor_at).total_seconds() > retention_seconds:
+            raise RuntimeError("history anchor exceeds route retention")
+        return self._begin("LOCAL", self.run_id, symbol, history_kind, now)
+
+    async def begin_testnet_scan(
+        self, *, run_id, symbol, history_kind, retention_seconds, now
+    ):
+        if run_id != self.run_id:
+            raise RuntimeError("Testnet run anchor is missing")
+        if (now - self.anchor_at).total_seconds() > retention_seconds:
+            raise RuntimeError("history anchor exceeds route retention")
+        return self._begin("TESTNET", run_id, symbol, history_kind, now)
+
+    async def persist_history_page(
+        self, *, checkpoint, expected_cursor_id, items, observed_at
+    ):
+        if checkpoint["cursor_id"] != expected_cursor_id:
+            raise RuntimeError("history cursor did not match")
+        rows = self.items.setdefault(
+            (checkpoint["runtime_target"], checkpoint["run_id"], checkpoint["symbol"],
+             checkpoint["history_kind"]),
+            {},
+        )
+        for item in items:
+            previous = rows.get(item["item_id"])
+            if previous is not None and previous != item:
+                raise RuntimeError("conflicting history duplicate")
+            rows[item["item_id"]] = dict(item)
+        checkpoint["cursor_id"] = max(
+            [expected_cursor_id, *(int(item["item_id"]) for item in items)]
+        )
+        return checkpoint["cursor_id"]
+
+    async def complete_history_scan(self, checkpoint):
+        checkpoint["coverage_status"] = "COVERED"
+        checkpoint["covered_through"] = checkpoint["scan_to_at"]
+        checkpoint["scan_started_at"] = None
+        checkpoint["scan_from_at"] = None
+        checkpoint["scan_to_at"] = None
+
+    async def record_history_observation(self, *, checkpoint, item, observed_at=None):
+        assert checkpoint["coverage_status"] == "COVERED"
+        assert checkpoint["history_kind"] in {"ALL_ORDERS", "USER_TRADES"}
+        key = (checkpoint["runtime_target"], checkpoint["run_id"],
+               checkpoint["symbol"], checkpoint["history_kind"])
+        rows = self.items.setdefault(key, {})
+        previous = rows.get(item["item_id"])
+        if previous is not None:
+            assert previous["client_id"] == item["client_id"]
+            assert previous["event_at"] == item["event_at"]
+        rows[item["item_id"]] = dict(item)
+        return dict(item)
+
+    async def record_algo_history_observation(self, *, checkpoint, item, observed_at=None):
+        self.observations.append(
+            {
+                "runtime_target": checkpoint["runtime_target"],
+                "run_id": checkpoint["run_id"],
+                "symbol": checkpoint["symbol"],
+                "item": dict(item),
+                "observed_at": observed_at,
+            }
+        )
+        return dict(self.observations[-1])
+
+    async def list_history_items(self, checkpoint):
+        key = (checkpoint["runtime_target"], checkpoint["run_id"],
+               checkpoint["symbol"], checkpoint["history_kind"])
+        return [dict(row) for _, row in sorted(self.items.get(key, {}).items())]
+
+    async def list_preexisting_algo_baselines(self, *, run_id, symbol):
+        return [
+            row for row in self.baselines
+            if row["run_id"] == run_id and row["symbol"] == symbol
+        ]
+
+
 def make_rules(symbol: str = "BTCUSDT") -> SymbolTradingRules:
     rules = SymbolTradingRules(symbol)
     rules.status = "TRADING"
@@ -161,6 +281,7 @@ async def make_adapter(snapshot=None, rest=None):
         env=BinanceEnvironment.TESTNET,
         ledger=ledger,
     )
+    adapter.require_testnet_protection = False
     adapter.state = ConnectionState.READY
     adapter.capabilities.account_request_succeeded = True
     adapter.capabilities.authenticated = True
@@ -342,7 +463,7 @@ async def test_mainnet_daily_pnl_is_paginated_filtered_and_fee_funding_inclusive
         assert method == "GET"
         assert path == "/fapi/v1/income"
         params = kwargs["params"]
-        assert params["symbol"] == "ETHUSDC"
+        assert "symbol" not in params
         assert params["limit"] == 1000
         assert "incomeType" not in params
         return page_one if params["page"] == 1 else page_two
@@ -352,7 +473,9 @@ async def test_mainnet_daily_pnl_is_paginated_filtered_and_fee_funding_inclusive
 
     total, known = await reconciliation._daily_realized_pnl()
 
-    assert total == Decimal("-3.5")
+    # The daily cap is account-wide for USDC-settled contracts; unrelated
+    # USDC losses count, while USDT-denominated income is not treated at par.
+    assert total == Decimal("-1002.5")
     assert known is True
     assert [call[2]["params"]["page"] for call in rest.calls] == [1, 2]
     assert reconciliation.daily_loss_window_start is not None
@@ -1680,6 +1803,47 @@ async def test_order_amendment_that_increases_notional_is_capped():
 
 
 @pytest.mark.asyncio
+async def test_protected_testnet_worker_blocks_risk_increasing_amendment_before_rest():
+    async def handler(method, path, kwargs):
+        raise AssertionError(f"Risk-increasing Testnet amendment reached REST: {method} {path}")
+
+    rest = ScriptedRest(handler)
+    adapter = await make_adapter(rest=rest)
+    adapter.require_testnet_protection = True
+    await adapter.ledger.upsert_order(
+        ExecutionOrder(
+            symbol="BTCUSDT", side=OrderSide.BUY,
+            quantity=Decimal("0.001"), price=Decimal(10000),
+            order_type="LIMIT", client_order_id="AMEND-PROTECTED-TESTNET",
+            status="NEW", exchange_order_id="15",
+        )
+    )
+    authority = GateAuthority()
+    adapter.bind_worker_authority(authority)
+
+    amended = await adapter.modify_order(
+        "BTCUSDT", "AMEND-PROTECTED-TESTNET", Decimal(10000),
+        Decimal("0.002"), "BUY", authority=authority,
+    )
+
+    assert amended is None
+    assert rest.calls == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_manual_testnet_runner_aborts_before_credentials_or_worker(monkeypatch):
+    monkeypatch.setenv("TESTNET_MANUAL_TRIAL_APPROVED", "true")
+
+    def forbidden_worker(*args, **kwargs):
+        raise AssertionError("disabled legacy runner must not construct or arm a worker")
+
+    monkeypatch.setattr(manual_testnet_module, "TradingWorkerApp", forbidden_worker)
+
+    with pytest.raises(RuntimeError, match="legacy BTCUSDT LIMIT/amend Testnet runner is disabled"):
+        await manual_testnet_module.manual_testnet_workflow()
+
+
+@pytest.mark.asyncio
 async def test_lower_notional_entry_amendment_preserves_entry_semantics():
     put_calls = []
 
@@ -1976,7 +2140,7 @@ async def test_worker_wraps_adapter_degradation_in_kill_switch_workflow(monkeypa
     adapter = worker.execution_adapter
     assert adapter is not None
 
-    async def degraded_execution(decision, *, authority=None):
+    async def degraded_protected_execution(decision, *, authority=None):
         adapter.state = ConnectionState.DEGRADED
         adapter.reconciliation.last_status = "UNKNOWN"
         return []
@@ -1985,7 +2149,7 @@ async def test_worker_wraps_adapter_degradation_in_kill_switch_workflow(monkeypa
         worker.kill_switch_active = active
         return {"status": "UNKNOWN"}
 
-    monkeypatch.setattr(adapter, "execute_decision", degraded_execution)
+    monkeypatch.setattr(adapter, "execute_protected_testnet_decision", degraded_protected_execution)
     monkeypatch.setattr(worker, "set_kill_switch", fake_kill_switch)
 
     await worker.execute_manual_decision(
@@ -1995,6 +2159,42 @@ async def test_worker_wraps_adapter_degradation_in_kill_switch_workflow(monkeypa
     assert worker.kill_switch_active is True
     assert worker.engine_state == WorkerEngineState.EMERGENCY
     assert await adapter.ledger.get_account_snapshot() is None
+
+
+@pytest.mark.asyncio
+async def test_worker_blocks_new_testnet_chain_while_durable_protection_is_active(monkeypatch):
+    worker = await make_ready_worker(monkeypatch)
+    adapter = worker.execution_adapter
+    adapter_calls = []
+
+    class ProtectionStore:
+        async def list_active_protections(self, *, venue, symbol=None):
+            assert venue == "binance_testnet" and symbol == "ETHUSDC"
+            return [{"state": "PROTECTED", "entry_client_order_id": "active-1"}]
+
+    class Repository:
+        algo_protections = ProtectionStore()
+
+    worker.persistence.repository = Repository()
+
+    async def protected_entry(*args, **kwargs):
+        adapter_calls.append((args, kwargs))
+        return []
+
+    async def fake_kill_switch(active):
+        worker.kill_switch_active = active
+        return {"status": "CONFIRMED"}
+
+    monkeypatch.setattr(adapter, "execute_protected_testnet_decision", protected_entry)
+    monkeypatch.setattr(worker, "set_kill_switch", fake_kill_switch)
+
+    await worker.execute_protected_testnet_decision(
+        make_decision(EconomicRiskClass.NEW_RISK, make_limit_intent())
+    )
+
+    assert adapter_calls == []
+    assert worker.kill_switch_active is True
+    assert worker.pause_new_risk is True
 
 
 @pytest.mark.asyncio
@@ -2343,7 +2543,7 @@ async def test_manual_trial_allows_approved_override_for_exchange_minimum():
 
 
 @pytest.mark.asyncio
-async def test_filled_order_recovery_recovers_canonical_fill_and_reaches_in_sync():
+async def test_filled_order_recovery_does_not_adopt_unowned_exchange_position():
     async def handler(method, path, kwargs):
         if path == "/fapi/v2/positionRisk":
             return [
@@ -2386,13 +2586,14 @@ async def test_filled_order_recovery_recovers_canonical_fill_and_reaches_in_sync
 
     status = await reconciliation.reconcile()
 
-    assert status == "IN_SYNC"
-    assert reconciliation.last_status == "IN_SYNC"
+    assert status == "MISMATCH"
+    assert reconciliation.last_status == "MISMATCH"
     assert len(ledger.fills) == 1
     assert isinstance(ledger.fills[0], ExchangeFill)
     assert ledger.fills[0].exchange_trade_id == "101"
     assert ledger.fills[0].client_order_id == "LOCAL-1"
     assert (await ledger.get_open_orders()) == []
+    assert await ledger.get_positions() == []
     await ledger.append_fill(ledger.fills[0])
     assert len(ledger.fills) == 1
 
@@ -2598,6 +2799,811 @@ async def test_recent_trade_recovery_falls_back_to_client_order_id_for_lineage()
     assert ledger.fills[0].client_order_id == "LOCAL-1"
     assert ledger.fills[0].strategy_id == "grid"
     assert ledger.fills[0].decision_id == "DEC-1"
+
+
+@pytest.mark.asyncio
+async def test_recent_trade_recovery_rejects_reused_client_id_with_different_exchange_order():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/userTrades":
+            return [trade_payload()]
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    ledger = InMemoryLedger()
+    await ledger.upsert_order(
+        ExecutionOrder(
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=Decimal("0.001"),
+            price=Decimal(10000),
+            client_order_id="LOCAL-1",
+            status="FILLED",
+            exchange_order_id="8",
+        )
+    )
+    reconciliation = BinanceReconciliation(ScriptedRest(handler), ledger)
+
+    diffs = await reconciliation._recover_recent_trades({"BTCUSDT"})
+
+    assert ledger.fills == []
+    assert len(diffs) == 1
+    assert diffs[0].code == "EXCHANGE_ORDER_ID_MISMATCH"
+    assert diffs[0].local_value == "8"
+    assert diffs[0].exchange_value == "7"
+
+
+@pytest.mark.asyncio
+async def test_recent_trade_recovery_detects_duplicate_exchange_orders_for_client_id():
+    second_trade = {**trade_payload(), "id": 102, "orderId": 8}
+
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/userTrades":
+            return [trade_payload(), second_trade]
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    ledger = InMemoryLedger()
+    await ledger.upsert_order(
+        ExecutionOrder(
+            symbol="BTCUSDT",
+            side=OrderSide.BUY,
+            quantity=Decimal("0.001"),
+            price=Decimal(10000),
+            client_order_id="LOCAL-1",
+            status="FILLED",
+            exchange_order_id="7",
+            position_side=PositionSide.LONG,
+        )
+    )
+    reconciliation = BinanceReconciliation(ScriptedRest(handler), ledger)
+
+    diffs = await reconciliation._recover_recent_trades({"BTCUSDT"})
+
+    assert len(ledger.fills) == 1
+    assert len(diffs) == 1
+    assert diffs[0].code == "DUPLICATE_EXCHANGE_CLIENT_ORDER_ID"
+
+
+@pytest.mark.asyncio
+async def test_recent_trade_recovery_full_page_fails_closed():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/userTrades":
+            return [trade_payload()] * 1000
+        raise AssertionError(f"Unexpected REST call: {method} {path}")
+
+    reconciliation = BinanceReconciliation(ScriptedRest(handler), InMemoryLedger())
+
+    with pytest.raises(FillRecoveryError, match="incomplete"):
+        await reconciliation._recover_recent_trades({"BTCUSDT"})
+
+
+@pytest.mark.asyncio
+async def test_mainnet_order_history_pages_and_rejects_duplicate_client_id():
+    calls = []
+    history = MemoryHistoryRepository()
+    event_time = int((history.anchor_at + timedelta(minutes=1)).timestamp() * 1000)
+
+    async def handler(method, path, kwargs):
+        assert method == "GET" and path == "/fapi/v1/allOrders"
+        calls.append(kwargs["params"])
+        return [
+            {"symbol": "ETHUSDC", "orderId": 1, "clientOrderId": "ENTRY-1", "time": event_time},
+            {"symbol": "ETHUSDC", "orderId": 2, "clientOrderId": "ENTRY-1", "time": event_time},
+            {"symbol": "ETHUSDC", "orderId": 3, "clientOrderId": "OTHER-3", "time": event_time},
+        ]
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+    tracked = [ExecutionOrder(
+        symbol="ETHUSDC", side=OrderSide.BUY, quantity=Decimal("0.01"),
+        price=Decimal("2000"), client_order_id="ENTRY-1", exchange_order_id="1", status="FILLED",
+    )]
+
+    diffs = await reconciliation._audit_exchange_order_history(tracked)
+
+    assert len(calls) == 1
+    assert calls[0]["symbol"] == "ETHUSDC"
+    assert calls[0]["limit"] == 1000
+    assert "startTime" in calls[0] and "endTime" in calls[0]
+    assert any(diff.code == "DUPLICATE_EXCHANGE_CLIENT_ORDER_ID" for diff in diffs)
+    assert any(diff.code == "EXCHANGE_ORDER_ID_MISMATCH" for diff in diffs)
+    assert any(diff.code == "EXCHANGE_ORDER_UNKNOWN_LOCALLY" for diff in diffs)
+
+
+@pytest.mark.asyncio
+async def test_mainnet_order_history_rejects_unowned_canceled_exchange_order():
+    history = MemoryHistoryRepository()
+    event_time = int((history.anchor_at + timedelta(minutes=1)).timestamp() * 1000)
+
+    async def handler(method, path, kwargs):
+        assert method == "GET" and path == "/fapi/v1/allOrders"
+        return [
+            {"symbol": "ETHUSDC", "orderId": 1, "clientOrderId": "MANUAL-ORDER", "time": event_time},
+            {"symbol": "ETHUSDC", "orderId": 2, "clientOrderId": "ENTRY-1", "time": event_time},
+        ]
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+    tracked = [ExecutionOrder(
+        symbol="ETHUSDC", side=OrderSide.BUY, quantity=Decimal("0.01"),
+        price=Decimal("2000"), client_order_id="ENTRY-1", exchange_order_id="2", status="FILLED",
+    )]
+
+    diffs = await reconciliation._audit_exchange_order_history(tracked)
+
+    assert [diff.code for diff in diffs] == ["EXCHANGE_ORDER_UNKNOWN_LOCALLY"]
+
+
+@pytest.mark.asyncio
+async def test_mainnet_order_history_missing_anchor_fails_closed():
+    history = MemoryHistoryRepository()
+
+    async def handler(method, path, kwargs):
+        return []
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+    tracked = [ExecutionOrder(
+        symbol="ETHUSDC", side=OrderSide.BUY, quantity=Decimal("0.01"),
+        price=Decimal("2000"), client_order_id="ENTRY-1", exchange_order_id="1", status="FILLED",
+    )]
+
+    diffs = await reconciliation._audit_exchange_order_history(tracked)
+
+    assert [diff.code for diff in diffs] == ["TRACKED_ORDER_MISSING_FROM_HISTORY"]
+
+
+@pytest.mark.asyncio
+async def test_mainnet_order_history_audit_preserves_algo_lifecycle_findings():
+    history = MemoryHistoryRepository()
+
+    async def handler(method, path, kwargs):
+        assert method == "GET" and path == "/fapi/v1/allOrders"
+        return []
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+    algo_finding = ReconciliationDiff(
+        code="ALGO_TRIGGER_REMAINS_CLOSE_ONLY",
+        symbol="ETHUSDC",
+        exchange_value="owner-close-pending",
+    )
+    reconciliation._history_diffs = [algo_finding]
+
+    diffs = await reconciliation._audit_exchange_order_history([])
+
+    assert diffs == [algo_finding]
+
+
+@pytest.mark.asyncio
+async def test_mainnet_order_history_scans_rejected_only_symbol_but_blocks_pending():
+    calls = []
+    history = MemoryHistoryRepository()
+
+    async def handler(method, path, kwargs):
+        assert method == "GET" and path == "/fapi/v1/allOrders"
+        calls.append(kwargs["params"])
+        return []
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+    rejected = ExecutionOrder(
+        symbol="ETHUSDC", side=OrderSide.BUY, quantity=Decimal("0.01"),
+        price=Decimal("2000"), client_order_id="REJECTED-1", status="REJECTED",
+    )
+    pending = rejected.model_copy(update={"client_order_id": "PENDING-1", "status": "PENDING"})
+
+    assert await reconciliation._audit_exchange_order_history([rejected]) == []
+    assert len(calls) == 1
+    assert calls[0]["symbol"] == "ETHUSDC"
+    assert calls[0]["limit"] == 1000
+    assert "startTime" in calls[0] and "endTime" in calls[0]
+    with pytest.raises(FillRecoveryError, match="anchor"):
+        await reconciliation._audit_exchange_order_history([pending])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("portfolio_margin", [False, True])
+async def test_mainnet_algo_reconciliation_reads_open_and_history(portfolio_margin):
+    calls = []
+    history = MemoryHistoryRepository()
+
+    async def handler(method, path, kwargs):
+        calls.append((method, path, kwargs))
+        return []
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    rest.portfolio_margin = portfolio_margin
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+
+    await reconciliation._audit_algo_orders([ExecutionOrder(
+        symbol="ETHUSDC", side=OrderSide.BUY, quantity=Decimal("0.01"),
+        price=Decimal("2000"), client_order_id="ENTRY-1", status="FILLED",
+    )])
+
+    prefix = "/papi/v1/um/algo" if portfolio_margin else "/fapi/v1"
+    assert [(method, path) for method, path, _ in calls] == [
+        ("GET", f"{prefix}/openAlgoOrders"),
+        ("GET", f"{prefix}/allAlgoOrders"),
+    ]
+    assert all(kwargs["signed"] is True for _, _, kwargs in calls)
+    assert calls[1][2]["params"]["symbol"] == "ETHUSDC"
+    assert calls[1][2]["params"]["limit"] == 1000
+    assert "startTime" in calls[1][2]["params"]
+    assert "endTime" in calls[1][2]["params"]
+
+
+@pytest.mark.asyncio
+async def test_mainnet_triggered_algo_closes_owner_only_after_child_fill_and_flat_readback():
+    history = MemoryHistoryRepository()
+    triggered = {
+        "algoId": 11,
+        "clientAlgoId": "stop-11",
+        "symbol": "ETHUSDC",
+        "algoType": "CONDITIONAL",
+        "orderType": "STOP_MARKET",
+        "algoStatus": "TRIGGERED",
+        "positionSide": "BOTH",
+        "side": "SELL",
+        "workingType": "MARK_PRICE",
+        "triggerPrice": "1900",
+        "closePosition": True,
+        "reduceOnly": False,
+        "actualOrderId": 900,
+        "createTime": int((history.anchor_at + timedelta(minutes=1)).timestamp() * 1000),
+    }
+    sibling = {
+        **triggered,
+        "algoId": 12,
+        "clientAlgoId": "target-12",
+        "orderType": "TAKE_PROFIT_MARKET",
+        "algoStatus": "CANCELED",
+        "triggerPrice": "2100",
+        "actualOrderId": None,
+    }
+    child_order = {
+        "symbol": "ETHUSDC",
+        "orderId": 900,
+        "clientOrderId": "algo-child-900",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "status": "FILLED",
+        "origQty": "0.2",
+        "executedQty": "0.2",
+        "time": int((history.anchor_at + timedelta(minutes=2)).timestamp() * 1000),
+        "updateTime": int((history.anchor_at + timedelta(minutes=2)).timestamp() * 1000),
+    }
+    child_trade = {
+        "id": 901,
+        "orderId": 900,
+        "clientOrderId": "algo-child-900",
+        "symbol": "ETHUSDC",
+        "side": "SELL",
+        "positionSide": "BOTH",
+        "qty": "0.2",
+        "price": "1900",
+        "commission": "0.01",
+        "commissionAsset": "USDC",
+        "realizedPnl": "-20",
+        "time": child_order["time"],
+    }
+    owner = {
+        "environment": "MAINNET",
+        "venue": "binance_mainnet",
+        "symbol": "ETHUSDC",
+        "entry_client_order_id": "entry-1",
+        "mainnet_launch_id": history.run_id,
+        "basket_id": "basket-1",
+        "entry_side": "BUY",
+        "position_side": "BOTH",
+        "requested_quantity": Decimal("0.2"),
+        "filled_quantity": Decimal("0.2"),
+        "entry_average_price": Decimal("2000"),
+        "stop_trigger_price": Decimal("1900"),
+        "take_profit_trigger_price": Decimal("2100"),
+        "stop_algo_id": "11",
+        "take_profit_algo_id": "12",
+        "stop_client_algo_id": "stop-11",
+        "take_profit_client_algo_id": "target-12",
+        "state": "PROTECTED",
+    }
+
+    class OwnerRepository:
+        async def list_protections(self, *, venue):
+            assert venue == "binance_mainnet"
+            return [dict(owner)]
+
+        async def list_active_protections(self, *, venue):
+            return [dict(owner)] if owner["state"] != "CLOSED" else []
+
+        async def get_protection(self, venue, symbol, client_id):
+            assert (venue, symbol, client_id) == ("binance_mainnet", "ETHUSDC", "entry-1")
+            return dict(owner)
+
+        async def set_protection_state(self, venue, symbol, client_id, state, reason=None):
+            assert (venue, symbol, client_id) == ("binance_mainnet", "ETHUSDC", "entry-1")
+            owner["state"] = state
+            owner["state_reason"] = reason
+            return dict(owner)
+
+        async def close_mainnet_protection_with_proof(self, symbol, client_id, proof):
+            assert (symbol, client_id) == ("ETHUSDC", "entry-1")
+            evidence = {
+                "kind": "BINANCE_ALGO_CLOSE_VERIFIED",
+                "symbol": owner["symbol"],
+                "entry_client_order_id": owner["entry_client_order_id"],
+                "mainnet_launch_id": owner["mainnet_launch_id"],
+                "basket_id": owner["basket_id"],
+                "algo_id": str(proof["algo_id"]),
+                "order_id": str(proof["order_id"]),
+                "client_order_id": str(proof["client_order_id"]),
+                "order_status": str(proof["order_status"]),
+                "executed_quantity": str(proof["executed_quantity"]),
+                "trade_quantity": str(proof["trade_quantity"]),
+                "owner_filled_quantity": str(owner["filled_quantity"]),
+                "position_quantity": str(proof["position_quantity"]),
+                "open_child_order_ids": list(proof["open_child_order_ids"]),
+                "open_owner_algo_ids": list(proof["open_owner_algo_ids"]),
+                "verified_at": proof["verified_at"].isoformat(),
+            }
+            canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            evidence["proof_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            owner["closure_evidence"] = evidence
+            owner["state"] = "CLOSED"
+            owner["state_reason"] = (
+                f"{proof['order_status']} child fill verified by test double"
+            )
+            return dict(owner)
+
+    async def handler(method, path, kwargs):
+        assert method == "GET" and kwargs.get("signed") is True
+        if path == "/fapi/v1/algoOrder":
+            algo_id = str(kwargs.get("params", {}).get("algoId"))
+            return dict(triggered if algo_id == "11" else sibling)
+        if path == "/fapi/v1/allAlgoOrders":
+            return [dict(triggered), dict(sibling)]
+        if path == "/fapi/v1/allOrders":
+            return [dict(child_order)]
+        if path == "/fapi/v1/userTrades":
+            return [dict(child_trade)]
+        if path == "/fapi/v1/order":
+            return dict(child_order)
+        raise AssertionError(f"Unexpected read-only reconciliation endpoint: {path}")
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+    reconciliation.algo_protection_repository = OwnerRepository()
+
+    await reconciliation._audit_mainnet_algo_lifecycle(
+        [],
+        exchange_positions=[
+            {"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0"}
+        ],
+        exchange_open_orders=[],
+    )
+
+    assert owner["state"] == "CLOSED"
+    assert "FILLED" in owner["state_reason"]
+    assert reconciliation._history_diffs == []
+
+
+@pytest.mark.asyncio
+async def test_mainnet_triggered_algo_keeps_owner_close_pending_when_fills_are_ambiguous():
+    # Reuse the full close-lineage scenario but provide only half of the
+    # exchange-reported child execution in durable userTrades history.
+    history = MemoryHistoryRepository()
+    algo = {
+        "algoId": 31,
+        "clientAlgoId": "stop-31",
+        "symbol": "ETHUSDC",
+        "algoType": "CONDITIONAL",
+        "orderType": "STOP_MARKET",
+        "algoStatus": "TRIGGERED",
+        "positionSide": "BOTH",
+        "side": "SELL",
+        "workingType": "MARK_PRICE",
+        "triggerPrice": "1900",
+        "closePosition": True,
+        "reduceOnly": False,
+        "actualOrderId": 930,
+        "createTime": int((history.anchor_at + timedelta(minutes=1)).timestamp() * 1000),
+    }
+    owner = {
+        "environment": "MAINNET", "venue": "binance_mainnet", "symbol": "ETHUSDC",
+        "entry_client_order_id": "entry-3", "mainnet_launch_id": history.run_id,
+        "basket_id": "basket-3",
+        "entry_side": "BUY", "position_side": "BOTH", "requested_quantity": Decimal("0.2"),
+        "filled_quantity": Decimal("0.2"), "entry_average_price": Decimal("2000"),
+        "stop_trigger_price": Decimal("1900"), "take_profit_trigger_price": Decimal("2100"),
+        "stop_algo_id": "31", "take_profit_algo_id": "32",
+        "stop_client_algo_id": "stop-31", "take_profit_client_algo_id": "target-32",
+        "state": "PROTECTED",
+    }
+    sibling = {
+        **algo, "algoId": 32, "clientAlgoId": "target-32",
+        "orderType": "TAKE_PROFIT_MARKET", "algoStatus": "CANCELED",
+        "triggerPrice": "2100", "actualOrderId": None,
+    }
+    child_order = {
+        "symbol": "ETHUSDC", "orderId": 930, "clientOrderId": "child-930",
+        "side": "SELL", "positionSide": "BOTH", "status": "FILLED",
+        "origQty": "0.2", "executedQty": "0.2",
+        "time": int((history.anchor_at + timedelta(minutes=2)).timestamp() * 1000),
+    }
+
+    class OwnerRepository:
+        async def list_protections(self, *, venue):
+            return [dict(owner)]
+
+        async def list_active_protections(self, *, venue):
+            return [dict(owner)]
+
+        async def get_protection(self, venue, symbol, client_id):
+            return dict(owner)
+
+        async def set_protection_state(self, venue, symbol, client_id, state, reason=None):
+            owner["state"] = state
+            owner["state_reason"] = reason
+            return dict(owner)
+
+        async def close_mainnet_protection_with_proof(self, symbol, client_id, proof):
+            owner["state"] = "CLOSED"
+            owner["closure_evidence"] = {"kind": "BINANCE_ALGO_CLOSE_VERIFIED"}
+            return dict(owner)
+
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/algoOrder":
+            algo_id = str(kwargs.get("params", {}).get("algoId"))
+            return dict(algo if algo_id == "31" else sibling)
+        if path == "/fapi/v1/allAlgoOrders":
+            return [dict(algo), dict(sibling)]
+        if path == "/fapi/v1/allOrders":
+            return [dict(child_order)]
+        if path == "/fapi/v1/userTrades":
+            return [{
+                "id": 931, "orderId": 930, "symbol": "ETHUSDC", "side": "SELL",
+                "positionSide": "BOTH", "qty": "0.1", "time": child_order["time"],
+            }]
+        if path == "/fapi/v1/order":
+            return dict(child_order)
+        raise AssertionError(f"Unexpected endpoint: {path}")
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+    reconciliation.algo_protection_repository = OwnerRepository()
+
+    with pytest.raises(FillRecoveryError, match="fills do not equal"):
+        await reconciliation._audit_mainnet_algo_lifecycle(
+            [],
+            exchange_positions=[
+                {"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0"}
+            ],
+            exchange_open_orders=[],
+        )
+
+    assert owner["state"] == "CLOSE_PENDING"
+
+
+@pytest.mark.asyncio
+async def test_testnet_algo_reconciliation_requires_exact_durable_protection_owner():
+    history = MemoryHistoryRepository(run_id="testnet-readonly-run")
+    owner = {
+        "environment": "TESTNET",
+        "state": "PROTECTED",
+        "symbol": "ETHUSDC",
+        "entry_client_order_id": "entry-1",
+        "entry_side": "BUY",
+        "position_side": "BOTH",
+        "filled_quantity": Decimal("0.2"),
+        "stop_algo_id": "11",
+        "take_profit_algo_id": "12",
+        "stop_client_algo_id": "sl-11",
+        "take_profit_client_algo_id": "tp-12",
+        "stop_trigger_price": Decimal("1900"),
+        "take_profit_trigger_price": Decimal("2100"),
+    }
+    open_algos = [
+        {
+            "algoId": 11,
+            "clientAlgoId": "sl-11",
+            "symbol": "ETHUSDC",
+            "algoType": "CONDITIONAL",
+            "orderType": "STOP_MARKET",
+            "algoStatus": "NEW",
+            "positionSide": "BOTH",
+            "side": "SELL",
+            "workingType": "MARK_PRICE",
+            "triggerPrice": "1900",
+            "closePosition": True,
+            "reduceOnly": False,
+            "createTime": int((history.anchor_at + timedelta(minutes=1)).timestamp() * 1000),
+        },
+        {
+            "algoId": 12,
+            "clientAlgoId": "tp-12",
+            "symbol": "ETHUSDC",
+            "algoType": "CONDITIONAL",
+            "orderType": "TAKE_PROFIT_MARKET",
+            "algoStatus": "NEW",
+            "positionSide": "BOTH",
+            "side": "SELL",
+            "workingType": "MARK_PRICE",
+            "triggerPrice": "2100",
+            "closePosition": True,
+            "reduceOnly": False,
+            "createTime": int((history.anchor_at + timedelta(minutes=1)).timestamp() * 1000),
+        },
+    ]
+
+    class ProtectionRepository:
+        async def list_active_protections(self, *, venue, symbol=None):
+            assert venue == "binance_testnet" and symbol is None
+            return [owner]
+
+        async def list_protections(self, *, venue, symbol=None):
+            assert venue == "binance_testnet" and symbol is None
+            return [owner]
+
+    async def handler(method, path, kwargs):
+        assert method == "GET"
+        if path == "/fapi/v1/openAlgoOrders":
+            assert not kwargs.get("params")
+            return [dict(row) for row in open_algos]
+        if path == "/fapi/v2/positionRisk":
+            return [{"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0.2"}]
+        if path == "/fapi/v1/algoOrder":
+            algo_id = kwargs["params"]["algoId"]
+            return next(row for row in open_algos if row["algoId"] == int(algo_id))
+        if path == "/fapi/v1/allAlgoOrders":
+            return [dict(row) for row in open_algos]
+        raise AssertionError(f"Unexpected endpoint: {path}")
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.TESTNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.require_testnet_algo_ownership = True
+    reconciliation.algo_protection_repository = ProtectionRepository()
+    reconciliation.history_repository = history
+    reconciliation.testnet_history_run_id = history.run_id
+
+    await reconciliation._audit_algo_orders([])
+
+    open_algos[0]["workingType"] = "CONTRACT_PRICE"
+    with pytest.raises(FillRecoveryError, match="differs from durable protection"):
+        await reconciliation._audit_algo_orders([])
+
+
+@pytest.mark.asyncio
+async def test_testnet_algo_reconciliation_rejects_unowned_open_algo():
+    async def handler(method, path, kwargs):
+        return [{"algoId": 99, "clientAlgoId": "manual", "symbol": "ETHUSDC"}]
+
+    class EmptyProtectionRepository:
+        async def list_active_protections(self, *, venue, symbol=None):
+            return []
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.TESTNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.require_testnet_algo_ownership = True
+    reconciliation.algo_protection_repository = EmptyProtectionRepository()
+
+    with pytest.raises(FillRecoveryError, match="unowned or duplicated"):
+        await reconciliation._audit_algo_orders([])
+
+
+@pytest.mark.asyncio
+async def test_testnet_algo_reconciliation_rejects_unowned_completed_history():
+    history = MemoryHistoryRepository(run_id="testnet-readonly-run")
+    completed_algo = {
+        "algoId": 77, "clientAlgoId": "manual-completed", "symbol": "ETHUSDC",
+        "algoType": "CONDITIONAL", "orderType": "STOP_MARKET",
+        "algoStatus": "TRIGGERED", "positionSide": "BOTH", "side": "SELL",
+        "workingType": "MARK_PRICE", "triggerPrice": "1900",
+        "closePosition": True, "reduceOnly": False,
+        "createTime": int((history.anchor_at + timedelta(minutes=1)).timestamp() * 1000),
+    }
+
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/openAlgoOrders":
+            return []
+        if path == "/fapi/v1/allAlgoOrders":
+            return [completed_algo]
+        raise AssertionError(f"Unexpected endpoint: {path}")
+
+    class EmptyProtectionRepository:
+        async def list_active_protections(self, *, venue, symbol=None):
+            return []
+
+        async def list_protections(self, *, venue, symbol=None):
+            return []
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.TESTNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.require_testnet_algo_ownership = True
+    reconciliation.algo_protection_repository = EmptyProtectionRepository()
+    reconciliation.history_repository = history
+    reconciliation.testnet_history_run_id = history.run_id
+
+    with pytest.raises(FillRecoveryError, match="no exact baseline proof"):
+        await reconciliation._audit_algo_orders([])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response,expected", [
+    ({"code": -1}, "invalid"),
+    ([{"algoId": 1, "symbol": "ETHUSDC"}], "unowned"),
+])
+async def test_mainnet_algo_open_orders_fail_closed(response, expected):
+    async def handler(method, path, kwargs):
+        assert path == "/fapi/v1/openAlgoOrders"
+        return response
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    with pytest.raises(FillRecoveryError, match=expected):
+        await reconciliation._audit_algo_orders([ExecutionOrder(
+            symbol="ETHUSDC", side=OrderSide.BUY, quantity=Decimal("0.01"),
+            price=Decimal("2000"), client_order_id="ENTRY-1", status="FILLED",
+        )])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response,expected", [
+    ({"code": -1}, "invalid"),
+    ([{"algoId": 1, "clientAlgoId": "MANUAL", "symbol": "ETHUSDC",
+       "createTime": 1}], "unowned Algo order history"),
+    ([{"algoId": 1, "clientAlgoId": "MANUAL", "symbol": "BTCUSDT",
+       "createTime": 1}], "symbol"),
+])
+async def test_mainnet_algo_history_fails_closed(response, expected):
+    async def handler(method, path, kwargs):
+        if not path.endswith("allAlgoOrders"):
+            return []
+        if isinstance(response, list):
+            return [
+                {**row, "createTime": kwargs["params"]["startTime"] + 1}
+                for row in response
+            ]
+        return response
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = MemoryHistoryRepository()
+    with pytest.raises(FillRecoveryError, match=expected):
+        await reconciliation._audit_algo_orders([ExecutionOrder(
+            symbol="ETHUSDC", side=OrderSide.BUY, quantity=Decimal("0.01"),
+            price=Decimal("2000"), client_order_id="ENTRY-1", status="FILLED",
+        )])
+
+
+@pytest.mark.asyncio
+async def test_mainnet_algo_history_older_than_retention_fails_before_query():
+    async def handler(method, path, kwargs):
+        if path == "/fapi/v1/openAlgoOrders":
+            return []
+        raise AssertionError("Expired history must not be certified")
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = MemoryHistoryRepository(anchor_age=timedelta(days=4))
+    order = ExecutionOrder(
+        symbol="ETHUSDC", side=OrderSide.BUY, quantity=Decimal("0.01"),
+        price=Decimal("2000"), client_order_id="ENTRY-1", status="FILLED",
+        timestamp=datetime.now(timezone.utc) - timedelta(days=4),
+    )
+    with pytest.raises(FillRecoveryError, match="launch-history anchor/checkpoint"):
+        await reconciliation._audit_algo_orders([order])
+
+
+@pytest.mark.asyncio
+async def test_mainnet_user_trade_history_uses_durable_symbol_time_windows():
+    calls = []
+    history = MemoryHistoryRepository()
+    trade_time = int((history.anchor_at + timedelta(minutes=1)).timestamp() * 1000)
+
+    async def handler(method, path, kwargs):
+        assert method == "GET" and path == "/fapi/v1/userTrades"
+        calls.append(kwargs["params"])
+        return [{
+            "id": 5001,
+            "orderId": 9001,
+            "clientOrderId": "ENTRY-1",
+            "symbol": "ETHUSDC",
+            "time": trade_time,
+        }]
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+
+    trades = await reconciliation._fetch_user_trade_history("ETHUSDC")
+
+    assert len(calls) == 1
+    assert calls[0]["symbol"] == "ETHUSDC"
+    assert calls[0]["limit"] == 1000
+    assert "startTime" in calls[0] and "endTime" in calls[0]
+    assert "fromId" not in calls[0]
+    assert len(trades) == 1
+    checkpoint = next(iter(history.checkpoints.values()))
+    assert checkpoint["coverage_status"] == "COVERED"
+    assert len(await history.list_history_items(checkpoint)) == 1
+
+
+@pytest.mark.asyncio
+async def test_mainnet_user_trade_history_unsplittable_saturated_window_fails_closed():
+    history = MemoryHistoryRepository()
+    trade_time = int(history.anchor_at.timestamp() * 1000)
+    calls = []
+
+    async def handler(method, path, kwargs):
+        calls.append(kwargs["params"])
+        return [{
+            "id": trade_id,
+            "orderId": 9001,
+            "clientOrderId": f"ENTRY-{trade_id}",
+            "symbol": "ETHUSDC",
+            "time": trade_time,
+        } for trade_id in range(1, 1001)]
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+
+    with pytest.raises(FillRecoveryError, match="unsplittable timestamp interval"):
+        await reconciliation._fetch_user_trade_history("ETHUSDC")
+    assert len(calls) > 1
+    assert "fromId" not in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_mainnet_trade_history_requires_durable_launch_anchor():
+    async def handler(method, path, kwargs):
+        raise AssertionError("History must not be requested without a launch anchor")
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    with pytest.raises(FillRecoveryError, match="durable Binance launch-history repository"):
+        await reconciliation._fetch_user_trade_history("ETHUSDC")
+    with pytest.raises(FillRecoveryError, match="durable Binance launch-history repository"):
+        await reconciliation._recover_recent_trades({"ETHUSDC"}, [])
+
+
+@pytest.mark.asyncio
+async def test_mainnet_trade_history_retention_gap_fails_before_query():
+    history = MemoryHistoryRepository(anchor_age=timedelta(days=91))
+
+    async def handler(method, path, kwargs):
+        raise AssertionError("Expired userTrades coverage must fail before a Binance request")
+
+    rest = ScriptedRest(handler)
+    rest.env = BinanceEnvironment.MAINNET
+    reconciliation = BinanceReconciliation(rest, InMemoryLedger())
+    reconciliation.history_repository = history
+
+    with pytest.raises(FillRecoveryError, match="launch-history anchor/checkpoint"):
+        await reconciliation._fetch_user_trade_history("ETHUSDC")
 
 
 @pytest.mark.asyncio
@@ -2880,4 +3886,3 @@ async def test_autonomous_soak_requires_the_normal_execution_flag(monkeypatch):
         match="AUTONOMOUS_TESTNET_EXECUTION must be true",
     ):
         await run_supervised_soak(duration_sec=1.0)
-
