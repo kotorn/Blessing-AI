@@ -63,6 +63,24 @@ function campaignFrom(value: PilotResponse): Campaign | null {
     : null;
 }
 
+export function formatLocalPilotFailure(error: unknown, fallback: string): string {
+  if (!error || typeof error !== 'object') return fallback;
+  const data = (error as { data?: { error?: unknown; reason?: unknown } }).data;
+  return typeof data?.error === 'string' && typeof data.reason === 'string'
+    ? `${data.error} · ${data.reason}` : fallback;
+}
+
+export function LocalPilotStatusMessage({ busy, evidence, message }: {
+  busy: boolean; evidence: 'UNKNOWN' | 'PASS' | 'FAIL'; message: string;
+}) {
+  return <div role="status" aria-live="polite" className="flex items-center gap-2 border-t border-zinc-800 pt-3 text-xs text-zinc-400">
+    {busy ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />
+      : evidence === 'PASS' ? <CheckCircle2 className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+        : evidence === 'FAIL' ? <AlertTriangle className="h-4 w-4 text-red-400" aria-hidden="true" /> : null}
+    <span>หลักฐาน: {evidence} · {message}</span>
+  </div>;
+}
+
 export const LocalLivePilotPanel: React.FC = () => {
   const [strategyId, setStrategyId] = useState<LocalLivePilotStrategyId>('trend');
   const [campaign, setCampaign] = useState<Campaign | null>(null);
@@ -117,15 +135,7 @@ export const LocalLivePilotPanel: React.FC = () => {
       if (refreshFailed) setMessage('Action ตอบกลับแล้ว แต่การอ่านสถานะล่าสุดล้มเหลว; ตรวจ Worker ก่อนดำเนินการต่อ');
     } catch (error) {
       setEvidence('FAIL');
-      const err = error as any;
-      const data = err?.data;
-      const reason = data?.reason;
-      const code = data?.error;
-      if (reason && code) {
-        setMessage(`${code} · ${reason}`);
-      } else {
-        setMessage(error instanceof Error ? error.message : 'ตรวจสอบไม่สำเร็จ');
-      }
+      setMessage(formatLocalPilotFailure(error, 'ตรวจสอบไม่สำเร็จ'));
     } finally {
       setBusy(false);
     }
@@ -148,15 +158,7 @@ export const LocalLivePilotPanel: React.FC = () => {
       setMessage(`สถานะแคมเปญ: ${next?.status || 'UNKNOWN'}`);
     } catch (error) {
       setEvidence('FAIL');
-      const err = error as any;
-      const data = err?.data;
-      const reason = data?.reason;
-      const code = data?.error;
-      if (reason && code) {
-        setMessage(`${code} · ${reason}`);
-      } else {
-        setMessage(error instanceof Error ? error.message : 'อ่านสถานะไม่สำเร็จ');
-      }
+      setMessage(formatLocalPilotFailure(error, 'อ่านสถานะไม่สำเร็จ'));
     } finally {
       setBusy(false);
     }
@@ -250,12 +252,7 @@ export const LocalLivePilotPanel: React.FC = () => {
           className="rounded-md border border-red-500/50 px-3 py-2 text-xs text-red-200 disabled:opacity-50">เพิกถอน</button>}
       </div>
 
-      <div role="status" aria-live="polite" className="flex items-center gap-2 border-t border-zinc-800 pt-3 text-xs text-zinc-400">
-        {busy ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />
-          : evidence === 'PASS' ? <CheckCircle2 className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-            : evidence === 'FAIL' ? <AlertTriangle className="h-4 w-4 text-red-400" aria-hidden="true" /> : null}
-        <span>หลักฐาน: {evidence} · {message}</span>
-      </div>
+      <LocalPilotStatusMessage busy={busy} evidence={evidence} message={message} />
     </section>
   );
 };

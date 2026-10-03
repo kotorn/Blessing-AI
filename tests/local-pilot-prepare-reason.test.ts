@@ -1,10 +1,37 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import * as pilotPanel from '../src/components/LocalLivePilotPanel';
+vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));
 
 import { sanitizePilotPrepareReason } from '../server.js';
 
 describe('Local Pilot Prepare Reason Sanitization and UI Display (M1)', () => {
+  it('never logs the raw Prepare error object', () => {
+    const source = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+    const block = source.split("app.post('/api/local/pilot/prepare'")[1]?.split("app.post('/api/local/pilot/start'")[0] ?? '';
+    expect(block).not.toContain("console.error('PILOT_PREPARE_FAILED:', message, error)");
+  });
+
+  it('does not treat arbitrary preflight-shaped text as an approved diagnostic ID', () => {
+    expect(sanitizePilotPrepareReason(new Error('LOCAL_PILOT_SIGNED_PREFLIGHT_FAILED: CHK-PREFLIGHT-SECRET-CANARY; CHK-PREFLIGHT-AUTH')))
+      .toBe('LOCAL_PILOT_SIGNED_PREFLIGHT_FAILED: CHK-PREFLIGHT-AUTH');
+  });
+
+  it('renders a failed response reason next to its error code in the actual status component', () => {
+    const components = pilotPanel as unknown as Record<string, any>;
+    expect(components.LocalPilotStatusMessage).toBeTypeOf('function');
+    expect(components.formatLocalPilotFailure).toBeTypeOf('function');
+    const message = components.formatLocalPilotFailure({ data: {
+      error: 'LOCAL_PILOT_PREPARE_FAILED', reason: 'LOCAL_PILOT_FINGERPRINT_CHANGED',
+    } }, 'failed');
+    const html = renderToStaticMarkup(createElement(components.LocalPilotStatusMessage, { busy: false, evidence: 'FAIL', message }));
+    expect(html).toContain('LOCAL_PILOT_PREPARE_FAILED · LOCAL_PILOT_FINGERPRINT_CHANGED');
+    expect(html).toContain('role="status"');
+    expect(components.formatLocalPilotFailure(new Error('Bearer SYNTHETIC_CANARY'), 'failed')).toBe('failed');
+  });
   it('returns known error codes unchanged', () => {
     expect(sanitizePilotPrepareReason(new Error('LOCAL_PILOT_REQUIRES_REVIEWED_CLEAN_COMMIT')))
       .toBe('LOCAL_PILOT_REQUIRES_REVIEWED_CLEAN_COMMIT');

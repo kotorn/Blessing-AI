@@ -2196,6 +2196,13 @@ function assertCommittedPilotCandidate(): void {
 export function sanitizePilotPrepareReason(error: unknown): string {
   if (!(error instanceof Error)) return 'LOCAL_PILOT_PREPARE_UNKNOWN_ERROR';
   const raw = error.message.trim();
+  const allowedChecks = new Set([
+    'LOCAL-RISK-LIFECYCLE', 'PILOT-MONITOR', 'PILOT-FLAT-ACCOUNT', 'CREDENTIALS',
+    'PERSISTENCE', 'DURABLE-LEDGER', 'KILL-SWITCH', 'CONNECTION', 'AUTH', 'CAN-TRADE',
+    'POSITION-MODE', 'RULES', 'RECONCILIATION', 'PRIVATE-STREAM', 'ACCOUNT-RISK', 'MARKET',
+  ].map((id) => `CHK-PREFLIGHT-${id}`));
+  const safeChecks = (value: string) => [...new Set(value.match(/CHK-PREFLIGHT-[A-Z0-9-]+/g) || [])]
+    .filter((id) => allowedChecks.has(id));
 
   const KNOWN_CODES = [
     'LOCAL_PILOT_REQUIRES_REVIEWED_CLEAN_COMMIT',
@@ -2218,7 +2225,7 @@ export function sanitizePilotPrepareReason(error: unknown): string {
     if (raw === code || raw.startsWith(`${code}:`)) {
       if (raw === code) return code;
       const suffix = raw.slice(code.length + 1).trim();
-      const checkMatches = suffix.match(/CHK-PREFLIGHT-[A-Z0-9-]+/g);
+      const checkMatches = safeChecks(suffix);
       if (checkMatches && checkMatches.length > 0) {
         return `${code}: ${[...new Set(checkMatches)].join(', ')}`;
       }
@@ -2227,7 +2234,7 @@ export function sanitizePilotPrepareReason(error: unknown): string {
   }
 
   if (raw.startsWith('LOCAL_PILOT_SIGNED_PREFLIGHT_FAILED')) {
-    const checkMatches = raw.match(/CHK-PREFLIGHT-[A-Z0-9-]+/g);
+    const checkMatches = safeChecks(raw);
     if (checkMatches && checkMatches.length > 0) {
       return `LOCAL_PILOT_SIGNED_PREFLIGHT_FAILED: ${[...new Set(checkMatches)].join(', ')}`;
     }
@@ -2787,7 +2794,7 @@ app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
       } catch { /* preserve the Worker for operator inspection when its state is ambiguous */ }
     }
     const message = sanitizePilotPrepareReason(error);
-    console.error('PILOT_PREPARE_FAILED:', message, error);
+    console.error('PILOT_PREPARE_FAILED:', message);
     return res.status(503).json({ error: 'LOCAL_PILOT_PREPARE_FAILED', reason: sanitizePilotPrepareReason(error), evidence_status: 'UNVERIFIED' });
   } finally {
     localPilotTransitionBusy = false;
