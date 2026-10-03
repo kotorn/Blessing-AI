@@ -237,10 +237,9 @@ export interface LocalPilotReadinessOptions {
 
 export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): LocalPilotReadiness {
   // Hashes detect accidental mutation; they do not authenticate who ran a
-  // check, authored a review, or observed an exchange lifecycle. Until the
-  // trusted collector/attestation channel is provisioned, disk JSON is only
-  // an audit export and must never authorize a campaign without authenticated
-  // server authority.
+  // check, authored a review, or observed an exchange lifecycle. Disk JSON is
+  // only an audit export and never authorizes a campaign by itself. In
+  // particular, a logged-in admin identity is not provenance evidence.
   const provenanceBlockers: string[] = [
     'LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED',
     'LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED',
@@ -337,40 +336,6 @@ export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): L
         capabilityBlockers.push('LOCAL_PILOT_INDEPENDENT_REVIEWS_NOT_VERIFIED');
       }
     }
-  }
-
-  const hasServerAuthority = Boolean(
-    options?.authenticatedServerAuthority?.adminUid
-    && typeof options.authenticatedServerAuthority.adminUid === 'string'
-    && options.authenticatedServerAuthority.adminUid.trim().length > 0,
-  );
-
-  if (hasServerAuthority && capabilityBlockers.length === 0) {
-    return {
-      status: 'READY',
-      canApprove: true,
-      canStart: false,
-      implementationReady: readinessPhase(implementationChecks.map((check) => ({
-        ...check,
-        status: 'PASS',
-        reason: 'LOCAL_PILOT_CHECK_VERIFIED',
-      }))),
-      approvalReady: readinessPhase([{
-        id: 'AUTHENTICATED_SERVER_AUTHORITY',
-        status: 'PASS',
-        reason: 'SERVER_AUTHORITY_VERIFIED',
-      }]),
-      prepared: readinessPhase([{
-        id: 'SERVER_OWNED_PREPARATION',
-        status: 'NOT_RUN',
-        reason: 'LOCAL_PILOT_AUTHENTICATED_PREPARATION_EVIDENCE_NOT_AVAILABLE',
-      }]),
-      ciAttestation: options
-        ? localPilotCiAttestation(path.resolve(options.root), options.fingerprint.gitSha)
-        : { status: 'NOT_RUN', reason: 'CI_ATTESTATION_SOURCE_NOT_VERIFIED' },
-      provenance: { localChecks: 'VERIFIED', reviews: 'VERIFIED', testnet: 'VERIFIED' } as const,
-      blockers: [],
-    };
   }
 
   const blockers = [...new Set([...provenanceBlockers, ...capabilityBlockers])];

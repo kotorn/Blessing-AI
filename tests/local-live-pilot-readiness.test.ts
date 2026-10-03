@@ -271,28 +271,30 @@ describe('Local live pilot capability gate', () => {
     expect(evaluate().blockers).toContain('LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN');
   });
 
-  it('grants READY and canApprove when authenticated server authority attests complete evidence', () => {
+  it('never treats authenticated admin identity as a substitute for provenance attestations', () => {
     const { root, fingerprint, save, evidence, now, pilotPolicySha256 } = fixture();
     evidence.reviews[1].reviewerId = 'reviewer-1';
     save();
-    const readiness = localLivePilotReadiness({
-      root,
-      fingerprint,
-      pilotPolicySha256,
-      now,
-      authenticatedServerAuthority: {
-        adminUid: 'admin-kotorn',
-        verifiedAt: now.toISOString(),
-      },
-    });
+    for (const adminUid of ['', '   ', 'forged-admin-id', 'admin-kotorn']) {
+      const readiness = localLivePilotReadiness({
+        root,
+        fingerprint,
+        pilotPolicySha256,
+        now,
+        authenticatedServerAuthority: {
+          adminUid,
+          verifiedAt: now.toISOString(),
+        },
+      });
 
-    expect(readiness.status).toBe('READY');
-    expect(readiness.canApprove).toBe(true);
-    expect(readiness.canStart).toBe(false);
-    expect(readiness.provenance).toEqual({ localChecks: 'VERIFIED', reviews: 'VERIFIED', testnet: 'VERIFIED' });
-    expect(readiness.blockers).toEqual([]);
-    expect(readiness.approvalReady.status).toBe('PASS');
-    expect(readiness.implementationReady.status).toBe('PASS');
+      expect(readiness.status).toBe('BLOCKED');
+      expect(readiness.canApprove).toBe(false);
+      expect(readiness.canStart).toBe(false);
+      expect(readiness.provenance).toEqual({ localChecks: 'UNVERIFIED', reviews: 'UNVERIFIED', testnet: 'UNVERIFIED' });
+      expect(readiness.blockers).toContain('LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED');
+      expect(readiness.blockers).toContain('LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED');
+      expect(readiness.blockers).toContain('LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED');
+      expect(readiness.approvalReady.status).toBe('FAIL');
+    }
   });
 });
-
