@@ -32,6 +32,12 @@ describe('Local Pilot Prepare Reason Sanitization and UI Display (M1)', () => {
     expect(html).toContain('role="status"');
     expect(components.formatLocalPilotFailure(new Error('Bearer SYNTHETIC_CANARY'), 'failed')).toBe('failed');
   });
+
+  it('preserves a fixed API error code when an early validation response has no reason', () => {
+    const components = pilotPanel as unknown as Record<string, any>;
+    expect(components.formatLocalPilotFailure({ data: { error: 'LOCAL_PILOT_FINGERPRINT_CHANGED' } }, 'failed'))
+      .toBe('LOCAL_PILOT_FINGERPRINT_CHANGED');
+  });
   it('returns known error codes unchanged', () => {
     expect(sanitizePilotPrepareReason(new Error('LOCAL_PILOT_REQUIRES_REVIEWED_CLEAN_COMMIT')))
       .toBe('LOCAL_PILOT_REQUIRES_REVIEWED_CLEAN_COMMIT');

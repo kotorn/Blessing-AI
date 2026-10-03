@@ -66,8 +66,8 @@ function campaignFrom(value: PilotResponse): Campaign | null {
 export function formatLocalPilotFailure(error: unknown, fallback: string): string {
   if (!error || typeof error !== 'object') return fallback;
   const data = (error as { data?: { error?: unknown; reason?: unknown } }).data;
-  return typeof data?.error === 'string' && typeof data.reason === 'string'
-    ? `${data.error} · ${data.reason}` : fallback;
+  if (typeof data?.error !== 'string' || !/^[A-Z][A-Z0-9_]{1,100}$/.test(data.error)) return fallback;
+  return typeof data.reason === 'string' ? `${data.error} · ${data.reason}` : data.error;
 }
 
 export function LocalPilotStatusMessage({ busy, evidence, message }: {
