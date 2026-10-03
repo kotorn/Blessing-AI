@@ -1,6 +1,8 @@
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +36,26 @@ def test_live_pilot_readiness_stays_blocked_until_runtime_evidence_exists(monkey
     assert all(check["status"] == "NOT_RUN" for check in readiness["implementation_ready"]["checks"][1:])
     assert readiness["approval_ready"]["status"] == "FAIL"
     assert readiness["prepared"]["status"] == "NOT_RUN"
+
+
+def test_shared_admin_identity_cases_never_change_worker_readiness(tmp_path):
+    fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "local-pilot-admin-readiness.json"
+    contract = json.loads(fixture_path.read_text(encoding="utf-8"))
+    expected = contract["expected"]
+
+    for identity_case in contract["identityCases"]:
+        readiness = local_live_pilot_readiness(tmp_path)
+        assert identity_case["id"]
+        assert isinstance(identity_case["adminUid"], str)
+        assert readiness["status"] == expected["status"]
+        assert readiness["can_approve"] == expected["canApprove"]
+        assert readiness["can_start"] == expected["canStart"]
+        assert readiness["provenance"] == {
+            "local_checks": expected["provenance"]["localChecks"],
+            "reviews": expected["provenance"]["reviews"],
+            "testnet": expected["provenance"]["testnet"],
+        }
+        assert set(expected["requiredBlockers"]).issubset(set(readiness["blockers"]))
 
 
 @pytest.mark.parametrize("dirty", [True, False])

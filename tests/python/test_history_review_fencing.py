@@ -7,6 +7,7 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -227,6 +228,86 @@ class EmergencyDB:
             self.owner["state_reason"] = args[3]
             return {"entry_client_order_id": args[2]}
         raise AssertionError(query)
+
+
+class EntryCancelDB:
+    def __init__(self):
+        self.owner = {
+            "environment": "MAINNET", "venue": "binance_mainnet", "symbol": "ETHUSDC",
+            "entry_client_order_id": "entry-cancel", "basket_id": "basket-review",
+            "mainnet_launch_id": "launch-review", "entry_side": "BUY", "position_side": "BOTH",
+            "requested_quantity": Decimal("0.5"),
+            "filled_quantity": Decimal("0"), "entry_average_price": None,
+            "stop_trigger_price": Decimal("90"),
+            "take_profit_trigger_price": Decimal("110"),
+            "stop_algo_id": None, "take_profit_algo_id": None,
+            "stop_client_algo_id": "stop-cancel", "take_profit_client_algo_id": "target-cancel",
+            "management_mode": "QUICK", "state": "PENDING", "state_reason": None,
+            "first_fill_at": None, "protection_verified_at": None,
+            "last_reconciled_at": None, "closed_at": None,
+        }
+        self.lock = asyncio.Lock()
+        self.updates = 0
+
+    @asynccontextmanager
+    async def transaction(self):
+        async with self.lock:
+            yield self
+
+    async def fetchrow(self, query, *args):
+        if "SELECT * FROM binance_algo_protections" in query:
+            assert "FOR UPDATE" in query
+            return dict(self.owner)
+        if "UPDATE binance_algo_protections" in query:
+            self.updates += 1
+            assert self.owner["state"] == args[4]
+            assert self.owner["state_reason"] == args[5]
+            self.owner["state_reason"] = args[3]
+            self.owner["last_reconciled_at"] = NOW
+            return dict(self.owner)
+        raise AssertionError(query)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_mainnet_entry_cancel_claim_is_atomic_and_one_shot():
+    db = EntryCancelDB()
+    repo = AlgoProtectionRepository(db)
+    results = await asyncio.gather(*(repo.claim_mainnet_entry_cancel(db.owner) for _ in range(12)))
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1
+    assert db.updates == 1
+    assert winners[0]["state_reason"] == "entry_cancel=ATTEMPTED_UNKNOWN"
+    assert await repo.claim_mainnet_entry_cancel(db.owner) is None
+    assert db.updates == 1
+
+
+@pytest.mark.asyncio
+async def test_emergency_close_cannot_race_ambiguous_entry_cancel_claim():
+    db = EmergencyDB(state_reason="entry_cancel=ATTEMPTED_UNKNOWN")
+    repo = AlgoProtectionRepository(db)
+
+    with pytest.raises(RuntimeError, match="entry cancellation"):
+        await claim(repo)
+
+    assert db.claim is None
+    assert db.owner["state"] == "PROTECTED"
+
+
+@pytest.mark.asyncio
+async def test_emergency_close_is_allowed_after_terminal_entry_cancel_readback():
+    db = EmergencyDB(state_reason="entry_cancel=CONFIRMED")
+    repo = AlgoProtectionRepository(db)
+    result = await claim(repo)
+    assert result["claimed"] is True
+    assert db.owner["state"] == "CLOSE_PENDING"
+    assert "entry_cancel=CONFIRMED" in db.owner["state_reason"]
+
+    assert await repo.mark_local_emergency_close_attempted(
+        "ETHUSDC", "entry-review", "close-review",
+        claimant_id="worker-one", fencing_token=1,
+    ) is True
+    assert "entry_cancel=CONFIRMED" in db.owner["state_reason"]
+    assert "close_submission=ATTEMPTED" in db.owner["state_reason"]
 
 
 async def claim(repo, claimant="worker-one", close_id="close-review"):

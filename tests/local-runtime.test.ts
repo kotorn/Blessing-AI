@@ -152,6 +152,19 @@ describe('local runtime safety contract', () => {
       .toBeLessThan(recoveryRoute.indexOf("forwardWorkerRequest('/recovery-only'"));
   });
 
+  it('keeps the Local Pilot /start route blocked before any ARM when readiness is unverified', () => {
+    const pilotStart = server
+      .split("app.post('/api/local/pilot/start'")[1]
+      ?.split("app.post('/api/local/pilot/close-only'")[0] ?? '';
+    const unready = pilotStart.indexOf('rejectUnreadyLocalPilot(res)');
+    const reserveTransition = pilotStart.indexOf('reserveLocalPilotTransition()');
+    const armRequest = pilotStart.indexOf("forwardWorkerRequest('/arm'");
+
+    expect(unready).toBeGreaterThanOrEqual(0);
+    expect(unready).toBeLessThan(reserveTransition);
+    expect(reserveTransition).toBeLessThan(armRequest);
+  });
+
   it('does not expose campaign identity or Secret Manager references in pilot responses', () => {
     const sanitizer = server
       .split('function safeLocalLivePilotCampaign(')[1]

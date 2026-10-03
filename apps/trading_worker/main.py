@@ -1364,6 +1364,53 @@ class TradingWorkerApp:
             and stored.get("state") == record.get("state", "PENDING")
         )
 
+    async def _claim_local_mainnet_entry_cancel(
+        self, record: Dict[str, Any]
+    ) -> bool:
+        """Win the durable one-shot cancellation claim before an entry DELETE."""
+        launch = getattr(self, "_mainnet_launch_session", None)
+        if (
+            self.execution_mode != WorkerExecutionMode.LIVE
+            or os.getenv("LOCAL_ONLY", "").strip().lower() not in {"1", "true", "yes", "on"}
+            or os.getenv("LOCAL_RUNTIME_TARGET", "").strip().upper() != "LOCAL"
+            or not isinstance(launch, dict)
+            or launch.get("policy") != "LIVE_RESEARCH_PILOT"
+            or launch.get("runtime_target") != "LOCAL"
+            or launch.get("launch_id") != str(self._mainnet_launch_id or "")
+            or not str(launch.get("pilot_campaign_id") or "").strip()
+            or str(record.get("environment", "")).upper() != "MAINNET"
+            or str(record.get("venue", "")).lower() != "binance_mainnet"
+            or str(record.get("symbol", "")).upper() != "ETHUSDC"
+            or str(record.get("mainnet_launch_id", "")) != str(self._mainnet_launch_id or "")
+            or not str(record.get("basket_id") or "").strip()
+        ):
+            return False
+        mode = str(getattr(self.persistence.mode, "value", self.persistence.mode)).upper()
+        readiness = self.persistence.readiness()
+        repository = getattr(self.persistence, "repository", None)
+        protections = getattr(repository, "algo_protections", None)
+        claim = getattr(protections, "claim_mainnet_entry_cancel", None)
+        if (
+            mode != "REQUIRED" or not self.persistence.is_connected
+            or readiness.get("durable") is not True or not callable(claim)
+        ):
+            return False
+        try:
+            stored = await claim(record)
+        except Exception as exc:
+            logger.error("Local Mainnet entry cancel claim failed: %s", type(exc).__name__)
+            return False
+        identity_fields = (
+            "environment", "venue", "symbol", "mainnet_launch_id", "basket_id",
+            "entry_client_order_id", "entry_side", "position_side",
+            "requested_quantity", "management_mode",
+        )
+        return bool(
+            isinstance(stored, dict)
+            and all(stored.get(key) == record.get(key) for key in identity_fields)
+            and "entry_cancel=ATTEMPTED_UNKNOWN" in str(stored.get("state_reason") or "")
+        )
+
     async def _persist_local_mainnet_protection_update(
         self, record: Dict[str, Any]
     ) -> bool:
@@ -4488,6 +4535,11 @@ class TradingWorkerApp:
                 )
                 self.execution_adapter.on_local_mainnet_protection_update = (
                     self._persist_local_mainnet_protection_update
+                    if local_mainnet_runtime
+                    else None
+                )
+                self.execution_adapter.on_local_mainnet_entry_cancel_claim = (
+                    self._claim_local_mainnet_entry_cancel
                     if local_mainnet_runtime
                     else None
                 )

@@ -1037,6 +1037,80 @@ class AlgoProtectionRepository:
         )
         return _decode_protection_record(row) if row is not None else None
 
+    async def claim_mainnet_entry_cancel(
+        self, record: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Atomically persist the one-shot marker authorizing an entry DELETE.
+
+        Returning ``None`` means this worker did not win the durable claim and
+        must only perform exact-order read-back. The marker is permanent even
+        if the exchange response is ambiguous; cancellation is never retried.
+        """
+        supplied = self._normalize_input(record)
+        key = (supplied["venue"], supplied["symbol"], supplied["entry_client_order_id"])
+        if supplied["environment"] != "MAINNET" or key[0] != "binance_mainnet":
+            raise ValueError("entry cancel claim requires a Local Mainnet owner")
+
+        async with self.db.transaction() as connection:
+            connection = connection or self.db
+            current_row = await connection.fetchrow(
+                """
+                SELECT * FROM binance_algo_protections
+                WHERE venue = $1 AND symbol = $2 AND entry_client_order_id = $3
+                FOR UPDATE
+                """,
+                *key,
+            )
+            if current_row is None:
+                return None
+            current = dict(current_row)
+            for name in (
+                "environment", "venue", "symbol", "entry_client_order_id",
+                "basket_id", "mainnet_launch_id", "entry_side", "position_side",
+                "requested_quantity", "management_mode",
+            ):
+                if current.get(name) != supplied.get(name):
+                    return None
+            if str(current.get("state") or "").upper() not in {"PENDING", "PROTECTED", "UNKNOWN"}:
+                return None
+
+            markers = dict(
+                part.split("=", 1)
+                for part in str(current.get("state_reason") or "").split(";")
+                if "=" in part
+            )
+            # Any prior marker or close reservation is a query-only state.
+            if "entry_cancel" in markers or "local_close_client_order_id" in markers:
+                return None
+            markers["entry_cancel"] = "ATTEMPTED_UNKNOWN"
+            priority = ("local_close_client_order_id", "close_submission", "algo_cancel", "entry_cancel")
+            ordered = [name for name in priority if name in markers]
+            ordered.extend(name for name in markers if name not in priority)
+            reason = ";".join(f"{name}={markers[name]}" for name in ordered)
+            if len(reason) > 256:
+                return None
+
+            updated = await connection.fetchrow(
+                """
+                UPDATE binance_algo_protections
+                SET state_reason = $4, last_reconciled_at = clock_timestamp(),
+                    updated_at = clock_timestamp()
+                WHERE venue = $1 AND symbol = $2 AND entry_client_order_id = $3
+                  AND state = $5 AND state_reason IS NOT DISTINCT FROM $6
+                RETURNING *
+                """,
+                *key,
+                reason,
+                current["state"],
+                current.get("state_reason"),
+            )
+            if updated is None:
+                return None
+            result = dict(updated)
+            if result.get("state_reason") != reason:
+                return None
+            return result
+
     async def claim_testnet_protection_close(
         self, *, venue: str, symbol: str, entry_client_order_id: str,
         entry_side: str, position_side: str, filled_quantity: Decimal,
@@ -1261,6 +1335,17 @@ class AlgoProtectionRepository:
                 raise RuntimeError("Emergency close requires a durable Local Mainnet owner")
             if not owner.get("basket_id") or not owner.get("mainnet_launch_id"):
                 raise RuntimeError("Emergency close owner has no durable launch/basket identity")
+            entry_cancel_markers = [
+                part.split("=", 1)[1]
+                for part in str(owner.get("state_reason") or "").split(";")
+                if part.startswith("entry_cancel=")
+            ]
+            # Entry cancellation and emergency close serialize on this owner
+            # row. A close may proceed only after exact exchange read-back has
+            # durably confirmed the entry terminal; otherwise the entry could
+            # fill after the reduce-only close and recreate exposure.
+            if entry_cancel_markers and entry_cancel_markers != ["CONFIRMED"]:
+                raise RuntimeError("Emergency close is blocked by unresolved entry cancellation")
             current = await connection.fetchrow(
                 """
                 SELECT * FROM binance_emergency_close_claims
@@ -1310,6 +1395,9 @@ class AlgoProtectionRepository:
                 claimed = transferred is not None
                 current = transferred or current
             if claimed:
+                close_reason = self._emergency_close_state_reason(
+                    owner.get("state_reason"), close_client_order_id, "RESERVED"
+                )
                 updated = await connection.fetchrow(
                     """
                     UPDATE binance_algo_protections
@@ -1318,11 +1406,32 @@ class AlgoProtectionRepository:
                       AND state <> 'CLOSED'
                     RETURNING entry_client_order_id
                     """, *key,
-                    f"local_close_client_order_id={close_client_order_id};close_submission=RESERVED",
+                    close_reason,
                 )
                 if updated is None:
                     raise RuntimeError("Emergency close owner changed during claim")
             return {**dict(current), "claimed": claimed}
+
+    @staticmethod
+    def _emergency_close_state_reason(
+        current_reason: object, close_client_order_id: str, submission_state: str
+    ) -> str:
+        entry_cancel_markers = [
+            part.split("=", 1)[1]
+            for part in str(current_reason or "").split(";")
+            if part.startswith("entry_cancel=")
+        ]
+        if entry_cancel_markers and entry_cancel_markers != ["CONFIRMED"]:
+            raise RuntimeError("Emergency close is blocked by unresolved entry cancellation")
+        reason = (
+            f"local_close_client_order_id={close_client_order_id};"
+            f"close_submission={submission_state}"
+        )
+        if entry_cancel_markers:
+            reason += ";entry_cancel=CONFIRMED"
+        if len(reason) > 256:
+            raise RuntimeError("Emergency close evidence exceeds the durable owner limit")
+        return reason
 
     async def mark_local_emergency_close_attempted(
         self, symbol: str, entry_client_order_id: str, close_client_order_id: str,
@@ -1343,13 +1452,16 @@ class AlgoProtectionRepository:
             connection = connection or self.db
             owner = await connection.fetchrow(
                 """
-                SELECT state FROM binance_algo_protections
+                SELECT state, state_reason FROM binance_algo_protections
                 WHERE venue = $1 AND symbol = $2 AND entry_client_order_id = $3
                 FOR UPDATE
                 """, *key,
             )
             if owner is None or owner["state"] != "CLOSE_PENDING":
                 return False
+            attempted_reason = self._emergency_close_state_reason(
+                owner.get("state_reason"), close_client_order_id, "ATTEMPTED"
+            )
             attempted = await connection.fetchrow(
                 """
                 UPDATE binance_emergency_close_claims
@@ -1370,7 +1482,7 @@ class AlgoProtectionRepository:
                   AND state = 'CLOSE_PENDING'
                 RETURNING entry_client_order_id
                 """, *key,
-                f"local_close_client_order_id={close_client_order_id};close_submission=ATTEMPTED",
+                attempted_reason,
             )
             if updated is None:
                 raise RuntimeError("Emergency close owner changed during submission claim")

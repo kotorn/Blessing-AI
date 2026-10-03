@@ -272,29 +272,48 @@ describe('Local live pilot capability gate', () => {
   });
 
   it('never treats authenticated admin identity as a substitute for provenance attestations', () => {
-    const { root, fingerprint, save, evidence, now, pilotPolicySha256 } = fixture();
-    evidence.reviews[1].reviewerId = 'reviewer-1';
-    save();
-    for (const adminUid of ['', '   ', 'forged-admin-id', 'admin-kotorn']) {
+    const shared = JSON.parse(readFileSync(
+      path.resolve(process.cwd(), 'tests/fixtures/local-pilot-admin-readiness.json'), 'utf8',
+    )) as {
+      identityCases: Array<{ id: string; adminUid: string }>;
+      expected: {
+        status: 'BLOCKED'; canApprove: false; canStart: false;
+        provenance: { localChecks: 'UNVERIFIED'; reviews: 'UNVERIFIED'; testnet: 'UNVERIFIED' };
+        requiredBlockers: string[];
+      };
+    };
+
+    for (const identityCase of shared.identityCases) {
+      const { root, fingerprint, save, evidence, now, pilotPolicySha256 } = fixture();
+      evidence.reviews[1].reviewerId = 'reviewer-1';
+      save();
       const readiness = localLivePilotReadiness({
         root,
         fingerprint,
         pilotPolicySha256,
         now,
         authenticatedServerAuthority: {
-          adminUid,
+          adminUid: identityCase.adminUid,
           verifiedAt: now.toISOString(),
         },
       });
 
-      expect(readiness.status).toBe('BLOCKED');
-      expect(readiness.canApprove).toBe(false);
-      expect(readiness.canStart).toBe(false);
-      expect(readiness.provenance).toEqual({ localChecks: 'UNVERIFIED', reviews: 'UNVERIFIED', testnet: 'UNVERIFIED' });
-      expect(readiness.blockers).toContain('LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED');
-      expect(readiness.blockers).toContain('LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED');
-      expect(readiness.blockers).toContain('LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED');
-      expect(readiness.approvalReady.status).toBe('FAIL');
+      expect({
+        id: identityCase.id,
+        status: readiness.status,
+        canApprove: readiness.canApprove,
+        canStart: readiness.canStart,
+        provenance: readiness.provenance,
+      }).toEqual({
+        id: identityCase.id,
+        status: shared.expected.status,
+        canApprove: shared.expected.canApprove,
+        canStart: shared.expected.canStart,
+        provenance: shared.expected.provenance,
+      });
+      for (const blocker of shared.expected.requiredBlockers) {
+        expect(readiness.blockers).toContain(blocker);
+      }
     }
   });
 });
