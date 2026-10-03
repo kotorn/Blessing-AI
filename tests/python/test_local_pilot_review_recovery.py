@@ -419,6 +419,112 @@ async def test_unknown_zero_fill_owner_reconciles_terminal_entry(terminal_filled
 
 
 @pytest.mark.asyncio
+async def test_unavailable_entry_user_trades_requires_exact_terminal_order_and_position():
+    """A terminal exchange fill alone is insufficient without signed position proof."""
+    adapter, authority, repository = make_adapter(owner_record(
+        state="UNKNOWN", filled_quantity=Decimal(0), entry_average_price=None,
+    ))
+    terminal_entry = {
+        "clientOrderId": "entry-review", "symbol": "ETHUSDC", "side": "BUY",
+        "positionSide": "BOTH", "origQty": "0.1", "executedQty": "0.1",
+        "status": "FILLED", "orderId": "123",
+    }
+    adapter.query_order.return_value = {**terminal_entry, "status": "NEW"}
+    adapter.rest_client.request.return_value = [{
+        "symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0.1",
+        "unRealizedProfit": "0", "entryPrice": "100", "markPrice": "100",
+        "leverage": "1", "marginType": "ISOLATED",
+    }]
+    adapter.ledger.get_order_by_client_id = AsyncMock(return_value=SimpleNamespace())
+    adapter.reconciliation._recover_order_fills = AsyncMock(
+        side_effect=RuntimeError("userTrades delayed")
+    )
+    adapter._cancel_and_read_back_pilot_entry = AsyncMock(return_value=None)
+    adapter._local_mainnet_close_only_once = AsyncMock(return_value=False)
+
+    recovered = await adapter._recover_unprotected_local_pilot_owner(
+        repository.row, authority=authority, launch_id="launch-review"
+    )
+
+    assert recovered is False
+    assert authority._mainnet_launch_session["pilot_status"] == "CLOSE_ONLY"
+    assert authority.persistence.enter_local_live_pilot_close_only.await_count == 1
+    adapter._local_mainnet_close_only_once.assert_not_awaited()
+    assert repository.row["state"] == "UNKNOWN"
+    assert repository.row["filled_quantity"] == 0
+    assert authority.get_local_live_pilot_accounting.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_terminal_entry_and_signed_position_delegate_to_fenced_close_when_trades_lag():
+    adapter, authority, repository = make_adapter(owner_record(
+        state="UNKNOWN", filled_quantity=Decimal(0), entry_average_price=None,
+    ))
+    exact_terminal = {
+        "clientOrderId": "entry-review", "symbol": "ETHUSDC", "side": "BUY",
+        "positionSide": "BOTH", "origQty": "0.1", "executedQty": "0.1",
+        "status": "FILLED", "orderId": "123",
+    }
+    adapter.query_order = AsyncMock(return_value=exact_terminal)
+    adapter.ledger.get_order_by_client_id = AsyncMock(return_value=SimpleNamespace())
+    adapter.reconciliation._recover_order_fills = AsyncMock(
+        side_effect=RuntimeError("userTrades temporarily delayed")
+    )
+    adapter._cancel_and_read_back_pilot_entry = AsyncMock(return_value=None)
+
+    # The recovery path may delegate to the existing close contract, but only
+    # after validating the signed position against the exact terminal order.
+    async def close_contract(intent, order, record, **kwargs):
+        assert intent.quantity == Decimal("0.1")
+        assert record["filled_quantity"] == 0
+        assert record["entry_average_price"] is None
+        return False
+
+    adapter._local_mainnet_close_only_once = AsyncMock(side_effect=close_contract)
+
+    recovered = await adapter._recover_unprotected_local_pilot_owner(
+        repository.row, authority=authority, launch_id="launch-review"
+    )
+
+    assert recovered is False
+    adapter._local_mainnet_close_only_once.assert_awaited_once()
+    assert repository.row["state"] == "UNKNOWN"
+    assert repository.row["filled_quantity"] == 0
+    assert repository.row["entry_average_price"] is None
+    assert authority._mainnet_launch_session["pilot_status"] == "CLOSE_ONLY"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_zero_fill_recovery_never_replays_deterministic_close():
+    """A prior one-shot close claim is query-only even when canonical entry fills lag."""
+    adapter, authority, repository = make_adapter(owner_record(
+        state="UNKNOWN", filled_quantity=Decimal(0), entry_average_price=None,
+    ))
+    deterministic_close_id = adapter._generate_client_order_id(
+        adapter._local_close_decision_id("entry-review"), "ETHUSDC", order_index=0
+    )
+    repository.row["state_reason"] = (
+        f"local_close_client_order_id={deterministic_close_id};close_submission=ATTEMPTED"
+    )
+    adapter._cancel_and_read_back_pilot_entry = AsyncMock(return_value=None)
+    adapter.query_order = AsyncMock(return_value={
+        "clientOrderId": "entry-review", "symbol": "ETHUSDC", "side": "BUY",
+        "positionSide": "BOTH", "origQty": "0.1", "executedQty": "0.1",
+        "status": "FILLED", "orderId": "123",
+    })
+
+    result = await adapter._recover_unprotected_local_pilot_owner(
+        repository.row, authority=authority, launch_id="launch-review"
+    )
+
+    assert result is False
+    adapter._execute_decision.assert_not_awaited()
+    adapter._verify_local_mainnet_close.assert_awaited_once()
+    assert repository.row["state"] == "UNKNOWN"
+    assert authority._mainnet_launch_session["pilot_status"] == "CLOSE_ONLY"
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_entry_cancel_is_durable_and_not_repeated():
     adapter, authority, repository = make_adapter(owner_record(state="UNKNOWN", filled_quantity=Decimal(0)))
     adapter.state = ConnectionState.DEGRADED
@@ -641,4 +747,3 @@ async def test_local_mainnet_position_is_flat_real_implementation():
     # Request failure or empty returns False
     adapter.rest_client.request = AsyncMock(side_effect=Exception("network"))
     assert await BinanceExecutionAdapter._local_mainnet_position_is_flat(adapter, intent) is False
-

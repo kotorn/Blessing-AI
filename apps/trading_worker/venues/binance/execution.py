@@ -4395,7 +4395,94 @@ class BinanceExecutionAdapter:
                 owner, authority=authority
             )
             if not isinstance(updated, Mapping):
-                return False
+                # Canonical userTrades may lag even when Binance has a
+                # terminal exact-ID entry order and a matching signed
+                # position. Keep the durable owner/accounting untouched, but
+                # allow the existing deterministic, fenced close-only path to
+                # independently re-prove that exact position before POST.
+                # The close verifier intentionally leaves the owner UNKNOWN
+                # until canonical entry fills and price are durable.
+                try:
+                    entry = await self.query_order(
+                        str(owner.get("symbol") or "").upper(),
+                        str(owner.get("entry_client_order_id") or ""),
+                    )
+                    executed = self._decimal_value(
+                        entry.get("executedQty"), positive=True
+                    ) if isinstance(entry, Mapping) else Decimal("NaN")
+                    original = self._decimal_value(
+                        entry.get("origQty"), positive=True
+                    ) if isinstance(entry, Mapping) else Decimal("NaN")
+                    exchange_id = str(entry.get("orderId") or "").strip() if isinstance(entry, Mapping) else ""
+                    expected_side = str(owner.get("entry_side") or "").upper()
+                    known_exchange_id = str(owner.get("exchange_order_id") or "").strip()
+                    terminal = str(entry.get("status") or "").upper() if isinstance(entry, Mapping) else ""
+                    if (
+                        not isinstance(entry, Mapping)
+                        or str(entry.get("clientOrderId") or "") != str(owner.get("entry_client_order_id") or "")
+                        or str(entry.get("symbol") or "").upper() != MAINNET_RISK_POLICY.symbol
+                        or expected_side not in {"BUY", "SELL"}
+                        or str(entry.get("side") or "").upper() != expected_side
+                        or str(entry.get("positionSide") or "BOTH").upper() != "BOTH"
+                        or terminal not in {"FILLED", "CANCELED", "CANCELLED", "EXPIRED"}
+                        or not exchange_id.isdigit() or int(exchange_id) <= 0
+                        or not known_exchange_id.isdigit() or known_exchange_id != exchange_id
+                        or not requested.is_finite() or original != requested
+                        or not executed.is_finite() or executed <= 0 or executed > requested
+                    ):
+                        return False
+                    positions = await self.rest_client.request(
+                        "GET", self._position_risk_path, signed=True
+                    )
+                    if not isinstance(positions, list):
+                        return False
+                    matching = [
+                        row for row in positions
+                        if isinstance(row, Mapping)
+                        and str(row.get("symbol") or "").upper() == MAINNET_RISK_POLICY.symbol
+                        and str(row.get("positionSide") or "BOTH").upper() == "BOTH"
+                    ]
+                    if len(matching) != 1:
+                        return False
+                    signed_amount = self._decimal_value(
+                        matching[0].get("positionAmt"), nonnegative=False
+                    )
+                    expected_amount = executed if expected_side == "BUY" else -executed
+                    if signed_amount != expected_amount:
+                        return False
+                except Exception:  # noqa: BLE001 - any signed-read failure must block the close handoff
+                    return False
+                recovered_intent = OrderIntent(
+                    client_order_id=str(owner.get("entry_client_order_id")),
+                    symbol=MAINNET_RISK_POLICY.symbol,
+                    basket_id=str(owner.get("basket_id") or ""),
+                    market_type=MarketType.USDM_FUTURES,
+                    side=OrderSide.BUY if expected_side == "BUY" else OrderSide.SELL,
+                    position_side=PositionSide.BOTH,
+                    order_type=OrderType.MARKET,
+                    time_in_force=TimeInForce.GTC,
+                    quantity=executed,
+                    management_mode="QUICK",
+                )
+                recovered_order = ExecutionOrder(
+                    client_order_id=str(owner.get("entry_client_order_id")),
+                    symbol=MAINNET_RISK_POLICY.symbol,
+                    exchange_order_id=exchange_id,
+                    side=recovered_intent.side,
+                    position_side=PositionSide.BOTH,
+                    order_type=OrderType.MARKET,
+                    time_in_force=TimeInForce.GTC,
+                    quantity=executed,
+                    price=Decimal(0),
+                    status=OrderStatus.FILLED,
+                )
+                return await self._local_mainnet_close_only_once(
+                    recovered_intent,
+                    recovered_order,
+                    dict(owner),
+                    reason="PILOT_ZERO_FILL_CANONICAL_TRADES_PENDING",
+                    authority=authority,
+                )
             owner = updated
             try:
                 filled = self._decimal_value(

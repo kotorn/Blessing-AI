@@ -2747,14 +2747,14 @@ app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
     });
     const preflight = await forwardWorkerRequest('/preflight/read-only', { method: 'POST' });
     if (!preflight.response.ok) {
-      console.error('PILOT_PREPARE_READ_ONLY_PREFLIGHT_HTTP_ERROR:', preflight.data);
-      throw new Error(`LOCAL_PILOT_READ_ONLY_PREFLIGHT_FAILED: ${JSON.stringify(preflight.data)}`);
+      console.error('PILOT_PREPARE_READ_ONLY_PREFLIGHT_HTTP_ERROR');
+      throw new Error('LOCAL_PILOT_READ_ONLY_PREFLIGHT_FAILED');
     }
     if (preflight.data?.preflightPassed !== true) {
       const failed = Array.isArray(preflight.data?.checks)
         ? preflight.data.checks.filter((c: any) => c.status !== 'PASS').map((c: any) => `${c.id}: ${c.message}`).join('; ')
         : 'preflightPassed=false';
-      console.error('PILOT_PREPARE_PREFLIGHT_CHECKS_FAILED:', failed);
+      console.error('PILOT_PREPARE_PREFLIGHT_CHECKS_FAILED');
       throw new Error(`LOCAL_PILOT_SIGNED_PREFLIGHT_FAILED: ${failed}`);
     }
     const finalState = await forwardWorkerRequest('/state');

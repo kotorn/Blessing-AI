@@ -75,6 +75,13 @@ describe('Local Pilot Prepare Reason Sanitization and UI Display (M1)', () => {
     expect(prepareBlock).toContain("reason: sanitizePilotPrepareReason(error)");
   });
 
+  it('never logs raw Worker preflight payloads or unsanitized diagnostic messages', () => {
+    const serverSource = readFileSync(resolve(process.cwd(), 'server.ts'), 'utf8');
+    const prepareBlock = serverSource.split("app.post('/api/local/pilot/prepare'")[1]?.split("app.post('/api/local/pilot/start'")[0] ?? '';
+    expect(prepareBlock).not.toContain("console.error('PILOT_PREPARE_READ_ONLY_PREFLIGHT_HTTP_ERROR:', preflight.data)");
+    expect(prepareBlock).not.toContain("console.error('PILOT_PREPARE_PREFLIGHT_CHECKS_FAILED:', failed)");
+  });
+
   it('verifies LocalLivePilotPanel.tsx renders the reason next to the error code on failure', () => {
     const panelSource = readFileSync(resolve(process.cwd(), 'src/components/LocalLivePilotPanel.tsx'), 'utf8');
     expect(panelSource).toMatch(/reason/);
