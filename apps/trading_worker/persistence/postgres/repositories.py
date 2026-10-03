@@ -1395,6 +1395,9 @@ class AlgoProtectionRepository:
                 claimed = transferred is not None
                 current = transferred or current
             if claimed:
+                close_reason = self._emergency_close_state_reason(
+                    owner.get("state_reason"), close_client_order_id, "RESERVED"
+                )
                 updated = await connection.fetchrow(
                     """
                     UPDATE binance_algo_protections
@@ -1403,11 +1406,32 @@ class AlgoProtectionRepository:
                       AND state <> 'CLOSED'
                     RETURNING entry_client_order_id
                     """, *key,
-                    f"local_close_client_order_id={close_client_order_id};close_submission=RESERVED",
+                    close_reason,
                 )
                 if updated is None:
                     raise RuntimeError("Emergency close owner changed during claim")
             return {**dict(current), "claimed": claimed}
+
+    @staticmethod
+    def _emergency_close_state_reason(
+        current_reason: object, close_client_order_id: str, submission_state: str
+    ) -> str:
+        entry_cancel_markers = [
+            part.split("=", 1)[1]
+            for part in str(current_reason or "").split(";")
+            if part.startswith("entry_cancel=")
+        ]
+        if entry_cancel_markers and entry_cancel_markers != ["CONFIRMED"]:
+            raise RuntimeError("Emergency close is blocked by unresolved entry cancellation")
+        reason = (
+            f"local_close_client_order_id={close_client_order_id};"
+            f"close_submission={submission_state}"
+        )
+        if entry_cancel_markers:
+            reason += ";entry_cancel=CONFIRMED"
+        if len(reason) > 256:
+            raise RuntimeError("Emergency close evidence exceeds the durable owner limit")
+        return reason
 
     async def mark_local_emergency_close_attempted(
         self, symbol: str, entry_client_order_id: str, close_client_order_id: str,
@@ -1428,13 +1452,16 @@ class AlgoProtectionRepository:
             connection = connection or self.db
             owner = await connection.fetchrow(
                 """
-                SELECT state FROM binance_algo_protections
+                SELECT state, state_reason FROM binance_algo_protections
                 WHERE venue = $1 AND symbol = $2 AND entry_client_order_id = $3
                 FOR UPDATE
                 """, *key,
             )
             if owner is None or owner["state"] != "CLOSE_PENDING":
                 return False
+            attempted_reason = self._emergency_close_state_reason(
+                owner.get("state_reason"), close_client_order_id, "ATTEMPTED"
+            )
             attempted = await connection.fetchrow(
                 """
                 UPDATE binance_emergency_close_claims
@@ -1455,7 +1482,7 @@ class AlgoProtectionRepository:
                   AND state = 'CLOSE_PENDING'
                 RETURNING entry_client_order_id
                 """, *key,
-                f"local_close_client_order_id={close_client_order_id};close_submission=ATTEMPTED",
+                attempted_reason,
             )
             if updated is None:
                 raise RuntimeError("Emergency close owner changed during submission claim")

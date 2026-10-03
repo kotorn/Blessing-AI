@@ -296,9 +296,18 @@ async def test_emergency_close_cannot_race_ambiguous_entry_cancel_claim():
 @pytest.mark.asyncio
 async def test_emergency_close_is_allowed_after_terminal_entry_cancel_readback():
     db = EmergencyDB(state_reason="entry_cancel=CONFIRMED")
-    result = await claim(AlgoProtectionRepository(db))
+    repo = AlgoProtectionRepository(db)
+    result = await claim(repo)
     assert result["claimed"] is True
     assert db.owner["state"] == "CLOSE_PENDING"
+    assert "entry_cancel=CONFIRMED" in db.owner["state_reason"]
+
+    assert await repo.mark_local_emergency_close_attempted(
+        "ETHUSDC", "entry-review", "close-review",
+        claimant_id="worker-one", fencing_token=1,
+    ) is True
+    assert "entry_cancel=CONFIRMED" in db.owner["state_reason"]
+    assert "close_submission=ATTEMPTED" in db.owner["state_reason"]
 
 
 async def claim(repo, claimant="worker-one", close_id="close-review"):

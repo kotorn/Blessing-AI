@@ -1421,8 +1421,16 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
             cancel_race_connection = await connect()
             try:
                 other_cancel_race = PersistenceRepository(cancel_race_connection).algo_protections
+                cancel_close_barrier = asyncio.Barrier(2)
+
+                async def try_entry_cancel():
+                    await cancel_close_barrier.wait()
+                    return await pilot_repository.algo_protections.claim_mainnet_entry_cancel(
+                        cancel_close_owner
+                    )
 
                 async def try_close_claim():
+                    await cancel_close_barrier.wait()
                     try:
                         result = await other_cancel_race.claim_local_emergency_close(
                             "ETHUSDC", cancel_close_owner["entry_client_order_id"],
@@ -1435,7 +1443,7 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
                         raise
 
                 concurrent_mutations = await asyncio.gather(
-                    pilot_repository.algo_protections.claim_mainnet_entry_cancel(cancel_close_owner),
+                    try_entry_cancel(),
                     try_close_claim(),
                 )
                 cancel_won = concurrent_mutations[0] is not None
@@ -1458,6 +1466,40 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
                     assert await pilot_repository.algo_protections.claim_mainnet_entry_cancel(
                         cancel_close_owner
                     ) is None
+
+                # A terminal-cancel proof remains durable across every
+                # emergency-close transition, even if a stale owner snapshot
+                # is written while the close lease is reserved.
+                confirmed_owner = {
+                    **cancel_close_owner,
+                    "entry_client_order_id": "pilot-confirmed-cancel-close-entry",
+                    "stop_client_algo_id": "pilot-confirmed-cancel-stop",
+                    "take_profit_client_algo_id": "pilot-confirmed-cancel-target",
+                    "state_reason": "entry_cancel=CONFIRMED",
+                }
+                await pilot_repository.algo_protections.upsert_protection(confirmed_owner)
+                confirmed_close = await pilot_repository.algo_protections.claim_local_emergency_close(
+                    "ETHUSDC", confirmed_owner["entry_client_order_id"],
+                    "pilot-confirmed-cancel-close", claimant_id="pilot-confirmed-worker",
+                )
+                assert confirmed_close["claimed"] is True
+                reserved_owner = await pilot_repository.algo_protections.get_protection(
+                    "binance_mainnet", "ETHUSDC", confirmed_owner["entry_client_order_id"]
+                )
+                assert "entry_cancel=CONFIRMED" in reserved_owner["state_reason"]
+                await pilot_repository.algo_protections.upsert_protection({
+                    **confirmed_owner, "state": "CLOSE_PENDING", "state_reason": None,
+                })
+                assert await pilot_repository.algo_protections.mark_local_emergency_close_attempted(
+                    "ETHUSDC", confirmed_owner["entry_client_order_id"],
+                    "pilot-confirmed-cancel-close", claimant_id="pilot-confirmed-worker",
+                    fencing_token=confirmed_close["fencing_token"],
+                ) is True
+                attempted_owner = await pilot_repository.algo_protections.get_protection(
+                    "binance_mainnet", "ETHUSDC", confirmed_owner["entry_client_order_id"]
+                )
+                assert "entry_cancel=CONFIRMED" in attempted_owner["state_reason"]
+                assert "close_submission=ATTEMPTED" in attempted_owner["state_reason"]
             finally:
                 await cancel_race_connection.close()
             # Two real database connections race for the same close identity.
