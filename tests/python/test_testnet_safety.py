@@ -2543,7 +2543,7 @@ async def test_manual_trial_allows_approved_override_for_exchange_minimum():
 
 
 @pytest.mark.asyncio
-async def test_filled_order_recovery_recovers_canonical_fill_and_reaches_in_sync():
+async def test_filled_order_recovery_does_not_adopt_unowned_exchange_position():
     async def handler(method, path, kwargs):
         if path == "/fapi/v2/positionRisk":
             return [
@@ -2586,13 +2586,14 @@ async def test_filled_order_recovery_recovers_canonical_fill_and_reaches_in_sync
 
     status = await reconciliation.reconcile()
 
-    assert status == "IN_SYNC"
-    assert reconciliation.last_status == "IN_SYNC"
+    assert status == "MISMATCH"
+    assert reconciliation.last_status == "MISMATCH"
     assert len(ledger.fills) == 1
     assert isinstance(ledger.fills[0], ExchangeFill)
     assert ledger.fills[0].exchange_trade_id == "101"
     assert ledger.fills[0].client_order_id == "LOCAL-1"
     assert (await ledger.get_open_orders()) == []
+    assert await ledger.get_positions() == []
     await ledger.append_fill(ledger.fills[0])
     assert len(ledger.fills) == 1
 
