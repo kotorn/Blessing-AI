@@ -19,6 +19,8 @@ from typing import Any
 from scripts.verify_local_pilot_ci_attestation import verify_ci_attestation
 from scripts.verify_local_pilot_track_c import verify_all
 from scripts.local_pilot_track_c import track_c_phases
+from scripts.local_pilot_track_c_source import DEPENDENCY_PATHS, SOURCE_PATHS
+from scripts.local_pilot_track_c_source import hash_files as hash_track_c_files
 
 
 EVIDENCE_PATH = Path("artifacts/local-pilot-capability.json")
@@ -29,15 +31,6 @@ REQUIRED_CHECKS = (
     "POSTGRES_17_MIGRATIONS_RESTART", "LEASE_FENCING", "PROTECTION_CLOSE", "TESTNET_E2E",
 )
 REQUIRED_REVIEW_DOMAINS = ("AUTH_RELEASE", "ORDER_RISK", "PERSISTENCE")
-SOURCE_PATHS = (
-    "server.ts", "Dockerfile.worker", "src/backend", "apps/trading_worker", "domain",
-    "scripts/start-local.ps1", "scripts/apply_local_postgres_migrations.py",
-    "config/risk/mainnet_local_policy.json", "config/risk/live_research_pilot.json",
-    'scripts/local_pilot_track_c.py', 'scripts/local_pilot_track_c_source.py',
-    'scripts/verify_local_pilot_track_c.py', 'scripts/produce_local_pilot_track_c.py',
-    '.github/workflows/ci.yml', '.github/workflows/local-pilot-track-c.yml',
-)
-DEPENDENCY_PATHS = ("package.json", "package-lock.json", "pyproject.toml", "requirements-worker.txt")
 HEX_SHA256 = re.compile(r"^[a-f0-9]{64}$")
 GIT_SHA = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 
@@ -75,39 +68,12 @@ def _git(root: Path, *args: str) -> str | None:
     return result.stdout.strip()
 
 
-def _collect_files(root: Path, relative: str) -> list[str]:
-    target = root / relative
+def _hash_files(root: Path, paths: tuple[str, ...]) -> str | None:
+    """Same tracked-file hashing as Track C (and the TypeScript fingerprint); None means unverifiable."""
     try:
-        if target.is_file():
-            return [relative.replace("\\", "/")]
-        if not target.is_dir():
-            return []
-        files: list[str] = []
-        for item in sorted(target.rglob("*"), key=lambda path: path.as_posix()):
-            if not item.is_file() or any(
-                part in {"__pycache__", ".pytest_cache"} for part in item.parts
-            ):
-                continue
-            files.append(item.relative_to(root).as_posix())
-        return files
-    except OSError:
-        return []
-
-
-def _hash_files(root: Path, paths: tuple[str, ...], *, required: bool = True) -> str | None:
-    files = sorted({name for path in paths for name in _collect_files(root, path)})
-    if required and not files:
+        return hash_track_c_files(root, paths)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
-    digest = hashlib.sha256()
-    try:
-        for name in files:
-            digest.update(name.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update((root / name).read_bytes())
-            digest.update(b"\0")
-    except OSError:
-        return None
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> tuple[dict[str, Any] | None, bytes | None]:

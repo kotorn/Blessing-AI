@@ -93,17 +93,38 @@ their values. The agent's job ends at item 5.
 
 ## Current state (refresh before acting)
 
-The previous snapshot was stale. At the last verified refresh on 2026-10-03,
-the checkout was clean on `codex/local-ethusdc-quick-pilot` at `6db1f75`, with
-M0/M1 completed in commits `7074d14`, `377031c`, and `6db1f75`. The browser
-showed readiness `BLOCKED` for unverified check/review/Testnet provenance and
-missing/stale capability evidence; Prepare was `NOT_RUN`, Worker `UNKNOWN`,
-and the visible campaign was `PENDING_APPROVAL`. Refresh Git, UI, and tests
-before relying on this snapshot. Independent review had identified unresolved
-P1 recovery/reconciliation findings: adoption of unowned excess positions,
-zero-fill UNKNOWN entry recovery, and a concurrent cancellation-claim race.
-No Mainnet secret was read, no ARM was performed, and no order was sent by the
-agent.
+Snapshot refreshed against base commit `52015b2` ("Bind Testnet close proof to
+final mutation barrier") on `codex/local-ethusdc-quick-pilot`. It will go
+stale again; always re-run `git log -1`, `git status` and the three test
+suites before relying on it.
+
+- Track C is merged into `codex/local-ethusdc-quick-pilot`
+  (`origin/codex/pilot-track-c-provenance` is an ancestor of `52015b2`). It is
+  **not** on `main` in the local view (`52015b2` is not an ancestor of the
+  locally known `origin/main`; no fetch was done), so signed `CHECKS` evidence
+  for this code does not exist on `main` yet.
+- The `adminUid`-only readiness shortcut introduced by `381bf37`
+  ("authenticated server-owned pilot readiness channel") is removed from the
+  gate: `fd297ad` ("require provenance attestations for readiness") deleted
+  the logic. `381bf37` itself is still an ancestor in git history (commits are
+  not erased), and `LocalPilotReadinessOptions.authenticatedServerAuthority`
+  still exists as an optional field that the readiness code no longer reads.
+  Tests keep empty/forged `adminUid` cases BLOCKED.
+- Readiness stays `BLOCKED` without real signed evidence. No real Track C
+  bundle (CHECKS, three REVIEW_* classes, TESTNET_ETHUSDC) has ever been
+  produced or verified, so the `gh attestation verify` JSON shape is still
+  unconfirmed. The TypeScript binding now equals the Python binding
+  (`tests/local-pilot-binding-parity.test.ts`), the Worker image now contains
+  the Track C modules, and `scripts/download_local_pilot_track_c.py` exists
+  (fake-`gh` tested only). See `docs/LOCAL-PILOT-TRACK-C.md`.
+- Earlier unresolved P1 recovery/reconciliation findings (adoption of unowned
+  excess positions, zero-fill UNKNOWN entry recovery, a concurrent
+  cancellation-claim race) were recorded at an older snapshot
+  (`6db1f75`, 2026-10-03). Later commits such as `25b894b`, `57f55a6`,
+  `4c28c9a` and `a8c1ee1` address related paths, but whether each finding is
+  closed has not been re-reviewed (UNVERIFIED).
+- No Mainnet secret was read, no ARM was performed, and no order was sent by
+  the agent.
 
 ## Milestones
 
@@ -186,9 +207,16 @@ If credentials, required Environment approval, or leverage evidence are
 missing, continue independent work and leave this acceptance `NOT_RUN`.
 
 - Accept: artifact PASS, `PROTECTED_VERIFIED`, `IN_SYNC`, `diff_count` 0, and
-  it confirms that a reduce-only close is accepted while reduce-only stop and
-  target algos are open. If that close is rejected, stop and report: the
-  emergency-close path would not work.
+  it confirms that a reduce-only market close is accepted while the stop and
+  target Algo orders are open. Be precise about which protection shape that
+  proves: the *Testnet* runner places the Algo orders with
+  `closePosition=true` (no `reduceOnly`), whereas the *Local Mainnet* path
+  places them with `reduceOnly=true`, `closePosition=false` and a fill-sized
+  quantity (`execution.py` `_submit_local_mainnet_protection_algo`). The
+  Testnet artifact therefore does not prove the Mainnet protection shape
+  coexists with a reduce-only close; treat that as an open gap and report it.
+  If the close is rejected, stop and report: the emergency-close path would
+  not work.
 
 ### M6 — Hand-off
 

@@ -32,6 +32,13 @@ jobs:
       with:
         persist-credentials: false
     
+    - name: Tracked text files must be LF (git ls-files --eol)
+      run: |
+        if git ls-files --eol | grep -E '(^|[[:space:]])(i|w)/(crlf|mixed)[[:space:]]'; then
+          echo "::error::Tracked text files with CRLF/mixed line endings found; Track C hashes raw bytes."
+          exit 1
+        fi
+
     - name: Setup Node.js
       uses: actions/setup-node@v7
       with:

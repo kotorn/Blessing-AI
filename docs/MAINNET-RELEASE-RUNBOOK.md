@@ -99,10 +99,10 @@ does not read secret values or call the exchange. A failed or interrupted
 collection invalidates an earlier receipt. The receipt is accepted only for
 the current commit, source/dependency/migration/policy fingerprints and recent
 results. This JSON and its hashes prove integrity only, not who ran the checks.
-The current Control Plane and Worker therefore keep the gate `BLOCKED` until a
-trusted collector channel is implemented and verified. The operator must obtain three independent PASS reports in
-`artifacts/local-pilot-reviews/` for `AUTH_RELEASE`, `ORDER_RISK`, and
-`PERSISTENCE`; plain JSON reports and distinct reviewer-name strings do not
+The capability receipt is therefore an audit export only and never opens the
+gate. Readiness clears only from the Track C GitHub-signed attestations
+described in the next section; plain JSON reports under
+`artifacts/local-pilot-reviews/` and distinct reviewer-name strings do not
 authenticate reviewer identity or independence and cannot open the gate.
 
 The Worker runtime is selected by `LOCAL_WORKER_RUNTIME`.
@@ -148,6 +148,70 @@ open the gate. The existing manual Testnet workflow currently
 targets `BTCUSDT`; its artifact cannot pass the Pilot receipt. No Testnet
 order is submitted by the collector. Missing, stale, incomplete, or
 cross-symbol evidence keeps Pilot approval blocked.
+
+## Local Pilot readiness: Track C evidence and the Docker Worker
+
+Status: written from the code at base commit `52015b2`. No real signed Track C
+bundle exists yet, so every statement about live GitHub/`gh` output is
+**UNVERIFIED**. Readiness stays `BLOCKED` without real signed evidence.
+
+**What opens the gate.** Five distinct GitHub-signed subjects, all bound to the
+same clean reviewed commit and younger than 24 hours: `CHECKS` (from the `main`
+push of `ci.yml`), `REVIEW_AUTH_RELEASE`, `REVIEW_ORDER_RISK`,
+`REVIEW_PERSISTENCE` (three separate `workflow_dispatch` runs of
+`local-pilot-track-c.yml`, each approved in the `pilot-review` Environment by a
+different non-author user) and `TESTNET_ETHUSDC` (a dispatch approved in the
+`testnet` Environment). Full rules and limits are in
+`docs/LOCAL-PILOT-TRACK-C.md`. These attestations do not prove Mainnet
+behavior, profitability, campaign approval, or permission to ARM. Environments
+and branch protection are human configuration; this repository does not change
+them.
+
+**Operator sequence (humans do the GitHub steps).**
+
+1. Merge the reviewed commit to `main` and let CI produce `CHECKS`.
+2. Dispatch the review and Testnet runs and approve them as the required
+   reviewers. An agent must not self-approve or impersonate a reviewer.
+3. On the Local host, check out exactly that `main` SHA with a clean tree and
+   LF line endings (`python scripts/check_tracked_eol.py`). "Clean" means clean
+   to the Python verifier, which ignores your global Git config: an untracked
+   file hidden only by a global ignore (e.g. `.claude/settings.local.json`)
+   still blocks Track C. See `docs/LOCAL-PILOT-DAY-OF-CHECKLIST.md` B10 for the
+   exact check. Whether to ignore `.claude/` in the repository `.gitignore` is a
+   human decision and was not changed.
+4. `python scripts/download_local_pilot_track_c.py --sha <that SHA>` copies the
+   subject/bundle pairs into `artifacts/local-pilot-attestations/`. It is
+   convenience only (and has only been tested against a fake `gh`); it never
+   overwrites files and verifies nothing.
+5. The Control Plane verifies them when `/api/local/pilot/readiness` is read,
+   by running `scripts/verify_local_pilot_track_c.py` with a trusted host
+   Python and `gh attestation verify` with the signed GitHub CLI at
+   `C:\Program Files\GitHub CLI\gh.exe`. The `--binding` it passes comes from
+   `computeLocalReleaseFingerprint`, which derives its git SHA and
+   source/dependency/migration hashes from `computeTrackCBinding`, plus the
+   pilot policy hash. These are byte-identical to the Python values
+   (`tests/local-pilot-binding-parity.test.ts`). Changing the hashed file lists
+   changed every hash, so any previously created local candidates, approvals
+   or capability receipts no longer match and must be recreated (fail-closed).
+
+**Docker path.** `scripts/start-local.ps1` always builds the Worker image from
+`Dockerfile.worker` and runs it as a container; the Control Plane and the Track
+C verification stay on the host. The image now copies the `scripts/` modules
+the Worker imports (`tests/python/test_dockerfile_worker_imports.py` keeps this
+complete), but the Worker's own Python gate cannot reach `READY` inside the
+container: there is no `git`, no `gh` and no `artifacts/` or source tree in the
+image. Treat the host TypeScript gate as the readiness authority for this path;
+how the container should consume host-verified evidence is an open decision
+(see `docs/LOCAL-PILOT-TRACK-C.md`). The default Docker Worker does not need a
+host Python, but the **Track C verification does** (trusted, PSF-signed,
+protected-tree interpreter). The paragraph above recording that no eligible
+interpreter existed on the original host may still apply; its current state is
+**UNVERIFIED**.
+
+**Manual recovery and day-of checks.** `docs/LOCAL-PILOT-BREAK-GLASS.md` and
+`docs/LOCAL-PILOT-DAY-OF-CHECKLIST.md` replace the older
+`docs/LIVE-READINESS-CHECKLIST.md` and `docs/SMALL-LIVE-CHECKLIST.md`, which
+are marked superseded.
 
 ## Gate 1 — Repository and identities
 

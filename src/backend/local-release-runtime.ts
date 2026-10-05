@@ -1,13 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { localSecretSourceIdentity, type LocalSecretSourceIdentity } from './local-secret-manager.js';
 
 export const LOCAL_RUNTIME_TARGET = 'LOCAL' as const;
 export const LOCAL_RISK_POLICY_PATH = 'config/risk/mainnet_local_policy.json';
 
-const SOURCE_PATHS = [
+// These lists MUST equal SOURCE_PATHS / DEPENDENCY_PATHS in scripts/local_pilot_track_c_source.py:
+// the Python verifier rejects any --binding that differs from its own recomputation.
+// tests/local-pilot-binding-parity.test.ts compares both lists and the resulting hashes.
+export const TRACK_C_SOURCE_PATHS = [
   'server.ts',
   'Dockerfile.worker',
   'src/backend',
@@ -19,14 +22,21 @@ const SOURCE_PATHS = [
   'config/risk/live_research_pilot.json',
   'scripts/local_pilot_track_c.py', 'scripts/local_pilot_track_c_source.py',
   'scripts/verify_local_pilot_track_c.py', 'scripts/produce_local_pilot_track_c.py',
+  'scripts/run_local_pilot_ci_regressions.py',
   '.github/workflows/ci.yml', '.github/workflows/local-pilot-track-c.yml',
-];
-const DEPENDENCY_PATHS = [
+] as const;
+export const TRACK_C_DEPENDENCY_PATHS = [
   'package.json',
   'package-lock.json',
   'pyproject.toml',
   'requirements-worker.txt',
-];
+  'requirements-worker.lock',
+] as const;
+export const TRACK_C_MIGRATION_PATHS = ['infra/postgres/migrations'] as const;
+export const TRACK_C_POLICY_PATH = 'config/risk/live_research_pilot.json';
+// Strategy hashes are persisted with campaigns and predate Track C; they keep their original
+// four-file dependency list so unrelated binding changes cannot invalidate them.
+const STRATEGY_DEPENDENCY_PATHS = ['package.json', 'package-lock.json', 'pyproject.toml', 'requirements-worker.txt'];
 const EXPECTED_POLICY = {
   version: 'local-mainnet-risk-v1',
   target: 'LOCAL',
@@ -130,6 +140,67 @@ function readGitSha(root: string): string {
   }
 }
 
+const TRACK_C_GIT_ENVIRONMENT_KEYS = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'TEMP', 'TMP']);
+
+/** Mirrors git() in scripts/local_pilot_track_c_source.py: scrubbed environment, no user/system config. */
+function trackCGit(root: string, args: string[]): string {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (TRACK_C_GIT_ENVIRONMENT_KEYS.has(name.toUpperCase()) && typeof value === 'string') environment[name] = value;
+  }
+  environment.GIT_CONFIG_NOSYSTEM = '1';
+  environment.GIT_NO_REPLACE_OBJECTS = '1';
+  environment.GIT_CONFIG_GLOBAL = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  return execFileSync('git', args, {
+    cwd: root, env: environment, encoding: 'utf8', shell: false, timeout: 10_000,
+    stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024, windowsHide: true,
+  }).trim();
+}
+
+/**
+ * Same algorithm as hash_files() in scripts/local_pilot_track_c_source.py: tracked files only
+ * (git ls-files), code-point ordered, symlinks and escaping paths rejected, always non-empty.
+ */
+function hashTrackedFiles(root: string, paths: readonly string[]): string {
+  const files = [...new Set(trackCGit(root, ['ls-files', '-z', '--', ...paths]).split('\0'))]
+    .filter((name) => name !== '')
+    .sort((left, right) => Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8')));
+  if (files.length === 0) throw new Error('LOCAL_RELEASE_FINGERPRINT_INPUT_MISSING');
+  const realRoot = realpathSync(root);
+  const digest = createHash('sha256');
+  for (const name of files) {
+    const file = path.resolve(root, name);
+    const relative = path.relative(realRoot, realpathSync(file));
+    if (lstatSync(file).isSymbolicLink() || relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error('LOCAL_RELEASE_FINGERPRINT_PATH_INVALID');
+    }
+    digest.update(name, 'utf8');
+    digest.update('\0');
+    digest.update(readFileSync(file));
+    digest.update('\0');
+  }
+  return digest.digest('hex');
+}
+
+export interface TrackCBinding {
+  gitSha: string; sourceSha256: string; dependencySha256: string; migrationSha256: string; pilotPolicySha256: string;
+}
+
+/**
+ * Binding the Python Track C verifier recomputes (source_binding). Unlike Python this does not
+ * refuse a dirty tree; callers keep their own clean-commit gates, and the verifier still refuses.
+ */
+export function computeTrackCBinding(root = process.cwd()): TrackCBinding {
+  const resolved = path.resolve(root);
+  return {
+    gitSha: readGitSha(resolved),
+    sourceSha256: hashTrackedFiles(resolved, TRACK_C_SOURCE_PATHS),
+    dependencySha256: hashTrackedFiles(resolved, TRACK_C_DEPENDENCY_PATHS),
+    migrationSha256: hashTrackedFiles(resolved, TRACK_C_MIGRATION_PATHS),
+    pilotPolicySha256: sha256(readFileSync(path.resolve(resolved, TRACK_C_POLICY_PATH))),
+  };
+}
+
 export function readLocalRiskPolicy(root = process.cwd()): typeof EXPECTED_POLICY {
   let value: unknown;
   try {
@@ -179,7 +250,7 @@ export function localLivePilotStrategySha256(strategyId: 'grid' | 'trend' | 'sho
     strategyId,
     mode: policy.management_mode,
     sourceSha256: hashFiles(path.resolve(root), ['apps/trading_worker/strategies', 'apps/trading_worker/engine'], false),
-    dependencySha256: hashFiles(path.resolve(root), DEPENDENCY_PATHS, true),
+    dependencySha256: hashFiles(path.resolve(root), STRATEGY_DEPENDENCY_PATHS, true),
   }));
 }
 
@@ -208,15 +279,16 @@ export function computeLocalReleaseFingerprint(
   const secretSource = localSecretSourceIdentity(
     options.secretManagerProjectId, options.apiKeyVersion, options.apiSecretVersion,
   );
-  const gitSha = readGitSha(root);
+  // One source of truth: the same function the parity tests compare against the Python verifier.
+  const trackC = computeTrackCBinding(root);
   const policy = readLocalRiskPolicy(root);
   return {
     runtimeTarget: LOCAL_RUNTIME_TARGET,
     runId,
-    gitSha,
-    sourceSha256: hashFiles(root, SOURCE_PATHS, true),
-    dependencySha256: hashFiles(root, DEPENDENCY_PATHS, true),
-    migrationSha256: hashFiles(root, ['infra/postgres/migrations'], true),
+    gitSha: trackC.gitSha,
+    sourceSha256: trackC.sourceSha256,
+    dependencySha256: trackC.dependencySha256,
+    migrationSha256: trackC.migrationSha256,
     riskPolicyVersion: policy.version,
     riskPolicySha256: localRiskPolicySha256(root),
     secretVersions: {

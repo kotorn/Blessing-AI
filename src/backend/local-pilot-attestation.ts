@@ -1,12 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import type { TrackCBinding } from './local-release-runtime.js';
 import { buildTrustedPythonVerificationEnvironment, resolveTrustedLocalPythonRuntime } from './local-python-runtime.js';
 
 export const TRACK_C_CLASSES = ['CHECKS', 'REVIEW_AUTH_RELEASE', 'REVIEW_ORDER_RISK', 'REVIEW_PERSISTENCE', 'TESTNET_ETHUSDC'] as const;
-export interface TrackCBinding {
-  gitSha: string; sourceSha256: string; dependencySha256: string; migrationSha256: string; pilotPolicySha256: string;
-}
+export type { TrackCBinding };
 
 /** Projects authenticated verifier output. Never call this with a browser/disk receipt. */
 export function trackCPhases(passClasses: string[], sourceClean: boolean) {
