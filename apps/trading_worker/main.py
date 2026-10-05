@@ -64,6 +64,10 @@ from apps.trading_worker.venues.binance.config import (
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.gates import DecisionExecutionGate
 from apps.trading_worker.venues.binance.local_pilot_readiness import local_live_pilot_readiness
+from apps.trading_worker.venues.binance.pilot_bracket import (
+    apply_pilot_bracket_to_intent,
+    plan_pilot_bracket,
+)
 from apps.trading_worker.venues.binance.models import (
     BinanceAuthenticationError,
     ConnectionState,
@@ -4797,6 +4801,38 @@ class TradingWorkerApp:
                 clamped_any = False
                 for order in getattr(decision, "orders", []):
                     if not getattr(order, "reduce_only", False):
+                        is_live_pilot = (
+                            self.execution_mode == WorkerExecutionMode.LIVE
+                            and str(getattr(decision, "symbol", "")).upper() == "ETHUSDC"
+                            and (
+                                bool(os.getenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "").strip())
+                                or (
+                                    isinstance(self._mainnet_launch_session, dict)
+                                    and self._mainnet_launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
+                                )
+                            )
+                        )
+                        if is_live_pilot and (
+                            order.stop_loss_price is None
+                            or order.take_profit_price is None
+                            or getattr(order, "management_mode", None) != "QUICK"
+                        ):
+                            try:
+                                bracket_plan = plan_pilot_bracket(
+                                    rules=rules,
+                                    entry_price=price,
+                                    side=order.side,
+                                )
+                                order = apply_pilot_bracket_to_intent(order, bracket_plan)
+                                new_orders.append(order)
+                                clamped_any = True
+                                continue
+                            except Exception as bracket_err:
+                                logger.error(
+                                    "Unable to derive pilot bracket for order %s: %s",
+                                    order.client_order_id,
+                                    bracket_err,
+                                )
                         est_notional = order.quantity * price
                         order_type_val = getattr(order.order_type, "value", order.order_type)
                         min_notional = rules.min_notional_for(order_type_val)
