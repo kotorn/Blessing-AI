@@ -13,6 +13,7 @@
     "lint": "tsc --noEmit && eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "check:eol": "node scripts/check_eol.mjs",
     "dataconnect:generate": "node scripts/generate-dataconnect.mjs"
   },
   "dependencies": {

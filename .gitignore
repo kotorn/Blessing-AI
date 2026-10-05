@@ -21,6 +21,7 @@ update_*.cjs
 *.orig
 artifacts/
 .research-cache/
+.claude/
 
 # Python
 __pycache__/

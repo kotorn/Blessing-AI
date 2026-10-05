@@ -15,6 +15,7 @@ SOURCE_PATHS = ('server.ts', 'Dockerfile.worker', 'src/backend', 'apps/trading_w
                 '.github/workflows/ci.yml', '.github/workflows/local-pilot-track-c.yml')
 DEPENDENCY_PATHS = ('package.json', 'package-lock.json', 'pyproject.toml', 'requirements-worker.txt',
                     'requirements-worker.lock')
+ALL_BOUND_PATHS = (*SOURCE_PATHS, *DEPENDENCY_PATHS, 'infra/postgres/migrations', 'config/risk/live_research_pilot.json')
 
 
 def git(root: Path, *args: str) -> str:
@@ -45,6 +46,9 @@ def hash_files(root: Path, paths: tuple[str, ...]) -> str:
 def source_binding(root: Path) -> dict:
     if git(root, 'status', '--porcelain', '--untracked-files=all'):
         raise ValueError('LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN')
+    eol_info = git(root, 'ls-files', '--eol', '-z', '--', *ALL_BOUND_PATHS)
+    if any('w/crlf' in entry for entry in eol_info.split('\0') if entry):
+        raise ValueError('TRACK_C_SOURCE_EOL_MISMATCH')
     result = {'gitSha': git(root, 'rev-parse', '--verify', 'HEAD'),
               'sourceSha256': hash_files(root, SOURCE_PATHS),
               'dependencySha256': hash_files(root, DEPENDENCY_PATHS),
