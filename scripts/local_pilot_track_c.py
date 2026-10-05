@@ -6,7 +6,32 @@ One dispatch produces one review domain; GitHub approval history has no job ID.
 from __future__ import annotations
 
 from datetime import datetime
+import json
+from pathlib import Path
 import re
+
+REVIEW_POLICY_PATH = 'config/risk/track_c_review_policy.json'
+
+
+def read_review_policy(root: Path | str | None = None) -> dict:
+    policy_path = (Path(root) / REVIEW_POLICY_PATH) if root is not None else Path(REVIEW_POLICY_PATH)
+    if not policy_path.exists():
+        return {'mode': 'INDEPENDENT', 'operator_github_id': None}
+    try:
+        data = json.loads(policy_path.read_text(encoding='utf-8'))
+        mode = data.get('mode')
+        if mode not in {'INDEPENDENT', 'SOLO_OPERATOR'}:
+            raise ValueError('REVIEW_POLICY_MODE_INVALID')
+        if mode == 'SOLO_OPERATOR':
+            op_id = data.get('operator_github_id')
+            if type(op_id) is not int:
+                raise ValueError('REVIEW_POLICY_OPERATOR_INVALID')
+            return {'mode': 'SOLO_OPERATOR', 'operator_github_id': op_id}
+        return {'mode': 'INDEPENDENT', 'operator_github_id': None}
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise
+        raise ValueError('REVIEW_POLICY_READ_FAILED') from e
 
 CLASSES = ('CHECKS', 'REVIEW_AUTH_RELEASE', 'REVIEW_ORDER_RISK',
            'REVIEW_PERSISTENCE', 'TESTNET_ETHUSDC')
@@ -58,16 +83,18 @@ def _testnet_close_protection_is_proven(trial: dict) -> bool:
         }:
             return False
         algo_id = value.get('algo_id')
+        is_close_pos = value.get('close_position') is True and value.get('reduce_only') is False
+        is_reduce_only = value.get('close_position') is False and value.get('reduce_only') is True
         return (isinstance(algo_id, str) and re.fullmatch(r'[1-9][0-9]*', algo_id) is not None
                 and value.get('client_algo_id') == expected_client_id
                 and value.get('order_type') == expected_type and value.get('status') == 'NEW'
-                and value.get('close_position') is True and value.get('reduce_only') is False)
+                and (is_close_pos or is_reduce_only))
 
     return (valid_algo(proof.get('stop'), trial.get('stop_client_algo_id'), 'STOP_MARKET')
             and valid_algo(proof.get('target'), trial.get('target_client_algo_id'), 'TAKE_PROFIT_MARKET'))
 
 
-def validate_payload(statement: dict) -> None:
+def validate_payload(statement: dict, *, review_policy: dict | None = None) -> None:
     evidence_class = statement['evidenceClass']
     payload = statement['payload']
     if not isinstance(payload, dict):
@@ -99,7 +126,8 @@ def validate_payload(statement: dict) -> None:
         if proof['actorId'] != run['actor']['id'] or proof['commit'].get('sha') != statement['gitSha']:
             raise ValueError('ATTESTATION_REVIEW_RUN_INVALID')
         reviewer = review_identity(proof['environment'], proof['branchPolicies'],
-                                   proof['approvals'], proof['commit'], actor_id=proof['actorId'])
+                                   proof['approvals'], proof['commit'], actor_id=proof['actorId'],
+                                   review_policy=review_policy)
         if payload['reviewer'] != reviewer:
             raise ValueError('ATTESTATION_REVIEW_IDENTITY_INVALID')
     else:
@@ -167,7 +195,8 @@ def validate_run(run: dict, statement: dict) -> None:
 
 
 def validate_statement(statement: dict, binding: dict, evidence_class: str,
-                       certificate: dict, *, now: str) -> None:
+                       certificate: dict, *, now: str,
+                       review_policy: dict | None = None) -> None:
     """Certificate fields are accepted only after gh verifies the signed subject."""
     if not isinstance(statement, dict) or evidence_class not in CLASSES or statement.get('evidenceClass') != evidence_class:
         raise ValueError('ATTESTATION_CLASS_MISMATCH')
@@ -199,10 +228,11 @@ def validate_statement(statement: dict, binding: dict, evidence_class: str,
     current = datetime.fromisoformat(now.replace('Z', '+00:00'))
     if observed.tzinfo is None or current.tzinfo is None or not -2 <= (current-observed).total_seconds() <= 86400:
         raise ValueError('ATTESTATION_STALE')
-    validate_payload(statement)
+    validate_payload(statement, review_policy=review_policy)
 
 
-def environment_protection(environment: dict, policies: dict, name: str) -> list:
+def environment_protection(environment: dict, policies: dict, name: str,
+                           *, review_policy: dict | None = None) -> list:
     if environment.get('name') != name or type(environment.get('id')) is not int:
         raise ValueError('ENVIRONMENT_UNPROVEN')
     rules = [r for r in environment.get('protection_rules', []) if r.get('type') == 'required_reviewers']
@@ -212,6 +242,17 @@ def environment_protection(environment: dict, policies: dict, name: str) -> list
     if not reviewers or any(r.get('type') != 'User' or
                             type(r.get('reviewer', {}).get('id')) is not int for r in reviewers):
         raise ValueError('ENVIRONMENT_REQUIRED_IDENTITY_UNPROVEN')
+    policy_cfg = review_policy or read_review_policy()
+    if name == 'pilot-review':
+        if policy_cfg['mode'] == 'INDEPENDENT':
+            if rules[0].get('prevent_self_review') is not True:
+                raise ValueError('ENVIRONMENT_PROTECTION_UNPROVEN')
+            if len(reviewers) < 3:
+                raise ValueError('ENVIRONMENT_REQUIRED_IDENTITY_UNPROVEN')
+        elif policy_cfg['mode'] == 'SOLO_OPERATOR':
+            op_id = policy_cfg['operator_github_id']
+            if not any(r.get('reviewer', {}).get('id') == op_id for r in reviewers):
+                raise ValueError('ENVIRONMENT_REQUIRED_IDENTITY_UNPROVEN')
     if environment.get('deployment_branch_policy') != {
         'protected_branches': False, 'custom_branch_policies': True,
     } or policies.get('total_count') != 1 or len(policies.get('branch_policies', [])) != 1:
@@ -223,9 +264,11 @@ def environment_protection(environment: dict, policies: dict, name: str) -> list
 
 
 def review_identity(environment: dict, policies: dict, approvals: list,
-                    commit: dict, *, actor_id: int) -> dict:
+                    commit: dict, *, actor_id: int,
+                    review_policy: dict | None = None) -> dict:
     """Reject incomplete/ambiguous API evidence, including unresolved Git authors."""
-    reviewers = environment_protection(environment, policies, 'pilot-review')
+    policy_cfg = review_policy or read_review_policy()
+    reviewers = environment_protection(environment, policies, 'pilot-review', review_policy=policy_cfg)
     authors = [commit.get('author'), commit.get('committer')]
     if any(not isinstance(a, dict) or type(a.get('id')) is not int for a in authors):
         raise ValueError('REVIEW_COMMIT_IDENTITY_UNPROVEN')
@@ -240,6 +283,12 @@ def review_identity(environment: dict, policies: dict, approvals: list,
             or user['id'] not in allowed
             or not isinstance(user.get('login'), str) or not user['login']):
         raise ValueError('REVIEW_INDEPENDENCE_UNPROVEN')
+    if policy_cfg['mode'] == 'INDEPENDENT':
+        if user['id'] == actor_id or any(user['id'] == a.get('id') for a in authors):
+            raise ValueError('REVIEW_INDEPENDENCE_UNPROVEN')
+    elif policy_cfg['mode'] == 'SOLO_OPERATOR':
+        if user['id'] != policy_cfg['operator_github_id']:
+            raise ValueError('REVIEW_INDEPENDENCE_UNPROVEN')
     return {'id': user['id'], 'login': user['login'].lower()}
 
 

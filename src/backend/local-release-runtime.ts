@@ -20,6 +20,7 @@ export const TRACK_C_SOURCE_PATHS = [
   'scripts/apply_local_postgres_migrations.py',
   LOCAL_RISK_POLICY_PATH,
   'config/risk/live_research_pilot.json',
+  'config/risk/track_c_review_policy.json',
   'scripts/local_pilot_track_c.py', 'scripts/local_pilot_track_c_source.py',
   'scripts/verify_local_pilot_track_c.py', 'scripts/produce_local_pilot_track_c.py',
   'scripts/run_local_pilot_ci_regressions.py',
@@ -241,6 +242,37 @@ export function localLivePilotPolicySha256(root = process.cwd()): string {
     return sha256(readFileSync(path.resolve(root, LOCAL_LIVE_PILOT_POLICY_PATH)));
   } catch {
     throw new Error('LOCAL_LIVE_PILOT_POLICY_UNAVAILABLE');
+  }
+}
+
+export const TRACK_C_REVIEW_POLICY_PATH = 'config/risk/track_c_review_policy.json';
+
+export interface TrackCReviewPolicy {
+  mode: 'INDEPENDENT' | 'SOLO_OPERATOR';
+  operator_github_id?: number | null;
+}
+
+export function readTrackCReviewPolicy(root = process.cwd()): TrackCReviewPolicy {
+  const filePath = path.resolve(root, TRACK_C_REVIEW_POLICY_PATH);
+  if (!existsSync(filePath)) {
+    return { mode: 'INDEPENDENT', operator_github_id: null };
+  }
+  try {
+    const raw = readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (parsed.mode === 'SOLO_OPERATOR') {
+      if (typeof parsed.operator_github_id !== 'number' || !Number.isSafeInteger(parsed.operator_github_id)) {
+        throw new Error('REVIEW_POLICY_OPERATOR_INVALID');
+      }
+      return { mode: 'SOLO_OPERATOR', operator_github_id: parsed.operator_github_id };
+    }
+    if (parsed.mode === 'INDEPENDENT') {
+      return { mode: 'INDEPENDENT', operator_github_id: null };
+    }
+    throw new Error('REVIEW_POLICY_MODE_INVALID');
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('REVIEW_POLICY_')) throw err;
+    throw new Error('REVIEW_POLICY_READ_FAILED');
   }
 }
 

@@ -17,12 +17,14 @@ does not satisfy any of these classes. Maximum age is 24 hours.
 Review identity is derived from the official REST workflow-run approvals
 endpoint, not a submitted name, workflow actor, or OIDC workflow identity.
 Each review domain must be dispatched in a separate run: approval history
-does not identify the job/domain within a run. Three distinct numeric user
-IDs are required. A producer must check pilot-review required reviewers,
-prevent_self_review and a custom main-only branch policy before signing.
-Unresolved commit author/committer IDs and team membership remain blocked.
-Review classes also require three distinct run IDs, because deployment
-approval history has no job/domain identifier.
+does not identify the job/domain within a run. The review policy is
+explicitly configured in `config/risk/track_c_review_policy.json` (hashed in
+`pilotPolicySha256`). In `SOLO_OPERATOR` mode, approvals must match the
+designated `operator_github_id` across three distinct runs. In `INDEPENDENT`
+mode, three distinct numeric user IDs are required, and the producer enforces
+`prevent_self_review`, non-author, and non-dispatcher checks. Review classes
+always require three distinct run IDs because deployment approval history has
+no job/domain identifier.
 
 The verifier re-computes the clean checkout fingerprint before and after
 signature verification. The optional --binding argument is an assertion
@@ -99,13 +101,13 @@ with `reduceOnly=true`, `closePosition=false` and an explicit fill-sized
 `quantity`, only for `positionSide=BOTH`. The shared read-back in
 `protection.py` accepts either shape (close-all with no `reduceOnly`, or
 `reduceOnly=true` with `quantity` equal to the absolute position). The final
-emergency/market close is `reduceOnly=true` on both paths. So the two
-statements are each true for their own code path: Testnet protections are
-`closePosition=true`/`reduceOnly=false`; Local Mainnet protections are
-`reduceOnly=true`/`closePosition=false`. Whether Binance accepts a
-reduce-only market close while reduce-only fill-sized Algo orders are open on
-Mainnet has not been shown by any Testnet artifact in this repository
-(UNVERIFIED).
+emergency/market close is `reduceOnly=true` on both paths. Following Decision
+D4, the Track C verification (`_testnet_close_protection_is_proven`), the
+emergency close barrier (`_close_owned_testnet_trial_locked`), and the Worker
+lifecycle (`close_protected_ethusdc_testnet_trial`) accept either shape:
+legacy Testnet (`closePosition=true`/`reduceOnly=false`) or Portfolio Margin /
+Pilot Bracket (`closePosition=false`/`reduceOnly=true` with fill-sized quantity).
+The fill-sized reduce-only close shape has now been verified with unit tests.
 
 Human prerequisites are to configure main branch protection, pilot-review
 required user reviewers/prevent_self_review/main-only branch policy, and the
@@ -156,25 +158,29 @@ and to the TypeScript `committedClean`, but makes `source_binding` raise
 `.claude/` entry; adding one would change what the gate calls dirty and is left
 as a human decision. The disagreement is fail-closed (TS clean, Python dirty).
 
-### Known limitation: the Python gate cannot reach READY inside Docker
+### Containerized Worker evidence path: HMAC-signed readiness verdict
 
-`Dockerfile.worker` now copies every `scripts/` module the Worker can import
-(`tests/python/test_dockerfile_worker_imports.py` enforces this statically), so
-the image is importable. It still cannot satisfy the gate, by static reading
-of the image contents (not exercised in a container build, so runtime
-behavior is UNVERIFIED):
+In Docker, the containerized Worker does not mount the host `.git`, `gh` binary,
+or `artifacts/` tree. Instead, the TypeScript Control Plane executes the Track C
+verifier on the host checkout, and issues a short-lived `PilotReadinessVerdict`
+(Decision D3) to the Worker.
 
-- there is no `git` in the final image, so `git rev-parse` / `git status`
-  return nothing and the clean-commit check reports
-  `LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN`;
-- there is no `gh` CLI, so `gh attestation verify` cannot run;
-- `artifacts/local-pilot-attestations/` and the hashed source files
-  (`server.ts`, `src/backend`, workflows, lock files) are not in the image.
+1. **Host Verification:** Control Plane verifies all 5 Track C attestations against
+   the host checkout and active binding using `scripts/verify_local_pilot_track_c.py`.
+2. **Deterministic Signing:** The Control Plane constructs a `PilotReadinessVerdict`
+   payload containing `campaignId`, `gitSha`, the 5 Track C hashes, the verified classes,
+   and an expiration timestamp (`expiresAt` bounded by the oldest attestation).
+   It signs the canonical JSON representation using HMAC-SHA256 with the shared
+   `WORKER_IDENTITY_TOKEN`.
+3. **Delivery & Enforcement:** The verdict is delivered during `/arm` or via periodic
+   supervisor heartbeats (`/supervisor/heartbeat` and `/local-pilot/verdict`).
+4. **Worker Verification:** In `apps/trading_worker/venues/binance/local_pilot_verdict.py`,
+   the Worker verifies the HMAC signature, confirms `campaignId` and `gitSha` match
+   its container environment (`LOCAL_LIVE_PILOT_CAMPAIGN_ID` and `LOCAL_LIVE_PILOT_GIT_SHA`),
+   and verifies that the binding hashes match its baked-in environment variables.
+   If valid and unexpired, the Worker gate reports `READY` (`can_start=True`). If
+   expired, missing, or altered, the Worker disarms immediately and fails closed.
 
-The Worker's own Track C result is therefore always BLOCKED in Docker. The
-TypeScript control plane verifies on the host checkout. How the containerized
-Worker should consume host-verified evidence is an open design decision that
-needs a human; it was deliberately not changed.
 
 ### Fetching the signed artifacts
 

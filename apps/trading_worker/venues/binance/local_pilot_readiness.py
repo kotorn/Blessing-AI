@@ -16,6 +16,8 @@ import re
 import subprocess
 from typing import Any
 
+from apps.trading_worker.local_runtime import worker_identity_token_value
+from .local_pilot_verdict import get_active_pilot_verdict, verify_pilot_readiness_verdict
 from scripts.verify_local_pilot_ci_attestation import verify_ci_attestation
 from scripts.verify_local_pilot_track_c import verify_all
 from scripts.local_pilot_track_c import track_c_phases
@@ -228,8 +230,56 @@ def _verify(root: Path, now: datetime) -> list[str]:
 
 def local_live_pilot_readiness(root: str | Path | None = None, *, now: datetime | None = None) -> dict[str, object]:
     """Verify current local evidence; the default path is the repository root."""
-    repo_root = Path(root).resolve() if root is not None else Path(__file__).resolve().parents[4]
     observed_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    active_verdict = get_active_pilot_verdict()
+    if active_verdict is not None:
+        token = worker_identity_token_value()
+        ok, reason, details = verify_pilot_readiness_verdict(active_verdict, token, now=observed_now)
+        if ok:
+            return {
+                "status": "READY",
+                "can_approve": True,
+                "can_start": True,
+                "implementation_ready": {
+                    "status": "PASS",
+                    "checks": [{"id": c, "status": "PASS", "reason": "TRACK_C_VERDICT_VERIFIED"} for c in REQUIRED_CHECKS],
+                },
+                "approval_ready": {"status": "PASS", "checks": []},
+                "prepared": {
+                    "status": "NOT_RUN",
+                    "checks": [{
+                        "id": "SERVER_OWNED_PREPARATION", "status": "NOT_RUN",
+                        "reason": "LOCAL_PILOT_AUTHENTICATED_PREPARATION_EVIDENCE_NOT_AVAILABLE",
+                    }],
+                },
+                "ci_attestation": {"status": "PASS", "reason": "TRACK_C_VERDICT_VERIFIED"},
+                "provenance": {"local_checks": "VERIFIED", "reviews": "VERIFIED", "testnet": "VERIFIED"},
+                "blockers": [],
+                "verdict": active_verdict,
+            }
+        else:
+            return {
+                "status": "BLOCKED",
+                "can_approve": False,
+                "can_start": False,
+                "implementation_ready": {
+                    "status": "FAIL",
+                    "checks": [{"id": c, "status": "FAIL", "reason": f"VERDICT_REJECTED_{reason}"} for c in REQUIRED_CHECKS],
+                },
+                "approval_ready": {"status": "FAIL", "checks": []},
+                "prepared": {
+                    "status": "NOT_RUN",
+                    "checks": [{
+                        "id": "SERVER_OWNED_PREPARATION", "status": "NOT_RUN",
+                        "reason": "LOCAL_PILOT_AUTHENTICATED_PREPARATION_EVIDENCE_NOT_AVAILABLE",
+                    }],
+                },
+                "ci_attestation": {"status": "FAIL", "reason": reason},
+                "provenance": {"local_checks": "UNVERIFIED", "reviews": "UNVERIFIED", "testnet": "UNVERIFIED"},
+                "blockers": [f"LOCAL_PILOT_VERDICT_INVALID:{reason}"],
+            }
+
+    repo_root = Path(root).resolve() if root is not None else Path(__file__).resolve().parents[4]
     # CI attests only the canonical build, not local DB/Testnet/review receipts.
     # A dirty checkout cannot inherit the attestation for its unchanged HEAD.
     ci_attestation: dict[str, object] = {

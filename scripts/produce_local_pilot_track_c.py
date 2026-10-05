@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 from scripts.local_pilot_track_c import (
     CHECK_IDS, CHECK_STEPS, REPOSITORY, REPOSITORY_ID, REF,
     environment_protection, review_identity, validate_run, validate_payload,
-    workflow_for,
+    workflow_for, read_review_policy,
 )
 from scripts.local_pilot_track_c_source import source_binding
 
@@ -189,7 +189,7 @@ def _build_dispatch_statement(root: Path, context: dict[str, str], token: str,
             raise ValueError("TRACK_C_REVIEW_APPROVALS_UNPROVEN")
         actor_id = run.get("actor", {}).get("id") if isinstance(run.get("actor"), dict) else None
         reviewer = review_identity(proof["environment"], proof["branchPolicies"], approvals,
-                                   commit, actor_id=actor_id)
+                                   commit, actor_id=actor_id, review_policy=read_review_policy(root))
         payload = {"reviewProof": {"run": run, "actorId": actor_id, "commit": commit,
                                    "environment": proof["environment"],
                                    "branchPolicies": proof["branchPolicies"],

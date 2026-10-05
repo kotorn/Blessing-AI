@@ -12,12 +12,13 @@ import sys
 
 # -I execution still imports only the script's explicitly resolved directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from local_pilot_track_c import CLASSES, REPOSITORY, REF, validate_statement, workflow_for
+from local_pilot_track_c import CLASSES, REPOSITORY, REF, validate_statement, workflow_for, read_review_policy
 from local_pilot_track_c_source import source_binding
 from verify_local_pilot_ci_attestation import _trusted_gh_digest, _gh_digest
 
 
-def verify_class(root: Path, binding: dict, evidence_class: str, now: str) -> dict:
+def verify_class(root: Path, binding: dict, evidence_class: str, now: str,
+                 *, review_policy: dict | None = None) -> dict:
     failure = {'status': 'FAIL', 'reason': 'TRACK_C_ATTESTATION_INVALID', 'evidenceClass': evidence_class}
     directory = root / 'artifacts/local-pilot-attestations'
     subject = directory / f'{evidence_class}.json'
@@ -51,7 +52,8 @@ def verify_class(root: Path, binding: dict, evidence_class: str, now: str) -> di
         if not isinstance(verified, list) or len(verified) != 1:
             return failure
         certificate = verified[0]['verificationResult']['signature']['certificate']
-        validate_statement(statement, binding, evidence_class, certificate, now=now)
+        validate_statement(statement, binding, evidence_class, certificate, now=now,
+                           review_policy=review_policy)
         if (_gh_digest(gh) != digest or subject.read_bytes() != raw or bundle.read_bytes() != bundle_raw):
             return failure
         return {'status': 'PASS', 'reason': 'TRACK_C_ATTESTATION_VERIFIED',
@@ -68,12 +70,20 @@ def verify_all(root: Path, binding: dict | None = None, *, now: str | None = Non
         actual = source_binding(root)
         if binding is not None and binding != actual:
             return {**failed, 'reason': 'TRACK_C_BINDING_MISMATCH'}
-        results = [verify_class(root, actual, c, now or datetime.now(UTC).isoformat()) for c in CLASSES]
+        policy = read_review_policy(root)
+        results = [verify_class(root, actual, c, now or datetime.now(UTC).isoformat(),
+                                review_policy=policy) for c in CLASSES]
         reviewers = [r['reviewer']['id'] for r in results
                      if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS']
         review_runs = [r['runId'] for r in results
                        if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS']
-        if len(reviewers) != 3 or len(set(review_runs)) != 3 or len(set(reviewers)) not in {1, 3}:
+        review_ok = False
+        if len(reviewers) == 3 and len(set(review_runs)) == 3:
+            if policy['mode'] == 'SOLO_OPERATOR':
+                review_ok = all(r == policy['operator_github_id'] for r in reviewers)
+            elif policy['mode'] == 'INDEPENDENT':
+                review_ok = len(set(reviewers)) == 3
+        if not review_ok:
             for result in results:
                 if result['evidenceClass'].startswith('REVIEW_'):
                     result['status'] = 'FAIL'

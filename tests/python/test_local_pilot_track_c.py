@@ -9,7 +9,9 @@ def fixture():
     return {
         'id': 12, 'name': 'pilot-review',
         'protection_rules': [{'type': 'required_reviewers', 'prevent_self_review': True,
-                              'reviewers': [{'type': 'User', 'reviewer': {'id': 42, 'login': 'reviewer'}}]}],
+                              'reviewers': [{'type': 'User', 'reviewer': {'id': 42, 'login': 'reviewer'}},
+                                            {'type': 'User', 'reviewer': {'id': 43, 'login': 'rev2'}},
+                                            {'type': 'User', 'reviewer': {'id': 44, 'login': 'rev3'}}]}],
         'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True},
     }, {'branch_policies': [{'name': 'main', 'type': 'branch'}], 'total_count': 1}, [
         {'state': 'approved', 'environments': [{'id': 12, 'name': 'pilot-review'}],
@@ -20,7 +22,7 @@ def fixture():
 
 
 def test_authenticated_approval_identity():
-    assert review_identity(*fixture(), actor_id=3) == {'id': 42, 'login': 'reviewer'}
+    assert review_identity(*fixture(), actor_id=3, review_policy={'mode': 'INDEPENDENT', 'operator_github_id': None}) == {'id': 42, 'login': 'reviewer'}
 
 
 @pytest.mark.parametrize('mutation', ['missing', 'not_allowed', 'branch', 'rejected', 'unknown_author', 'team', 'ambiguous'])
@@ -34,14 +36,62 @@ def test_unprovable_review_is_blocked(mutation):
     if mutation == 'team': environment['protection_rules'][0]['reviewers'][0]['type'] = 'Team'
     if mutation == 'ambiguous': approvals.append(deepcopy(approvals[0]))
     with pytest.raises(ValueError):
-        review_identity(environment, policies, approvals, commit, actor_id=3)
+        review_identity(environment, policies, approvals, commit, actor_id=3, review_policy={'mode': 'INDEPENDENT', 'operator_github_id': None})
+
+
+def test_independent_mode_self_approval_rejected():
+    environment, policies, approvals, commit = deepcopy(fixture())
+    with pytest.raises(ValueError, match='REVIEW_INDEPENDENCE_UNPROVEN'):
+        review_identity(environment, policies, approvals, commit, actor_id=42,
+                        review_policy={'mode': 'INDEPENDENT', 'operator_github_id': None})
+
+
+def test_independent_mode_author_approval_rejected():
+    environment, policies, approvals, commit = deepcopy(fixture())
+    commit['author']['id'] = 42
+    with pytest.raises(ValueError, match='REVIEW_INDEPENDENCE_UNPROVEN'):
+        review_identity(environment, policies, approvals, commit, actor_id=3,
+                        review_policy={'mode': 'INDEPENDENT', 'operator_github_id': None})
+
+
+def test_independent_mode_committer_approval_rejected():
+    environment, policies, approvals, commit = deepcopy(fixture())
+    commit['committer']['id'] = 42
+    with pytest.raises(ValueError, match='REVIEW_INDEPENDENCE_UNPROVEN'):
+        review_identity(environment, policies, approvals, commit, actor_id=3,
+                        review_policy={'mode': 'INDEPENDENT', 'operator_github_id': None})
+
+
+def test_independent_mode_requires_prevent_self_review():
+    environment, policies, approvals, commit = deepcopy(fixture())
+    environment['protection_rules'][0]['prevent_self_review'] = False
+    with pytest.raises(ValueError, match='ENVIRONMENT_PROTECTION_UNPROVEN'):
+        review_identity(environment, policies, approvals, commit, actor_id=3,
+                        review_policy={'mode': 'INDEPENDENT', 'operator_github_id': None})
+
+
+def test_independent_mode_requires_at_least_three_reviewers():
+    environment, policies, approvals, commit = deepcopy(fixture())
+    environment['protection_rules'][0]['reviewers'] = [{'type': 'User', 'reviewer': {'id': 42, 'login': 'reviewer'}}]
+    with pytest.raises(ValueError, match='ENVIRONMENT_REQUIRED_IDENTITY_UNPROVEN'):
+        review_identity(environment, policies, approvals, commit, actor_id=3,
+                        review_policy={'mode': 'INDEPENDENT', 'operator_github_id': None})
 
 
 def test_solo_operator_author_review_accepted():
     environment, policies, approvals, commit = deepcopy(fixture())
     commit['author']['id'] = 42
     environment['protection_rules'][0]['prevent_self_review'] = False
-    assert review_identity(environment, policies, approvals, commit, actor_id=42) == {'id': 42, 'login': 'reviewer'}
+    environment['protection_rules'][0]['reviewers'] = [{'type': 'User', 'reviewer': {'id': 42, 'login': 'reviewer'}}]
+    policy = {'mode': 'SOLO_OPERATOR', 'operator_github_id': 42}
+    assert review_identity(environment, policies, approvals, commit, actor_id=42, review_policy=policy) == {'id': 42, 'login': 'reviewer'}
+
+
+def test_solo_operator_wrong_reviewer_rejected():
+    environment, policies, approvals, commit = deepcopy(fixture())
+    policy = {'mode': 'SOLO_OPERATOR', 'operator_github_id': 999}
+    with pytest.raises(ValueError, match='ENVIRONMENT_REQUIRED_IDENTITY_UNPROVEN'):
+        review_identity(environment, policies, approvals, commit, actor_id=3, review_policy=policy)
 
 
 def statement_fixture():
@@ -179,6 +229,25 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
     with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
         validate_payload(statement)
     trial['protection_at_close']['target']['client_algo_id'] = 'target'
+    # Test D4: fill-sized reduce-only bracket shape is accepted
+    trial['protection_at_close']['stop']['close_position'] = False
+    trial['protection_at_close']['stop']['reduce_only'] = True
+    trial['protection_at_close']['target']['close_position'] = False
+    trial['protection_at_close']['target']['reduce_only'] = True
+    validate_payload(statement)
+
+    # Invalid combination: close_position=False and reduce_only=False is rejected
+    trial['protection_at_close']['stop']['reduce_only'] = False
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement)
+    trial['protection_at_close']['stop']['reduce_only'] = True
+
+    # Restore default fixture
+    trial['protection_at_close']['stop']['close_position'] = True
+    trial['protection_at_close']['stop']['reduce_only'] = False
+    trial['protection_at_close']['target']['close_position'] = True
+    trial['protection_at_close']['target']['reduce_only'] = False
+
     statement['payload']['approvals'] = []
     with pytest.raises(ValueError, match='TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN'):
         validate_payload(statement)
@@ -259,9 +328,10 @@ def test_cross_domain_run_replay_and_mixed_reviewers_blocked(monkeypatch, tmp_pa
     from scripts.local_pilot_track_c import CLASSES
     binding = statement_fixture()[1]
     monkeypatch.setattr(verifier, 'source_binding', lambda _: binding)
-    def verified(_root, _binding, cls, _now):
+    monkeypatch.setattr(verifier, 'read_review_policy', lambda _: {'mode': 'INDEPENDENT', 'operator_github_id': None})
+    def verified(_root, _binding, cls, _now, **_kw):
         index = CLASSES.index(cls)
-        # mixed_reviewers: 2 reviewers across 3 domains (42, 42, 43) -> size 2, not in {1, 3}
+        # mixed_reviewers: 2 reviewers across 3 domains (42, 42, 43) -> size 2, not 3
         reviewer_id = (42 if index <= 2 else 43) if same == 'mixed_reviewers' else 40 + index
         return dict(status='PASS', reason='TRACK_C_ATTESTATION_VERIFIED', evidenceClass=cls,
                     runId='123' if same == 'run' else str(100+index),
@@ -276,10 +346,42 @@ def test_solo_operator_distinct_runs_accepted(monkeypatch, tmp_path):
     from scripts.local_pilot_track_c import CLASSES
     binding = statement_fixture()[1]
     monkeypatch.setattr(verifier, 'source_binding', lambda _: binding)
-    def verified(_root, _binding, cls, _now):
+    monkeypatch.setattr(verifier, 'read_review_policy', lambda _: {'mode': 'SOLO_OPERATOR', 'operator_github_id': 42})
+    def verified(_root, _binding, cls, _now, **_kw):
         index = CLASSES.index(cls)
         return dict(status='PASS', reason='TRACK_C_ATTESTATION_VERIFIED', evidenceClass=cls,
                     runId=str(100+index), reviewer={'id': 42, 'login': 'fixture'})
+    monkeypatch.setattr(verifier, 'verify_class', verified)
+    result = verifier.verify_all(tmp_path)
+    assert all(r['status'] == 'PASS' for r in result['classes'] if r['evidenceClass'].startswith('REVIEW_'))
+
+
+def test_solo_operator_wrong_reviewer_fails_in_verify_all(monkeypatch, tmp_path):
+    from scripts import verify_local_pilot_track_c as verifier
+    from scripts.local_pilot_track_c import CLASSES
+    binding = statement_fixture()[1]
+    monkeypatch.setattr(verifier, 'source_binding', lambda _: binding)
+    monkeypatch.setattr(verifier, 'read_review_policy', lambda _: {'mode': 'SOLO_OPERATOR', 'operator_github_id': 42})
+    def verified(_root, _binding, cls, _now, **_kw):
+        index = CLASSES.index(cls)
+        rev_id = 999 if cls == 'REVIEW_PERSISTENCE' else 42
+        return dict(status='PASS', reason='TRACK_C_ATTESTATION_VERIFIED', evidenceClass=cls,
+                    runId=str(100+index), reviewer={'id': rev_id, 'login': 'fixture'})
+    monkeypatch.setattr(verifier, 'verify_class', verified)
+    result = verifier.verify_all(tmp_path)
+    assert all(r['status'] == 'FAIL' for r in result['classes'] if r['evidenceClass'].startswith('REVIEW_'))
+
+
+def test_independent_mode_distinct_reviewers_accepted(monkeypatch, tmp_path):
+    from scripts import verify_local_pilot_track_c as verifier
+    from scripts.local_pilot_track_c import CLASSES
+    binding = statement_fixture()[1]
+    monkeypatch.setattr(verifier, 'source_binding', lambda _: binding)
+    monkeypatch.setattr(verifier, 'read_review_policy', lambda _: {'mode': 'INDEPENDENT', 'operator_github_id': None})
+    def verified(_root, _binding, cls, _now, **_kw):
+        index = CLASSES.index(cls)
+        return dict(status='PASS', reason='TRACK_C_ATTESTATION_VERIFIED', evidenceClass=cls,
+                    runId=str(100+index), reviewer={'id': 40+index, 'login': f'fixture{index}'})
     monkeypatch.setattr(verifier, 'verify_class', verified)
     result = verifier.verify_all(tmp_path)
     assert all(r['status'] == 'PASS' for r in result['classes'] if r['evidenceClass'].startswith('REVIEW_'))

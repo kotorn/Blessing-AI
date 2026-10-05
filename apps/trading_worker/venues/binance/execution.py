@@ -6492,6 +6492,8 @@ class BinanceExecutionAdapter:
                 )
                 observed_at = datetime.now(timezone.utc)
                 evidence = getattr(protection_result, "evidence", None)
+                is_close_pos = isinstance(evidence, Mapping) and evidence.get("close_position") is True and evidence.get("reduce_only") is False
+                is_reduce_only = isinstance(evidence, Mapping) and evidence.get("close_position") is False and evidence.get("reduce_only") is True
                 if (getattr(protection_result, "state", None) != "PROTECTED"
                         or not isinstance(evidence, Mapping)
                         or evidence.get("stop_order_id") != protection_intent.stop_algo_id
@@ -6503,8 +6505,7 @@ class BinanceExecutionAdapter:
                         or evidence.get("take_profit_order_type") != "TAKE_PROFIT_MARKET"
                         or evidence.get("take_profit_status") != "NEW"
                         or evidence.get("position_side") != "BOTH"
-                        or evidence.get("close_position") is not True
-                        or evidence.get("reduce_only") is not False):
+                        or not (is_close_pos or is_reduce_only)):
                     protection_failure_reason = "trial_protection_not_confirmed_before_close"
                     raise RuntimeError("trial protection not confirmed at close submission barrier")
                 close_submission_at = datetime.now(timezone.utc)
@@ -6521,13 +6522,15 @@ class BinanceExecutionAdapter:
                         "algo_id": stop_algo_id_text,
                         "client_algo_id": stop_client_algo_id,
                         "order_type": "STOP_MARKET", "status": "NEW",
-                        "close_position": True, "reduce_only": False,
+                        "close_position": bool(evidence.get("close_position")),
+                        "reduce_only": bool(evidence.get("reduce_only")),
                     },
                     "target": {
                         "algo_id": target_algo_id_text,
                         "client_algo_id": target_client_algo_id,
                         "order_type": "TAKE_PROFIT_MARKET", "status": "NEW",
-                        "close_position": True, "reduce_only": False,
+                        "close_position": bool(evidence.get("close_position")),
+                        "reduce_only": bool(evidence.get("reduce_only")),
                     },
                 })
 

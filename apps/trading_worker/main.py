@@ -64,6 +64,10 @@ from apps.trading_worker.venues.binance.config import (
 from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.gates import DecisionExecutionGate
 from apps.trading_worker.venues.binance.local_pilot_readiness import local_live_pilot_readiness
+from apps.trading_worker.venues.binance.local_pilot_verdict import (
+    set_active_pilot_verdict,
+    verify_pilot_readiness_verdict,
+)
 from apps.trading_worker.venues.binance.pilot_bracket import (
     apply_pilot_bracket_to_intent,
     plan_pilot_bracket,
@@ -111,6 +115,7 @@ class ArmRequest(BaseModel):
     releaseApprovalId: Optional[str] = None
     launchPolicy: Literal["STAGED_FIRST_ORDER", "LIVE_RESEARCH_PILOT"] = "STAGED_FIRST_ORDER"
     pilotCampaignId: Optional[str] = None
+    pilotReadinessVerdict: Optional[dict[str, Any]] = None
 
     @field_validator("instruments")
     @classmethod
@@ -692,8 +697,13 @@ def get_state() -> WorkerRuntimeState:
         return WORKER_ENGINE.get_state()
     return get_default_state()
 
+class SupervisorHeartbeatRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    pilotReadinessVerdict: Optional[dict[str, Any]] = None
+
+
 @app.post("/supervisor/heartbeat")
-def local_supervisor_heartbeat():
+def local_supervisor_heartbeat(payload: Optional[SupervisorHeartbeatRequest] = None):
     """Accept a per-launch heartbeat only from the authenticated Local parent."""
     if not (
         _env_enabled("LOCAL_ONLY")
@@ -702,8 +712,25 @@ def local_supervisor_heartbeat():
         raise HTTPException(status_code=404, detail="Local supervisor heartbeat is unavailable")
     if WORKER_ENGINE is None:
         raise HTTPException(status_code=503, detail="Worker is not initialized")
+    if payload and payload.pilotReadinessVerdict is not None:
+        set_active_pilot_verdict(payload.pilotReadinessVerdict)
     WORKER_ENGINE.record_local_supervisor_heartbeat()
     return {"status": "ok", "runtimeTarget": "LOCAL"}
+
+
+class PilotVerdictRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verdict: dict[str, Any]
+
+
+@app.post("/local-pilot/verdict")
+def set_pilot_verdict_endpoint(req: PilotVerdictRequest):
+    token = worker_identity_token_value()
+    ok, reason, details = verify_pilot_readiness_verdict(req.verdict, token)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"LOCAL_PILOT_VERDICT_REJECTED: {reason}")
+    set_active_pilot_verdict(req.verdict)
+    return {"status": "ok", "reason": reason, "details": details}
 
 @app.get("/capabilities")
 def get_capabilities():
@@ -715,6 +742,8 @@ def get_capabilities():
 async def arm(config: ArmRequest):
     if not WORKER_ENGINE:
         raise HTTPException(status_code=503, detail="Worker not initialized")
+    if config.pilotReadinessVerdict is not None:
+        set_active_pilot_verdict(config.pilotReadinessVerdict)
     success, msg = await WORKER_ENGINE.arm(config)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
@@ -5130,12 +5159,16 @@ class TradingWorkerApp:
                 or not isinstance(protection_at_close.get("target"), dict)
                 or protection_at_close["stop"].get("client_algo_id") != owner["stop_client_algo_id"]
                 or protection_at_close["stop"].get("status") != "NEW"
-                or protection_at_close["stop"].get("close_position") is not True
-                or protection_at_close["stop"].get("reduce_only") is not False
+                or not (
+                    (protection_at_close["stop"].get("close_position") is True and protection_at_close["stop"].get("reduce_only") is False)
+                    or (protection_at_close["stop"].get("close_position") is False and protection_at_close["stop"].get("reduce_only") is True)
+                )
                 or protection_at_close["target"].get("client_algo_id") != owner["take_profit_client_algo_id"]
                 or protection_at_close["target"].get("status") != "NEW"
-                or protection_at_close["target"].get("close_position") is not True
-                or protection_at_close["target"].get("reduce_only") is not False):
+                or not (
+                    (protection_at_close["target"].get("close_position") is True and protection_at_close["target"].get("reduce_only") is False)
+                    or (protection_at_close["target"].get("close_position") is False and protection_at_close["target"].get("reduce_only") is True)
+                )):
             raise RuntimeError("Protected Testnet close lacks pre-submission stop/target read-back")
         close_id = str(close_orders[0].client_order_id or "")
         close_exchange_order_id = str(close_orders[0].exchange_order_id or "")

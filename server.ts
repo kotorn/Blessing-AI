@@ -103,6 +103,7 @@ import {
   localLivePilotStrategySha256,
 } from './src/backend/local-release-runtime.js';
 import { localSecretSourceIdentity } from './src/backend/local-secret-manager.js';
+import { createPilotReadinessVerdict } from './src/backend/local-pilot-verdict.js';
 
 
 dotenv.config();
@@ -2777,6 +2778,22 @@ app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
       workerState: finalState.data,
       preflight: preflight.data,
     });
+    const readiness = currentPilotCapabilityReadiness(uid);
+    const pilotVerdict = createPilotReadinessVerdict({
+      campaign,
+      binding: {
+        gitSha: fingerprint.gitSha,
+        sourceSha256: fingerprint.sourceSha256,
+        dependencySha256: fingerprint.dependencySha256,
+        migrationSha256: fingerprint.migrationSha256,
+        pilotPolicySha256: localLivePilotPolicySha256(),
+      },
+      readiness,
+      workerIdentityToken: LOCAL_WORKER_IDENTITY_TOKEN,
+    });
+    if (pilotVerdict && localWorkerSupervisor) {
+      localWorkerSupervisor.setPilotReadinessVerdict(pilotVerdict);
+    }
     campaign = await store.recordPreparation(campaign.campaignId, localLivePilotBinding(campaign), preparation);
     return res.json({
       campaign: safeLocalLivePilotCampaign(campaign),
@@ -2893,6 +2910,22 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
       shock: campaign.strategyId === 'shock',
       carry: campaign.strategyId === 'carry',
     };
+    const readiness = currentPilotCapabilityReadiness(uid);
+    const pilotVerdict = createPilotReadinessVerdict({
+      campaign,
+      binding: {
+        gitSha: fingerprint.gitSha,
+        sourceSha256: fingerprint.sourceSha256,
+        dependencySha256: fingerprint.dependencySha256,
+        migrationSha256: fingerprint.migrationSha256,
+        pilotPolicySha256: localLivePilotPolicySha256(),
+      },
+      readiness,
+      workerIdentityToken: LOCAL_WORKER_IDENTITY_TOKEN,
+    });
+    if (pilotVerdict && localWorkerSupervisor) {
+      localWorkerSupervisor.setPilotReadinessVerdict(pilotVerdict);
+    }
     armAttempted = true;
     const armed = await forwardWorkerRequest('/arm', {
       method: 'POST',
@@ -2903,6 +2936,7 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
         releaseApprovalId: approvalId,
         launchPolicy: 'LIVE_RESEARCH_PILOT',
         pilotCampaignId: campaign.campaignId,
+        pilotReadinessVerdict: pilotVerdict || undefined,
       }),
     });
     if (!armed.response.ok) throw new Error('LOCAL_PILOT_WORKER_ARM_REJECTED');

@@ -9,6 +9,7 @@ import {
   resolveTrustedLocalDockerRuntime,
   type TrustedLocalDockerRuntime,
 } from './local-docker-runtime.js';
+import type { PilotReadinessVerdict } from './local-pilot-verdict.js';
 
 export interface LocalWorkerSupervisorOptions {
   root?: string;
@@ -173,6 +174,7 @@ export class LocalWorkerSupervisor {
   private mode: 'STOPPED' | 'PAPER' | 'LIVE' = 'STOPPED';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private stateMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  private activePilotVerdict: PilotReadinessVerdict | null = null;
   private stateMonitorInFlightFor: ChildProcess | null = null;
   private lastStateObservedAt: string | null = null;
   private workerHeartbeatAt: string | null = null;
@@ -195,6 +197,10 @@ export class LocalWorkerSupervisor {
       }));
     this.dockerExecFileSync = options.dockerExecFileSync || execFileSync;
     this.fetcher = options.fetcher || fetch;
+  }
+
+  public setPilotReadinessVerdict(verdict: PilotReadinessVerdict | null): void {
+    this.activePilotVerdict = verdict;
   }
 
   status(): {
@@ -562,9 +568,16 @@ export class LocalWorkerSupervisor {
     const send = async () => {
       if (this.worker !== child || !this.childIsRunning(child)) return;
       try {
+        const body = this.activePilotVerdict
+          ? JSON.stringify({ pilotReadinessVerdict: this.activePilotVerdict })
+          : undefined;
         await this.fetcher(`${this.options.workerUrl.replace(/\/+$/, '')}/supervisor/heartbeat`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${this.options.workerIdentityToken}` },
+          headers: {
+            Authorization: `Bearer ${this.options.workerIdentityToken}`,
+            ...(body ? { 'Content-Type': 'application/json' } : {}),
+          },
+          body,
           signal: AbortSignal.timeout(2_500),
         });
       } catch {
@@ -679,6 +692,7 @@ export class LocalWorkerSupervisor {
     this.heartbeatTimer = null;
     if (this.stateMonitorTimer) clearInterval(this.stateMonitorTimer);
     this.stateMonitorTimer = null;
+    this.activePilotVerdict = null;
     this.worker = null;
     this.mode = 'STOPPED';
     this.workerApprovalId = null;

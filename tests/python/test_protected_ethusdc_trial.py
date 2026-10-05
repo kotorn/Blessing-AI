@@ -458,3 +458,95 @@ async def test_owned_testnet_close_requires_fresh_open_protection_before_submiss
         assert adapter.last_emergency_result["reason"] == "trial_protection_not_confirmed_before_close"
         authority.claim_testnet_trial_close_submission.assert_awaited_once()
         adapter._execute_decision.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_close_owned_testnet_trial_with_fill_sized_reduce_only_bracket_shape():
+    """D4 requirement: exercise fill-sized reduce-only close shape while conditional orders are open."""
+    entry_id = "entry-reduce-only-1"
+    close_id = "close-reduce-only-1"
+    owner = {
+        "entry_client_order_id": entry_id, "state": "CLOSE_PENDING",
+        "state_reason": f"protected_ethusdc_testnet_trial_close:{close_id}:CLAIMED",
+        "environment": "TESTNET", "venue": "binance_testnet", "symbol": "ETHUSDC",
+        "entry_side": "BUY", "position_side": "BOTH",
+        "requested_quantity": Decimal("0.02"), "filled_quantity": Decimal("0.02"),
+        "stop_client_algo_id": "stop-ro-1", "take_profit_client_algo_id": "target-ro-1",
+        "stop_algo_id": "201", "take_profit_algo_id": "202",
+        "stop_trigger_price": Decimal("2400"), "take_profit_trigger_price": Decimal("2600"),
+    }
+    entry_exchange = {
+        "clientOrderId": entry_id, "orderId": 881, "symbol": "ETHUSDC", "side": "BUY",
+        "positionSide": "BOTH", "origQty": "0.02", "executedQty": "0.02", "status": "FILLED",
+    }
+    close_exchange = {
+        "clientOrderId": close_id, "orderId": 882, "symbol": "ETHUSDC", "side": "SELL",
+        "positionSide": "BOTH", "origQty": "0.02", "executedQty": "0.02", "status": "FILLED",
+        "type": "MARKET", "reduceOnly": "true",
+    }
+    fill = SimpleNamespace(
+        client_order_id=entry_id, exchange_order_id="881", symbol="ETHUSDC", side="BUY",
+        position_side="BOTH", quantity=Decimal("0.02"), price=Decimal("2500"),
+    )
+    local_entry = SimpleNamespace(
+        client_order_id=entry_id, exchange_order_id="881", symbol="ETHUSDC", side="BUY",
+    )
+    adapter = BinanceExecutionAdapter.__new__(BinanceExecutionAdapter)
+    adapter.env = BinanceEnvironment.TESTNET
+    adapter._worker_authorized = lambda _authority: True
+    adapter._mutation_lock = asyncio.Lock()
+    adapter.last_emergency_result = {}
+    adapter.testnet_trial_close_client_order_id = lambda _e: close_id
+    adapter.query_order = AsyncMock(side_effect=[None, entry_exchange, close_exchange])
+    adapter.ledger = SimpleNamespace(
+        get_order_by_client_id=AsyncMock(return_value=local_entry),
+        get_fills=AsyncMock(return_value=[fill]), replace_positions=AsyncMock(),
+    )
+    adapter.reconciliation = SimpleNamespace(
+        _recover_order_fills=AsyncMock(), reconcile=AsyncMock(return_value="IN_SYNC"), last_diffs=[],
+    )
+    adapter.rest_client = SimpleNamespace(
+        portfolio_margin=False,
+        request=AsyncMock(side_effect=[
+            [{"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0.02"}],
+            [{"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0"}],
+        ]),
+    )
+    # The bracket shape used on Portfolio Margin / Pilot Bracket: closePosition=False, reduceOnly=True
+    proof = {
+        "stop_order_id": 201, "stop_client_order_id": "stop-ro-1", "stop_order_type": "STOP_MARKET",
+        "stop_status": "NEW", "stop_close_position": False, "stop_reduce_only": True,
+        "take_profit_order_id": 202, "take_profit_client_order_id": "target-ro-1",
+        "take_profit_order_type": "TAKE_PROFIT_MARKET", "take_profit_status": "NEW",
+        "take_profit_close_position": False, "take_profit_reduce_only": True,
+        "position_side": "BOTH", "close_position": False, "reduce_only": True,
+    }
+
+    async def read_protection(intent, *, entry_client_order_id):
+        return SimpleNamespace(state="PROTECTED", evidence=proof, reasons=())
+
+    adapter.read_back_algo_protection = AsyncMock(side_effect=read_protection)
+
+    async def claim_submission(_owner, observed_close_id):
+        assert observed_close_id == close_id
+        return {**owner, "state_reason": f"protected_ethusdc_testnet_trial_close:{close_id}:SUBMITTING"}
+
+    authority = SimpleNamespace(claim_testnet_trial_close_submission=AsyncMock(side_effect=claim_submission))
+
+    async def execute(decision, *, before_mutation, **_kwargs):
+        await before_mutation()
+        assert decision.orders[0].reduce_only is True
+        assert decision.orders[0].quantity == Decimal("0.02")
+        return [SimpleNamespace(client_order_id=close_id, exchange_order_id="882")]
+
+    adapter._execute_decision = AsyncMock(side_effect=execute)
+
+    orders = await adapter.close_owned_testnet_trial(owner, authority=authority)
+
+    assert len(orders) == 1
+    assert adapter.last_emergency_result["status"] == "CONFIRMED"
+    assert adapter.last_emergency_result["protection_at_close"]["stop"]["close_position"] is False
+    assert adapter.last_emergency_result["protection_at_close"]["stop"]["reduce_only"] is True
+    assert adapter.last_emergency_result["protection_at_close"]["target"]["close_position"] is False
+    assert adapter.last_emergency_result["protection_at_close"]["target"]["reduce_only"] is True
+

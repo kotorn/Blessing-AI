@@ -9,6 +9,7 @@ import subprocess
 SOURCE_PATHS = ('server.ts', 'Dockerfile.worker', 'src/backend', 'apps/trading_worker', 'domain',
                 'scripts/start-local.ps1', 'scripts/apply_local_postgres_migrations.py',
                 'config/risk/mainnet_local_policy.json', 'config/risk/live_research_pilot.json',
+                'config/risk/track_c_review_policy.json',
                 'scripts/local_pilot_track_c.py', 'scripts/local_pilot_track_c_source.py',
                 'scripts/verify_local_pilot_track_c.py', 'scripts/produce_local_pilot_track_c.py',
                 'scripts/run_local_pilot_ci_regressions.py',

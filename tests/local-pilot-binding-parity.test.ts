@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   computeLocalReleaseFingerprint, computeTrackCBinding, TRACK_C_DEPENDENCY_PATHS, TRACK_C_MIGRATION_PATHS, TRACK_C_POLICY_PATH,
-  TRACK_C_SOURCE_PATHS,
+  TRACK_C_REVIEW_POLICY_PATH, TRACK_C_SOURCE_PATHS,
 } from '../src/backend/local-release-runtime.js';
 
 vi.setConfig({ testTimeout: 60_000 });
@@ -58,6 +58,7 @@ function fixtureRepo(): string {
     if (isDirectory) write(`${item}/a-file.txt`, `first ${item}\n`);
   }
   write(TRACK_C_POLICY_PATH, '{"version":"fixture"}\n');
+  write(TRACK_C_REVIEW_POLICY_PATH, '{"mode":"SOLO_OPERATOR","operator_github_id":12929483}\n');
   git(root, 'add', '.');
   git(root, 'commit', '-qm', 'fixture');
   return root;

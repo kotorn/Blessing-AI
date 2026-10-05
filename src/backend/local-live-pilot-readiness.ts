@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
-import type { LocalReleaseFingerprint } from './local-release-runtime.js';
+import { type LocalReleaseFingerprint, type TrackCReviewPolicy, readTrackCReviewPolicy } from './local-release-runtime.js';
 import { buildTrustedPythonVerificationEnvironment, resolveTrustedLocalPythonRuntime } from './local-python-runtime.js';
 import { trackCPhases, verifiedTrackCClasses } from './local-pilot-attestation.js';
 
@@ -352,10 +352,27 @@ export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): L
       const reviews = Array.isArray(evidence.reviews) ? evidence.reviews : [];
       const reviewerIds = reviews.map((review) => review?.reviewerId);
       let reviewsPassed = true;
-      if (reviews.length !== REQUIRED_REVIEW_DOMAINS.length
-        || ![1, 3].includes(new Set(reviewerIds).size)) {
+      let reviewPolicy: TrackCReviewPolicy = { mode: 'INDEPENDENT', operator_github_id: null };
+      try {
+        reviewPolicy = readTrackCReviewPolicy(root);
+      } catch {
         reviewsPassed = false;
+      }
+      if (reviews.length !== REQUIRED_REVIEW_DOMAINS.length) {
+        reviewsPassed = false;
+      } else if (reviewPolicy.mode === 'SOLO_OPERATOR') {
+        const expectedId = String(reviewPolicy.operator_github_id);
+        if (!reviewerIds.every((id) => id === expectedId)) {
+          reviewsPassed = false;
+        }
+      } else if (reviewPolicy.mode === 'INDEPENDENT') {
+        if (new Set(reviewerIds).size !== 3) {
+          reviewsPassed = false;
+        }
       } else {
+        reviewsPassed = false;
+      }
+      if (reviewsPassed) {
         for (const domain of REQUIRED_REVIEW_DOMAINS) {
           const review = reviews.find((r) => r?.domain === domain);
           if (!review || review.status !== 'PASS'

@@ -44,16 +44,18 @@ seven days from approval.
 
 ## C. Evidence and readiness (all must be real, none may be forced)
 
-1. Track C CHECKS, three distinct REVIEW_* classes (three different non-author
-   approvers) and TESTNET_ETHUSDC exist as GitHub-signed subjects for this
-   exact commit, and are younger than 24 hours.
+1. Track C CHECKS, three distinct REVIEW_* classes (satisfying
+   `config/risk/track_c_review_policy.json`: either `SOLO_OPERATOR` matching
+   `operator_github_id` across 3 distinct runs, or `INDEPENDENT` with 3 distinct
+   non-author approvers) and TESTNET_ETHUSDC exist as GitHub-signed subjects
+   for this exact commit, and are younger than 24 hours.
 2. `python scripts/download_local_pilot_track_c.py --sha <HEAD>` placed the
    five pairs in `artifacts/local-pilot-attestations/` (tool only exercised
    against a fake `gh`; **UNVERIFIED** against real artifacts).
 3. `GET /api/local/pilot/readiness` and `GET /api/local/runtime` report `READY`
-   from verified attestations, and the Python Worker gate is not contradicting
-   it. (Inside Docker the Python gate cannot reach READY; see
-   `docs/LOCAL-PILOT-TRACK-C.md`.)
+   from verified attestations. The Control Plane delivers the signed
+   `PilotReadinessVerdict` to the containerized Worker, and the Worker reports
+   `can_start=True`.
 4. A real `trading_admin` approved this campaign. Prepare reached
    `LIVE/DISARMED` with zero order attempts and the read-only preflight passed.
 
