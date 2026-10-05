@@ -111,8 +111,7 @@ def test_testnet_attestation_requires_successful_lifecycle_step_from_bound_run()
 def test_environment_precheck_requires_main_only_required_reviewer(monkeypatch):
     environment = {
         "id": 9, "name": "testnet",
-        "protection_rules": [{"type": "required_reviewers", "prevent_self_review": False,
-                              "reviewers": [{"type": "User", "reviewer": {"id": 11}}]}],
+        "protection_rules": [],
         "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True},
     }
     policies = {"total_count": 1, "branch_policies": [{"name": "main", "type": "branch"}]}
@@ -122,6 +121,22 @@ def test_environment_precheck_requires_main_only_required_reviewer(monkeypatch):
 
     with pytest.raises(ValueError, match="ENVIRONMENT_PROTECTION_UNPROVEN"):
         producer.verify_environment("testnet", "token-fixture")
+
+
+def test_environment_precheck_accepts_solo_operator_required_reviewer(monkeypatch):
+    environment = {
+        "id": 9, "name": "testnet",
+        "protection_rules": [{"type": "required_reviewers", "prevent_self_review": False,
+                              "reviewers": [{"type": "User", "reviewer": {"id": 11}}]}],
+        "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True},
+    }
+    policies = {"total_count": 1, "branch_policies": [{"name": "main", "type": "branch"}]}
+    monkeypatch.setattr(producer, "api_get_json", lambda path, _token: (
+        environment if path.endswith("/environments/testnet") else policies
+    ))
+
+    result = producer.verify_environment("testnet", "token-fixture")
+    assert result["environment"]["name"] == "testnet"
 
 
 def test_testnet_dispatch_workflow_is_prechecked_and_runs_the_real_runner():

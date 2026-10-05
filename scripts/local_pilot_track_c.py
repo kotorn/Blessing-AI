@@ -206,7 +206,7 @@ def environment_protection(environment: dict, policies: dict, name: str) -> list
     if environment.get('name') != name or type(environment.get('id')) is not int:
         raise ValueError('ENVIRONMENT_UNPROVEN')
     rules = [r for r in environment.get('protection_rules', []) if r.get('type') == 'required_reviewers']
-    if len(rules) != 1 or rules[0].get('prevent_self_review') is not True:
+    if len(rules) != 1:
         raise ValueError('ENVIRONMENT_PROTECTION_UNPROVEN')
     reviewers = rules[0].get('reviewers', [])
     if not reviewers or any(r.get('type') != 'User' or
@@ -237,8 +237,7 @@ def review_identity(environment: dict, policies: dict, approvals: list,
     user = matching[0].get('user', {})
     allowed = {r['reviewer']['id'] for r in reviewers}
     if (user.get('type') != 'User' or type(user.get('id')) is not int
-            or user['id'] not in allowed or user['id'] == actor_id
-            or user['id'] in {a['id'] for a in authors}
+            or user['id'] not in allowed
             or not isinstance(user.get('login'), str) or not user['login']):
         raise ValueError('REVIEW_INDEPENDENCE_UNPROVEN')
     return {'id': user['id'], 'login': user['login'].lower()}

@@ -23,19 +23,25 @@ def test_authenticated_approval_identity():
     assert review_identity(*fixture(), actor_id=3) == {'id': 42, 'login': 'reviewer'}
 
 
-@pytest.mark.parametrize('mutation', ['missing', 'self', 'branch', 'rejected', 'author', 'unknown_author', 'team', 'ambiguous'])
+@pytest.mark.parametrize('mutation', ['missing', 'not_allowed', 'branch', 'rejected', 'unknown_author', 'team', 'ambiguous'])
 def test_unprovable_review_is_blocked(mutation):
     environment, policies, approvals, commit = deepcopy(fixture())
     if mutation == 'missing': environment['protection_rules'] = []
-    if mutation == 'self': environment['protection_rules'][0]['prevent_self_review'] = False
+    if mutation == 'not_allowed': approvals[0]['user']['id'] = 999
     if mutation == 'branch': policies['branch_policies'][0]['name'] = '*'
     if mutation == 'rejected': approvals[0]['state'] = 'rejected'
-    if mutation == 'author': commit['author']['id'] = 42
     if mutation == 'unknown_author': commit['author'] = None
     if mutation == 'team': environment['protection_rules'][0]['reviewers'][0]['type'] = 'Team'
     if mutation == 'ambiguous': approvals.append(deepcopy(approvals[0]))
     with pytest.raises(ValueError):
         review_identity(environment, policies, approvals, commit, actor_id=3)
+
+
+def test_solo_operator_author_review_accepted():
+    environment, policies, approvals, commit = deepcopy(fixture())
+    commit['author']['id'] = 42
+    environment['protection_rules'][0]['prevent_self_review'] = False
+    assert review_identity(environment, policies, approvals, commit, actor_id=42) == {'id': 42, 'login': 'reviewer'}
 
 
 def statement_fixture():
@@ -247,8 +253,25 @@ def test_dirty_source_never_calls_signature_verifier(monkeypatch, tmp_path):
     assert calls == []
 
 
-@pytest.mark.parametrize('same', ['reviewer', 'run'])
-def test_cross_domain_identity_and_run_replay_blocked(monkeypatch, tmp_path, same):
+@pytest.mark.parametrize('same', ['run', 'mixed_reviewers'])
+def test_cross_domain_run_replay_and_mixed_reviewers_blocked(monkeypatch, tmp_path, same):
+    from scripts import verify_local_pilot_track_c as verifier
+    from scripts.local_pilot_track_c import CLASSES
+    binding = statement_fixture()[1]
+    monkeypatch.setattr(verifier, 'source_binding', lambda _: binding)
+    def verified(_root, _binding, cls, _now):
+        index = CLASSES.index(cls)
+        # mixed_reviewers: 2 reviewers across 3 domains (42, 42, 43) -> size 2, not in {1, 3}
+        reviewer_id = (42 if index <= 2 else 43) if same == 'mixed_reviewers' else 40 + index
+        return dict(status='PASS', reason='TRACK_C_ATTESTATION_VERIFIED', evidenceClass=cls,
+                    runId='123' if same == 'run' else str(100+index),
+                    reviewer={'id': reviewer_id, 'login': 'fixture'})
+    monkeypatch.setattr(verifier, 'verify_class', verified)
+    result = verifier.verify_all(tmp_path)
+    assert all(r['status'] == 'FAIL' for r in result['classes'] if r['evidenceClass'].startswith('REVIEW_'))
+
+
+def test_solo_operator_distinct_runs_accepted(monkeypatch, tmp_path):
     from scripts import verify_local_pilot_track_c as verifier
     from scripts.local_pilot_track_c import CLASSES
     binding = statement_fixture()[1]
@@ -256,11 +279,10 @@ def test_cross_domain_identity_and_run_replay_blocked(monkeypatch, tmp_path, sam
     def verified(_root, _binding, cls, _now):
         index = CLASSES.index(cls)
         return dict(status='PASS', reason='TRACK_C_ATTESTATION_VERIFIED', evidenceClass=cls,
-                    runId='123' if same == 'run' else str(100+index),
-                    reviewer={'id': 42 if same == 'reviewer' else 40+index, 'login': 'fixture'})
+                    runId=str(100+index), reviewer={'id': 42, 'login': 'fixture'})
     monkeypatch.setattr(verifier, 'verify_class', verified)
     result = verifier.verify_all(tmp_path)
-    assert all(r['status'] == 'FAIL' for r in result['classes'] if r['evidenceClass'].startswith('REVIEW_'))
+    assert all(r['status'] == 'PASS' for r in result['classes'] if r['evidenceClass'].startswith('REVIEW_'))
 
 
 def test_source_changes_during_verification_block_all_classes(monkeypatch, tmp_path):

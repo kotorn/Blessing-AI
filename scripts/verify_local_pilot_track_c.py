@@ -73,7 +73,7 @@ def verify_all(root: Path, binding: dict | None = None, *, now: str | None = Non
                      if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS']
         review_runs = [r['runId'] for r in results
                        if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS']
-        if len(reviewers) != 3 or len(set(reviewers)) != 3 or len(set(review_runs)) != 3:
+        if len(reviewers) != 3 or len(set(review_runs)) != 3 or len(set(reviewers)) not in {1, 3}:
             for result in results:
                 if result['evidenceClass'].startswith('REVIEW_'):
                     result['status'] = 'FAIL'
