@@ -1,5 +1,11 @@
 # Local Live Research Pilot: Success & Abort Criteria
 
+> [!NOTE]
+> **Plan v4 Update**: Plan v3 (`scalable-bubbling-dongarra.md`) and the legacy staging terms in this document (`STAGED_FIRST_ORDER`, "exactly one order", and net reward floor "0.20 USDC") are **SUPERSEDED** by [GEMINI-HANDOFF.md](file:///h:/Blessing%20AI/docs/GEMINI-HANDOFF.md). Specifically:
+> - Execution mode is `LIVE_RESEARCH_PILOT` (not `STAGED_FIRST_ORDER`).
+> - Single-entry restriction is enforced via `max_entries = 1` in `config/risk/live_research_pilot.json`.
+> - Minimum net reward floor is **0.25 USDC** (not 0.20 USDC).
+
 ## 1. Scope & Objective
 This document defines the formal success, completion, and abort criteria for the **Local Live Research Pilot (Plumbing Test)** on Binance USDⓈ-M / Portfolio Margin Futures for `ETHUSDC`.
 
@@ -10,7 +16,7 @@ The primary goal of this pilot is **end-to-end operational verification** of the
 - **Max Notional Cap:** ≤ 50.0 USDC per order
 - **Max Stop Risk Cap:** ≤ 2.0 USDC
 - **Maximum Aggregate Loss Cap:** ≤ 5.0 USDC
-- **Campaign Execution Limit:** Exactly 1 staged entry order
+- **Campaign Execution Limit:** `max_entries = 1` (*supersedes legacy "Exactly 1 staged entry order"*)
 
 ---
 
@@ -26,13 +32,13 @@ The pilot is deemed **SUCCESSFUL** if and only if all of the following stages co
 5. All 19 preflight safety checks pass (`PASS`) and system transitions to `LIVE/DISARMED`.
 
 ### B. Stage 2: Operator Arming & Staged Entry
-1. Operator explicitly ARMs the stack for `STAGED_FIRST_ORDER`.
-2. Exactly one order intent is evaluated by the Worker risk gate and clamped by `plan_pilot_bracket`:
+1. Operator explicitly ARMs the stack for `LIVE_RESEARCH_PILOT` (*supersedes `STAGED_FIRST_ORDER`*).
+2. At most one order intent is evaluated by the Worker risk gate and clamped by `plan_pilot_bracket`:
    - Side: `BUY` or `SELL`
    - Position Mode: One-Way (`BOTH`)
    - Notional: ≤ 50.0 USDC
    - Planned Stop Risk: ≤ 2.0 USDC
-   - Minimum Net Reward: ≥ 0.20 USDC
+   - Minimum Net Reward: ≥ 0.25 USDC (*supersedes 0.20 USDC*)
 3. Entry order fills on Binance exchange (`FILLED`).
 
 ### C. Stage 3: Exchange-Native Protection Bracket Verification
