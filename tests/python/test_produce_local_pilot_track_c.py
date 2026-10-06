@@ -168,3 +168,98 @@ def test_pull_request_ci_token_is_read_only_and_not_persisted():
     workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "permissions:\n  contents: read\n\njobs:" in workflow
     assert "- uses: actions/checkout@v7\n      with:\n        persist-credentials: false" in workflow
+
+
+def test_producer_builds_solo_operator_testnet_statement(monkeypatch, tmp_path):
+    import json
+    policy_dir = tmp_path / "config/risk"
+    policy_dir.mkdir(parents=True)
+    (policy_dir / "track_c_review_policy.json").write_text(
+        json.dumps({"mode": "SOLO_OPERATOR", "operator_github_id": 42}), encoding="utf-8"
+    )
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir(parents=True)
+
+    trial = {
+        'trial_type': 'PROTECTED_ETHUSDC_V1', 'build_sha': 'a' * 40,
+        'environment': 'BINANCE_TESTNET', 'symbol': 'ETHUSDC', 'status': 'PASS',
+        'protection_status': 'PROTECTED_VERIFIED', 'close_status': 'VERIFIED',
+        'close_order_type': 'MARKET', 'close_order_reduce_only': True,
+        'reconciliation_status': 'IN_SYNC', 'diff_count': 0, 'entry_fill_count': 1,
+        'position_after': [], 'open_orders_after': [], 'open_algo_after': [],
+        'entry_client_order_id': 'entry', 'close_client_order_id': 'close',
+        'stop_client_algo_id': 'stop', 'target_client_algo_id': 'target',
+        'protection_at_close': {
+            'status': 'PROTECTED', 'observed_at': '2026-10-03T00:00:00.000Z',
+            'close_submission_at': '2026-10-03T00:00:00.000Z',
+            'stop': {'algo_id': '101', 'client_algo_id': 'stop',
+                     'order_type': 'STOP_MARKET', 'status': 'NEW',
+                     'close_position': True, 'reduce_only': False},
+            'target': {'algo_id': '102', 'client_algo_id': 'target',
+                       'order_type': 'TAKE_PROFIT_MARKET', 'status': 'NEW',
+                       'close_position': True, 'reduce_only': False},
+        },
+        'account_baseline': {
+            'position_mode': 'ONE_WAY', 'leverage': 5,
+            'nonzero_positions': 0, 'open_orders': 0, 'open_algo_orders': 0,
+        },
+    }
+    (artifacts_dir / "testnet-trial-1.json").write_text(json.dumps(trial), encoding="utf-8")
+
+    binding = {
+        "gitSha": "a" * 40, "sourceSha256": "b" * 64,
+        "dependencySha256": "c" * 64, "migrationSha256": "d" * 64,
+        "pilotPolicySha256": "e" * 64,
+    }
+    monkeypatch.setattr(producer, "source_binding", lambda _root: binding.copy())
+
+    run_obj = {
+        "id": 123, "run_attempt": 1, "head_sha": "a" * 40,
+        "head_branch": "main", "event": "workflow_dispatch",
+        "repository": {"id": 1366161771},
+        "actor": {"id": 42, "login": "operator", "type": "User"},
+    }
+    testnet_job = {
+        "id": 789, "run_id": 123, "head_sha": "a" * 40, "name": "testnet_trial",
+        "status": "in_progress", "conclusion": None,
+        "steps": [{
+            "name": "Run the protected ETHUSDC Testnet lifecycle with Testnet-only keys",
+            "status": "completed", "conclusion": "success",
+        }],
+    }
+    env_obj = {
+        "id": 33, "name": "testnet",
+        "protection_rules": [{"type": "required_reviewers", "prevent_self_review": False,
+                              "reviewers": [{"type": "User", "reviewer": {"id": 42}}]}],
+        "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True},
+    }
+    policies_obj = {"total_count": 1, "branch_policies": [{"name": "main", "type": "branch"}]}
+    approvals_obj = [{
+        "state": "approved", "environments": [{"id": 33, "name": "testnet"}],
+        "user": {"id": 42, "type": "User", "login": "operator"},
+    }]
+
+    def fake_api(path, _token):
+        if path.endswith("/runs/123"): return run_obj
+        if path.endswith("/jobs?per_page=100"): return {"total_count": 1, "jobs": [testnet_job]}
+        if path.endswith("/environments/testnet"): return env_obj
+        if path.endswith("/deployment-branch-policies?per_page=100"): return policies_obj
+        if path.endswith("/approvals?per_page=100"): return approvals_obj
+        raise AssertionError(f"Unexpected path: {path}")
+
+    monkeypatch.setattr(producer, "api_get_json", fake_api)
+
+    context = {
+        "repository": REPOSITORY, "repository_id": "1366161771", "sha": "a" * 40,
+        "ref": "refs/heads/main", "event": "workflow_dispatch", "run_id": "123", "run_attempt": "1",
+    }
+
+    statement = producer._build_dispatch_statement(tmp_path, context, "token-fixture", "TESTNET_ETHUSDC")
+    assert statement["evidenceClass"] == "TESTNET_ETHUSDC"
+    assert statement["status"] == "PASS"
+
+    (policy_dir / "track_c_review_policy.json").write_text(
+        json.dumps({"mode": "SOLO_OPERATOR", "operator_github_id": 999}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN"):
+        producer._build_dispatch_statement(tmp_path, context, "token-fixture", "TESTNET_ETHUSDC")

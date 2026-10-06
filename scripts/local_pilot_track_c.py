@@ -146,10 +146,17 @@ def validate_payload(statement: dict, *, review_policy: dict | None = None) -> N
         actor_id = run_actor.get('id') if isinstance(run_actor, dict) else None
         user = matching[0].get('user', {}) if len(matching) == 1 else {}
         reviewer_ids = {r['reviewer']['id'] for r in reviewers}
+        policy_cfg = review_policy or read_review_policy()
         if (len(matching) != 1 or matching[0].get('state') != 'approved'
                 or user.get('type') != 'User' or type(user.get('id')) is not int
-                or user['id'] not in reviewer_ids or user['id'] == actor_id):
+                or user['id'] not in reviewer_ids):
             raise ValueError('TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN')
+        if policy_cfg['mode'] == 'INDEPENDENT':
+            if user['id'] == actor_id:
+                raise ValueError('TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN')
+        elif policy_cfg['mode'] == 'SOLO_OPERATOR':
+            if user['id'] != policy_cfg['operator_github_id']:
+                raise ValueError('TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN')
         trial = payload['trial']
         ids = [trial.get(key) for key in ('entry_client_order_id', 'close_client_order_id',
                                          'stop_client_algo_id', 'target_client_algo_id')]

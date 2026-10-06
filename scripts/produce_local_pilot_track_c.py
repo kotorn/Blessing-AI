@@ -218,7 +218,7 @@ def _build_dispatch_statement(root: Path, context: dict[str, str], token: str,
                    "approvals": approvals}
     statement = _statement(base, binding, payload, evidence_class=evidence_class)
     # The GitHub certificate is validated separately by the local verifier after signing.
-    validate_payload(statement)
+    validate_payload(statement, review_policy=read_review_policy(root))
     if source_binding(root) != binding:
         raise ValueError("TRACK_C_SOURCE_CHANGED")
     return statement

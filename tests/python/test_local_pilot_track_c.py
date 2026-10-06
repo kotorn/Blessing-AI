@@ -200,46 +200,47 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
         },
     }
 
-    validate_payload(statement)
+    policy = {'mode': 'INDEPENDENT', 'operator_github_id': None}
+    validate_payload(statement, review_policy=policy)
     trial = statement['payload']['trial']
     invalid_timestamp = dict(trial)
     invalid_timestamp['protection_at_close'] = dict(trial['protection_at_close'])
     invalid_timestamp['protection_at_close']['observed_at'] = '2026-02-30T00:00:00.000Z'
     statement['payload']['trial'] = invalid_timestamp
     with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
-        validate_payload(statement)
+        validate_payload(statement, review_policy=policy)
     stale_at_submission = dict(trial)
     stale_at_submission['protection_at_close'] = dict(trial['protection_at_close'])
     stale_at_submission['protection_at_close']['close_submission_at'] = '2026-10-03T00:00:05.001Z'
     statement['payload']['trial'] = stale_at_submission
     with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
-        validate_payload(statement)
+        validate_payload(statement, review_policy=policy)
     statement['payload']['trial'] = trial
     missing_close_protection = dict(trial)
     missing_close_protection.pop('protection_at_close')
     statement['payload']['trial'] = missing_close_protection
     with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
-        validate_payload(statement)
+        validate_payload(statement, review_policy=policy)
     trial['protection_at_close']['stop']['status'] = 'CANCELED'
     statement['payload']['trial'] = trial
     with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
-        validate_payload(statement)
+        validate_payload(statement, review_policy=policy)
     trial['protection_at_close']['stop']['status'] = 'NEW'
     trial['protection_at_close']['target']['client_algo_id'] = 'other'
     with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
-        validate_payload(statement)
+        validate_payload(statement, review_policy=policy)
     trial['protection_at_close']['target']['client_algo_id'] = 'target'
     # Test D4: fill-sized reduce-only bracket shape is accepted
     trial['protection_at_close']['stop']['close_position'] = False
     trial['protection_at_close']['stop']['reduce_only'] = True
     trial['protection_at_close']['target']['close_position'] = False
     trial['protection_at_close']['target']['reduce_only'] = True
-    validate_payload(statement)
+    validate_payload(statement, review_policy=policy)
 
     # Invalid combination: close_position=False and reduce_only=False is rejected
     trial['protection_at_close']['stop']['reduce_only'] = False
     with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
-        validate_payload(statement)
+        validate_payload(statement, review_policy=policy)
     trial['protection_at_close']['stop']['reduce_only'] = True
 
     # Restore default fixture
@@ -250,7 +251,7 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
 
     statement['payload']['approvals'] = []
     with pytest.raises(ValueError, match='TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN'):
-        validate_payload(statement)
+        validate_payload(statement, review_policy=policy)
 
     statement['payload']['approvals'] = [{
         'state': 'approved', 'environments': [{'id': 33, 'name': 'testnet'}],
@@ -258,7 +259,128 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
     }]
     statement['payload']['trial']['account_baseline']['leverage'] = 11
     with pytest.raises(ValueError, match='TESTNET_ACCOUNT_BASELINE_UNPROVEN'):
-        validate_payload(statement)
+        validate_payload(statement, review_policy=policy)
+
+
+def _testnet_fixture():
+    environment = {
+        'id': 33, 'name': 'testnet',
+        'protection_rules': [{'type': 'required_reviewers', 'prevent_self_review': False,
+                              'reviewers': [{'type': 'User', 'reviewer': {'id': 42}}]}],
+        'deployment_branch_policy': {'protected_branches': False, 'custom_branch_policies': True},
+    }
+    policies = {'total_count': 1, 'branch_policies': [{'name': 'main', 'type': 'branch'}]}
+    statement = {
+        'evidenceClass': 'TESTNET_ETHUSDC', 'runId': '123', 'runAttempt': 1,
+        'gitSha': 'a' * 40, 'eventName': 'workflow_dispatch',
+        'payload': {
+            'trial': {
+                'trial_type': 'PROTECTED_ETHUSDC_V1', 'build_sha': 'a' * 40,
+                'environment': 'BINANCE_TESTNET', 'symbol': 'ETHUSDC', 'status': 'PASS',
+                'protection_status': 'PROTECTED_VERIFIED', 'close_status': 'VERIFIED',
+                'close_order_type': 'MARKET', 'close_order_reduce_only': True,
+                'reconciliation_status': 'IN_SYNC', 'diff_count': 0, 'entry_fill_count': 1,
+                'position_after': [], 'open_orders_after': [], 'open_algo_after': [],
+                'entry_client_order_id': 'entry', 'close_client_order_id': 'close',
+                'stop_client_algo_id': 'stop', 'target_client_algo_id': 'target',
+                'protection_at_close': {
+                    'status': 'PROTECTED', 'observed_at': '2026-10-03T00:00:00.000Z',
+                    'close_submission_at': '2026-10-03T00:00:00.000Z',
+                    'stop': {'algo_id': '101', 'client_algo_id': 'stop',
+                             'order_type': 'STOP_MARKET', 'status': 'NEW',
+                             'close_position': True, 'reduce_only': False},
+                    'target': {'algo_id': '102', 'client_algo_id': 'target',
+                               'order_type': 'TAKE_PROFIT_MARKET', 'status': 'NEW',
+                               'close_position': True, 'reduce_only': False},
+                },
+                'account_baseline': {
+                    'position_mode': 'ONE_WAY', 'leverage': 5,
+                    'nonzero_positions': 0, 'open_orders': 0, 'open_algo_orders': 0,
+                },
+            },
+            'environmentProof': {'environment': environment, 'branchPolicies': policies},
+            'run': {
+                'id': 123, 'run_attempt': 1, 'head_sha': 'a' * 40, 'head_branch': 'main',
+                'event': 'workflow_dispatch', 'repository': {'id': 1366161771},
+                'actor': {'id': 42, 'login': 'operator', 'type': 'User'},
+            },
+            'approvals': [{
+                'state': 'approved', 'environments': [{'id': 33, 'name': 'testnet'}],
+                'user': {'id': 42, 'type': 'User', 'login': 'operator'},
+            }],
+        },
+    }
+    return statement
+
+
+def test_solo_operator_testnet_approval_accepted():
+    from scripts.local_pilot_track_c import validate_payload
+    statement = _testnet_fixture()
+    policy = {'mode': 'SOLO_OPERATOR', 'operator_github_id': 42}
+    validate_payload(statement, review_policy=policy)
+
+
+def test_solo_operator_testnet_wrong_approver_rejected():
+    from scripts.local_pilot_track_c import validate_payload
+    statement = _testnet_fixture()
+    statement['payload']['approvals'][0]['user']['id'] = 999
+    policy = {'mode': 'SOLO_OPERATOR', 'operator_github_id': 42}
+    with pytest.raises(ValueError, match='TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN'):
+        validate_payload(statement, review_policy=policy)
+
+
+def test_solo_operator_testnet_operator_not_in_reviewer_list_rejected():
+    from scripts.local_pilot_track_c import validate_payload
+    statement = _testnet_fixture()
+    statement['payload']['environmentProof']['environment']['protection_rules'][0]['reviewers'] = [
+        {'type': 'User', 'reviewer': {'id': 999}}
+    ]
+    policy = {'mode': 'SOLO_OPERATOR', 'operator_github_id': 42}
+    with pytest.raises(ValueError, match='TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN'):
+        validate_payload(statement, review_policy=policy)
+
+
+def test_independent_mode_testnet_self_approval_rejected():
+    from scripts.local_pilot_track_c import validate_payload
+    statement = _testnet_fixture()
+    statement['payload']['environmentProof']['environment']['protection_rules'][0]['reviewers'] = [
+        {'type': 'User', 'reviewer': {'id': 42}},
+        {'type': 'User', 'reviewer': {'id': 43}},
+        {'type': 'User', 'reviewer': {'id': 44}},
+    ]
+    policy = {'mode': 'INDEPENDENT', 'operator_github_id': None}
+    with pytest.raises(ValueError, match='TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN'):
+        validate_payload(statement, review_policy=policy)
+
+
+def test_independent_mode_testnet_distinct_approver_accepted():
+    from scripts.local_pilot_track_c import validate_payload
+    statement = _testnet_fixture()
+    statement['payload']['environmentProof']['environment']['protection_rules'][0]['reviewers'] = [
+        {'type': 'User', 'reviewer': {'id': 42}},
+        {'type': 'User', 'reviewer': {'id': 43}},
+        {'type': 'User', 'reviewer': {'id': 44}},
+    ]
+    statement['payload']['approvals'][0]['user']['id'] = 43
+    statement['payload']['approvals'][0]['user']['login'] = 'independent-reviewer'
+    policy = {'mode': 'INDEPENDENT', 'operator_github_id': None}
+    validate_payload(statement, review_policy=policy)
+
+
+def test_solo_operator_testnet_accepted_in_verify_all(monkeypatch, tmp_path):
+    from scripts import verify_local_pilot_track_c as verifier
+    from scripts.local_pilot_track_c import CLASSES
+    binding = statement_fixture()[1]
+    monkeypatch.setattr(verifier, 'source_binding', lambda _: binding)
+    monkeypatch.setattr(verifier, 'read_review_policy', lambda _: {'mode': 'SOLO_OPERATOR', 'operator_github_id': 42})
+    def verified(_root, _binding, cls, _now, **_kw):
+        index = CLASSES.index(cls)
+        return dict(status='PASS', reason='TRACK_C_ATTESTATION_VERIFIED', evidenceClass=cls,
+                    runId=str(100+index), reviewer={'id': 42, 'login': 'fixture'})
+    monkeypatch.setattr(verifier, 'verify_class', verified)
+    result = verifier.verify_all(tmp_path)
+    testnet = next(r for r in result['classes'] if r['evidenceClass'] == 'TESTNET_ETHUSDC')
+    assert testnet['status'] == 'PASS'
 
 
 def test_local_json_without_bundle_is_not_authority(tmp_path):
