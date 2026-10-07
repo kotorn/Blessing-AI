@@ -234,5 +234,13 @@ describe('local runtime safety contract', () => {
     expect(launcher).not.toContain('Get-LocalConfigValue "BINANCE_PORTFOLIO_MARGIN" "true"');
     expect(launcher).toContain("BINANCE_PORTFOLIO_MARGIN must be set to 'true' or 'false'");
   });
+
+  it('skips dotenv.config() in LOCAL_ONLY mode or when SKIP_DOTENV sentinel is set', () => {
+    expect(server).toContain('if (!skipDotenv) {');
+    expect(server).toContain('dotenv.config();');
+    expect(server).toContain("const skipDotenv = isLocalOnlyBoot || ['1', 'true', 'yes', 'on'].includes(");
+    expect(server).toContain("process.env.SKIP_DOTENV");
+    expect(server).toContain("process.env.LOCAL_ONLY");
+  });
 });
 

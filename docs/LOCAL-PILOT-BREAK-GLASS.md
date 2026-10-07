@@ -122,11 +122,29 @@ Safe handling:
    launcher supplies it via the environment):
 
    ```powershell
+   # Dump inside the container and docker cp to avoid PowerShell UTF-16 redirection corruption:
    docker exec blessing-postgres-local pg_dump -U <POSTGRES_USER> -d <POSTGRES_DB> `
-     -t mainnet_launch_sessions -t binance_algo_protections > break-glass-backup.sql
+     -t mainnet_launch_sessions -t binance_algo_protections -f /tmp/break-glass-backup.sql
+   docker cp blessing-postgres-local:/tmp/break-glass-backup.sql break-glass-backup.sql
+   docker exec blessing-postgres-local rm -f /tmp/break-glass-backup.sql
    ```
 
-   Keep the file outside the repository.
+   Alternatively, run the repository backup helper script:
+
+   ```powershell
+   py -3.13 scripts/backup_local_postgres.py --action backup --file break-glass-backup.sql
+   # Or in PowerShell:
+   .\scripts\backup-local-postgres.ps1 -Action backup -File break-glass-backup.sql
+   ```
+
+   Keep the file outside the repository. To restore if needed:
+
+   ```powershell
+   docker cp break-glass-backup.sql blessing-postgres-local:/tmp/break-glass-backup.sql
+   docker exec blessing-postgres-local psql -U <POSTGRES_USER> -d <POSTGRES_DB> -f /tmp/break-glass-backup.sql
+   docker exec blessing-postgres-local rm -f /tmp/break-glass-backup.sql
+   # Or: py -3.13 scripts/backup_local_postgres.py --action restore --file break-glass-backup.sql
+   ```
 3. Inspect read-only:
 
    ```sql

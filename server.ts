@@ -106,11 +106,20 @@ import { localSecretSourceIdentity } from './src/backend/local-secret-manager.js
 import { createPilotReadinessVerdict } from './src/backend/local-pilot-verdict.js';
 
 
-dotenv.config();
+const isLocalOnlyBoot = ['1', 'true', 'yes', 'on'].includes(
+  (process.env.LOCAL_ONLY || '').trim().toLowerCase(),
+);
+const skipDotenv = isLocalOnlyBoot || ['1', 'true', 'yes', 'on'].includes(
+  (process.env.SKIP_DOTENV || '').trim().toLowerCase(),
+);
+
+if (!skipDotenv) {
+  dotenv.config();
+}
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const LOCAL_ONLY = ['1', 'true', 'yes', 'on'].includes(
+const LOCAL_ONLY = isLocalOnlyBoot || ['1', 'true', 'yes', 'on'].includes(
   (process.env.LOCAL_ONLY || '').trim().toLowerCase(),
 );
 const RUNTIME_TARGET = LOCAL_ONLY ? LOCAL_RUNTIME_TARGET : 'CLOUD_RUN';

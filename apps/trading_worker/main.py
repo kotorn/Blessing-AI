@@ -162,11 +162,14 @@ class ToggleRequest(BaseModel):
     active: bool = True
 
 
+from apps.trading_worker.logging_config import configure_rotating_file_logger
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("blessing.worker")
+configure_rotating_file_logger(logger_name="blessing")
 
 # --- Worker Runtime State Models & Execution Authority ---
 
