@@ -267,8 +267,14 @@ async def _local_mainnet_risk_gate(
         costs_age = (datetime.now(timezone.utc) - costs_at.astimezone(timezone.utc)).total_seconds()
         if costs_age < 0 or costs_age > 5:
             raise ValueError('cost evidence is stale')
+        is_pm = bool(getattr(adapter, "portfolio_margin", False))
+        expected_source = (
+            'BINANCE_PAPI_COMMISSION_FUNDING_DEPTH'
+            if is_pm
+            else 'BINANCE_FAPI_COMMISSION_FUNDING_DEPTH'
+        )
         if (
-            cost_evidence.get('source') != 'BINANCE_FAPI_COMMISSION_FUNDING_DEPTH'
+            cost_evidence.get('source') != expected_source
             or cost_evidence.get('symbol') != MAINNET_RISK_POLICY.symbol
             or cost_evidence.get('client_order_id') != intent.client_order_id
             or Decimal(str(cost_evidence.get('quantity'))) != quantity
@@ -280,11 +286,11 @@ async def _local_mainnet_risk_gate(
             'commission', 'depth', 'funding', 'funding_info', 'leverage_brackets'
         }
         expected_routes = {
-            'commission': '/fapi/v1/commissionRate',
+            'commission': '/papi/v1/um/commissionRate' if is_pm else '/fapi/v1/commissionRate',
             'depth': '/fapi/v1/depth',
             'funding': '/fapi/v1/fundingRate',
             'funding_info': '/fapi/v1/fundingInfo',
-            'leverage_brackets': '/fapi/v1/leverageBracket',
+            'leverage_brackets': '/papi/v1/um/leverageBracket' if is_pm else '/fapi/v1/leverageBracket',
         }
         expected_params = {
             'commission': {'symbol': MAINNET_RISK_POLICY.symbol},

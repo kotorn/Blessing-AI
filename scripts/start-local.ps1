@@ -373,7 +373,11 @@ $env:CONTROL_PLANE_URL = "http://127.0.0.1:3001"
 $env:LOCAL_MAINNET_API_KEY_VERSION = Get-LocalConfigValue "BINANCE_MAINNET_API_KEY_VERSION"
 $env:LOCAL_MAINNET_API_SECRET_VERSION = Get-LocalConfigValue "BINANCE_MAINNET_API_SECRET_VERSION"
 $env:LOCAL_SECRET_MANAGER_PROJECT_ID = Get-LocalConfigValue "SECRET_MANAGER_PROJECT_ID" (Get-LocalConfigValue "GCP_PROJECT_ID" "gen-lang-client-0730128480")
-$env:BINANCE_PORTFOLIO_MARGIN = Get-LocalConfigValue "BINANCE_PORTFOLIO_MARGIN" "true"
+$rawPm = (Get-LocalConfigValue "BINANCE_PORTFOLIO_MARGIN" "").Trim().ToLower()
+if ($rawPm -ne "true" -and $rawPm -ne "false") {
+    throw "BINANCE_PORTFOLIO_MARGIN must be set to 'true' or 'false' in .env or environment (found: '$rawPm')."
+}
+$env:BINANCE_PORTFOLIO_MARGIN = $rawPm
 $env:EXECUTION_MODE = "PAPER"
 $env:MAINNET_LIVE_APPROVED = "false"
 $env:MAINNET_RELEASE_APPROVAL_ID = ""

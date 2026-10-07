@@ -974,15 +974,25 @@ class BinanceExecutionAdapter:
                     "source_timestamp": None,
                 }
 
+            commission_path = (
+                "/papi/v1/um/commissionRate"
+                if self.portfolio_margin
+                else "/fapi/v1/commissionRate"
+            )
+            leverage_bracket_path = (
+                "/papi/v1/um/leverageBracket"
+                if self.portfolio_margin
+                else "/fapi/v1/leverageBracket"
+            )
             observed = await asyncio.gather(
-                fetch_observed("commission", "/fapi/v1/commissionRate", signed=True,
+                fetch_observed("commission", commission_path, signed=True,
                                params={"symbol": "ETHUSDC"}),
                 fetch_observed("depth", "/fapi/v1/depth",
                                params={"symbol": "ETHUSDC", "limit": 1000}),
                 fetch_observed("funding", "/fapi/v1/fundingRate",
                                params={"symbol": "ETHUSDC", "limit": 3}),
                 fetch_observed("funding_info", "/fapi/v1/fundingInfo"),
-                fetch_observed("leverage_brackets", "/fapi/v1/leverageBracket", signed=True,
+                fetch_observed("leverage_brackets", leverage_bracket_path, signed=True,
                                params={"symbol": "ETHUSDC"}),
             )
             (commission, commission_observation), (depth, depth_observation), \
@@ -1101,7 +1111,11 @@ class BinanceExecutionAdapter:
             ) + 1
             funding_bound = notional * funding_cap * periods
             return {
-                "source": "BINANCE_FAPI_COMMISSION_FUNDING_DEPTH",
+                "source": (
+                    "BINANCE_PAPI_COMMISSION_FUNDING_DEPTH"
+                    if self.portfolio_margin
+                    else "BINANCE_FAPI_COMMISSION_FUNDING_DEPTH"
+                ),
                 "symbol": "ETHUSDC",
                 "client_order_id": str(intent.client_order_id),
                 "quantity": quantity,

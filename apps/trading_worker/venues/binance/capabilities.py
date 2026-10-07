@@ -47,11 +47,15 @@ class BinanceCapabilities:
                 if not isinstance(papi_acc, dict) or papi_acc.get("accountStatus") != "NORMAL":
                     raise ValueError("Portfolio Margin account is not NORMAL or valid")
 
+                um_acc = await rest_client.request("GET", "/papi/v1/um/account", signed=True)
+                if not isinstance(um_acc, dict) or "canTrade" not in um_acc:
+                    raise ValueError("Portfolio Margin UM account response missing canTrade")
+
                 pos_mode = await rest_client.request("GET", "/papi/v1/um/positionSide/dual", signed=True)
                 if not isinstance(pos_mode, dict) or "dualSidePosition" not in pos_mode:
                     raise ValueError("Position mode response is invalid")
                 self.account_request_succeeded = True
-                self.trade_authorized = True
+                self.trade_authorized = _exchange_bool(um_acc["canTrade"])
                 self.hedge_mode = _exchange_bool(pos_mode["dualSidePosition"])
                 self.position_mode_known = True
             else:

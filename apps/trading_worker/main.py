@@ -3691,18 +3691,37 @@ class TradingWorkerApp:
                         "reason": f"Kill switch remains active until a verified {self._current_exchange_label()} restart/reconciliation.",
                     }
                 try:
+                    open_orders_path = getattr(adapter, "_open_orders_path", "/fapi/v1/openOrders")
                     open_orders = await adapter.rest_client.request(
-                        "GET", "/fapi/v1/openOrders", signed=True
+                        "GET", open_orders_path, signed=True
                     )
                     if not isinstance(open_orders, list):
                         return {
                             "status": "UNKNOWN",
                             "reason": "Authoritative openOrders response is invalid.",
                         }
-                    if open_orders:
+                    open_algos_path = getattr(adapter, "_open_algo_orders_path", None)
+                    open_algos = []
+                    if open_algos_path:
+                        try:
+                            algos_resp = await adapter.rest_client.request(
+                                "GET", open_algos_path, signed=True, params={"algoType": "CONDITIONAL"}
+                            )
+                            if isinstance(algos_resp, list):
+                                open_algos = algos_resp
+                            elif isinstance(algos_resp, dict) and isinstance(algos_resp.get("orders"), list):
+                                open_algos = algos_resp["orders"]
+                        except Exception as exc:
+                            logger.warning("Failed to check open algo orders on kill-switch release: %s", exc)
+                            return {
+                                "status": "UNKNOWN",
+                                "reason": "Failed to verify open algo orders on exchange.",
+                            }
+                    total_remaining = len(open_orders) + len(open_algos)
+                    if total_remaining > 0:
                         return {
                             "status": "PARTIAL",
-                            "remaining_orders": len(open_orders),
+                            "remaining_orders": total_remaining,
                             "reason": f"Kill switch remains active while {self._current_exchange_label()} open orders exist.",
                         }
                     reconciliation = await self.trigger_reconciliation()

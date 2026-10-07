@@ -229,4 +229,10 @@ describe('local runtime safety contract', () => {
     expect(prepareRoute).toContain("status: campaign.status");
     expect(prepareRoute).not.toContain("forwardWorkerRequest('/arm'");
   });
+
+  it('strictly validates BINANCE_PORTFOLIO_MARGIN in start-local.ps1 without a silent default', () => {
+    expect(launcher).not.toContain('Get-LocalConfigValue "BINANCE_PORTFOLIO_MARGIN" "true"');
+    expect(launcher).toContain("BINANCE_PORTFOLIO_MARGIN must be set to 'true' or 'false'");
+  });
 });
+

@@ -103,6 +103,7 @@ _ALLOWED_REQUEST_METHODS: dict[str, frozenset[str]] = {
     "/papi/v1/um/order": frozenset({"GET", "POST", "PUT", "DELETE"}),
     "/papi/v1/um/leverage": frozenset({"POST"}),
     "/papi/v1/um/leverageBracket": frozenset({"GET"}),
+    "/papi/v1/um/commissionRate": frozenset({"GET"}),
     "/papi/v1/listenKey": frozenset({"POST", "PUT", "DELETE"}),
 }
 
@@ -149,6 +150,8 @@ class BinanceRestClient:
         if portfolio_margin is None:
             portfolio_margin = is_portfolio_margin_enabled()
         self.portfolio_margin = bool(portfolio_margin)
+        if self.portfolio_margin and self.env == BinanceEnvironment.TESTNET:
+            raise ValueError("Portfolio Margin is not supported in Binance TESTNET environment")
         # A preflight adapter gets a transport-level read-only boundary in
         # addition to the adapter method guards.  This prevents a future
         # preflight code path from reaching the order endpoint accidentally.
