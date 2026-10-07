@@ -172,8 +172,9 @@ def test_fails_closed_when_costs_exceed_stop_risk():
         )
 
 
+@pytest.mark.parametrize("side", [OrderSide.BUY, OrderSide.SELL])
 @pytest.mark.asyncio
-async def test_end_to_end_local_mainnet_risk_gate_accepts_pilot_bracket(monkeypatch):
+async def test_end_to_end_local_mainnet_risk_gate_accepts_pilot_bracket(monkeypatch, side):
     from apps.trading_worker.venues.binance.gates import _local_mainnet_risk_gate
     from tests.python.test_local_mainnet_gate import make_adapter, make_risk_context, make_cost_evidence
 
@@ -182,14 +183,26 @@ async def test_end_to_end_local_mainnet_risk_gate_accepts_pilot_bracket(monkeypa
 
     rules = _ethusdc_rules()
     entry = Decimal("2713.39")
-    plan = plan_pilot_bracket(rules=rules, entry_price=entry, side=OrderSide.BUY)
+    # Independent, realistic exchange cost bounds (NOT derived or echoed from plan)
+    exchange_fees = Decimal("0.05")
+    exchange_funding = Decimal("0.60")
+    exchange_slippage = Decimal("0.05")
+
+    plan = plan_pilot_bracket(
+        rules=rules,
+        entry_price=entry,
+        side=side,
+        estimated_fees_usdc=exchange_fees,
+        estimated_funding_usdc=exchange_funding,
+        estimated_slippage_usdc=exchange_slippage,
+    )
 
     intent = OrderIntent(
-        client_order_id="local-pilot-e2e-1",
+        client_order_id=f"local-pilot-e2e-{side.value.lower()}",
         symbol="ETHUSDC",
         basket_id="basket-1",
         market_type=MarketType.USDM_FUTURES,
-        side=OrderSide.BUY,
+        side=side,
         position_side=PositionSide.BOTH,
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.GTC,
@@ -205,9 +218,10 @@ async def test_end_to_end_local_mainnet_risk_gate_accepts_pilot_bracket(monkeypa
     async def cost_evidence(_intent, _context):
         return make_cost_evidence(
             intent,
-            fees_upper_bound_usdc=plan.estimated_fees_usdc,
-            funding_upper_bound_usdc=plan.estimated_funding_usdc,
-            slippage_upper_bound_usdc=plan.estimated_slippage_usdc,
+            side=side.value,
+            fees_upper_bound_usdc=exchange_fees,
+            funding_upper_bound_usdc=exchange_funding,
+            slippage_upper_bound_usdc=exchange_slippage,
             funding_interval_hours=Decimal("8"),
             funding_events_assumed=4,
         )
@@ -227,7 +241,8 @@ async def test_end_to_end_local_mainnet_risk_gate_accepts_pilot_bracket(monkeypa
     assert gate_result is None, f"Local Mainnet gate blocked pilot order: {gate_result.reason if gate_result else ''}"
 
 
-def test_worker_clamp_applies_pilot_bracket_to_unprotected_pilot_order(monkeypatch):
+@pytest.mark.asyncio
+async def test_worker_clamp_applies_pilot_bracket_to_unprotected_pilot_order(monkeypatch):
     from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
     from domain.models import ExecutionDecision
     from domain.enums import EconomicRiskClass
@@ -262,7 +277,7 @@ def test_worker_clamp_applies_pilot_bracket_to_unprotected_pilot_order(monkeypat
         orders=[raw_order],
     )
 
-    clamped = worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2713.39"))
+    clamped = await worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2713.39"))
     assert len(clamped.orders) == 1
     bracketed = clamped.orders[0]
     assert bracketed.management_mode == "QUICK"
@@ -270,3 +285,308 @@ def test_worker_clamp_applies_pilot_bracket_to_unprotected_pilot_order(monkeypat
     assert bracketed.take_profit_price is not None
     assert bracketed.quantity <= Decimal("0.02")
     assert bracketed.quantity * Decimal("2713.39") <= Decimal("50.0")
+
+
+@pytest.mark.asyncio
+async def test_worker_clamp_sizes_at_side_price_for_buy_and_sell(monkeypatch):
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from domain.models import ExecutionDecision
+    from domain.enums import EconomicRiskClass
+
+    monkeypatch.setenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "test-campaign-123")
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+
+    rules = _ethusdc_rules()
+    ask_price = Decimal("2750.00")
+    bid_price = Decimal("2700.00")
+
+    async def mock_fresh_price(_self, symbol, side=None):
+        if str(side).upper() == "BUY":
+            return ask_price
+        return bid_price
+
+    worker.execution_adapter = type("MockAdapter", (), {
+        "safety_limits": type("Limits", (), {"max_single_order_notional": Decimal("50.0")})(),
+        "symbol_rules": {"ETHUSDC": rules},
+        "get_fresh_market_price": mock_fresh_price,
+        "_is_local_live_pilot_bound": lambda _self: True,
+    })()
+
+    for side, expected_price in [(OrderSide.BUY, ask_price), (OrderSide.SELL, bid_price)]:
+        raw_order = OrderIntent(
+            client_order_id=f"raw-{side.value}",
+            symbol="ETHUSDC",
+            market_type=MarketType.USDM_FUTURES,
+            side=side,
+            position_side=PositionSide.BOTH,
+            order_type=OrderType.MARKET,
+            time_in_force=TimeInForce.GTC,
+            quantity=Decimal("1.0"),
+        )
+        decision = ExecutionDecision(
+            decision_id=f"dec-{side.value}",
+            symbol="ETHUSDC",
+            action="SUBMIT_ORDER",
+            risk_class=EconomicRiskClass.NEW_RISK,
+            orders=[raw_order],
+        )
+
+        clamped = await worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2500.00"))
+        bracketed = clamped.orders[0]
+        # Sizing must satisfy 50 USDC cap at the side price (ask for BUY, bid for SELL)
+        assert bracketed.quantity * expected_price <= Decimal("50.0")
+        expected_qty = rules.normalize_quantity(Decimal("50.0") / expected_price, is_market=True)
+        while expected_qty * expected_price > Decimal("50.0"):
+            expected_qty -= rules.step_size
+            expected_qty = rules.normalize_quantity(expected_qty, is_market=True)
+        assert bracketed.quantity == expected_qty
+
+
+@pytest.mark.asyncio
+async def test_worker_clamp_cost_aware_preplan_with_adapter_evidence(monkeypatch):
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from domain.models import ExecutionDecision
+    from domain.enums import EconomicRiskClass
+    from tests.python.test_local_mainnet_gate import make_cost_evidence
+
+    monkeypatch.setenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "test-campaign-123")
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+
+    rules = _ethusdc_rules()
+    side_price = Decimal("2700.00")
+    cost_evidence_called = False
+
+    async def mock_fresh_price(_self, symbol, side=None):
+        return side_price
+
+    async def mock_cost_evidence(_self, intent, context):
+        nonlocal cost_evidence_called
+        cost_evidence_called = True
+        return make_cost_evidence(
+            intent,
+            fees_upper_bound_usdc=Decimal("0.05"),
+            funding_upper_bound_usdc=Decimal("0.60"),
+            slippage_upper_bound_usdc=Decimal("0.05"),
+            funding_interval_hours=Decimal("8"),
+            funding_events_assumed=4,
+        )
+
+    worker.execution_adapter = type("MockAdapter", (), {
+        "safety_limits": type("Limits", (), {"max_single_order_notional": Decimal("50.0")})(),
+        "symbol_rules": {"ETHUSDC": rules},
+        "get_fresh_market_price": mock_fresh_price,
+        "get_local_mainnet_cost_evidence": mock_cost_evidence,
+        "_is_local_live_pilot_bound": lambda _self: True,
+    })()
+
+    raw_order = OrderIntent(
+        client_order_id="raw-preplan-1",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("1.0"),
+    )
+    decision = ExecutionDecision(
+        decision_id="dec-preplan-1",
+        symbol="ETHUSDC",
+        action="SUBMIT_ORDER",
+        risk_class=EconomicRiskClass.NEW_RISK,
+        orders=[raw_order],
+    )
+
+    clamped = await worker._clamp_order_notional_if_needed(decision, reference_price=side_price)
+    assert cost_evidence_called is True
+    bracketed = clamped.orders[0]
+    assert bracketed.estimated_fees_usdc == Decimal("0.05")
+    assert bracketed.estimated_funding_usdc == Decimal("0.60")
+    assert bracketed.estimated_slippage_usdc == Decimal("0.05")
+    # Total risk <= 2.0 and net reward >= 0.25
+    stop_risk = (side_price - bracketed.stop_loss_price) * bracketed.quantity
+    total_risk = stop_risk + Decimal("0.70")
+    assert total_risk <= Decimal("2.0")
+    net_reward = (bracketed.take_profit_price - side_price) * bracketed.quantity - Decimal("0.70")
+    assert net_reward >= Decimal("0.25")
+
+
+@pytest.mark.asyncio
+async def test_worker_clamp_cost_aware_preplan_fails_closed_when_costs_exceed_budget(monkeypatch):
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from domain.models import ExecutionDecision
+    from domain.enums import EconomicRiskClass
+    from tests.python.test_local_mainnet_gate import make_cost_evidence
+
+    monkeypatch.setenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "test-campaign-123")
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+
+    rules = _ethusdc_rules()
+    side_price = Decimal("2700.00")
+
+    async def mock_fresh_price(_self, symbol, side=None):
+        return side_price
+
+    async def excessive_cost_evidence(_self, intent, context):
+        return make_cost_evidence(
+            intent,
+            fees_upper_bound_usdc=Decimal("1.50"),
+            funding_upper_bound_usdc=Decimal("1.00"),
+            slippage_upper_bound_usdc=Decimal("0.50"),
+            funding_interval_hours=Decimal("8"),
+            funding_events_assumed=4,
+        )
+
+    worker.execution_adapter = type("MockAdapter", (), {
+        "safety_limits": type("Limits", (), {"max_single_order_notional": Decimal("50.0")})(),
+        "symbol_rules": {"ETHUSDC": rules},
+        "get_fresh_market_price": mock_fresh_price,
+        "get_local_mainnet_cost_evidence": excessive_cost_evidence,
+        "_is_local_live_pilot_bound": lambda _self: True,
+    })()
+
+    raw_order = OrderIntent(
+        client_order_id="raw-excess-1",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("1.0"),
+    )
+    decision = ExecutionDecision(
+        decision_id="dec-excess-1",
+        symbol="ETHUSDC",
+        action="SUBMIT_ORDER",
+        risk_class=EconomicRiskClass.NEW_RISK,
+        orders=[raw_order],
+    )
+
+    with pytest.raises(RuntimeError, match="exceed or equal"):
+        await worker._clamp_order_notional_if_needed(decision, reference_price=side_price)
+
+
+@pytest.mark.asyncio
+async def test_worker_clamp_missing_side_price_fails_closed(monkeypatch):
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from domain.models import ExecutionDecision
+    from domain.enums import EconomicRiskClass
+
+    monkeypatch.setenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "test-campaign-123")
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+
+    rules = _ethusdc_rules()
+
+    async def mock_none_price(_self, symbol, side=None):
+        return None
+
+    worker.execution_adapter = type("MockAdapter", (), {
+        "safety_limits": type("Limits", (), {"max_single_order_notional": Decimal("50.0")})(),
+        "symbol_rules": {"ETHUSDC": rules},
+        "get_fresh_market_price": mock_none_price,
+        "_is_local_live_pilot_bound": lambda _self: True,
+    })()
+
+    raw_order = OrderIntent(
+        client_order_id="raw-missing-price-1",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("1.0"),
+    )
+    decision = ExecutionDecision(
+        decision_id="dec-missing-price-1",
+        symbol="ETHUSDC",
+        action="SUBMIT_ORDER",
+        risk_class=EconomicRiskClass.NEW_RISK,
+        orders=[raw_order],
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await worker._clamp_order_notional_if_needed(decision, reference_price=None)
+
+
+@pytest.mark.asyncio
+async def test_worker_clamp_cost_aware_preplan_quantity_parity_failure_fails_closed(monkeypatch):
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from domain.models import ExecutionDecision
+    from domain.enums import EconomicRiskClass
+    from tests.python.test_local_mainnet_gate import make_cost_evidence
+    import apps.trading_worker.main as main_module
+    from dataclasses import replace
+
+    monkeypatch.setenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "test-campaign-123")
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+
+    rules = _ethusdc_rules()
+    side_price = Decimal("2700.00")
+
+    async def mock_fresh_price(_self, symbol, side=None):
+        return side_price
+
+    async def mock_cost_evidence(_self, intent, context):
+        return make_cost_evidence(
+            intent,
+            fees_upper_bound_usdc=Decimal("0.05"),
+            funding_upper_bound_usdc=Decimal("0.60"),
+            slippage_upper_bound_usdc=Decimal("0.05"),
+            funding_interval_hours=Decimal("8"),
+            funding_events_assumed=4,
+        )
+
+    worker.execution_adapter = type("MockAdapter", (), {
+        "safety_limits": type("Limits", (), {"max_single_order_notional": Decimal("50.0")})(),
+        "symbol_rules": {"ETHUSDC": rules},
+        "get_fresh_market_price": mock_fresh_price,
+        "get_local_mainnet_cost_evidence": mock_cost_evidence,
+        "_is_local_live_pilot_bound": lambda _self: True,
+    })()
+
+    raw_order = OrderIntent(
+        client_order_id="raw-qty-parity-1",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.BUY,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("1.0"),
+    )
+    decision = ExecutionDecision(
+        decision_id="dec-qty-parity-1",
+        symbol="ETHUSDC",
+        action="SUBMIT_ORDER",
+        risk_class=EconomicRiskClass.NEW_RISK,
+        orders=[raw_order],
+    )
+
+    real_plan_bracket = main_module.plan_pilot_bracket
+    calls = 0
+
+    def mock_plan_bracket(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        plan = real_plan_bracket(*args, **kwargs)
+        if calls == 2:
+            return replace(plan, quantity=Decimal("0.010"))
+        return plan
+
+    monkeypatch.setattr(main_module, "plan_pilot_bracket", mock_plan_bracket)
+
+    with pytest.raises(RuntimeError, match="quantity parity mismatch"):
+        await worker._clamp_order_notional_if_needed(decision, reference_price=side_price)
+

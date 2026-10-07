@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import math
@@ -4808,7 +4809,7 @@ class TradingWorkerApp:
             clear_local_mainnet_secrets()
         logger.info("Worker DISARMED")
 
-    def _clamp_order_notional_if_needed(
+    async def _clamp_order_notional_if_needed(
         self,
         decision,
         reference_price: Optional[Decimal] = None,
@@ -4823,7 +4824,7 @@ class TradingWorkerApp:
             else None
         )
         price = reference_price
-        if limits and rules and price and price > 0:
+        if limits and rules and ((price and price > 0) or hasattr(self.execution_adapter, "get_fresh_market_price")):
             max_order_notional = getattr(limits, "max_single_order_notional", None)
             if max_order_notional and max_order_notional > 0:
                 new_orders = []
@@ -4847,11 +4848,97 @@ class TradingWorkerApp:
                             or getattr(order, "management_mode", None) != "QUICK"
                         ):
                             try:
-                                bracket_plan = plan_pilot_bracket(
+                                side_str = "BUY" if order.side == OrderSide.BUY else "SELL"
+                                side_price = None
+                                if hasattr(self.execution_adapter, "get_fresh_market_price"):
+                                    price_getter = self.execution_adapter.get_fresh_market_price
+                                    if callable(price_getter):
+                                        res = price_getter(decision.symbol, side_str)
+                                        if inspect.iscoroutine(res):
+                                            res = await res
+                                        if res is not None and res > 0:
+                                            side_price = res
+                                if side_price is None:
+                                    cached = (
+                                        getattr(self.execution_adapter, "last_market_ask", {}).get(decision.symbol)
+                                        if side_str == "BUY"
+                                        else getattr(self.execution_adapter, "last_market_bid", {}).get(decision.symbol)
+                                    )
+                                    if cached is not None and cached > 0:
+                                        side_price = cached
+                                if side_price is None and price is not None and price > 0:
+                                    side_price = price
+                                if side_price is None or side_price <= 0:
+                                    raise ValueError(
+                                        f"Fresh side market price unavailable for {decision.symbol} {side_str}"
+                                    )
+
+                                # 1. Provisional bracket plan at side_price with default costs
+                                provisional_plan = plan_pilot_bracket(
                                     rules=rules,
-                                    entry_price=price,
+                                    entry_price=side_price,
                                     side=order.side,
                                 )
+                                provisional_order = apply_pilot_bracket_to_intent(order, provisional_plan)
+
+                                # 2. Cost-aware pre-planning if adapter provides cost evidence
+                                cost_provider = getattr(
+                                    self.execution_adapter, "get_local_mainnet_cost_evidence", None
+                                )
+                                if callable(cost_provider):
+                                    context = {
+                                        "runtime_target": "LOCAL",
+                                        "validated_quantity": provisional_plan.quantity,
+                                        "validated_entry_price": side_price,
+                                    }
+                                    risk_ctx_provider = getattr(
+                                        self.execution_adapter, "get_local_mainnet_risk_context", None
+                                    )
+                                    if callable(risk_ctx_provider):
+                                        try:
+                                            ctx_res = risk_ctx_provider(provisional_order, context)
+                                            if inspect.iscoroutine(ctx_res):
+                                                ctx_res = await ctx_res
+                                            if isinstance(ctx_res, dict):
+                                                context = ctx_res
+                                        except Exception as ctx_err:
+                                            logger.warning(
+                                                "Risk context resolution before cost evidence failed: %s", ctx_err
+                                            )
+
+                                    cost_evidence = cost_provider(provisional_order, context)
+                                    if inspect.iscoroutine(cost_evidence):
+                                        cost_evidence = await cost_evidence
+
+                                    if not isinstance(cost_evidence, dict):
+                                        raise ValueError(
+                                            "Exchange-derived cost evidence unavailable for pilot bracket pre-planning"
+                                        )
+
+                                    actual_fees = Decimal(str(cost_evidence.get("fees_upper_bound_usdc", "0")))
+                                    actual_funding = Decimal(str(cost_evidence.get("funding_upper_bound_usdc", "0")))
+                                    actual_slippage = Decimal(str(cost_evidence.get("slippage_upper_bound_usdc", "0")))
+
+                                    re_planned = plan_pilot_bracket(
+                                        rules=rules,
+                                        entry_price=side_price,
+                                        side=order.side,
+                                        estimated_fees_usdc=actual_fees,
+                                        estimated_funding_usdc=actual_funding,
+                                        estimated_slippage_usdc=actual_slippage,
+                                    )
+
+                                    # Enforce quantity parity
+                                    if re_planned.quantity != provisional_plan.quantity:
+                                        raise ValueError(
+                                            f"Pilot bracket pre-planning quantity parity mismatch: "
+                                            f"provisional {provisional_plan.quantity} != re-planned {re_planned.quantity}"
+                                        )
+
+                                    bracket_plan = re_planned
+                                else:
+                                    bracket_plan = provisional_plan
+
                                 order = apply_pilot_bracket_to_intent(order, bracket_plan)
                                 new_orders.append(order)
                                 clamped_any = True
@@ -4862,57 +4949,72 @@ class TradingWorkerApp:
                                     order.client_order_id,
                                     bracket_err,
                                 )
-                        est_notional = order.quantity * price
-                        order_type_val = getattr(order.order_type, "value", order.order_type)
-                        min_notional = rules.min_notional_for(order_type_val)
-                        if est_notional > max_order_notional:
-                            # Target 90% of max notional, capped at 45 USDC for the 50 USDC pilot limit
-                            target_notional = min(max_order_notional * Decimal("0.90"), Decimal("45.0"))
-                            target_qty = target_notional / price
-                            is_market = order_type_val == OrderType.MARKET.value
-                            clamped_qty = rules.normalize_quantity(target_qty, is_market=is_market)
-                            min_qty = rules.market_min_qty if is_market and rules.market_min_qty else rules.min_qty
-                            if (
-                                clamped_qty >= min_qty
-                                and (clamped_qty * price) >= min_notional
-                                and (clamped_qty * price) <= max_order_notional
-                            ):
-                                logger.info(
-                                    "Clamping order %s quantity from %s to %s to satisfy single-order cap %s",
-                                    order.client_order_id,
-                                    order.quantity,
-                                    clamped_qty,
-                                    max_order_notional,
+                                raise RuntimeError(
+                                    f"Pilot bracket derivation failed for {order.client_order_id}: {bracket_err}"
+                                ) from bracket_err
+                        est_price = price
+                        if est_price is None or est_price <= 0:
+                            side_str = "BUY" if order.side == OrderSide.BUY else "SELL"
+                            if hasattr(self.execution_adapter, "get_fresh_market_price"):
+                                price_getter = self.execution_adapter.get_fresh_market_price
+                                if callable(price_getter):
+                                    res = price_getter(decision.symbol, side_str)
+                                    if inspect.iscoroutine(res):
+                                        res = await res
+                                    if res is not None and res > 0:
+                                        est_price = res
+                        if est_price and est_price > 0:
+                            est_notional = order.quantity * est_price
+                            order_type_val = getattr(order.order_type, "value", order.order_type)
+                            min_notional = rules.min_notional_for(order_type_val)
+                            if est_notional > max_order_notional:
+                                # Target 90% of max notional, capped at 45 USDC for the 50 USDC pilot limit
+                                target_notional = min(max_order_notional * Decimal("0.90"), Decimal("45.0"))
+                                target_qty = target_notional / est_price
+                                is_market = order_type_val == OrderType.MARKET.value
+                                clamped_qty = rules.normalize_quantity(target_qty, is_market=is_market)
+                                min_qty = rules.market_min_qty if is_market and rules.market_min_qty else rules.min_qty
+                                if (
+                                    clamped_qty >= min_qty
+                                    and (clamped_qty * est_price) >= min_notional
+                                    and (clamped_qty * est_price) <= max_order_notional
+                                ):
+                                    logger.info(
+                                        "Clamping order %s quantity from %s to %s to satisfy single-order cap %s",
+                                        order.client_order_id,
+                                        order.quantity,
+                                        clamped_qty,
+                                        max_order_notional,
+                                    )
+                                    new_orders.append(order.model_copy(update={"quantity": clamped_qty}))
+                                    clamped_any = True
+                                    continue
+                            elif min_notional > 0 and est_notional < min_notional:
+                                target_notional = min(
+                                    min_notional * Decimal("1.25"),
+                                    max_order_notional * Decimal("0.90"),
+                                    Decimal("45.0"),
                                 )
-                                new_orders.append(order.model_copy(update={"quantity": clamped_qty}))
-                                clamped_any = True
-                                continue
-                        elif min_notional > 0 and est_notional < min_notional:
-                            target_notional = min(
-                                min_notional * Decimal("1.25"),
-                                max_order_notional * Decimal("0.90"),
-                                Decimal("45.0"),
-                            )
-                            target_qty = target_notional / price
-                            is_market = order_type_val == OrderType.MARKET.value
-                            clamped_qty = rules.normalize_quantity(target_qty, is_market=is_market)
-                            min_qty = rules.market_min_qty if is_market and rules.market_min_qty else rules.min_qty
-                            if (
-                                clamped_qty >= min_qty
-                                and (clamped_qty * price) >= min_notional
-                                and (clamped_qty * price) <= max_order_notional
-                            ):
-                                logger.info(
-                                    "Bumping order %s quantity from %s to %s to satisfy exchange min_notional %s (capped at %s)",
-                                    order.client_order_id,
-                                    order.quantity,
-                                    clamped_qty,
-                                    min_notional,
-                                    max_order_notional,
-                                )
-                                new_orders.append(order.model_copy(update={"quantity": clamped_qty}))
-                                clamped_any = True
-                                continue
+                                target_qty = target_notional / est_price
+                                is_market = order_type_val == OrderType.MARKET.value
+                                clamped_qty = rules.normalize_quantity(target_qty, is_market=is_market)
+                                min_qty = rules.market_min_qty if is_market and rules.market_min_qty else rules.min_qty
+                                if (
+                                    clamped_qty >= min_qty
+                                    and (clamped_qty * est_price) >= min_notional
+                                    and (clamped_qty * est_price) <= max_order_notional
+                                ):
+                                    logger.info(
+                                        "Bumping order %s quantity from %s to %s to satisfy exchange min_notional %s (capped at %s)",
+                                        order.client_order_id,
+                                        order.quantity,
+                                        clamped_qty,
+                                        min_notional,
+                                        max_order_notional,
+                                    )
+                                    new_orders.append(order.model_copy(update={"quantity": clamped_qty}))
+                                    clamped_any = True
+                                    continue
                     new_orders.append(order)
                 if clamped_any:
                     new_delta = sum(
@@ -5528,7 +5630,16 @@ class TradingWorkerApp:
                         environment_name = "TESTNET"
                         is_ready = autonomous_enabled and bool(launch_readiness.get(readiness_key, False))
                     if is_ready:
-                        decision = self._clamp_order_notional_if_needed(decision, event.last_price)
+                        try:
+                            decision = await self._clamp_order_notional_if_needed(decision, event.last_price)
+                        except Exception as clamp_err:
+                            logger.error(
+                                "[%s][PREPLAN_FAILED] Order clamping or bracket pre-planning failed for %s: %s",
+                                environment_name,
+                                decision.decision_id,
+                                clamp_err,
+                            )
+                            return
                         is_safe, reason = self._evaluate_execution_gate(decision)
                         if is_safe:
                             logger.info(
