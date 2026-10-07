@@ -41,7 +41,7 @@ export function buildTrustedPythonVerificationEnvironment(
   return environment;
 }
 
-function verifyPython(executable: string, source: NodeJS.ProcessEnv, verifyTree: boolean): string {
+export function verifyPython(executable: string, source: NodeJS.ProcessEnv = process.env, verifyTree = true): string {
   const digestBefore = createHash('sha256').update(readFileSync(executable)).digest('hex');
   const environment = buildTrustedPythonVerificationEnvironment(source, executable);
   environment.BLESSING_VERIFY_PYTHON_TREE = verifyTree ? '1' : '0';
@@ -66,9 +66,12 @@ function verifyPython(executable: string, source: NodeJS.ProcessEnv, verifyTree:
       + '$sddl=$acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access); '
       + 'if (-not $sddl.StartsWith("D:",[StringComparison]::Ordinal) -or $sddl.Contains("NO_ACCESS_CONTROL")) { exit 1 }; '
       + 'if ($acl.Owner -notin $owners) { exit 1 }; foreach ($rule in $acl.Access) { '
-      + '$sid=$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value; '
+      + '$sid=try { $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } '
+      + 'catch { $raw=$rule.IdentityReference.Value; if ($raw -match "ALL APPLICATION PACKAGES" -or $raw -match "S-1-15-2-1") { "S-1-15-2-1" } '
+      + 'elseif ($raw -match "ALL RESTRICTED APP" -or $raw -match "S-1-15-2-2") { "S-1-15-2-2" } else { $raw } }; '
       + '$rights=[int64]$rule.FileSystemRights; '
       + '$isParent=(-not $item.FullName.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)); '
+      + 'if ($isParent -and ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }; '
       + '$writeMask=[int64]0x50000000 -bor [int64][Security.AccessControl.FileSystemRights]::WriteData '
       + '-bor [int64][Security.AccessControl.FileSystemRights]::AppendData '
       + '-bor [int64][Security.AccessControl.FileSystemRights]::WriteExtendedAttributes '
@@ -120,11 +123,15 @@ export function resolveTrustedLocalPythonRuntime(
   }
   let executable: string | undefined;
   let runtimeHash: string | undefined;
+  let hasTrustedCandidateWithoutDependencies = false;
   for (const candidate of candidates) {
     try {
       const candidatePath = path.resolve(candidate);
       const candidateHash = verifyPython(candidatePath, source, true);
-      if (!hasWorkerDependencies(candidatePath, source, cwd)) continue;
+      if (!hasWorkerDependencies(candidatePath, source, cwd)) {
+        hasTrustedCandidateWithoutDependencies = true;
+        continue;
+      }
       executable = candidatePath;
       runtimeHash = candidateHash;
       break;
@@ -132,7 +139,12 @@ export function resolveTrustedLocalPythonRuntime(
       // Continue only to another independently verified, protected PSF runtime.
     }
   }
-  if (!executable || !runtimeHash) throw new Error('LOCAL_PILOT_TRUSTED_PYTHON_EXECUTABLE_NOT_VERIFIED');
+  if (!executable || !runtimeHash) {
+    if (hasTrustedCandidateWithoutDependencies) {
+      throw new Error('LOCAL_PILOT_PYTHON_DEPENDENCIES_MISSING');
+    }
+    throw new Error('LOCAL_PILOT_TRUSTED_PYTHON_EXECUTABLE_NOT_VERIFIED');
+  }
   return {
     executable,
     assertUnchanged() {
