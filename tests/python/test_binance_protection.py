@@ -708,9 +708,9 @@ async def test_testnet_market_entry_cancels_partial_remainder_then_confirms_prot
             "triggerPrice": str(kwargs["trigger_price"]),
             "workingType": "MARK_PRICE",
             "algoStatus": "NEW",
-            "closePosition": True,
-            "reduceOnly": False,
-            "quantity": "0",
+            "closePosition": False,
+            "reduceOnly": True,
+            "quantity": str(kwargs.get("quantity", "0.1")),
             "createTime": int(time.time() * 1000) - 100,
         }
         exchange_algos.append(order)
@@ -733,6 +733,7 @@ async def test_testnet_market_entry_cancels_partial_remainder_then_confirms_prot
     adapter._cancel_testnet_entry_for_protection = cancel_entry
     adapter.reconciliation._recover_order_fills = recover_order_fills
     adapter._submit_testnet_protection_algo = submit_algo
+    adapter._submit_local_mainnet_protection_algo = submit_algo
     adapter.rest_client = ReadOnlyRest()
     protection_writes = []
 

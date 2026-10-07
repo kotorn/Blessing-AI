@@ -192,16 +192,24 @@ export function protectedEthTestnetTrialPassed(trial: Record<string, unknown>, g
       || new Date(proof.close_submission_at).toISOString() !== proof.close_submission_at
       || Date.parse(proof.close_submission_at) < Date.parse(proof.observed_at)
       || Date.parse(proof.close_submission_at) - Date.parse(proof.observed_at) > 5000) return false;
+    const filledQty = (trial as Record<string, unknown>).filled_quantity;
+    const filledStr = filledQty !== undefined && filledQty !== null ? String(filledQty) : null;
     const validAlgo = (value: unknown, expectedClientId: unknown, orderType: string): boolean => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
       const algo = value as Record<string, unknown>;
-      return exactKeys(algo, ['algo_id', 'client_algo_id', 'order_type', 'status', 'close_position', 'reduce_only'])
+      return exactKeys(algo, ['algo_id', 'client_algo_id', 'order_type', 'status', 'close_position', 'reduce_only', 'quantity'])
         && typeof algo.algo_id === 'string' && /^[1-9][0-9]*$/.test(algo.algo_id)
         && algo.client_algo_id === expectedClientId && algo.order_type === orderType
-        && algo.status === 'NEW' && algo.close_position === true && algo.reduce_only === false;
+        && algo.status === 'NEW' && algo.close_position === false && algo.reduce_only === true
+        && typeof algo.quantity === 'string' && /^(?!0(\.0+)?$)\d+(\.\d+)?$/.test(algo.quantity)
+        && (filledStr === null || algo.quantity === filledStr);
     };
+    const stopAlgo = proof.stop as Record<string, unknown> | undefined;
+    const targetAlgo = proof.target as Record<string, unknown> | undefined;
     return validAlgo(proof.stop, stopId, 'STOP_MARKET')
-      && validAlgo(proof.target, targetId, 'TAKE_PROFIT_MARKET');
+      && validAlgo(proof.target, targetId, 'TAKE_PROFIT_MARKET')
+      && typeof stopAlgo === 'object' && typeof targetAlgo === 'object'
+      && stopAlgo?.quantity === targetAlgo?.quantity;
   })();
   return trial.trial_type === 'PROTECTED_ETHUSDC_V1'
     && trial.build_sha === gitSha && trial.environment === 'BINANCE_TESTNET'

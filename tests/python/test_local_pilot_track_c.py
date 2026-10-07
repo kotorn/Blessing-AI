@@ -169,6 +169,7 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
                 'protection_status': 'PROTECTED_VERIFIED', 'close_status': 'VERIFIED',
                 'close_order_type': 'MARKET', 'close_order_reduce_only': True,
                 'reconciliation_status': 'IN_SYNC', 'diff_count': 0, 'entry_fill_count': 1,
+                'filled_quantity': '0.01',
                 'position_after': [], 'open_orders_after': [], 'open_algo_after': [],
                 'entry_client_order_id': 'entry', 'close_client_order_id': 'close',
                 'stop_client_algo_id': 'stop', 'target_client_algo_id': 'target',
@@ -177,10 +178,10 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
                     'close_submission_at': '2026-10-03T00:00:00.000Z',
                     'stop': {'algo_id': '101', 'client_algo_id': 'stop',
                              'order_type': 'STOP_MARKET', 'status': 'NEW',
-                             'close_position': True, 'reduce_only': False},
+                             'close_position': False, 'reduce_only': True, 'quantity': '0.01'},
                     'target': {'algo_id': '102', 'client_algo_id': 'target',
                                'order_type': 'TAKE_PROFIT_MARKET', 'status': 'NEW',
-                               'close_position': True, 'reduce_only': False},
+                               'close_position': False, 'reduce_only': True, 'quantity': '0.01'},
                 },
                 'account_baseline': {
                     'position_mode': 'ONE_WAY', 'leverage': 5,
@@ -230,12 +231,13 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
     with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
         validate_payload(statement, review_policy=policy)
     trial['protection_at_close']['target']['client_algo_id'] = 'target'
-    # Test D4: fill-sized reduce-only bracket shape is accepted
+    # Legacy close_position=True shape is rejected
+    trial['protection_at_close']['stop']['close_position'] = True
+    trial['protection_at_close']['stop']['reduce_only'] = False
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement, review_policy=policy)
     trial['protection_at_close']['stop']['close_position'] = False
     trial['protection_at_close']['stop']['reduce_only'] = True
-    trial['protection_at_close']['target']['close_position'] = False
-    trial['protection_at_close']['target']['reduce_only'] = True
-    validate_payload(statement, review_policy=policy)
 
     # Invalid combination: close_position=False and reduce_only=False is rejected
     trial['protection_at_close']['stop']['reduce_only'] = False
@@ -243,11 +245,23 @@ def test_testnet_payload_requires_its_authenticated_environment_approval():
         validate_payload(statement, review_policy=policy)
     trial['protection_at_close']['stop']['reduce_only'] = True
 
-    # Restore default fixture
-    trial['protection_at_close']['stop']['close_position'] = True
-    trial['protection_at_close']['stop']['reduce_only'] = False
-    trial['protection_at_close']['target']['close_position'] = True
-    trial['protection_at_close']['target']['reduce_only'] = False
+    # Missing quantity is rejected
+    trial['protection_at_close']['stop'].pop('quantity')
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement, review_policy=policy)
+    trial['protection_at_close']['stop']['quantity'] = '0.01'
+
+    # Quantity mismatch with target is rejected
+    trial['protection_at_close']['target']['quantity'] = '0.02'
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement, review_policy=policy)
+    trial['protection_at_close']['target']['quantity'] = '0.01'
+
+    # Quantity mismatch with filled_quantity is rejected
+    trial['filled_quantity'] = '0.02'
+    with pytest.raises(ValueError, match='ATTESTATION_TESTNET_LIFECYCLE_INCOMPLETE'):
+        validate_payload(statement, review_policy=policy)
+    trial['filled_quantity'] = '0.01'
 
     statement['payload']['approvals'] = []
     with pytest.raises(ValueError, match='TESTNET_ENVIRONMENT_APPROVAL_UNPROVEN'):
@@ -280,6 +294,7 @@ def _testnet_fixture():
                 'protection_status': 'PROTECTED_VERIFIED', 'close_status': 'VERIFIED',
                 'close_order_type': 'MARKET', 'close_order_reduce_only': True,
                 'reconciliation_status': 'IN_SYNC', 'diff_count': 0, 'entry_fill_count': 1,
+                'filled_quantity': '0.01',
                 'position_after': [], 'open_orders_after': [], 'open_algo_after': [],
                 'entry_client_order_id': 'entry', 'close_client_order_id': 'close',
                 'stop_client_algo_id': 'stop', 'target_client_algo_id': 'target',
@@ -288,10 +303,10 @@ def _testnet_fixture():
                     'close_submission_at': '2026-10-03T00:00:00.000Z',
                     'stop': {'algo_id': '101', 'client_algo_id': 'stop',
                              'order_type': 'STOP_MARKET', 'status': 'NEW',
-                             'close_position': True, 'reduce_only': False},
+                             'close_position': False, 'reduce_only': True, 'quantity': '0.01'},
                     'target': {'algo_id': '102', 'client_algo_id': 'target',
                                'order_type': 'TAKE_PROFIT_MARKET', 'status': 'NEW',
-                               'close_position': True, 'reduce_only': False},
+                               'close_position': False, 'reduce_only': True, 'quantity': '0.01'},
                 },
                 'account_baseline': {
                     'position_mode': 'ONE_WAY', 'leverage': 5,

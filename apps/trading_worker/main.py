@@ -5432,6 +5432,7 @@ class TradingWorkerApp:
             "close_client_order_id": close_id,
             "close_order_type": "MARKET",
             "close_order_reduce_only": True,
+            "filled_quantity": str(owner["filled_quantity"]),
             "protection_at_close": protection_at_close,
             "position_after": [], "open_orders_after": [], "open_algo_after": [],
             "reconciliation_status": "IN_SYNC", "diff_count": 0,

@@ -147,7 +147,7 @@ async def test_protected_trial_worker_path_records_exchange_readback_shape(monke
                 "take_profit_client_algo_id": "target-1",
             }
             adapter.ledger.get_fills = AsyncMock(return_value=[
-                SimpleNamespace(client_order_id=entry_id, symbol="ETHUSDC")
+                SimpleNamespace(client_order_id=entry_id, symbol="ETHUSDC", quantity=Decimal("0.01"))
             ])
             return [SimpleNamespace(client_order_id=entry_id)]
 
@@ -155,15 +155,16 @@ async def test_protected_trial_worker_path_records_exchange_readback_shape(monke
             return {
                 "close_status": "VERIFIED", "close_client_order_id": "close-1",
                 "close_order_type": "MARKET", "close_order_reduce_only": True,
+                "filled_quantity": "0.01",
                 "protection_at_close": {
                     "status": "PROTECTED", "observed_at": "2026-10-03T00:00:00.000Z",
                     "close_submission_at": "2026-10-03T00:00:00.000Z",
                     "stop": {"algo_id": "101", "client_algo_id": "stop-1",
                              "order_type": "STOP_MARKET", "status": "NEW",
-                             "close_position": True, "reduce_only": False},
+                             "close_position": False, "reduce_only": True, "quantity": "0.01"},
                     "target": {"algo_id": "102", "client_algo_id": "target-1",
                                "order_type": "TAKE_PROFIT_MARKET", "status": "NEW",
-                               "close_position": True, "reduce_only": False},
+                               "close_position": False, "reduce_only": True, "quantity": "0.01"},
                 },
                 "position_after": [], "open_orders_after": [], "open_algo_after": [],
                 "reconciliation_status": "IN_SYNC", "diff_count": 0,
@@ -231,10 +232,10 @@ async def test_trial_close_persists_close_pending_before_one_reduction_and_verif
                 "close_submission_at": "2026-10-03T00:00:00.000Z",
                 "stop": {"algo_id": "101", "client_algo_id": "stop-1",
                          "order_type": "STOP_MARKET", "status": "NEW",
-                         "close_position": True, "reduce_only": False},
+                         "close_position": False, "reduce_only": True, "quantity": "0.01"},
                 "target": {"algo_id": "102", "client_algo_id": "target-1",
                            "order_type": "TAKE_PROFIT_MARKET", "status": "NEW",
-                           "close_position": True, "reduce_only": False},
+                           "close_position": False, "reduce_only": True, "quantity": "0.01"},
             },
         },
         testnet_trial_close_client_order_id=lambda _entry: "close-1",
@@ -409,11 +410,13 @@ async def test_owned_testnet_close_requires_fresh_open_protection_before_submiss
     )
     proof = {
         "stop_order_id": 101, "stop_client_order_id": "stop-1", "stop_order_type": "STOP_MARKET",
-        "stop_status": "NEW", "stop_close_position": True, "stop_reduce_only": False,
+        "stop_status": "NEW", "stop_close_position": False, "stop_reduce_only": True,
+        "stop_quantity": Decimal("0.01"),
         "take_profit_order_id": 102, "take_profit_client_order_id": "target-1",
         "take_profit_order_type": "TAKE_PROFIT_MARKET", "take_profit_status": "NEW",
-        "take_profit_close_position": True, "take_profit_reduce_only": False,
-        "position_side": "BOTH", "close_position": True, "reduce_only": False,
+        "take_profit_close_position": False, "take_profit_reduce_only": True,
+        "take_profit_quantity": Decimal("0.01"),
+        "position_side": "BOTH", "close_position": False, "reduce_only": True,
     }
 
     async def read_protection(intent, *, entry_client_order_id):
@@ -450,7 +453,13 @@ async def test_owned_testnet_close_requires_fresh_open_protection_before_submiss
         assert len(orders) == 1, adapter.last_emergency_result
         assert events == ["submission_claim", "close_pre_send", "protection_readback", "close_submission"]
         assert adapter.last_emergency_result["protection_at_close"]["stop"]["status"] == "NEW"
+        assert adapter.last_emergency_result["protection_at_close"]["stop"]["close_position"] is False
+        assert adapter.last_emergency_result["protection_at_close"]["stop"]["reduce_only"] is True
+        assert adapter.last_emergency_result["protection_at_close"]["stop"]["quantity"] == "0.01"
         assert adapter.last_emergency_result["protection_at_close"]["target"]["status"] == "NEW"
+        assert adapter.last_emergency_result["protection_at_close"]["target"]["close_position"] is False
+        assert adapter.last_emergency_result["protection_at_close"]["target"]["reduce_only"] is True
+        assert adapter.last_emergency_result["protection_at_close"]["target"]["quantity"] == "0.01"
     else:
         assert orders == []
         assert events == ["submission_claim", "close_pre_send", "protection_readback"]
@@ -516,9 +525,11 @@ async def test_close_owned_testnet_trial_with_fill_sized_reduce_only_bracket_sha
     proof = {
         "stop_order_id": 201, "stop_client_order_id": "stop-ro-1", "stop_order_type": "STOP_MARKET",
         "stop_status": "NEW", "stop_close_position": False, "stop_reduce_only": True,
+        "stop_quantity": Decimal("0.02"),
         "take_profit_order_id": 202, "take_profit_client_order_id": "target-ro-1",
         "take_profit_order_type": "TAKE_PROFIT_MARKET", "take_profit_status": "NEW",
         "take_profit_close_position": False, "take_profit_reduce_only": True,
+        "take_profit_quantity": Decimal("0.02"),
         "position_side": "BOTH", "close_position": False, "reduce_only": True,
     }
 
@@ -547,6 +558,8 @@ async def test_close_owned_testnet_trial_with_fill_sized_reduce_only_bracket_sha
     assert adapter.last_emergency_result["status"] == "CONFIRMED"
     assert adapter.last_emergency_result["protection_at_close"]["stop"]["close_position"] is False
     assert adapter.last_emergency_result["protection_at_close"]["stop"]["reduce_only"] is True
+    assert adapter.last_emergency_result["protection_at_close"]["stop"]["quantity"] == "0.02"
     assert adapter.last_emergency_result["protection_at_close"]["target"]["close_position"] is False
     assert adapter.last_emergency_result["protection_at_close"]["target"]["reduce_only"] is True
+    assert adapter.last_emergency_result["protection_at_close"]["target"]["quantity"] == "0.02"
 

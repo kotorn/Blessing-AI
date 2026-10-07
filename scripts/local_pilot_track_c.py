@@ -77,21 +77,33 @@ def _testnet_close_protection_is_proven(trial: dict) -> bool:
             or not 0 <= (close_submission_at - observed_at).total_seconds() <= 5):
         return False
 
+    filled = trial.get('filled_quantity')
+    filled_str = str(filled) if filled is not None else None
+
     def valid_algo(value: object, expected_client_id: object, expected_type: str) -> bool:
         if not isinstance(value, dict) or set(value) != {
-            'algo_id', 'client_algo_id', 'order_type', 'status', 'close_position', 'reduce_only',
+            'algo_id', 'client_algo_id', 'order_type', 'status', 'close_position', 'reduce_only', 'quantity',
         }:
             return False
         algo_id = value.get('algo_id')
-        is_close_pos = value.get('close_position') is True and value.get('reduce_only') is False
         is_reduce_only = value.get('close_position') is False and value.get('reduce_only') is True
+        qty = value.get('quantity')
+        qty_valid = (
+            isinstance(qty, str)
+            and re.fullmatch(r'^(?!0(\.0+)?$)\d+(\.\d+)?$', qty) is not None
+            and (filled_str is None or qty == filled_str)
+        )
         return (isinstance(algo_id, str) and re.fullmatch(r'[1-9][0-9]*', algo_id) is not None
                 and value.get('client_algo_id') == expected_client_id
                 and value.get('order_type') == expected_type and value.get('status') == 'NEW'
-                and (is_close_pos or is_reduce_only))
+                and is_reduce_only and qty_valid)
 
-    return (valid_algo(proof.get('stop'), trial.get('stop_client_algo_id'), 'STOP_MARKET')
-            and valid_algo(proof.get('target'), trial.get('target_client_algo_id'), 'TAKE_PROFIT_MARKET'))
+    stop = proof.get('stop')
+    target = proof.get('target')
+    return (valid_algo(stop, trial.get('stop_client_algo_id'), 'STOP_MARKET')
+            and valid_algo(target, trial.get('target_client_algo_id'), 'TAKE_PROFIT_MARKET')
+            and isinstance(stop, dict) and isinstance(target, dict)
+            and stop.get('quantity') == target.get('quantity'))
 
 
 def validate_payload(statement: dict, *, review_policy: dict | None = None) -> None:

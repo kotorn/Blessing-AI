@@ -153,6 +153,7 @@ describe('Local live pilot capability gate', () => {
       protection_status: 'PROTECTED_VERIFIED', close_status: 'VERIFIED',
       close_order_type: 'MARKET', close_order_reduce_only: true,
       reconciliation_status: 'IN_SYNC', diff_count: 0, entry_fill_count: 1,
+      filled_quantity: '0.01',
       position_after: [], open_orders_after: [], open_algo_after: [],
       entry_client_order_id: 'entry', close_client_order_id: 'close',
       stop_client_algo_id: 'stop', target_client_algo_id: 'target',
@@ -160,9 +161,9 @@ describe('Local live pilot capability gate', () => {
         status: 'PROTECTED', observed_at: '2026-10-03T00:00:00.000Z',
         close_submission_at: '2026-10-03T00:00:00.000Z',
         stop: { algo_id: '101', client_algo_id: 'stop', order_type: 'STOP_MARKET',
-          status: 'NEW', close_position: true, reduce_only: false },
+          status: 'NEW', close_position: false, reduce_only: true, quantity: '0.01' },
         target: { algo_id: '102', client_algo_id: 'target', order_type: 'TAKE_PROFIT_MARKET',
-          status: 'NEW', close_position: true, reduce_only: false },
+          status: 'NEW', close_position: false, reduce_only: true, quantity: '0.01' },
       },
     };
     expect(protectedEthTestnetTrialPassed(trial, 'a'.repeat(40))).toBe(true);
@@ -180,6 +181,13 @@ describe('Local live pilot capability gate', () => {
     expect(protectedEthTestnetTrialPassed({ ...trial, protection_at_close: {
       ...trial.protection_at_close, target: { ...trial.protection_at_close.target, client_algo_id: 'other' },
     } }, 'a'.repeat(40))).toBe(false);
+    expect(protectedEthTestnetTrialPassed({ ...trial, protection_at_close: {
+      ...trial.protection_at_close, stop: { ...trial.protection_at_close.stop, close_position: true, reduce_only: false },
+    } }, 'a'.repeat(40))).toBe(false);
+    expect(protectedEthTestnetTrialPassed({ ...trial, protection_at_close: {
+      ...trial.protection_at_close, target: { ...trial.protection_at_close.target, quantity: '0.02' },
+    } }, 'a'.repeat(40))).toBe(false);
+    expect(protectedEthTestnetTrialPassed({ ...trial, filled_quantity: '0.05' }, 'a'.repeat(40))).toBe(false);
     expect(protectedEthTestnetTrialPassed({ ...trial, symbol: 'BTCUSDT' }, 'a'.repeat(40))).toBe(false);
     expect(protectedEthTestnetTrialPassed({ ...trial, stop_client_algo_id: '' }, 'a'.repeat(40))).toBe(false);
     expect(protectedEthTestnetTrialPassed({ ...trial, open_algo_after: [{}] }, 'a'.repeat(40))).toBe(false);

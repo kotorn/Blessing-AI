@@ -5490,74 +5490,16 @@ class BinanceExecutionAdapter:
         self, *, symbol: str, side: str, position_side: str,
         order_type: str, trigger_price: Decimal, client_algo_id: str,
         authority: object, deadline: float,
+        quantity: Optional[Decimal] = None,
     ) -> Optional[Dict[str, Any]]:
-        async def assert_authority() -> None:
-            if not self._worker_authorized(authority) or bool(
-                getattr(authority, "kill_switch_active", False)
-            ):
-                raise LeaseLostError("Worker authority closed during Testnet protection")
+        qty = quantity if quantity is not None and quantity > 0 else Decimal("0.1")
+        return await self._submit_local_mainnet_protection_algo(
+            symbol=symbol, side=side, position_side=position_side,
+            order_type=order_type, trigger_price=trigger_price,
+            quantity=qty, client_algo_id=client_algo_id,
+            authority=authority, deadline=deadline,
+        )
 
-        params: Dict[str, Any] = {
-            "algoType": "CONDITIONAL",
-            "symbol": symbol,
-            "side": side,
-            "positionSide": position_side,
-            "type": order_type,
-            "triggerPrice": str(trigger_price),
-            "workingType": "MARK_PRICE",
-            "closePosition": "true",
-            "clientAlgoId": client_algo_id,
-        }
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None
-        try:
-            response = await asyncio.wait_for(
-                self.rest_client.request(
-                    "POST", self._algo_order_path, signed=True, params=params,
-                    before_mutation=assert_authority,
-                ),
-                timeout=remaining,
-            )
-        except (BinanceTransportAmbiguity, asyncio.TimeoutError):
-            # Resolve one ambiguous POST using the stable clientAlgoId. Never
-            # resend the protection request after a timeout.
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            try:
-                response = await asyncio.wait_for(
-                    self._query_algo_order(symbol=symbol, client_algo_id=client_algo_id),
-                    timeout=remaining,
-                )
-            except Exception:
-                return None
-        except Exception as exc:
-            logger.error("Testnet protection submission failed: %s", type(exc).__name__)
-            return None
-        if not isinstance(response, dict):
-            return None
-        algo_id = response.get("algoId")
-        try:
-            algo_id = int(algo_id)
-        except (TypeError, ValueError):
-            return None
-        if algo_id <= 0 or str(response.get("clientAlgoId") or "") != client_algo_id:
-            return None
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None
-        try:
-            confirmed = await asyncio.wait_for(
-                self.rest_client.request(
-                    "GET", self._algo_order_query_path, signed=True,
-                    params={"symbol": symbol, "algoId": algo_id},
-                ),
-                timeout=remaining,
-            )
-        except Exception:
-            return None
-        return confirmed if isinstance(confirmed, dict) else None
 
     async def _cancel_testnet_entry_for_protection(
         self, symbol: str, client_order_id: str,
@@ -5669,9 +5611,10 @@ class BinanceExecutionAdapter:
                 ("stop", "STOP_MARKET", Decimal(str(intent.stop_loss_price)), stop_client_id),
                 ("target", "TAKE_PROFIT_MARKET", Decimal(str(intent.take_profit_price)), target_client_id),
             ):
-                confirmed = await self._submit_testnet_protection_algo(
+                confirmed = await self._submit_local_mainnet_protection_algo(
                     symbol=symbol, side=side, position_side=position_side,
                     order_type=order_type, trigger_price=trigger,
+                    quantity=filled_quantity,
                     client_algo_id=client_id, authority=authority, deadline=deadline,
                 )
                 if confirmed is None:
@@ -6526,6 +6469,16 @@ class BinanceExecutionAdapter:
                 if time.monotonic() - observed_monotonic > 5.0:
                     protection_failure_reason = "trial_protection_readback_stale_before_close"
                     raise RuntimeError("trial protection read-back exceeded freshness window")
+                stop_quantity = str(
+                    evidence.get("stop_quantity")
+                    if evidence.get("stop_quantity") is not None
+                    else expected_qty
+                )
+                target_quantity = str(
+                    evidence.get("take_profit_quantity")
+                    if evidence.get("take_profit_quantity") is not None
+                    else expected_qty
+                )
                 protection_at_close.update({
                     "status": "PROTECTED",
                     "observed_at": observed_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
@@ -6538,6 +6491,7 @@ class BinanceExecutionAdapter:
                         "order_type": "STOP_MARKET", "status": "NEW",
                         "close_position": bool(evidence.get("close_position")),
                         "reduce_only": bool(evidence.get("reduce_only")),
+                        "quantity": stop_quantity,
                     },
                     "target": {
                         "algo_id": target_algo_id_text,
@@ -6545,6 +6499,7 @@ class BinanceExecutionAdapter:
                         "order_type": "TAKE_PROFIT_MARKET", "status": "NEW",
                         "close_position": bool(evidence.get("close_position")),
                         "reduce_only": bool(evidence.get("reduce_only")),
+                        "quantity": target_quantity,
                     },
                 })
 

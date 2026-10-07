@@ -168,6 +168,8 @@ async def run_protected_ethusdc_testnet_trial() -> dict[str, object]:
                  if fill.client_order_id == entry_id and fill.symbol == "ETHUSDC"]
         if not fills:
             raise RuntimeError("Protected ETHUSDC Testnet fill evidence is unavailable")
+        filled_qty = sum(Decimal(str(getattr(fill, "quantity", "0.01"))) for fill in fills)
+        artifact["filled_quantity"] = str(filled_qty)
         artifact["entry_fill_count"] = len(fills)
         artifact["protection_status"] = "PROTECTED_VERIFIED"
         artifact["stop_client_algo_id"] = str(protection.get("stop_client_algo_id") or "")
