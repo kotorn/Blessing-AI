@@ -105,7 +105,8 @@ def verify_ci_attestation(root: Path, expected_sha: str, *, now: datetime | None
             text=True, timeout=30, check=False,
         )
         if result.returncode != 0 or len(result.stdout) > 4_194_304:
-            return failure
+            detail = result.stderr.strip()[:1024] if result.stderr else None
+            return {**failure, "stderr": detail, "detail": detail} if detail else failure
         verified = json.loads(result.stdout)
         if not isinstance(verified, list) or not verified:
             return failure

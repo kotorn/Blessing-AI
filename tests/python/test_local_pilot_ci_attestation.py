@@ -48,5 +48,8 @@ def test_ci_attestation_enforces_certificate_source_and_signer_sha(monkeypatch, 
     monkeypatch.setattr(verifier, "_trusted_gh_digest", lambda name: None)
     assert verifier.verify_ci_attestation(tmp_path, sha, now=datetime(2026, 9, 30, tzinfo=UTC))["reason"] == "CI_ATTESTATION_VERIFIER_UNTRUSTED"
     monkeypatch.setattr(verifier, "_trusted_gh_digest", lambda name: "fixture-binary-digest")
-    monkeypatch.setattr(verifier.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""))
-    assert verifier.verify_ci_attestation(tmp_path, sha, now=datetime(2026, 9, 30, tzinfo=UTC))["status"] == "FAIL"
+    monkeypatch.setattr(verifier.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="gh: no attestation found"))
+    failed_outcome = verifier.verify_ci_attestation(tmp_path, sha, now=datetime(2026, 9, 30, tzinfo=UTC))
+    assert failed_outcome["status"] == "FAIL"
+    assert failed_outcome["stderr"] == "gh: no attestation found"
+    assert failed_outcome["detail"] == "gh: no attestation found"

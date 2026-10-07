@@ -47,7 +47,8 @@ def verify_class(root: Path, binding: dict, evidence_class: str, now: str,
         ], cwd=root, env=environment, capture_output=True, text=True, timeout=40,
            check=False, shell=False)
         if result.returncode != 0 or len(result.stdout) > 4194304:
-            return failure
+            detail = result.stderr.strip()[:1024] if result.stderr else None
+            return {**failure, 'stderr': detail, 'detail': detail} if detail else failure
         verified = json.loads(result.stdout)
         if not isinstance(verified, list) or len(verified) != 1:
             return failure

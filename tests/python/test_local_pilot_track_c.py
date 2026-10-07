@@ -419,8 +419,11 @@ def test_verifier_failure_never_passes(monkeypatch, tmp_path):
     (directory / 'CHECKS.bundle.json').write_text('forged')
     monkeypatch.setattr(verifier.shutil, 'which', lambda _: 'fixture-gh')
     monkeypatch.setattr(verifier, '_trusted_gh_digest', lambda _: 'fixture-digest')
-    monkeypatch.setattr(verifier.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=1, stdout=''))
-    assert verifier.verify_class(tmp_path, binding, 'CHECKS', '2026-10-03T00:00:00Z')['status'] == 'FAIL'
+    monkeypatch.setattr(verifier.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=1, stdout='', stderr='gh: signature invalid'))
+    result = verifier.verify_class(tmp_path, binding, 'CHECKS', '2026-10-03T00:00:00Z')
+    assert result['status'] == 'FAIL'
+    assert result['stderr'] == 'gh: signature invalid'
+    assert result['detail'] == 'gh: signature invalid'
 
 
 def test_shared_phase_contract():

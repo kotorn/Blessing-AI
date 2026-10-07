@@ -277,5 +277,11 @@ async def test_binance_testnet_algo_baseline_is_strictly_read_only(api_credentia
         assert isinstance(positions, list)
         assert isinstance(open_orders, list)
         assert isinstance(open_algos, list)
+        assert audit["symbol_status"] == "TRADING"
+        assert audit["can_trade"] is True
+        assert position_mode.get("dualSidePosition") is False
+        assert audit["open_order_count"] == 0
+        assert len(audit["open_algo_ids"]) == 0
+        assert audit["protected_trial_sizing"]["status"] == "PASS"
     finally:
         await client.close()

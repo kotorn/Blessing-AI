@@ -114,7 +114,12 @@ jobs:
 
     - name: Pilot lease and protection regression (no skips)
       run: python -m scripts.run_local_pilot_ci_regressions
-      
+
+    - name: Docker worker build and import smoke test
+      run: |
+        docker build -f Dockerfile.worker -t blessing-worker:ci-smoke .
+        docker run --rm blessing-worker:ci-smoke python -c "import apps.trading_worker.main; print('WORKER_IMAGE_SMOKE_PASS')"
+
     - name: Hygiene Check
       run: |
         # Tests and package installs create ignored caches in the checkout.
@@ -142,6 +147,11 @@ jobs:
       with:
         ref: ${{ github.sha }}
         persist-credentials: false
+
+    - name: Setup Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.13'
 
     - name: Create CI evidence subject
       env:
