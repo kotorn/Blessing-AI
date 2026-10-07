@@ -2901,9 +2901,6 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
     campaign = await getServerLocalLivePilotStore().recordPreparation(
       campaign.campaignId, localLivePilotBinding(campaign), refreshedPreparation,
     );
-    // This CAS transition is immediately followed by the explicit ARM action.
-    campaign = await getServerLocalLivePilotStore().activate(campaign.campaignId, localLivePilotBinding(campaign));
-    activated = true;
     const strategies = {
       grid: campaign.strategyId === 'grid',
       trend: campaign.strategyId === 'trend',
@@ -2940,6 +2937,9 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
       }),
     });
     if (!armed.response.ok) throw new Error('LOCAL_PILOT_WORKER_ARM_REJECTED');
+    // Activate store campaign only after worker confirms ARM so rejected ARM does not burn campaign into CLOSE_ONLY
+    campaign = await getServerLocalLivePilotStore().activate(campaign.campaignId, localLivePilotBinding(campaign));
+    activated = true;
     const finalState = await forwardWorkerRequest('/state');
     if (!finalState.response.ok || finalState.data?.execution_mode !== 'LIVE'
       || !['ARMED', 'PAUSED_NEW_RISK'].includes(String(finalState.data?.engine_state))

@@ -197,23 +197,78 @@ LOCAL_MAINNET_RISK_LIFECYCLE_METHODS = (
 
 def local_mainnet_risk_lifecycle_status(
     adapter: Any = None,
+    worker: Any = None,
 ) -> tuple[bool, list[str]]:
-    """Require fresh correlated runtime proof, not adapter method presence."""
+    """Verify runtime lifecycle readiness without requiring prior order evidence."""
 
     unavailable = [
         name
         for name in LOCAL_MAINNET_RISK_LIFECYCLE_METHODS
         if not callable(getattr(adapter, name, None))
     ]
-    has_evidence = getattr(adapter, "has_fresh_local_mainnet_lifecycle_evidence", None)
-    if unavailable or not callable(has_evidence):
+    if unavailable or adapter is None:
         return False, list(LOCAL_MAINNET_RISK_LIFECYCLE_METHODS)
-    try:
-        if has_evidence() is True:
-            return True, []
-    except Exception as exc:
-        logger.warning("Local Mainnet lifecycle evidence check failed: %s", type(exc).__name__)
-    return False, list(LOCAL_MAINNET_RISK_LIFECYCLE_METHODS)
+
+    if worker is None:
+        worker = getattr(adapter, "_worker_authority", None)
+
+    missing: list[str] = []
+
+    target_local = str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+    local_only = os.getenv("LOCAL_ONLY", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not (target_local and local_only):
+        missing.append("LOCAL_RUNTIME_TARGET_AND_LOCAL_ONLY")
+
+    monitor_fn = getattr(worker, "_local_pilot_lifecycle_monitor_state", None)
+    if callable(monitor_fn):
+        try:
+            m_state = monitor_fn()
+            status = m_state.get("status")
+            if status in {"STALLED", "STALE", "DEGRADED"}:
+                missing.append("pilot_monitor_healthy")
+        except Exception:
+            missing.append("pilot_monitor_healthy")
+
+    market_fresh = False
+    market_fresh_fn = getattr(worker, "is_market_data_fresh", None)
+    if callable(market_fresh_fn):
+        try:
+            market_fresh = bool(market_fresh_fn())
+        except Exception:
+            market_fresh = False
+    elif adapter is not None:
+        last_event = getattr(adapter, "last_market_event_at", {}).get("ETHUSDC")
+        market_fresh = bool(last_event is not None)
+    if not market_fresh:
+        missing.append("market_data_fresh")
+
+    recon_status = "UNKNOWN"
+    reconciliation = getattr(adapter, "reconciliation", None)
+    if reconciliation is not None:
+        recon_status = str(getattr(reconciliation, "last_status", "UNKNOWN")).upper()
+    elif worker is not None:
+        recon_status = str(getattr(worker, "reconciliation_status", "UNKNOWN")).upper()
+    if recon_status != "IN_SYNC":
+        missing.append("reconciliation_in_sync")
+
+    stream_healthy = bool(
+        getattr(adapter, "private_stream_healthy", False)
+        or getattr(worker, "private_stream_healthy", False)
+    )
+    if not stream_healthy:
+        missing.append("private_stream_healthy")
+
+    recovery_only = bool(getattr(worker, "recovery_only", False))
+    if recovery_only:
+        missing.append("recovery_only_false")
+
+    kill_switch_active = bool(getattr(worker, "kill_switch_active", False))
+    if kill_switch_active:
+        missing.append("kill_switch_inactive")
+
+    if missing:
+        return False, missing
+    return True, []
 
 
 def local_mainnet_preflight_lifecycle_status(
@@ -332,6 +387,7 @@ class LaunchReadiness(BaseModel):
     mainnet_continuation_approval_id: Optional[str] = None
     local_mainnet_risk_lifecycle_ready: bool = False
     local_mainnet_risk_lifecycle_missing: List[str] = Field(default_factory=list)
+    local_pilot_execution_ready: bool = False
     persistence: Dict[str, Any] = Field(default_factory=dict)
 
 class WorkerRuntimeState(BaseModel):
@@ -3067,7 +3123,7 @@ class TradingWorkerApp:
             self.persistence.mode.value != "REQUIRED" or persistence["durable"]
         )
         local_risk_lifecycle_ready, local_risk_lifecycle_missing = (
-            local_mainnet_risk_lifecycle_status(self.execution_adapter)
+            local_mainnet_risk_lifecycle_status(self.execution_adapter, worker=self)
         )
 
         readiness = LaunchReadiness(
@@ -3180,6 +3236,43 @@ class TradingWorkerApp:
             and readiness.mainnet_launch_state == "AUTONOMOUS_ACTIVE"
             and self.engine_state == WorkerEngineState.ARMED
             and not self.pause_new_risk
+        )
+
+        session = launch_session if isinstance(launch_session, dict) else {}
+        pilot_policy = session.get("policy") == "LIVE_RESEARCH_PILOT"
+        pilot_expires_at = session.get("pilot_campaign_expires_at") or session.get("expires_at")
+        pilot_expired = False
+        if pilot_policy:
+            if isinstance(pilot_expires_at, str):
+                try:
+                    pilot_expires_dt = datetime.fromisoformat(pilot_expires_at)
+                    if pilot_expires_dt.tzinfo is None:
+                        pilot_expires_dt = pilot_expires_dt.replace(tzinfo=timezone.utc)
+                    pilot_expired = pilot_expires_dt <= utc_now()
+                except Exception:
+                    pilot_expired = True
+            elif isinstance(pilot_expires_at, datetime):
+                dt = (
+                    pilot_expires_at
+                    if pilot_expires_at.tzinfo is not None
+                    else pilot_expires_at.replace(tzinfo=timezone.utc)
+                )
+                pilot_expired = dt <= utc_now()
+            else:
+                pilot_expired = True
+
+        readiness.local_pilot_execution_ready = bool(
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and readiness.mainnet_preflight_ready
+            and pilot_policy
+            and session.get("state") == "ACTIVE"
+            and session.get("pilot_status", "ACTIVE") == "ACTIVE"
+            and not session.get("pilot_drawdown_triggered", False)
+            and not pilot_expired
+            and self.engine_state == WorkerEngineState.ARMED
+            and not self.pause_new_risk
+            and not getattr(self, "_pilot_accounting_pause_active", False)
+            and not self.kill_switch_active
         )
         
         return readiness.model_dump()
@@ -3303,7 +3396,7 @@ class TradingWorkerApp:
             ]
             if str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL":
                 risk_lifecycle_ready, missing_methods = local_mainnet_risk_lifecycle_status(
-                    self.execution_adapter
+                    self.execution_adapter, worker=self
                 )
                 checks.append(
                     {
@@ -3314,7 +3407,7 @@ class TradingWorkerApp:
                         "message": (
                             "Fresh Local PostgreSQL risk and signed stop/target evidence are verified"
                             if risk_lifecycle_ready
-                            else "Local Mainnet remains blocked; fresh correlated runtime evidence is missing: "
+                            else "Local Mainnet remains blocked; lifecycle check failed: "
                             + ", ".join(missing_methods)
                         ),
                     }
@@ -5614,8 +5707,10 @@ class TradingWorkerApp:
                                 and self.engine_state == WorkerEngineState.ARMED
                                 and not self.pause_new_risk
                             )
+                        elif policy == "LIVE_RESEARCH_PILOT":
+                            live_ready = bool(launch_readiness.get("local_pilot_execution_ready"))
                         else:
-                            live_ready = bool(launch_readiness.get("mainnet_autonomous_ready"))
+                            live_ready = False
                         environment_name = "MAINNET"
                         is_ready = autonomous_enabled and live_ready
                     else:
