@@ -4,6 +4,15 @@ This runbook is the operational boundary for the first Mainnet launch. The
 repository changes and CI checks do not send an order. Every step is fail-closed
 and must leave the Worker `DISARMED` when evidence is missing or stale.
 
+> [!NOTE]
+> **Local Live Pilot Runbook Hierarchy**:
+> For the Local `ETHUSDC` Quick pilot execution on Binance Portfolio Margin, the authoritative operational documents are:
+> - Master Execution Plan: [GEMINI-HANDOFF.md](file:///H:/Blessing%20AI/docs/GEMINI-HANDOFF.md)
+> - Success & Abort Criteria: [LOCAL-PILOT-SUCCESS-CRITERIA.md](file:///H:/Blessing%20AI/docs/LOCAL-PILOT-SUCCESS-CRITERIA.md)
+> - Day-of Attended Checklist: [LOCAL-PILOT-DAY-OF-CHECKLIST.md](file:///H:/Blessing%20AI/docs/LOCAL-PILOT-DAY-OF-CHECKLIST.md)
+> - Break-Glass Emergency Procedures: [LOCAL-PILOT-BREAK-GLASS.md](file:///H:/Blessing%20AI/docs/LOCAL-PILOT-BREAK-GLASS.md)
+> - Track C Provenance & Attestations: [LOCAL-PILOT-TRACK-C.md](file:///H:/Blessing%20AI/docs/LOCAL-PILOT-TRACK-C.md)
+
 ## Fixed release policy
 
 - Project: `gen-lang-client-0730128480`

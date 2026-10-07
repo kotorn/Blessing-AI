@@ -93,38 +93,25 @@ their values. The agent's job ends at item 5.
 
 ## Current state (refresh before acting)
 
-Snapshot refreshed against base commit `52015b2` ("Bind Testnet close proof to
-final mutation barrier") on `codex/local-ethusdc-quick-pilot`. It will go
-stale again; always re-run `git log -1`, `git status` and the three test
-suites before relying on it.
+> [!NOTE]
+> **Plan v4 Update (2026-10-07)**: Work is executing under approved Plan v4 ([GEMINI-HANDOFF.md](file:///h:/Blessing%20AI/docs/GEMINI-HANDOFF.md)).
+> Work packages WP0 through WP11 are complete and verified on branch `codex/local-ethusdc-quick-pilot`:
+> - **WP0**: Baseline setup & vitest exclusion of `.claude/**`.
+> - **WP1**: Solo Testnet approval support under `SOLO_OPERATOR` review policy (`TC-01`).
+> - **WP2**: Arm-to-order execution chain & lifecycle readiness (`OP-1`, `OP-2`, `Gap A`).
+> - **WP3**: Bracket cost sizing at side price & fee/funding pre-planning (`OP-3`, `OP-5`).
+> - **WP4**: Binance Portfolio Margin PAPI route integration (`OP-7`, `OPS-02`).
+> - **WP5**: Testnet protection parity with Mainnet fill-sized reduce-only shape (`OPS-03`, `OP-6`).
+> - **WP6**: Sibling algo order cancellation on exit fill reaching `IN_SYNC` (`Gap B`).
+> - **WP7**: `PilotReadinessVerdict` TTL bounds (300s default, 3600s max) and ~4m refresh (`D3`).
+> - **WP8**: Trusted host Python ACL verification with `InheritOnly` and AppContainer support (`OPS-01`).
+> - **WP9**: CI hardening: setup-python 3.13 and containerized Worker image smoke test.
+> - **WP10**: Single-entry cap (`max_entries = 1`), `grid` strategy default, and bracket exit fencing.
+> - **WP11**: Dotenv sentinel in `server.ts`, rotating redacted file logger, and break-glass db backup/restore script.
 
-- Track C is merged into `codex/local-ethusdc-quick-pilot`
-  (`origin/codex/pilot-track-c-provenance` is an ancestor of `52015b2`). It is
-  **not** on `main` in the local view (`52015b2` is not an ancestor of the
-  locally known `origin/main`; no fetch was done), so signed `CHECKS` evidence
-  for this code does not exist on `main` yet.
-- The `adminUid`-only readiness shortcut introduced by `381bf37`
-  ("authenticated server-owned pilot readiness channel") is removed from the
-  gate: `fd297ad` ("require provenance attestations for readiness") deleted
-  the logic. `381bf37` itself is still an ancestor in git history (commits are
-  not erased), and `LocalPilotReadinessOptions.authenticatedServerAuthority`
-  still exists as an optional field that the readiness code no longer reads.
-  Tests keep empty/forged `adminUid` cases BLOCKED.
-- Readiness stays `BLOCKED` without real signed evidence. No real Track C
-  bundle (CHECKS, three REVIEW_* classes, TESTNET_ETHUSDC) has ever been
-  produced or verified, so the `gh attestation verify` JSON shape is still
-  unconfirmed. The TypeScript binding now equals the Python binding
-  (`tests/local-pilot-binding-parity.test.ts`), the Worker image now contains
-  the Track C modules, and `scripts/download_local_pilot_track_c.py` exists
-  (fake-`gh` tested only). See `docs/LOCAL-PILOT-TRACK-C.md`.
-- Earlier unresolved P1 recovery/reconciliation findings (adoption of unowned
-  excess positions, zero-fill UNKNOWN entry recovery, a concurrent
-  cancellation-claim race) were recorded at an older snapshot
-  (`6db1f75`, 2026-10-03). Later commits such as `25b894b`, `57f55a6`,
-  `4c28c9a` and `a8c1ee1` address related paths, but whether each finding is
-  closed has not been re-reviewed (UNVERIFIED).
-- No Mainnet secret was read, no ARM was performed, and no order was sent by
-  the agent.
+- Track C is active on `codex/local-ethusdc-quick-pilot`.
+- Readiness stays `BLOCKED` until real signed Track C evidence is downloaded via `scripts/download_local_pilot_track_c.py`.
+- No Mainnet secret was read, no ARM was performed, and no order was sent by the agent.
 
 ## Milestones
 

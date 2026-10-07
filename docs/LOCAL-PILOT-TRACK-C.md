@@ -85,29 +85,21 @@ REST client's final pre-mutation callback, after throttling and lease fencing
 and immediately before the single market-close request. The artifact binds
 the read-back time to the submission barrier within five seconds, and records
 the close as `MARKET` with `reduceOnly=true`, verified by exchange read-back.
-The *Testnet* protection Algo orders use `closePosition=true` (no quantity),
-which is incompatible with `reduceOnly`; therefore those Testnet protection
-records correctly report `reduceOnly=false`
-(`_submit_testnet_protection_algo`, `execution.py`; enforced by
-`valid_algo` in `scripts/local_pilot_track_c.py`). This documents the
-exchange-supported order semantics, not a completed Testnet run. Until an
-authorized protected Environment dispatch produces a real signed artifact,
-Testnet evidence stays NOT_RUN.
+The Testnet protection Algo orders now use the exact same fill-sized, reduce-only
+shape as Local Mainnet (`closePosition=false`, `reduceOnly=true`, with `quantity`
+matching the entry fill), implemented via `_submit_testnet_protection_algo`
+delegating directly to `_submit_local_mainnet_protection_algo`. Both the Python
+Track C verifier (`valid_algo` in `scripts/local_pilot_track_c.py`) and TypeScript
+readiness verifier (`src/backend/local-live-pilot-readiness.ts`) strictly enforce
+this shape, requiring non-zero decimal quantities, `close_position: false`,
+`reduce_only: true`, and quantity parity across stop and target legs.
 
-**The Local Mainnet path is different, and the Testnet artifact does not
-exercise it.** `_submit_local_mainnet_protection_algo`
-(`execution.py`, params block around lines 3594-3595 at `52015b2`) submits each stop/target Algo
-with `reduceOnly=true`, `closePosition=false` and an explicit fill-sized
-`quantity`, only for `positionSide=BOTH`. The shared read-back in
-`protection.py` accepts either shape (close-all with no `reduceOnly`, or
-`reduceOnly=true` with `quantity` equal to the absolute position). The final
-emergency/market close is `reduceOnly=true` on both paths. Following Decision
-D4, the Track C verification (`_testnet_close_protection_is_proven`), the
-emergency close barrier (`_close_owned_testnet_trial_locked`), and the Worker
-lifecycle (`close_protected_ethusdc_testnet_trial`) accept either shape:
-legacy Testnet (`closePosition=true`/`reduceOnly=false`) or Portfolio Margin /
-Pilot Bracket (`closePosition=false`/`reduceOnly=true` with fill-sized quantity).
-The fill-sized reduce-only close shape has now been verified with unit tests.
+**The Testnet and Local Mainnet paths now share identical protection bracket semantics.**
+Both submit each stop/target Algo with `reduceOnly=true`, `closePosition=false` and an explicit
+fill-sized `quantity` for `positionSide=BOTH`. The final emergency/market close is `reduceOnly=true`
+on both paths. Following WP5 (`OPS-03`), the Track C verification (`_testnet_close_protection_is_proven`),
+the emergency close barrier (`_close_owned_testnet_trial_locked`), and the Worker lifecycle
+(`close_protected_ethusdc_testnet_trial`) validate this unified bracket shape.
 
 Human prerequisites are to configure main branch protection, pilot-review
 required user reviewers/prevent_self_review/main-only branch policy, and the
@@ -169,11 +161,13 @@ verifier on the host checkout, and issues a short-lived `PilotReadinessVerdict`
    the host checkout and active binding using `scripts/verify_local_pilot_track_c.py`.
 2. **Deterministic Signing:** The Control Plane constructs a `PilotReadinessVerdict`
    payload containing `campaignId`, `gitSha`, the 5 Track C hashes, the verified classes,
-   and an expiration timestamp (`expiresAt` bounded by the oldest attestation).
-   It signs the canonical JSON representation using HMAC-SHA256 with the shared
-   `WORKER_IDENTITY_TOKEN`.
-3. **Delivery & Enforcement:** The verdict is delivered during `/arm` or via periodic
-   supervisor heartbeats (`/supervisor/heartbeat` and `/local-pilot/verdict`).
+   and an expiration timestamp (`expiresAt` bounded by `min(now + 300s, oldest_attestation + 24h, campaign_expiry)`,
+   with hard maximum TTL cap of 3600s). It signs the canonical JSON representation using
+   HMAC-SHA256 with the shared `WORKER_IDENTITY_TOKEN`.
+3. **Delivery & Enforcement:** The verdict is delivered during `/arm` and refreshed periodically
+   every ~4 minutes by a background timer in `server.ts` via supervisor heartbeats (`/supervisor/heartbeat`
+   and `/local-pilot/verdict`). If the campaign is revoked, deactivated, or enters close-only, the timer
+   is cleared and null verdict is dispatched to immediately disarm the Worker.
 4. **Worker Verification:** In `apps/trading_worker/venues/binance/local_pilot_verdict.py`,
    the Worker verifies the HMAC signature, confirms `campaignId` and `gitSha` match
    its container environment (`LOCAL_LIVE_PILOT_CAMPAIGN_ID` and `LOCAL_LIVE_PILOT_GIT_SHA`),

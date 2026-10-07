@@ -27,12 +27,12 @@ The pilot is deemed **SUCCESSFUL** if and only if all of the following stages co
 ### A. Stage 1: Preparation & Preflight Gate
 1. Host and Containerized Worker run with identical git commit SHA matching the signed Track C release binding.
 2. Control Plane verifies all 5 Track C evidence classes (`CHECKS`, `REVIEW_AUTH_RELEASE`, `REVIEW_ORDER_RISK`, `REVIEW_PERSISTENCE`, `TESTNET_ETHUSDC`) within their 24-hour validity window.
-3. Control Plane issues an HMAC-signed short-lived `PilotReadinessVerdict` to the containerized Worker.
+3. Control Plane issues an HMAC-signed short-lived `PilotReadinessVerdict` to the containerized Worker (default TTL 300s, max 3600s, refreshed periodically every ~4m while active).
 4. Worker verifies the HMAC signature, campaign ID, git SHA, and 5-field hashes against its container environment.
 5. All 19 preflight safety checks pass (`PASS`) and system transitions to `LIVE/DISARMED`.
 
 ### B. Stage 2: Operator Arming & Staged Entry
-1. Operator explicitly ARMs the stack for `LIVE_RESEARCH_PILOT` (*supersedes `STAGED_FIRST_ORDER`*).
+1. Operator explicitly ARMs the stack for `LIVE_RESEARCH_PILOT` (*supersedes `STAGED_FIRST_ORDER`*), defaulting strategy to `'grid'`.
 2. At most one order intent is evaluated by the Worker risk gate and clamped by `plan_pilot_bracket`:
    - Side: `BUY` or `SELL`
    - Position Mode: One-Way (`BOTH`)
@@ -50,8 +50,8 @@ The pilot is deemed **SUCCESSFUL** if and only if all of the following stages co
 
 ### D. Stage 4: Position Closure
 The position is closed through one of the following legitimate exit paths:
-1. **Take-Profit Trigger:** Market reaches the TP price; Binance executes the TP order and cancels/expires the SL order.
-2. **Stop-Loss Trigger:** Market reaches the SL price; Binance executes the SL order and cancels/expires the TP order.
+1. **Take-Profit Trigger:** Market reaches the TP price; Binance executes the TP order and Worker reconciliation automatically cancels the sibling SL algo order.
+2. **Stop-Loss Trigger:** Market reaches the SL price; Binance executes the SL order and Worker reconciliation automatically cancels the sibling TP algo order.
 3. **24-Hour Expiry Close:** If neither trigger fires within 24 hours, the position is automatically or manually closed via reduce-only market order.
 4. **Operator Break-Glass Close:** Operator issues emergency flatten or manual close via Binance UI.
 
@@ -59,7 +59,7 @@ The position is closed through one of the following legitimate exit paths:
 Immediately following position closure:
 1. **Position Exposure:** Net position in `ETHUSDC` equals `0.000` (flat verified on exchange position risk endpoint).
 2. **Open Orders:** Zero (0) open regular orders on `ETHUSDC`.
-3. **Open Algo Orders:** Zero (0) open conditional algo orders on `ETHUSDC` (no dangling SL/TP orders).
+3. **Open Algo Orders:** Zero (0) open conditional algo orders on `ETHUSDC` (no dangling SL/TP orders; sibling cancellation verified by `_cancel_local_mainnet_owned_algos`).
 4. **Reconciliation State:** Worker reconciliation reports `IN_SYNC` with `diff_count == 0`.
 5. **Durable Ledger:** All fills, trades, and fees are recorded with zero unhandled discrepancies.
 

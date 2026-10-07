@@ -17,7 +17,7 @@ seven days from approval.
 
 | # | Check | How the code treats it |
 |---|-------|------------------------|
-| A1 | Account type matches `BINANCE_PORTFOLIO_MARGIN`. A classic USD-M Futures account needs `false`; a Portfolio Margin account needs `true`. | `scripts/start-local.ps1` defaults it to `true` when unset; the Python default is `false`. When true the adapter uses the `papi` endpoints. A mismatch is not detected up front by this checklist: expect a failed preflight (**UNVERIFIED** how). Which setting your account needs is **UNVERIFIED** here. |
+| A1 | Account type matches `BINANCE_PORTFOLIO_MARGIN`. A classic USD-M Futures account needs `false`; a Portfolio Margin account needs `true`. | `scripts/start-local.ps1` strictly validates that `BINANCE_PORTFOLIO_MARGIN` is explicitly set to `'true'` or `'false'`. When `true` the adapter uses Binance PAPI endpoints (`/papi/v1/um/*`). Operator may run read-only probe script `artifacts/gemini-progress/probe_papi_readonly.py` to confirm PAPI permissions, ONE_WAY position mode, and equity cap. |
 | A2 | Position mode is **one-way** (not hedge). | The Local Mainnet protection path only handles `positionSide=BOTH`. Hedge mode is expected to block (**UNVERIFIED** exact gate). |
 | A3 | **Multi-Assets mode is off.** | The gate accepts only `CROSS`, `ISOLATED` or `SINGLE_ASSET_CROSS`; `MULTI_ASSET_CROSS` is derived from `multiAssetsMargin` and is not accepted (`reconciliation.py`, `gates.py`). |
 | A4 | Collateral is **USDC** and wallet balance is **at most 250 USDC**. | `mainnet_risk.py` rejects other collateral assets and any wallet or collateral above 250 USDC. |
@@ -36,10 +36,10 @@ seven days from approval.
 | B3 | **No Windows Update window** during the session: set active hours or pause updates, and confirm no reboot is pending. | A reboot or sleep kills the launcher and Worker. A restart never restores approval or credentials; a position left open would have no running Worker. |
 | B4 | Power/sleep: disable sleep and hibernate for the session. Remote Desktop session stays connected. | The UI is on `127.0.0.1:3001`, reached via the remote session. |
 | B5 | One launcher window: `scripts/start-local.ps1` is running (it runs `npm run dev` in the foreground). Do not close it; closing it stops the Control Plane. | Leave it visible. |
-| B6 | No stale containers: `docker ps -a --filter "name=blessing-"`. Only `blessing-postgres-local` should exist as a long-lived container; stop and remove any old `blessing-local-worker-*`. | Do not remove the Postgres volume. |
+| B6 | No stale containers: `docker ps -a --filter "name=blessing-"`. Only `blessing-postgres-local` should exist as a long-lived container; stop and remove any old `blessing-local-worker-*`. | Do not remove the Postgres volume. Take safe backup via `scripts/backup_local_postgres.py` or `scripts/backup-local-postgres.ps1` if needed. |
 | B7 | Ports `3001` and `8000` are free; `5433` is held only by the managed `blessing-postgres-local`. | The launcher refuses to start otherwise and says what holds the port. |
 | B8 | Windows clock is correct (`w32tm /resync`). | Attestation freshness tolerates about 2 seconds of clock skew into the future; larger skew can invalidate evidence. |
-| B9 | Trusted host tools for Track C verification exist: GitHub CLI at `C:\Program Files\GitHub CLI\gh.exe` with a valid "GitHub, Inc." signature, and a Python Software Foundation signed interpreter with the Worker dependencies in a protected install tree. | The Control Plane verifies Track C on the host even though the Worker runs in Docker. `docs/MAINNET-RELEASE-RUNBOOK.md` records that no eligible interpreter existed on the original host; whether that is still true is **UNVERIFIED**. |
+| B9 | Trusted host tools for Track C verification exist: GitHub CLI at `C:\Program Files\GitHub CLI\gh.exe` with a valid "GitHub, Inc." signature, and a Python Software Foundation signed interpreter with Worker dependencies matching `requirements-worker-windows.lock` in a protected install tree. | The Control Plane verifies Track C on the host even though the Worker runs in Docker. Host Python ACL verification ignores non-inheriting parent directory permissions (`InheritOnly`) and translates AppContainer capability package SIDs safely. |
 | B10 | Checkout is a **clean** tree on the reviewed `main` commit, judged **the way the verifier judges it**, with LF line endings (`python scripts/check_tracked_eol.py` exits 0). Run `python -I -c "import sys; sys.path.insert(0,'scripts'); import local_pilot_track_c_source as s; from pathlib import Path; print(repr(s.git(Path('.'),'status','--porcelain','--untracked-files=all')))"` and require `''`. | The Python verifier and downloader scrub Git's user/global config, so a file hidden only by your *global* ignore file (for example an untracked `.claude/settings.local.json`) makes a plain `git status` look clean while Track C refuses with `LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN`. The repository `.gitignore` does not ignore `.claude/` (a human decision; not changed here). The TypeScript `committedClean` uses your normal Git config, so it can say clean when Python says dirty; that disagreement is fail-closed. Dirty trees and CRLF working copies change the source binding and block readiness. |
 
 ## C. Evidence and readiness (all must be real, none may be forced)
@@ -54,10 +54,13 @@ seven days from approval.
    against a fake `gh`; **UNVERIFIED** against real artifacts).
 3. `GET /api/local/pilot/readiness` and `GET /api/local/runtime` report `READY`
    from verified attestations. The Control Plane delivers the signed
-   `PilotReadinessVerdict` to the containerized Worker, and the Worker reports
-   `can_start=True`.
+   `PilotReadinessVerdict` (TTL 300s, max 3600s, refreshed periodically every ~4m)
+   to the containerized Worker, and the Worker reports `can_start=True`.
 4. A real `trading_admin` approved this campaign. Prepare reached
    `LIVE/DISARMED` with zero order attempts and the read-only preflight passed.
+5. Scope limits verified: single-entry cap `max_entries = 1` in effect, strategy
+   defaulted to `'grid'`, and non-emergency exit fencing active while QUICK bracket
+   is open.
 
 ## D. Attended-operator schedule (recommendation, not enforced by code)
 
