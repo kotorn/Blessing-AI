@@ -14,7 +14,7 @@ from domain.models import ExchangeFill, utc_now
 
 from .ledger import ExecutionLedger
 from .config import BinanceEnvironment, environment_label
-from .models import BinanceAuthenticationError, ExchangeAccountSnapshot
+from .models import BinanceAuthenticationError, BinanceDefinitiveRejection, ExchangeAccountSnapshot
 from .rest_client import BinanceRestClient
 
 logger = logging.getLogger("blessing.binance.reconciliation")
@@ -897,6 +897,10 @@ class BinanceReconciliation:
     def _all_algo_orders_path(self) -> str:
         return "/papi/v1/um/algo/allAlgoOrders" if self.portfolio_margin else "/fapi/v1/allAlgoOrders"
 
+    @property
+    def _algo_order_path(self) -> str:
+        return "/papi/v1/um/algo/order" if self.portfolio_margin else "/fapi/v1/algoOrder"
+
     @staticmethod
     def _testnet_algo_row_matches_owner(
         order: Any, owner: dict[str, Any], *, source: str
@@ -920,6 +924,9 @@ class BinanceReconciliation:
             return False
         expected_type = "STOP_MARKET" if role == "stop" else "TAKE_PROFIT_MARKET"
         expected_side = "SELL" if record["entry_side"] == "BUY" else "BUY"
+        close_pos = _exchange_bool(order.get("closePosition"))
+        reduce_only = _exchange_bool(order.get("reduceOnly"))
+        bracket_shape_valid = (close_pos and not reduce_only) or (not close_pos and reduce_only)
         return bool(
             valid_algo_id
             and order.get("clientAlgoId") == owner["client_algo_id"]
@@ -931,8 +938,7 @@ class BinanceReconciliation:
             and order.get("side") == expected_side
             and order.get("workingType") == "MARK_PRICE"
             and valid_trigger
-            and _exchange_bool(order.get("closePosition"))
-            and not _exchange_bool(order.get("reduceOnly"))
+            and bracket_shape_valid
             and source in {"open", "query"}
         )
 
@@ -960,6 +966,9 @@ class BinanceReconciliation:
             return False
         expected_type = "STOP_MARKET" if role == "stop" else "TAKE_PROFIT_MARKET"
         expected_side = "SELL" if record["entry_side"] == "BUY" else "BUY"
+        close_pos = _exchange_bool(order.get("closePosition"))
+        reduce_only = _exchange_bool(order.get("reduceOnly"))
+        bracket_shape_valid = (close_pos and not reduce_only) or (not close_pos and reduce_only)
         return bool(
             valid_algo_id
             and order.get("clientAlgoId") == owner["client_algo_id"]
@@ -972,8 +981,7 @@ class BinanceReconciliation:
             and order.get("side") == expected_side
             and order.get("workingType") == "MARK_PRICE"
             and valid_trigger
-            and _exchange_bool(order.get("closePosition"))
-            and not _exchange_bool(order.get("reduceOnly"))
+            and bracket_shape_valid
         )
 
     @classmethod
@@ -1427,6 +1435,93 @@ class BinanceReconciliation:
             )
         except (InvalidOperation, TypeError, ValueError, KeyError):
             return False
+
+    async def _query_algo_order(
+        self, *, symbol: str, client_algo_id: str
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            result = await self.rest_client.request(
+                "GET",
+                self._algo_order_query_path,
+                signed=True,
+                params={"symbol": symbol, "clientAlgoId": client_algo_id},
+            )
+        except BinanceDefinitiveRejection as exc:
+            if exc.code == -2013:
+                return None
+            raise
+        return result if isinstance(result, dict) else None
+
+    async def _cancel_local_mainnet_owned_algos(
+        self, record: Dict[str, Any]
+    ) -> bool:
+        """Cancel owned still-open brackets once and prove they left openAlgoOrders."""
+        symbol = str(record.get("symbol") or "").upper()
+        client_ids = {
+            str(record.get("stop_client_algo_id") or "").strip(),
+            str(record.get("take_profit_client_algo_id") or "").strip(),
+        }
+        if not symbol or "" in client_ids or len(client_ids) != 2:
+            return False
+        terminal = {
+            "CANCELED", "CANCELLED", "EXPIRED", "FINISHED", "TRIGGERED", "REJECTED"
+        }
+        for client_id in client_ids:
+            try:
+                current = await self._query_algo_order(
+                    symbol=symbol, client_algo_id=client_id
+                )
+            except Exception:
+                return False
+            if current is None:
+                continue
+            if str(current.get("clientAlgoId") or "") != client_id:
+                return False
+            state = str(current.get("algoStatus") or "").upper()
+            if state == "NEW":
+                try:
+                    await self.rest_client.request(
+                        "DELETE",
+                        self._algo_order_path,
+                        signed=True,
+                        params={
+                            "symbol": symbol,
+                            "algoId": int(current["algoId"]),
+                        },
+                    )
+                except Exception:
+                    # DELETE may have reached the exchange. Read back once;
+                    # never repeat an ambiguous cancel.
+                    pass
+                try:
+                    current = await self._query_algo_order(
+                        symbol=symbol, client_algo_id=client_id
+                    )
+                except Exception:
+                    return False
+                if current is not None and str(
+                    current.get("algoStatus") or ""
+                ).upper() == "NEW":
+                    return False
+            elif state not in terminal:
+                return False
+        try:
+            open_algos = await self.rest_client.request(
+                "GET",
+                self._open_algo_orders_path,
+                signed=True,
+                params={"symbol": symbol, "algoType": "CONDITIONAL"},
+            )
+        except Exception:
+            return False
+        return bool(
+            isinstance(open_algos, list)
+            and not any(
+                isinstance(row, dict)
+                and str(row.get("clientAlgoId") or "") in client_ids
+                for row in open_algos
+            )
+        )
 
     async def _audit_mainnet_algo_lifecycle(
         self,
@@ -1923,6 +2018,18 @@ class BinanceReconciliation:
                 if key[0] == entry_key[0]
                 and owners[key]["record"] is record
             ]
+            if (
+                order_status == "FILLED"
+                and executed_quantity > 0
+                and owner_filled_quantity.is_finite()
+                and executed_quantity == owner_filled_quantity
+                and not open_child
+                and current_amount == 0
+                and owner_open_algos
+            ):
+                cancelled = await self._cancel_local_mainnet_owned_algos(record)
+                if cancelled:
+                    owner_open_algos = []
             closed = (
                 order_status == "FILLED"
                 and executed_quantity > 0

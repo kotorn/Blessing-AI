@@ -3674,72 +3674,7 @@ class BinanceExecutionAdapter:
         self, record: Dict[str, Any]
     ) -> bool:
         """Cancel owned still-open brackets once and prove they left openAlgoOrders."""
-        symbol = str(record.get("symbol") or "").upper()
-        client_ids = {
-            str(record.get("stop_client_algo_id") or "").strip(),
-            str(record.get("take_profit_client_algo_id") or "").strip(),
-        }
-        if not symbol or "" in client_ids or len(client_ids) != 2:
-            return False
-        terminal = {
-            "CANCELED", "CANCELLED", "EXPIRED", "FINISHED", "TRIGGERED", "REJECTED"
-        }
-        for client_id in client_ids:
-            try:
-                current = await self._query_algo_order(
-                    symbol=symbol, client_algo_id=client_id
-                )
-            except Exception:
-                return False
-            if current is None:
-                continue
-            if str(current.get("clientAlgoId") or "") != client_id:
-                return False
-            state = str(current.get("algoStatus") or "").upper()
-            if state == "NEW":
-                try:
-                    await self.rest_client.request(
-                        "DELETE",
-                        self._algo_order_path,
-                        signed=True,
-                        params={
-                            "symbol": symbol,
-                            "algoId": int(current["algoId"]),
-                        },
-                    )
-                except Exception:
-                    # DELETE may have reached the exchange. Read back once;
-                    # never repeat an ambiguous cancel.
-                    pass
-                try:
-                    current = await self._query_algo_order(
-                        symbol=symbol, client_algo_id=client_id
-                    )
-                except Exception:
-                    return False
-                if current is not None and str(
-                    current.get("algoStatus") or ""
-                ).upper() == "NEW":
-                    return False
-            elif state not in terminal:
-                return False
-        try:
-            open_algos = await self.rest_client.request(
-                "GET",
-                self._open_algo_orders_path,
-                signed=True,
-                params={"symbol": symbol, "algoType": "CONDITIONAL"},
-            )
-        except Exception:
-            return False
-        return bool(
-            isinstance(open_algos, list)
-            and not any(
-                isinstance(row, dict)
-                and str(row.get("clientAlgoId") or "") in client_ids
-                for row in open_algos
-            )
-        )
+        return await self.reconciliation._cancel_local_mainnet_owned_algos(record)
 
     async def _local_mainnet_close_order_filled(
         self, intent: OrderIntent, close_client_order_id: str
