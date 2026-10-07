@@ -13,5 +13,6 @@
   "quick_max_hold_seconds": 86400,
   "min_net_reward_usdc": "0.25",
   "min_reward_to_risk": "0.125",
-  "management_mode": "QUICK"
+  "management_mode": "QUICK",
+  "max_entries": 1
 }

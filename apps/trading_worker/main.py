@@ -2485,6 +2485,23 @@ class TradingWorkerApp:
         except (InvalidOperation, TypeError, ValueError):
             return False
 
+    def has_open_quick_bracket(self, symbol: str = "ETHUSDC") -> bool:
+        """Return True if a QUICK bracket or protected position is currently active."""
+        adapter = getattr(self, "execution_adapter", None)
+        if adapter is not None and hasattr(adapter, "has_open_quick_bracket"):
+            return bool(adapter.has_open_quick_bracket(symbol))
+        session = getattr(self, "_mainnet_launch_session", None)
+        if isinstance(session, dict) and session.get("policy") == "LIVE_RESEARCH_PILOT":
+            if session.get("state") == "ACTIVE" and int(session.get("submitted_orders", 0) or 0) > 0:
+                current_exposure = session.get("pilot_current_total_exposure_usdc") or session.get("pilot_net_exposure_usdc")
+                if current_exposure is not None:
+                    try:
+                        if abs(Decimal(str(current_exposure))) > Decimal("0"):
+                            return True
+                    except (InvalidOperation, TypeError, ValueError):
+                        pass
+        return False
+
     def _is_mainnet_snapshot_risk_ready(
         self,
         snapshot: Any,
@@ -4803,7 +4820,7 @@ class TradingWorkerApp:
                     max_order_count: int | None = 1
                     if req.launchPolicy == "LIVE_RESEARCH_PILOT":
                         launch_policy = "LIVE_RESEARCH_PILOT"
-                        max_order_count = None
+                        max_order_count = 1
                         pilot_binding = {
                             "campaign_id": req.pilotCampaignId,
                             "git_sha": os.getenv("LOCAL_LIVE_PILOT_GIT_SHA", "").strip().lower(),

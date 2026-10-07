@@ -74,6 +74,7 @@ const EXPECTED_LOCAL_LIVE_PILOT_POLICY = {
   min_net_reward_usdc: '0.25',
   min_reward_to_risk: '0.125',
   management_mode: 'QUICK',
+  max_entries: 1,
 } as const;
 
 function compareFingerprintPaths(left: string, right: string): number {

@@ -196,6 +196,7 @@ _LOCAL_LIVE_PILOT_EXPECTED = {
     # so the minimum planned reward/risk ratio is 0.125. Scale-up keeps 1:2.
     "min_reward_to_risk": "0.125",
     "management_mode": "QUICK",
+    "max_entries": 1,
 }
 
 

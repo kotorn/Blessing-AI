@@ -686,6 +686,23 @@ class DecisionExecutionGate:
         if disabled_strategy_reason:
             return GateResult(False, disabled_strategy_reason)
 
+        if (
+            (
+                _is_risk_reducing(risk_class)
+                or str(getattr(decision, "action", "")).upper() in {"REDUCE_POSITION", "CLOSE"}
+                or any(getattr(o, "reduce_only", False) for o in getattr(decision, "orders", []))
+            )
+            and risk_class != EconomicRiskClass.EMERGENCY
+        ):
+            has_bracket_fn = getattr(self.worker, "has_open_quick_bracket", None) or getattr(
+                adapter, "has_open_quick_bracket", None
+            )
+            decision_symbol = getattr(decision, "symbol", "ETHUSDC")
+            if callable(has_bracket_fn) and has_bracket_fn(decision_symbol):
+                return GateResult(
+                    False, "Strategy REDUCE/CLOSE is fenced while QUICK bracket is open"
+                )
+
         if _is_risk_increasing(risk_class):
             # Treat canonical engine state as a safety input as well as the
             # compatibility flags. Any disagreement fails closed instead of

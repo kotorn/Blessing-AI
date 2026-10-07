@@ -378,6 +378,36 @@ class BinanceExecutionAdapter:
         except (InvalidOperation, TypeError, ValueError):
             return False
 
+    def has_open_quick_bracket(self, symbol: str = "ETHUSDC") -> bool:
+        """Return True if a QUICK bracket or protected position is currently active."""
+        normalized_symbol = str(symbol).upper()
+        last_protection = getattr(self, "last_local_mainnet_protection", {})
+        if isinstance(last_protection, dict) and last_protection.get("status") == "PROTECTED":
+            return True
+        ledger = getattr(self, "ledger", None)
+        positions = getattr(ledger, "positions", []) if ledger is not None else []
+        for pos in positions:
+            pos_symbol = str(getattr(pos, "symbol", "")).upper()
+            if pos_symbol == normalized_symbol:
+                qty = getattr(pos, "quantity", Decimal("0"))
+                try:
+                    if abs(Decimal(str(qty))) > Decimal("0"):
+                        return True
+                except (InvalidOperation, TypeError, ValueError):
+                    pass
+        authority = getattr(self, "_worker_authority", None)
+        session = getattr(authority, "_mainnet_launch_session", None)
+        if isinstance(session, dict) and session.get("policy") == "LIVE_RESEARCH_PILOT":
+            if session.get("state") == "ACTIVE" and int(session.get("submitted_orders", 0) or 0) > 0:
+                current_exposure = session.get("pilot_current_total_exposure_usdc") or session.get("pilot_net_exposure_usdc")
+                if current_exposure is not None:
+                    try:
+                        if abs(Decimal(str(current_exposure))) > Decimal("0"):
+                            return True
+                    except (InvalidOperation, TypeError, ValueError):
+                        pass
+        return False
+
     @staticmethod
     def _enum_value(value: Any) -> Any:
         return getattr(value, "value", value)

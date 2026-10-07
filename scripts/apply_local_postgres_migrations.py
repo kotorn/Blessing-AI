@@ -430,8 +430,8 @@ REQUIRED_CONSTRAINTS = {
             "'live_research_pilot'",
             "and",
             "max_risk_increasing_orders",
-            "is",
-            "null",
+            "=",
+            "1",
         ),
     ),
     "mainnet_launch_reserved_check": (

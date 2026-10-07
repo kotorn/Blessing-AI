@@ -56,7 +56,7 @@ function campaignFrom(value: PilotResponse): Campaign | null {
     ? {
         campaignId: value.campaignId,
         status: value.status,
-        strategyId: value.strategyId || 'trend',
+        strategyId: value.strategyId || 'grid',
         campaignExpiresAt: value.campaignExpiresAt,
         version: value.version ?? 0,
       }
@@ -82,7 +82,7 @@ export function LocalPilotStatusMessage({ busy, evidence, message }: {
 }
 
 export const LocalLivePilotPanel: React.FC = () => {
-  const [strategyId, setStrategyId] = useState<LocalLivePilotStrategyId>('trend');
+  const [strategyId, setStrategyId] = useState<LocalLivePilotStrategyId>('grid');
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('ยังไม่มีผลตรวจจากแคมเปญนี้');

@@ -115,6 +115,7 @@ def test_emergency_claim_contract_requires_every_column_and_does_not_approve_020
     assert (CLAIM_TABLE, ("venue", "symbol", "entry_client_order_id"), True) in REQUIRED_UNIQUE_KEYS
     assert (CLAIM_TABLE, ("venue", "close_client_order_id"), False) in REQUIRED_UNIQUE_KEYS
     assert "020_emergency_close_submission_claims.sql" not in SAFE_POPULATED_UPGRADES
+    assert "021_pilot_single_entry_cap.sql" not in SAFE_POPULATED_UPGRADES
 
 
 @pytest.mark.parametrize("old,new", [
@@ -325,6 +326,7 @@ def test_local_migrations_are_numbered_and_discovered_in_order():
         "018_local_pilot_binding_not_null.sql",
         "019_local_pilot_event_ownership.sql",
         "020_emergency_close_submission_claims.sql",
+        "021_pilot_single_entry_cap.sql",
     ]
     assert all(len(migration_checksum(path)) == 64 for path in migrations)
     pilot_migration = next(path for path in migrations if path.name == REQUIRED_LOCAL_PILOT_MIGRATION)
@@ -406,16 +408,20 @@ def test_populated_database_allows_only_verified_additive_identity_migrations():
     first_six = {migration.name: migration_checksum(migration) for migration in migrations[:6]}
     # Only checksum-pinned additive migrations may upgrade populated local data.
     recorded = dict(first_six)
-    # The new submission-claim migration remains unapproved for populated
-    # databases until real PostgreSQL acceptance and independent review.
-    verified_migrations = migrations[:-1]
+    # The new submission-claim and single-entry cap migrations remain unapproved for
+    # populated databases until real PostgreSQL acceptance and independent review.
+    verified_migrations = [
+        migration
+        for migration in migrations
+        if migration.name in SAFE_POPULATED_UPGRADES or migration.name in first_six
+    ]
     for index in range(6, len(verified_migrations)):
         assert populated_data_upgrade_is_safe(
             recorded, verified_migrations[index:], verified_migrations, ledger_exists=True
         )
         recorded[migrations[index].name] = migration_checksum(migrations[index])
     assert not populated_data_upgrade_is_safe(
-        recorded, migrations[-1:], migrations, ledger_exists=True
+        recorded, migrations[len(verified_migrations) :], migrations, ledger_exists=True
     )
     assert not populated_data_upgrade_is_safe(
         first_six, migrations[6:], migrations, ledger_exists=False
@@ -1364,11 +1370,23 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
                     pilot_max_drawdown_usdc, pilot_quick_target_net_usdc,
                     pilot_quick_max_hold_seconds, pilot_max_leverage, pilot_status)
                    VALUES ($1, 'migration-test-pilot-approval', 'ETHUSDC',
-                    'LIVE_RESEARCH_PILOT', 'ACTIVE', 'LOCAL', $2, NULL, $3,
+                    'LIVE_RESEARCH_PILOT', 'ACTIVE', 'LOCAL', $2, 1, $3,
                     $4, $5, $5, $5, $5, 'test-project', '1', '2', 'QUICK',
                     CURRENT_TIMESTAMP + INTERVAL '7 days', $5, 50, 2, 5, 0.25, 86400, 10, 'ACTIVE')""",
                 pilot_id, "d" * 64, campaign_id, "e" * 40, hash_value,
             )
+            with pytest.raises(asyncpg.CheckViolationError):
+                async with connection.transaction():
+                    await connection.execute(
+                        "UPDATE mainnet_launch_sessions SET max_risk_increasing_orders = NULL WHERE launch_id = $1",
+                        pilot_id,
+                    )
+            with pytest.raises(asyncpg.CheckViolationError):
+                async with connection.transaction():
+                    await connection.execute(
+                        "UPDATE mainnet_launch_sessions SET max_risk_increasing_orders = 2 WHERE launch_id = $1",
+                        pilot_id,
+                    )
             for column, bad_value in (
                 ("pilot_git_sha", None),
                 ("pilot_git_sha", "a" * 41),
@@ -2058,7 +2076,7 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
                     pilot_max_drawdown_usdc, pilot_quick_target_net_usdc,
                     pilot_quick_max_hold_seconds, pilot_max_leverage, pilot_status)
                    VALUES ($1, 'migration-test-pilot-restart-approval', 'ETHUSDC',
-                    'LIVE_RESEARCH_PILOT', 'ACTIVE', 'LOCAL', $2, NULL, $3,
+                    'LIVE_RESEARCH_PILOT', 'ACTIVE', 'LOCAL', $2, 1, $3,
                     $4, $5, $5, $5, $5, 'test-project', '1', '2', 'QUICK',
                     CURRENT_TIMESTAMP + INTERVAL '7 days', $5, 50, 2, 5, 0.25, 86400, 10, 'ACTIVE')""",
                 restart_pilot_id, "f" * 64, restart_campaign_id,

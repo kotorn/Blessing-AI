@@ -3309,8 +3309,8 @@ class PersistenceRepository:
             raise ValueError("Mainnet staged launch permits exactly one risk-increasing order")
         normalized_pilot: dict[str, Any] | None = None
         if policy == "LIVE_RESEARCH_PILOT":
-            if normalized_target != _LOCAL_RUNTIME_TARGET or max_risk_increasing_orders is not None:
-                raise ValueError("Live Research Pilot is Local-only and permits bounded sequential orders")
+            if normalized_target != _LOCAL_RUNTIME_TARGET or max_risk_increasing_orders != 1:
+                raise ValueError("Live Research Pilot is Local-only and permits exactly one risk-increasing order")
             required_pilot_fields = {
                 "campaign_id", "git_sha", "source_hash", "dependency_hash", "migration_hash",
                 "strategy_hash", "secret_project_id", "api_key_version", "api_secret_version",
@@ -3529,7 +3529,8 @@ class PersistenceRepository:
                  AND state = 'ACTIVE'
                  AND pilot_status = 'ACTIVE'
                  AND pilot_campaign_expires_at > CURRENT_TIMESTAMP
-                 AND pilot_drawdown_triggered = FALSE)
+                 AND pilot_drawdown_triggered = FALSE
+                 AND reserved_orders < max_risk_increasing_orders)
               )
             RETURNING launch_id
             """,

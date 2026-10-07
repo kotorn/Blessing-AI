@@ -2461,7 +2461,7 @@ app.post('/api/local/pilot/request', async (req: Request, res: Response) => {
   if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'strategyId')) {
     return res.status(400).json({ error: 'LOCAL_PILOT_REQUEST_INVALID' });
   }
-  const strategyId = String(body.strategyId || '').trim().toLowerCase() as LocalLivePilotStrategyId;
+  const strategyId = String(body.strategyId || 'grid').trim().toLowerCase() as LocalLivePilotStrategyId;
   if (!['grid', 'trend', 'shock', 'carry'].includes(strategyId)) {
     return res.status(400).json({ error: 'LOCAL_PILOT_STRATEGY_REQUIRED' });
   }
