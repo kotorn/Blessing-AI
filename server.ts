@@ -2818,6 +2818,70 @@ app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
   }
 });
 
+let pilotVerdictRefreshTimer: NodeJS.Timeout | null = null;
+let activePilotCampaignId: string | null = null;
+
+function stopPilotVerdictRefreshTimer(): void {
+  if (pilotVerdictRefreshTimer) {
+    clearInterval(pilotVerdictRefreshTimer);
+    pilotVerdictRefreshTimer = null;
+  }
+  activePilotCampaignId = null;
+}
+
+async function refreshActivePilotVerdict(): Promise<void> {
+  if (!LOCAL_ONLY || !localWorkerSupervisor) return;
+  const supervisorStatus = localWorkerSupervisor.status();
+  const campaignId = activePilotCampaignId || supervisorStatus.pilotCampaignId;
+  if (!campaignId) {
+    stopPilotVerdictRefreshTimer();
+    return;
+  }
+  try {
+    const store = getServerLocalLivePilotStore();
+    const campaign = await store.get(campaignId);
+    if (!campaign || campaign.status !== 'ACTIVE') {
+      localWorkerSupervisor.setPilotReadinessVerdict(null);
+      stopPilotVerdictRefreshTimer();
+      return;
+    }
+    const readiness = currentPilotCapabilityReadiness(campaign.adminUid);
+    if (readiness.status !== 'READY' || !readiness.canStart) {
+      localWorkerSupervisor.setPilotReadinessVerdict(null);
+      return;
+    }
+    const fingerprint = currentLocalFingerprint(
+      (process.env.LOCAL_MAINNET_API_KEY_VERSION || '').trim(),
+      (process.env.LOCAL_MAINNET_API_SECRET_VERSION || '').trim(),
+    );
+    const pilotVerdict = createPilotReadinessVerdict({
+      campaign,
+      binding: {
+        gitSha: fingerprint.gitSha,
+        sourceSha256: fingerprint.sourceSha256,
+        dependencySha256: fingerprint.dependencySha256,
+        migrationSha256: fingerprint.migrationSha256,
+        pilotPolicySha256: localLivePilotPolicySha256(),
+      },
+      readiness,
+      workerIdentityToken: LOCAL_WORKER_IDENTITY_TOKEN,
+    });
+    localWorkerSupervisor.setPilotReadinessVerdict(pilotVerdict);
+  } catch {
+    localWorkerSupervisor.setPilotReadinessVerdict(null);
+  }
+}
+
+function startPilotVerdictRefreshTimer(campaignId: string): void {
+  activePilotCampaignId = campaignId;
+  if (pilotVerdictRefreshTimer) {
+    clearInterval(pilotVerdictRefreshTimer);
+  }
+  pilotVerdictRefreshTimer = setInterval(() => {
+    void refreshActivePilotVerdict();
+  }, 240_000);
+}
+
 app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
   if (!LOCAL_ONLY || !localWorkerSupervisor) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
   if (rejectUnreadyLocalPilot(res)) return;
@@ -2920,7 +2984,10 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
       readiness,
       workerIdentityToken: LOCAL_WORKER_IDENTITY_TOKEN,
     });
-    if (pilotVerdict && localWorkerSupervisor) {
+    if (!pilotVerdict) {
+      throw new Error('LOCAL_PILOT_VERDICT_UNAVAILABLE');
+    }
+    if (localWorkerSupervisor) {
       localWorkerSupervisor.setPilotReadinessVerdict(pilotVerdict);
     }
     armAttempted = true;
@@ -2933,13 +3000,14 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
         releaseApprovalId: approvalId,
         launchPolicy: 'LIVE_RESEARCH_PILOT',
         pilotCampaignId: campaign.campaignId,
-        pilotReadinessVerdict: pilotVerdict || undefined,
+        pilotReadinessVerdict: pilotVerdict,
       }),
     });
     if (!armed.response.ok) throw new Error('LOCAL_PILOT_WORKER_ARM_REJECTED');
     // Activate store campaign only after worker confirms ARM so rejected ARM does not burn campaign into CLOSE_ONLY
     campaign = await getServerLocalLivePilotStore().activate(campaign.campaignId, localLivePilotBinding(campaign));
     activated = true;
+    startPilotVerdictRefreshTimer(campaign.campaignId);
     const finalState = await forwardWorkerRequest('/state');
     if (!finalState.response.ok || finalState.data?.execution_mode !== 'LIVE'
       || !['ARMED', 'PAUSED_NEW_RISK'].includes(String(finalState.data?.engine_state))
@@ -2964,6 +3032,7 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
     });
   } catch (error) {
     if (activated && campaign) {
+      stopPilotVerdictRefreshTimer();
       try {
         await getServerLocalLivePilotStore().enterCloseOnly(campaign.campaignId, localLivePilotBinding(campaign));
       } catch { /* retain fail-closed runtime for operator reconciliation */ }
@@ -3014,6 +3083,10 @@ app.post('/api/local/pilot/close-only', async (req: Request, res: Response) => {
         return res.status(503).json({ error: 'LOCAL_PILOT_WORKER_CLOSE_ONLY_UNCONFIRMED', evidence_status: 'UNVERIFIED' });
       }
     }
+    stopPilotVerdictRefreshTimer();
+    if (localWorkerSupervisor) {
+      localWorkerSupervisor.setPilotReadinessVerdict(null);
+    }
     const closed = await store.enterCloseOnly(campaign.campaignId, localLivePilotBinding(campaign));
     return res.json({ ...safeLocalLivePilotCampaign(closed), evidence_status: 'VERIFIED' });
   } catch {
@@ -3059,6 +3132,10 @@ app.post('/api/local/pilot/revoke', async (req: Request, res: Response) => {
       ),
       onWorkerRecoveryConfirmed: () => { workerRecoveryConfirmed = true; },
     });
+    stopPilotVerdictRefreshTimer();
+    if (localWorkerSupervisor) {
+      localWorkerSupervisor.setPilotReadinessVerdict(null);
+    }
     return res.json({ ...safeLocalLivePilotCampaign(revoked), evidence_status: 'VERIFIED' });
   } catch (error) {
     const message = error instanceof Error ? error.message : '';

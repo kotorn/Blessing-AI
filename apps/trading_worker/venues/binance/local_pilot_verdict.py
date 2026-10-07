@@ -68,9 +68,9 @@ def verify_pilot_readiness_verdict(
     if not expected_campaign or verdict.get("campaignId") != expected_campaign:
         return False, "VERDICT_CAMPAIGN_MISMATCH", {}
 
-    # Git SHA check
+    # Git SHA check (mandatory when campaignId is present)
     expected_git_sha = str(os.getenv("LOCAL_LIVE_PILOT_GIT_SHA", "")).strip()
-    if expected_git_sha and verdict.get("gitSha") != expected_git_sha:
+    if not expected_git_sha or verdict.get("gitSha") != expected_git_sha:
         return False, "VERDICT_GIT_SHA_MISMATCH", {}
 
     # Binding check
@@ -80,20 +80,21 @@ def verify_pilot_readiness_verdict(
     if binding.get("gitSha") != verdict.get("gitSha"):
         return False, "VERDICT_BINDING_MISMATCH", {}
 
+    # Binding environment variables are mandatory when campaignId is present
     expected_source_hash = str(os.getenv("LOCAL_LIVE_PILOT_SOURCE_HASH", "")).strip()
-    if expected_source_hash and binding.get("sourceSha256") != expected_source_hash:
+    if not expected_source_hash or binding.get("sourceSha256") != expected_source_hash:
         return False, "VERDICT_BINDING_MISMATCH", {}
 
     expected_dep_hash = str(os.getenv("LOCAL_LIVE_PILOT_DEPENDENCY_HASH", "")).strip()
-    if expected_dep_hash and binding.get("dependencySha256") != expected_dep_hash:
+    if not expected_dep_hash or binding.get("dependencySha256") != expected_dep_hash:
         return False, "VERDICT_BINDING_MISMATCH", {}
 
     expected_mig_hash = str(os.getenv("LOCAL_LIVE_PILOT_MIGRATION_HASH", "")).strip()
-    if expected_mig_hash and binding.get("migrationSha256") != expected_mig_hash:
+    if not expected_mig_hash or binding.get("migrationSha256") != expected_mig_hash:
         return False, "VERDICT_BINDING_MISMATCH", {}
 
     expected_policy_hash = str(os.getenv("LOCAL_LIVE_PILOT_RISK_POLICY_HASH", "")).strip()
-    if expected_policy_hash and binding.get("pilotPolicySha256") != expected_policy_hash:
+    if not expected_policy_hash or binding.get("pilotPolicySha256") != expected_policy_hash:
         return False, "VERDICT_BINDING_MISMATCH", {}
 
     # Verified classes check
@@ -108,6 +109,14 @@ def verify_pilot_readiness_verdict(
         expires_at = datetime.fromisoformat(str(verdict["expiresAt"]).replace("Z", "+00:00")).astimezone(timezone.utc)
     except (ValueError, TypeError):
         return False, "VERDICT_TIMESTAMPS_INVALID", {}
+
+    # Must satisfy expiresAt > issuedAt
+    if expires_at <= issued_at:
+        return False, "VERDICT_TIMESTAMPS_INVALID", {}
+
+    # Maximum allowed TTL is 3600 seconds
+    if (expires_at - issued_at).total_seconds() > 3600:
+        return False, "VERDICT_TTL_EXCEEDED", {}
 
     # Clock skew tolerance: 10 seconds in the future
     if (issued_at - current_time).total_seconds() > 10:
@@ -126,11 +135,52 @@ def verify_pilot_readiness_verdict(
 
 
 def set_active_pilot_verdict(verdict: dict[str, Any] | None) -> None:
-    """Store the most recent signed verdict in Worker memory."""
+    """Store the newest valid signed verdict in Worker memory."""
     global _ACTIVE_VERDICT
+    if verdict is None:
+        _ACTIVE_VERDICT = None
+        return
+
+    # If current active verdict is valid, retain it unless incoming verdict is also valid and newer
+    if _ACTIVE_VERDICT is not None:
+        try:
+            from apps.trading_worker.local_runtime import worker_identity_token_value
+            token = worker_identity_token_value()
+        except Exception:
+            token = str(os.getenv("WORKER_IDENTITY_TOKEN", "")).strip()
+        curr_ok, _, _ = verify_pilot_readiness_verdict(_ACTIVE_VERDICT, token)
+        if curr_ok:
+            new_ok, _, _ = verify_pilot_readiness_verdict(verdict, token)
+            if not new_ok:
+                return
+            try:
+                curr_issued = datetime.fromisoformat(str(_ACTIVE_VERDICT.get("issuedAt", "")).replace("Z", "+00:00")).astimezone(timezone.utc)
+                new_issued = datetime.fromisoformat(str(verdict.get("issuedAt", "")).replace("Z", "+00:00")).astimezone(timezone.utc)
+                if new_issued < curr_issued:
+                    return
+            except Exception:
+                pass
     _ACTIVE_VERDICT = verdict
 
 
 def get_active_pilot_verdict() -> dict[str, Any] | None:
     """Retrieve the current in-memory signed verdict."""
     return _ACTIVE_VERDICT
+
+
+def get_pilot_verdict_status(*, now: datetime | None = None) -> str:
+    """Compute verdict status: VALID, EXPIRED, NOT_AVAILABLE, or INVALID."""
+    verdict = get_active_pilot_verdict()
+    if verdict is None:
+        return "NOT_AVAILABLE"
+    try:
+        from apps.trading_worker.local_runtime import worker_identity_token_value
+        token = worker_identity_token_value()
+    except Exception:
+        token = str(os.getenv("WORKER_IDENTITY_TOKEN", "")).strip()
+    ok, reason, _ = verify_pilot_readiness_verdict(verdict, token, now=now)
+    if ok:
+        return "VALID"
+    if reason == "VERDICT_EXPIRED":
+        return "EXPIRED"
+    return "INVALID"

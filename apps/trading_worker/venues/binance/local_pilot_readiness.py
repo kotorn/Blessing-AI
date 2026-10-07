@@ -252,8 +252,8 @@ def local_live_pilot_readiness(root: str | Path | None = None, *, now: datetime 
                         "reason": "LOCAL_PILOT_AUTHENTICATED_PREPARATION_EVIDENCE_NOT_AVAILABLE",
                     }],
                 },
-                "ci_attestation": {"status": "PASS", "reason": "TRACK_C_VERDICT_VERIFIED"},
-                "provenance": {"local_checks": "VERIFIED", "reviews": "VERIFIED", "testnet": "VERIFIED"},
+                "ci_attestation": {"status": "PASS", "reason": "DELEGATED"},
+                "provenance": {"local_checks": "DELEGATED", "reviews": "DELEGATED", "testnet": "DELEGATED"},
                 "blockers": [],
                 "verdict": active_verdict,
             }

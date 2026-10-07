@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -100,16 +101,82 @@ describe('Pilot Readiness Verdict Interoperability', () => {
     expect(verdict).toBeNull();
   });
 
-  it('computes deterministic canonical json and signature', () => {
-    const payload = {
-      b: 2,
-      a: 1,
-      nested: { z: 9, y: 8 },
-      signature: 'ignored',
-    };
-    expect(canonicalVerdictJson(payload)).toBe('{"a":1,"b":2,"nested":{"y":8,"z":9}}');
-    const sig1 = signVerdict(payload, token);
-    const sig2 = signVerdict({ nested: { y: 8, z: 9 }, a: 1, b: 2 }, token);
-    expect(sig1).toBe(sig2);
+  it('computes deterministic canonical json and signature matching golden fixture', () => {
+    const goldenRaw = readFileSync(path.resolve(repo, 'tests/fixtures/pilot_verdict_golden.json'), 'utf8');
+    const golden = JSON.parse(goldenRaw);
+    const canonical = canonicalVerdictJson(golden.rawPayload);
+    expect(canonical).toBe(golden.canonicalJson);
+    const signature = signVerdict(golden.rawPayload, golden.token);
+    expect(signature).toBe(golden.expectedSignature);
+  });
+
+  it('defaults TTL to 300s and clamps TTL to max 3600s', () => {
+    const t0 = new Date('2026-10-07T12:00:00.000Z');
+    const defaultVerdict = createPilotReadinessVerdict({
+      campaign,
+      binding,
+      readiness: readyReadiness,
+      workerIdentityToken: token,
+      now: t0,
+    });
+    expect(defaultVerdict).not.toBeNull();
+    expect(defaultVerdict?.expiresAt).toBe('2026-10-07T12:05:00.000Z');
+
+    const maxVerdict = createPilotReadinessVerdict({
+      campaign,
+      binding,
+      readiness: readyReadiness,
+      workerIdentityToken: token,
+      now: t0,
+      ttlSeconds: 7200,
+    });
+    expect(maxVerdict).not.toBeNull();
+    // Clamped to 3600s = 1 hour
+    expect(maxVerdict?.expiresAt).toBe('2026-10-07T13:00:00.000Z');
+  });
+
+  it('bounds expiresAt by oldestAttestationAt + 24h and campaignExpiresAt', () => {
+    const t0 = new Date('2026-10-07T12:00:00.000Z');
+    // Oldest attestation was 23 hours and 58 minutes ago -> expires in 2 minutes
+    const oldAttestation = new Date(t0.getTime() - (23 * 3600 + 58 * 60) * 1000);
+    const verdict = createPilotReadinessVerdict({
+      campaign,
+      binding,
+      readiness: readyReadiness,
+      workerIdentityToken: token,
+      now: t0,
+      ttlSeconds: 300,
+      oldestAttestationAt: oldAttestation,
+    });
+    expect(verdict).not.toBeNull();
+    expect(verdict?.expiresAt).toBe(new Date(oldAttestation.getTime() + 24 * 3600 * 1000).toISOString());
+
+    // Campaign expires before TTL
+    const campaignExp = '2026-10-07T12:02:00.000Z';
+    const campaignWithExpiry = { ...campaign, campaignExpiresAt: campaignExp };
+    const campVerdict = createPilotReadinessVerdict({
+      campaign: campaignWithExpiry,
+      binding,
+      readiness: readyReadiness,
+      workerIdentityToken: token,
+      now: t0,
+      ttlSeconds: 300,
+    });
+    expect(campVerdict).not.toBeNull();
+    expect(campVerdict?.expiresAt).toBe(campaignExp);
+  });
+
+  it('returns null if computed expiresAt is not greater than issuedAt', () => {
+    const t0 = new Date('2026-10-07T12:00:00.000Z');
+    // Campaign already expired
+    const expiredCampaign = { ...campaign, campaignExpiresAt: '2026-10-07T11:59:00.000Z' };
+    const verdict = createPilotReadinessVerdict({
+      campaign: expiredCampaign,
+      binding,
+      readiness: readyReadiness,
+      workerIdentityToken: token,
+      now: t0,
+    });
+    expect(verdict).toBeNull();
   });
 });

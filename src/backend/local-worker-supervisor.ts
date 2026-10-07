@@ -568,14 +568,12 @@ export class LocalWorkerSupervisor {
     const send = async () => {
       if (this.worker !== child || !this.childIsRunning(child)) return;
       try {
-        const body = this.activePilotVerdict
-          ? JSON.stringify({ pilotReadinessVerdict: this.activePilotVerdict })
-          : undefined;
+        const body = JSON.stringify({ pilotReadinessVerdict: this.activePilotVerdict });
         await this.fetcher(`${this.options.workerUrl.replace(/\/+$/, '')}/supervisor/heartbeat`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${this.options.workerIdentityToken}`,
-            ...(body ? { 'Content-Type': 'application/json' } : {}),
+            'Content-Type': 'application/json',
           },
           body,
           signal: AbortSignal.timeout(2_500),

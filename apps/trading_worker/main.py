@@ -66,6 +66,7 @@ from apps.trading_worker.venues.binance.execution import BinanceExecutionAdapter
 from apps.trading_worker.venues.binance.gates import DecisionExecutionGate
 from apps.trading_worker.venues.binance.local_pilot_readiness import local_live_pilot_readiness
 from apps.trading_worker.venues.binance.local_pilot_verdict import (
+    get_pilot_verdict_status,
     set_active_pilot_verdict,
     verify_pilot_readiness_verdict,
 )
@@ -421,6 +422,7 @@ class WorkerRuntimeState(BaseModel):
     # This is deliberately separate from the general heartbeat: a fresh
     # process heartbeat does not prove the Local Pilot lifecycle monitor ran.
     pilot_lifecycle_monitor: Dict[str, Any] = Field(default_factory=dict)
+    pilot_verdict_status: Optional[str] = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -659,6 +661,7 @@ def get_default_state() -> WorkerRuntimeState:
         health_indicators=health,
         config_version="v0.2.0-beta",
         active_configuration=None,
+        pilot_verdict_status=get_pilot_verdict_status(),
         updated_at=utc_now()
     )
 
@@ -769,7 +772,7 @@ def local_supervisor_heartbeat(payload: Optional[SupervisorHeartbeatRequest] = N
         raise HTTPException(status_code=404, detail="Local supervisor heartbeat is unavailable")
     if WORKER_ENGINE is None:
         raise HTTPException(status_code=503, detail="Worker is not initialized")
-    if payload and payload.pilotReadinessVerdict is not None:
+    if payload and "pilotReadinessVerdict" in payload.model_fields_set:
         set_active_pilot_verdict(payload.pilotReadinessVerdict)
     WORKER_ENGINE.record_local_supervisor_heartbeat()
     return {"status": "ok", "runtimeTarget": "LOCAL"}
@@ -2910,6 +2913,7 @@ class TradingWorkerApp:
             local_source_fingerprint=os.getenv("LOCAL_SOURCE_FINGERPRINT", "").strip() if _env_enabled("LOCAL_ONLY") else "",
             local_supervisor_instance_id=os.getenv("LOCAL_SUPERVISOR_INSTANCE_ID", "").strip() if _env_enabled("LOCAL_ONLY") else "",
             pilot_lifecycle_monitor=self._local_pilot_lifecycle_monitor_state(),
+            pilot_verdict_status=get_pilot_verdict_status(),
             engine_state=self.engine_state,
             connection_state=self.connection_state,
             market_data_healthy=self.market_data_healthy,

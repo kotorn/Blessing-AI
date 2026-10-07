@@ -5,6 +5,8 @@
  * all 5 Track C classes are verified on the host on the exact frozen git SHA and binding.
  */
 import { createHmac } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import type { LocalPilotReadiness } from './local-live-pilot-readiness.js';
 import type { TrackCBinding } from './local-release-runtime.js';
 import { TRACK_C_CLASSES } from './local-pilot-attestation.js';
@@ -49,22 +51,85 @@ export function signVerdict(payload: Record<string, unknown>, token: string): st
   return createHmac('sha256', token).update(canonical, 'utf8').digest('hex');
 }
 
+export function getOldestAttestationTime(root: string = process.cwd()): Date | null {
+  const dir = path.resolve(root, 'artifacts/local-pilot-attestations');
+  if (!existsSync(dir)) return null;
+  let oldestMs = Infinity;
+  for (const c of TRACK_C_CLASSES) {
+    const file = path.join(dir, `${c}.json`);
+    if (!existsSync(file)) continue;
+    try {
+      const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+      if (typeof raw?.observedAt === 'string') {
+        const ms = Date.parse(raw.observedAt);
+        if (!Number.isNaN(ms) && ms < oldestMs) {
+          oldestMs = ms;
+        }
+      }
+    } catch {
+      // ignore read/parse failure
+    }
+  }
+  return oldestMs === Infinity ? null : new Date(oldestMs);
+}
+
 export interface CreatePilotVerdictParams {
-  campaign: { campaignId: string };
+  campaign: { campaignId: string; campaignExpiresAt?: string };
   binding: TrackCBinding;
   readiness: LocalPilotReadiness;
   workerIdentityToken: string;
   now?: Date;
   ttlSeconds?: number;
+  oldestAttestationAt?: Date | string | null;
+  root?: string;
 }
 
 export function createPilotReadinessVerdict(params: CreatePilotVerdictParams): PilotReadinessVerdict | null {
-  const { campaign, binding, readiness, workerIdentityToken, now = new Date(), ttlSeconds = 3600 } = params;
+  const {
+    campaign,
+    binding,
+    readiness,
+    workerIdentityToken,
+    now = new Date(),
+    ttlSeconds = 300,
+    oldestAttestationAt,
+    root,
+  } = params;
   if (readiness.status !== 'READY' || !readiness.canStart) {
     return null;
   }
+
+  let oldestAttestationMs: number | null = null;
+  if (oldestAttestationAt) {
+    const parsed = typeof oldestAttestationAt === 'string' ? Date.parse(oldestAttestationAt) : oldestAttestationAt.getTime();
+    if (!Number.isNaN(parsed)) oldestAttestationMs = parsed;
+  }
+  if (oldestAttestationMs === null) {
+    const fromDisk = getOldestAttestationTime(root);
+    if (fromDisk) oldestAttestationMs = fromDisk.getTime();
+  }
+
+  const effectiveTtlSeconds = Math.min(Math.max(1, ttlSeconds ?? 300), 3600);
+  const ttlExpiryMs = now.getTime() + effectiveTtlSeconds * 1000;
+
+  const candidates: number[] = [ttlExpiryMs];
+  if (oldestAttestationMs !== null) {
+    candidates.push(oldestAttestationMs + 24 * 60 * 60 * 1000);
+  }
+  if (campaign.campaignExpiresAt) {
+    const campaignExpMs = Date.parse(campaign.campaignExpiresAt);
+    if (!Number.isNaN(campaignExpMs)) {
+      candidates.push(campaignExpMs);
+    }
+  }
+
+  const finalExpiresMs = Math.min(...candidates);
+  if (finalExpiresMs <= now.getTime()) {
+    return null;
+  }
+
   const issuedAt = now.toISOString();
-  const expiresAt = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
+  const expiresAt = new Date(finalExpiresMs).toISOString();
   const payload: PilotReadinessVerdictPayload = {
     verdict: 'READY',
     campaignId: campaign.campaignId,
