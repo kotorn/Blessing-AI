@@ -430,6 +430,11 @@ REQUIRED_CONSTRAINTS = {
             "'live_research_pilot'",
             "and",
             "max_risk_increasing_orders",
+            "is",
+            "not",
+            "null",
+            "and",
+            "max_risk_increasing_orders",
             "=",
             "1",
         ),
@@ -690,7 +695,7 @@ REQUIRED_CONSTRAINT_DEFINITION_SHA256 = {
     "mainnet_launch_policy_check":
         "ec93dbfd21170594e0d24440769f87076539f8a0c2eb2a2c9eefb52906b47961",
     "mainnet_launch_limit_check":
-        "285d2a2485710a0372385dbba6dfa35b2b4def7cd8adea00571ba4f457f781b5",
+        "375be366590008da0771627f385581181bd0296d06f5b29528a56b92a078ab5a",
     "mainnet_launch_reserved_check":
         "754e745f4099f48091634688a7ab71598c32c1fff804b3f070394db8940f915d",
     "mainnet_launch_submitted_check":
@@ -723,11 +728,11 @@ REQUIRED_CONSTRAINT_DEFINITION_SHA256 = {
         "a302a72cf3216ca66eb6a693842abee7d910825523f8cbd4f54c366ccc9f19af",
     "binance_preexisting_algo_proof_check":
         "9ff319da1defd629e3ad6072f90168c1e0c0abbb80bf95f0ae0f3d1f58cf640a",
-    "mainnet_launch_pilot_policy_check": "e602c26bc79ce50eee52285c7e0439f3b5cac711dc0c92e66484214c90ad9204",
+    "mainnet_launch_pilot_policy_check": "c44bb03c84b082229a015502f77eb9770eaa3d7e1b85afe7e77c4213fc284d7e",
     "binance_algo_protection_management_mode_check": "b06b0b0fd8479dfea990e3d5d922889e4086d3e6de3fb95c22f7e9a2835b8d59",
     "binance_history_checkpoint_scan_fence_check": "7a34f2359e9772f52cbf836a4b348782550440561b1e70fddea62f7b7a8a93a9",
     "binance_history_item_observation_shape_check": "f76b9d81d72c06e4c2ee0b60bab057fe171bfe617ace5765cb5931133ad542fe",
-    "mainnet_launch_pilot_binding_check": "fe3d0408e55d68e58d9a81926ad8471df4dc929c82225ed4cfcb9dbb399c3719",
+    "mainnet_launch_pilot_binding_check": "731d9f12618a71dafccaea62f20f787e8c0c65f5554995ea578090719bed5577",
     "local_live_pilot_event_type_check": "dadf5f5734b503be5512731be1b16f9abbe9ac9fbb6d1c7a22fd4890a7164197",
     "local_live_pilot_event_source_check": "4b477b1d14da7b3550681d27c2e2162ce842ce67978a540a8e48dce248e49ee6",
     "local_live_pilot_event_payload_check": "85556805e9eb2092f095776969c572d06489b18c301c0aa1d553946a16373989",

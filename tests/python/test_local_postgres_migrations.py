@@ -116,6 +116,7 @@ def test_emergency_claim_contract_requires_every_column_and_does_not_approve_020
     assert (CLAIM_TABLE, ("venue", "close_client_order_id"), False) in REQUIRED_UNIQUE_KEYS
     assert "020_emergency_close_submission_claims.sql" not in SAFE_POPULATED_UPGRADES
     assert "021_pilot_single_entry_cap.sql" not in SAFE_POPULATED_UPGRADES
+    assert "022_pilot_single_entry_cap_not_null.sql" not in SAFE_POPULATED_UPGRADES
 
 
 @pytest.mark.parametrize("old,new", [
@@ -327,6 +328,7 @@ def test_local_migrations_are_numbered_and_discovered_in_order():
         "019_local_pilot_event_ownership.sql",
         "020_emergency_close_submission_claims.sql",
         "021_pilot_single_entry_cap.sql",
+        "022_pilot_single_entry_cap_not_null.sql",
     ]
     assert all(len(migration_checksum(path)) == 64 for path in migrations)
     pilot_migration = next(path for path in migrations if path.name == REQUIRED_LOCAL_PILOT_MIGRATION)
@@ -810,6 +812,8 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
         "018",
         "019",
         "020",
+        "021",
+        "022",
     ]
 
     async def scenario():
@@ -897,7 +901,7 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
             # populated state in this disposable PostgreSQL 17 database.
             with tempfile.TemporaryDirectory(prefix="blessing-migrations-007-019-") as temporary:
                 legacy_directory = Path(temporary)
-                for migration in migrations[:-1]:
+                for migration in migrations[:19]:
                     shutil.copyfile(migration, legacy_directory / migration.name)
                 # The current production verifier deliberately refuses an
                 # incomplete legacy schema. Additive upgrades are recorded,
@@ -908,18 +912,20 @@ def test_populated_migration_upgrade_through_020_survives_reconnect():
                     "SELECT version FROM local_schema_migrations ORDER BY version"
                 )
                 assert [row["version"] for row in recorded_versions] == [
-                    migration.name for migration in migrations[:-1]
+                    migration.name for migration in migrations[:19]
                 ]
                 with pytest.raises(RuntimeError, match="binance_emergency_close_claims"):
                     await apply_migrations(connection, legacy_directory)
-            # Exercise 020 only inside this explicitly isolated acceptance
-            # database. This does not whitelist upgrades of operational data.
+            # Exercise 020 and 021 only inside this explicitly isolated
+            # acceptance database. This does not whitelist upgrades of
+            # operational data.
             async with connection.transaction():
-                await connection.execute(migrations[-1].read_text(encoding="utf-8"))
-                await connection.execute(
-                    "INSERT INTO public.local_schema_migrations (version, checksum) VALUES ($1, $2)",
-                    migrations[-1].name, migration_checksum(migrations[-1]),
-                )
+                for migration in migrations[19:]:
+                    await connection.execute(migration.read_text(encoding="utf-8"))
+                    await connection.execute(
+                        "INSERT INTO public.local_schema_migrations (version, checksum) VALUES ($1, $2)",
+                        migration.name, migration_checksum(migration),
+                    )
             await verify_schema(connection)
             assert await connection.fetchval(
                 "SELECT to_regclass('public.binance_emergency_close_claims') IS NOT NULL"
