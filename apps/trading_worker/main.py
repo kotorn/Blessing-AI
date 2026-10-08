@@ -4951,6 +4951,25 @@ class TradingWorkerApp:
             clear_local_mainnet_secrets()
         logger.info("Worker DISARMED")
 
+    def _pilot_basket_id(self) -> Optional[str]:
+        """One stable basket per launch for every pilot bracket.
+
+        The launch session binds its basket once and later reservations and the
+        order risk context accept only that basket, so a random basket per
+        decision strands the campaign after the first aborted attempt.
+        """
+        session = self._mainnet_launch_session
+        if not isinstance(session, dict):
+            return None
+        bound = str(session.get("basket_id") or "").strip()
+        if bound:
+            return bound
+        launch_id = str(session.get("launch_id") or "").strip()
+        if not launch_id:
+            return None
+        digest = hashlib.sha256(f"pilot-basket:{launch_id}".encode("utf-8")).hexdigest()
+        return f"pilot-{digest[:16]}"
+
     async def _clamp_order_notional_if_needed(
         self,
         decision,
@@ -5021,7 +5040,9 @@ class TradingWorkerApp:
                                     entry_price=side_price,
                                     side=order.side,
                                 )
-                                provisional_order = apply_pilot_bracket_to_intent(order, provisional_plan)
+                                provisional_order = apply_pilot_bracket_to_intent(
+                                    order, provisional_plan, basket_id=self._pilot_basket_id()
+                                )
 
                                 # 2. Cost-aware pre-planning if adapter provides cost evidence
                                 cost_provider = getattr(
@@ -5081,7 +5102,9 @@ class TradingWorkerApp:
                                 else:
                                     bracket_plan = provisional_plan
 
-                                order = apply_pilot_bracket_to_intent(order, bracket_plan)
+                                order = apply_pilot_bracket_to_intent(
+                                    order, bracket_plan, basket_id=self._pilot_basket_id()
+                                )
                                 new_orders.append(order)
                                 clamped_any = True
                                 continue
