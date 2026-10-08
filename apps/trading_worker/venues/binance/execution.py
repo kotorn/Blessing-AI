@@ -159,6 +159,8 @@ class BinanceExecutionAdapter:
         self.last_market_ask: Dict[str, Decimal] = {}
         self.last_market_bid_qty: Dict[str, Decimal] = {}
         self.last_market_ask_qty: Dict[str, Decimal] = {}
+        # Executable bid/ask clock; mark-price frames must not refresh it.
+        self.last_market_book_at: Dict[str, datetime] = {}
         self.last_market_event_source: Dict[str, str] = {}
         self.last_market_event_venue: Dict[str, str] = {}
         self.last_market_event_market_type: Dict[str, str] = {}
@@ -1392,6 +1394,7 @@ class BinanceExecutionAdapter:
         if bid is not None and ask is not None:
             self.last_market_bid[normalized_symbol] = bid
             self.last_market_ask[normalized_symbol] = ask
+            self.last_market_book_at[normalized_symbol] = timestamp
             if bid_qty is not None and bid_qty.is_finite() and bid_qty > 0:
                 self.last_market_bid_qty[normalized_symbol] = bid_qty
             if ask_qty is not None and ask_qty.is_finite() and ask_qty > 0:
@@ -1469,12 +1472,18 @@ class BinanceExecutionAdapter:
             if mark_price is not None and mark_price.is_finite() and mark_price > 0:
                 self.last_market_reference_price[symbol] = mark_price
                 self.last_market_reference_at[symbol] = timestamp
+        # markPrice frames have no order book; the public stream parser mirrors
+        # the mark into best_bid/best_ask. Only book events may set the
+        # executable quote, otherwise it alternates between ask and mark.
+        if event.mark_price is not None:
+            return True
         try:
             bid = Decimal(str(event.best_bid))
             ask = Decimal(str(event.best_ask))
             if bid.is_finite() and ask.is_finite() and bid > 0 and ask >= bid:
                 self.last_market_bid[symbol] = bid
                 self.last_market_ask[symbol] = ask
+                self.last_market_book_at[symbol] = timestamp
         except (InvalidOperation, TypeError, ValueError):
             pass
         return True
@@ -1513,8 +1522,12 @@ class BinanceExecutionAdapter:
         # Executable bid/ask samples and the mark/reference sample have
         # independent freshness clocks. A fresh book ticker must never make
         # an older mark price look fresh for PERCENT_PRICE validation.
+        # Every production writer of last_market_bid/ask also sets
+        # last_market_book_at; the event clock is only a fallback for state
+        # seeded without a book timestamp.
         event_at = (
-            self.last_market_event_at.get(normalized_symbol)
+            self.last_market_book_at.get(normalized_symbol)
+            or self.last_market_event_at.get(normalized_symbol)
             if normalized_side in {OrderSide.BUY.value, OrderSide.SELL.value}
             else self.last_market_reference_at.get(normalized_symbol)
         )

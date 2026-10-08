@@ -1551,6 +1551,71 @@ def test_percent_price_reference_uses_mark_not_book_or_midpoint():
     assert adapter.get_market_reference_price("BTCUSDT") == Decimal(10000)
 
 
+def test_mark_price_event_never_overwrites_real_top_of_book():
+    """markPrice frames carry no book; the parser mirrors mark into bid/ask.
+
+    Those mirrored values must not replace the real bookTicker bid/ask, or the
+    executable quote flips between ask and mark every second and the
+    MARKET entry_price == ask check becomes a coin flip.
+    """
+    adapter = BinanceExecutionAdapter(env=BinanceEnvironment.TESTNET)
+    book_event = MarketEvent(
+        event_id="BOOK-1",
+        event_time=utc_now(),
+        symbol="ETHUSDC",
+        venue="BINANCE_TESTNET",
+        market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("2609.9"),
+        best_bid=Decimal("2609.9"),
+        best_ask=Decimal("2610.0"),
+    )
+    assert adapter.record_market_event(book_event) is True
+    mark_event = book_event.model_copy(
+        update={
+            "event_id": "MARK-1",
+            "event_time": utc_now(),
+            "last_price": Decimal("2609.5"),
+            "best_bid": Decimal("2609.5"),
+            "best_ask": Decimal("2609.5"),
+            "mark_price": Decimal("2609.5"),
+        }
+    )
+    assert adapter.record_market_event(mark_event) is True
+    assert adapter.last_market_bid["ETHUSDC"] == Decimal("2609.9")
+    assert adapter.last_market_ask["ETHUSDC"] == Decimal("2610.0")
+    assert adapter.get_market_reference_price("ETHUSDC") == Decimal("2609.5")
+
+
+@pytest.mark.asyncio
+async def test_fresh_mark_does_not_make_a_stale_book_quote_look_fresh():
+    calls = []
+
+    async def handler(method, path, kwargs):
+        calls.append(path)
+        assert path == "/fapi/v1/ticker/bookTicker"
+        return {
+            "symbol": "ETHUSDC", "bidPrice": "2609.9", "askPrice": "2610.1",
+            "bidQty": "5", "askQty": "5", "time": int(utc_now().timestamp() * 1000),
+        }
+
+    adapter = await make_adapter(rest=ScriptedRest(handler))
+    old = utc_now() - timedelta(seconds=30)
+    adapter.record_market_event(MarketEvent(
+        event_id="BOOK-OLD", event_time=old, symbol="ETHUSDC",
+        venue="BINANCE_TESTNET", market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("2609.9"), best_bid=Decimal("2609.9"), best_ask=Decimal("2610.0"),
+    ))
+    adapter.record_market_event(MarketEvent(
+        event_id="MARK-NOW", event_time=utc_now(), symbol="ETHUSDC",
+        venue="BINANCE_TESTNET", market_type=MarketType.USDM_FUTURES,
+        last_price=Decimal("2609.5"), best_bid=Decimal("2609.5"),
+        best_ask=Decimal("2609.5"), mark_price=Decimal("2609.5"),
+    ))
+    price = await adapter._get_fresh_market_price("ETHUSDC", "BUY")
+    assert price == Decimal("2610.1")
+    assert calls == ["/fapi/v1/ticker/bookTicker"]
+
+
 @pytest.mark.asyncio
 async def test_stale_mark_is_refreshed_even_when_book_sample_is_fresh(monkeypatch):
     async def handler(method, path, kwargs):
