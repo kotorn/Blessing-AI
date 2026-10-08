@@ -45,6 +45,8 @@ def test_rest_client_routes_papi_urls():
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/account", set())
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/balance", set())
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/account", set())
+    # canTrade is only returned by accountConfig, not by um/account.
+    assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/accountConfig", set())
     assert "POST" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/order", set())
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/openOrders", set())
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/positionRisk", set())
@@ -109,8 +111,8 @@ async def test_portfolio_margin_capability_discovery():
         async def request(self, method, path, **kwargs):
             if path == "/papi/v1/account":
                 return {"accountStatus": "NORMAL"}
-            if path == "/papi/v1/um/account":
-                return {"canTrade": True}
+            if path == "/papi/v1/um/accountConfig":
+                return {"canTrade": True, "dualSidePosition": False}
             if path == "/papi/v1/um/positionSide/dual":
                 return {"dualSidePosition": False}
             if path == "/fapi/v1/exchangeInfo":
@@ -150,8 +152,8 @@ async def test_portfolio_margin_capability_discovery_can_trade_false():
         async def request(self, method, path, **kwargs):
             if path == "/papi/v1/account":
                 return {"accountStatus": "NORMAL"}
-            if path == "/papi/v1/um/account":
-                return {"canTrade": False}
+            if path == "/papi/v1/um/accountConfig":
+                return {"canTrade": False, "dualSidePosition": False}
             if path == "/papi/v1/um/positionSide/dual":
                 return {"dualSidePosition": False}
             if path == "/fapi/v1/exchangeInfo":
@@ -190,8 +192,8 @@ async def test_portfolio_margin_capability_discovery_missing_can_trade_fails():
         async def request(self, method, path, **kwargs):
             if path == "/papi/v1/account":
                 return {"accountStatus": "NORMAL"}
-            if path == "/papi/v1/um/account":
-                return {"assets": []}
+            if path == "/papi/v1/um/accountConfig":
+                return {"dualSidePosition": False}
             if path == "/papi/v1/um/positionSide/dual":
                 return {"dualSidePosition": False}
             if path == "/fapi/v1/exchangeInfo":

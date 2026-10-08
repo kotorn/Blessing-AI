@@ -3674,10 +3674,10 @@ class BinanceExecutionAdapter:
             "side": side,
             "positionSide": position_side,
             "type": order_type,
-            "quantity": str(quantity),
+            "quantity": format(quantity, "f"),
             "reduceOnly": "true",
             "closePosition": "false",
-            "triggerPrice": str(trigger_price),
+            "triggerPrice": format(trigger_price, "f"),
             "workingType": "MARK_PRICE",
             "clientAlgoId": client_algo_id,
         }

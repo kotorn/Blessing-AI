@@ -90,6 +90,7 @@ _ALLOWED_REQUEST_METHODS: dict[str, frozenset[str]] = {
     "/papi/v1/account": frozenset({"GET"}),
     "/papi/v1/balance": frozenset({"GET"}),
     "/papi/v1/um/account": frozenset({"GET"}),
+    "/papi/v1/um/accountConfig": frozenset({"GET"}),
     "/papi/v1/um/positionSide/dual": frozenset({"GET"}),
     "/papi/v1/um/positionRisk": frozenset({"GET"}),
     "/papi/v1/um/openOrders": frozenset({"GET"}),
