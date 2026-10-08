@@ -426,6 +426,8 @@ class WorkerRuntimeState(BaseModel):
     # process heartbeat does not prove the Local Pilot lifecycle monitor ran.
     pilot_lifecycle_monitor: Dict[str, Any] = Field(default_factory=dict)
     pilot_verdict_status: Optional[str] = None
+    # Why pilot signals did or did not become orders (non-secret, truncated).
+    pilot_attempt_diagnostics: Dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="ignore")
 
@@ -1045,6 +1047,44 @@ class TradingWorkerApp:
         self._mainnet_launch_id: Optional[str] = None
         self._mainnet_launch_session: Optional[dict[str, Any]] = None
         self._last_risk_snapshot_enqueued_at: float = 0.0
+        self._pilot_attempt_counts: Dict[str, int] = {}
+        self._pilot_attempt_last: Dict[str, Optional[str]] = {
+            "stage": None, "reason": None, "at": None, "signal_at": None,
+        }
+
+    _PILOT_ATTEMPT_STAGES = (
+        "SIGNAL", "PREPLAN_FAILED", "EXECUTION_BLOCKED", "MONITOR_ONLY",
+        "EXECUTING", "EXECUTION_ERROR",
+    )
+
+    def _note_pilot_attempt(self, stage: str, reason: Optional[str] = None) -> None:
+        """Record where a strategy signal stopped, for the operator state view."""
+        now = utc_now().isoformat()
+        self._pilot_attempt_counts[stage] = self._pilot_attempt_counts.get(stage, 0) + 1
+        if stage == "SIGNAL":
+            self._pilot_attempt_last["signal_at"] = now
+            return
+        cleaned = "".join(
+            ch if ch.isprintable() else " " for ch in str(reason or "")
+        ).strip()[:200]
+        self._pilot_attempt_last.update(stage=stage, reason=cleaned or None, at=now)
+
+    def _pilot_attempt_diagnostics(self) -> Dict[str, Any]:
+        counts = self._pilot_attempt_counts
+        adapter_block = getattr(self.execution_adapter, "last_order_block", None)
+        return {
+            "signals": counts.get("SIGNAL", 0),
+            "preplan_failed": counts.get("PREPLAN_FAILED", 0),
+            "execution_blocked": counts.get("EXECUTION_BLOCKED", 0),
+            "monitor_only": counts.get("MONITOR_ONLY", 0),
+            "executing": counts.get("EXECUTING", 0),
+            "execution_error": counts.get("EXECUTION_ERROR", 0),
+            "last_stage": self._pilot_attempt_last["stage"],
+            "last_reason": self._pilot_attempt_last["reason"],
+            "last_at": self._pilot_attempt_last["at"],
+            "last_signal_at": self._pilot_attempt_last["signal_at"],
+            "adapter_last_block": dict(adapter_block) if isinstance(adapter_block, dict) else None,
+        }
 
     def get_wealth_metrics(self) -> Dict[str, Any]:
         pm = self.wealth_evaluator.get_portfolio_metrics()
@@ -2940,6 +2980,7 @@ class TradingWorkerApp:
             local_supervisor_instance_id=os.getenv("LOCAL_SUPERVISOR_INSTANCE_ID", "").strip() if _env_enabled("LOCAL_ONLY") else "",
             pilot_lifecycle_monitor=self._local_pilot_lifecycle_monitor_state(),
             pilot_verdict_status=get_pilot_verdict_status(),
+            pilot_attempt_diagnostics=self._pilot_attempt_diagnostics(),
             engine_state=self.engine_state,
             connection_state=self.connection_state,
             market_data_healthy=self.market_data_healthy,
@@ -5764,6 +5805,7 @@ class TradingWorkerApp:
         decision = self.risk_governor.evaluate(target_exposure, risk_snapshot, current_position_qty=current_position_qty)
         
         if decision.action != "NOOP":
+            self._note_pilot_attempt("SIGNAL")
             if self.engine_state in EXECUTABLE_ENGINE_STATES:
                 if self.execution_mode in {
                     WorkerExecutionMode.TESTNET,
@@ -5807,6 +5849,7 @@ class TradingWorkerApp:
                                 decision.decision_id,
                                 clamp_err,
                             )
+                            self._note_pilot_attempt("PREPLAN_FAILED", str(clamp_err))
                             return
                         is_safe, reason = self._evaluate_execution_gate(decision)
                         if is_safe:
@@ -5816,9 +5859,13 @@ class TradingWorkerApp:
                                 decision.decision_id,
                                 decision.symbol,
                             )
+                            self._note_pilot_attempt("EXECUTING")
                             try:
                                 await self.execute_manual_decision(decision)
                             except Exception as exc:
+                                self._note_pilot_attempt(
+                                    "EXECUTION_ERROR", f"{type(exc).__name__}: {exc}"
+                                )
                                 await self._fail_closed_after_autonomous_execution_error(exc)
                         else:
                             logger.info(
@@ -5827,6 +5874,7 @@ class TradingWorkerApp:
                                 decision.decision_id,
                                 reason,
                             )
+                            self._note_pilot_attempt("EXECUTION_BLOCKED", reason)
                     else:
                         logger.info(
                             "[%s][MONITOR_ONLY] Decision %s for %s "
@@ -5835,6 +5883,10 @@ class TradingWorkerApp:
                             environment_name,
                             decision.decision_id,
                             decision.symbol,
+                        )
+                        self._note_pilot_attempt(
+                            "MONITOR_ONLY",
+                            "Execution readiness not met (approval, evidence or runtime readiness)",
                         )
                 else:
                     logger.info(f"[{self.execution_mode.value}][SIMULATED] EXECUTION DECISION: {decision.symbol} | Action: {decision.action}")

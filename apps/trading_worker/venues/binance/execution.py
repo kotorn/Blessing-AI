@@ -161,6 +161,8 @@ class BinanceExecutionAdapter:
         self.last_market_ask_qty: Dict[str, Decimal] = {}
         # Executable bid/ask clock; mark-price frames must not refresh it.
         self.last_market_book_at: Dict[str, datetime] = {}
+        # Last order-level block, surfaced in the worker state for operators.
+        self.last_order_block: Optional[Dict[str, str]] = None
         self.last_market_event_source: Dict[str, str] = {}
         self.last_market_event_venue: Dict[str, str] = {}
         self.last_market_event_market_type: Dict[str, str] = {}
@@ -2615,6 +2617,10 @@ class BinanceExecutionAdapter:
             )
             if not gate_result.allowed or gate_result.prepared is None:
                 logger.warning("Order blocked by final gate: %s", gate_result.reason)
+                self.last_order_block = {
+                    "stage": "ORDER_GATE",
+                    "reason": " ".join(str(gate_result.reason).split())[:200],
+                }
                 continue
             prepared = gate_result.prepared
             if enforce_testnet_protection:
@@ -2935,6 +2941,10 @@ class BinanceExecutionAdapter:
                             intent, planned_order, "lease_lost_before_entry_submit"
                         )
                 self.state = ConnectionState.DEGRADED
+                self.last_order_block = {
+                    "stage": "FINAL_FENCE",
+                    "reason": " ".join(str(exc).split())[:200],
+                }
                 logger.error("Order submission fenced before request: %s", exc)
             except (BinanceTransportAmbiguity, BinanceAPIError) as exc:
                 logger.error("%s order response is ambiguous: %s", environment_label(self.env), exc)
