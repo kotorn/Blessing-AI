@@ -26,7 +26,7 @@ class BinancePublicWebSocket:
         self,
         symbols: List[str],
         base_ws_url: str = "wss://fstream.binance.com/ws",
-        event_callback: Optional[Callable[[MarketEvent], Coroutine[Any, Any, None]]] = None,
+        event_callback: Optional[Callable[[MarketEvent], Coroutine[Any, Any, Any]]] = None,
         venue: str = "BINANCE_TESTNET",
     ):
         self.symbols = [s.lower() for s in symbols]
@@ -52,6 +52,8 @@ class BinancePublicWebSocket:
     async def _run(self) -> None:
         attempt = 0
         while self.is_running:
+            if websockets is None:
+                break
             try:
                 url = self.construct_combined_stream_url()
                 async with websockets.connect(url) as websocket:
@@ -59,7 +61,8 @@ class BinancePublicWebSocket:
                     attempt = 0
                     logger.info("Public market stream connected: %s", self.base_ws_url)
                     async for raw_message in websocket:
-                        event = self.parse_payload(raw_message)
+                        msg_str = raw_message.decode("utf-8") if isinstance(raw_message, bytes) else str(raw_message)
+                        event = self.parse_payload(msg_str)
                         if event is not None and self.event_callback is not None:
                             await self.event_callback(event)
             except asyncio.CancelledError:

@@ -184,7 +184,7 @@ def _verify(root: Path, now: datetime) -> list[str]:
         return blockers
 
     checks = evidence.get("checks")
-    check_ids = [check.get("id") for check in checks if isinstance(check, dict)] if isinstance(checks, list) else []
+    check_ids: list[Any] = [check.get("id") for check in checks if isinstance(check, dict)] if isinstance(checks, list) else []
     if not isinstance(checks, list) or len(checks) != len(REQUIRED_CHECKS) or len(set(check_ids)) != len(check_ids):
         blockers.append("LOCAL_PILOT_CAPABILITY_TESTS_NOT_VERIFIED")
     else:
@@ -207,7 +207,7 @@ def _verify(root: Path, now: datetime) -> list[str]:
                 break
 
     reviews = evidence.get("reviews")
-    review_ids = [item.get("reviewerId") for item in reviews if isinstance(item, dict)] if isinstance(reviews, list) else []
+    review_ids: list[Any] = [item.get("reviewerId") for item in reviews if isinstance(item, dict)] if isinstance(reviews, list) else []
     if not isinstance(reviews, list) or len(reviews) != len(REQUIRED_REVIEW_DOMAINS) or len(set(review_ids)) != len(review_ids):
         blockers.append("LOCAL_PILOT_INDEPENDENT_REVIEWS_NOT_VERIFIED")
     else:
@@ -307,15 +307,15 @@ def local_live_pilot_readiness(root: str | Path | None = None, *, now: datetime 
         "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED",
     ]
     try:
-        blockers = [*provenance_blockers, *_verify(repo_root, observed_now)]
+        blockers: list[str] = [*provenance_blockers, *_verify(repo_root, observed_now)]
     except Exception:
         # Unexpected parse/filesystem/tool failures are not evidence of readiness.
         blockers = ["LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED"]
     source_clean = bool(head and GIT_SHA.fullmatch(head) and _git(
         repo_root, 'status', '--porcelain', '--untracked-files=all') == '')
     try:
-        track_c = verify_all(repo_root, now=observed_now.isoformat()) if source_clean else {}
-        verified_classes = [r['evidenceClass'] for r in track_c.get('classes', [])
+        track_c: dict[str, Any] = verify_all(repo_root, now=observed_now.isoformat()) if source_clean else {}
+        verified_classes: list[Any] = [r['evidenceClass'] for r in track_c.get('classes', [])
                             if r.get('status') == 'PASS' and r.get('reason') == 'TRACK_C_ATTESTATION_VERIFIED']
         source_clean = source_clean and _git(repo_root, 'rev-parse', '--verify', 'HEAD') == head and _git(
             repo_root, 'status', '--porcelain', '--untracked-files=all') == ''

@@ -200,17 +200,19 @@ async def run_mainnet_read_only_preflight(context: MainnetPreflightContext) -> d
                 else "Local Mainnet remains blocked; runtime identity or adapter methods are unavailable: "
                 + ", ".join(missing_methods),
             )
+            launch_session = getattr(worker, "_mainnet_launch_session", None)
             is_local_pilot = (
-                worker.execution_mode.value == "LIVE"
+                getattr(getattr(worker, "execution_mode", None), "value", None) == "LIVE"
                 and (
                     (
-                        isinstance(worker._mainnet_launch_session, Mapping)
-                        and worker._mainnet_launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
+                        isinstance(launch_session, Mapping)
+                        and launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
                     )
                     or bool(str(os.getenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "")).strip())
                 )
             )
-            monitor_state = worker._local_pilot_lifecycle_monitor_state()
+            get_monitor_state = getattr(worker, "_local_pilot_lifecycle_monitor_state", None)
+            monitor_state = get_monitor_state() if callable(get_monitor_state) else {}
             add_check(
                 "CHK-PREFLIGHT-PILOT-MONITOR",
                 "Local Pilot Lifecycle Monitor Readiness",

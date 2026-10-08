@@ -9,9 +9,10 @@ import re
 import time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
-from apps.trading_worker.main import ArmRequest, TradingWorkerApp
+from apps.trading_worker.main import ArmRequest, StrategyEnablement, TradingWorkerApp
 from apps.trading_worker.venues.binance.config import BinanceEnvironment
 from apps.trading_worker.venues.binance.manual_testnet import _current_sha
 from apps.trading_worker.venues.binance.protected_ethusdc_trial import (
@@ -41,7 +42,7 @@ def _approved_testnet_runtime() -> None:
         raise RuntimeError("Protected Testnet trial requires a dedicated local database")
 
 
-async def _flat_testnet_baseline(adapter) -> dict[str, object]:
+async def _flat_testnet_baseline(adapter: Any) -> dict[str, object]:
     if getattr(adapter, "env", None) != BinanceEnvironment.TESTNET:
         raise RuntimeError("Protected trial adapter is not Binance Testnet")
     positions = await adapter.rest_client.request(
@@ -103,14 +104,14 @@ async def run_protected_ethusdc_testnet_trial() -> dict[str, object]:
     try:
         armed, _reason = await worker.arm(ArmRequest(
             executionMode="TESTNET", instruments=["ETHUSDC"],
-            strategies={"grid": True}, riskProfile="CONSERVATIVE",
+            strategies=StrategyEnablement(grid=True), riskProfile="CONSERVATIVE",
         ))
         if not armed or worker.execution_adapter is None:
             raise RuntimeError("Protected ETHUSDC Testnet Worker did not ARM")
         adapter = worker.execution_adapter
         baseline = await _flat_testnet_baseline(adapter)
         artifact["account_baseline"] = baseline
-        leverage = int(baseline["leverage"])
+        leverage = int(str(baseline["leverage"]))
         repository = getattr(worker.persistence, "repository", None)
         protections = getattr(repository, "algo_protections", None)
         if protections is None or await protections.list_active_protections(

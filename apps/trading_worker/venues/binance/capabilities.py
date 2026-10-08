@@ -19,7 +19,7 @@ def _exchange_bool(value: object) -> bool:
 
 
 class BinanceCapabilities:
-    def __init__(self):
+    def __init__(self) -> None:
         self.authenticated = False
         self.account_request_succeeded = False
         self.trade_authorized = False

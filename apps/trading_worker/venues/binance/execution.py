@@ -14,7 +14,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, cast
 from uuid import uuid4
 
 from domain.enums import (
@@ -112,7 +112,7 @@ class BinanceExecutionAdapter:
         ledger: Optional[ExecutionLedger] = None,
         preflight_only: bool = False,
         portfolio_margin: Optional[bool] = None,
-    ):
+    ) -> None:
         if not isinstance(env, BinanceEnvironment):
             raise ValueError("Binance execution requires TESTNET or MAINNET")
         if env == BinanceEnvironment.MAINNET and os.getenv(
@@ -226,7 +226,7 @@ class BinanceExecutionAdapter:
         return self.state
 
     @asynccontextmanager
-    async def _mutation_scope(self):
+    async def _mutation_scope(self) -> AsyncIterator[None]:
         """Serialize mutations, allowing only the owning task to enter again."""
         task = asyncio.current_task()
         if getattr(self, "_mutation_owner_task", None) is task:
@@ -235,7 +235,7 @@ class BinanceExecutionAdapter:
         if not hasattr(self, "_mutation_lock"):
             self._mutation_lock = asyncio.Lock()
         async with self._mutation_lock:
-            self._mutation_owner_task = task
+            self._mutation_owner_task: Optional[asyncio.Task[Any]] = task
             try:
                 yield
             finally:
@@ -312,7 +312,7 @@ class BinanceExecutionAdapter:
         return True
 
     @property
-    def account_snapshot(self):
+    def account_snapshot(self) -> Any:
         return getattr(self.ledger, "account_snapshot", None)
 
     @property
@@ -475,13 +475,13 @@ class BinanceExecutionAdapter:
         ):
             return False
         persistence = getattr(worker, "persistence", None)
-        reload_ledger = getattr(persistence, "create_execution_ledger", None)
+        reload_ledger: Any = getattr(persistence, "create_execution_ledger", None)
         if not callable(reload_ledger):
             return False
-        durable = await reload_ledger(
+        durable = await cast(Any, reload_ledger(
             symbol=MAINNET_RISK_POLICY.symbol,
             venue=environment_label(BinanceEnvironment.MAINNET),
-        )
+        ))
         if (
             getattr(durable, "durable_snapshot", False) is not True
             or str(getattr(durable, "symbol", "")).upper() != MAINNET_RISK_POLICY.symbol
@@ -545,7 +545,7 @@ class BinanceExecutionAdapter:
 
         persistence = getattr(worker, "persistence", None)
         readiness_method = getattr(persistence, "readiness", None)
-        launch_loader = getattr(persistence, "get_mainnet_launch_session", None)
+        launch_loader: Any = getattr(persistence, "get_mainnet_launch_session", None)
         if not callable(readiness_method) or not callable(launch_loader):
             return None
         readiness = readiness_method()
@@ -575,7 +575,7 @@ class BinanceExecutionAdapter:
         launch_id = str(getattr(worker, "_mainnet_launch_id", "") or "").strip()
         if not launch_id:
             return None
-        session = await launch_loader(launch_id)
+        session = await cast(Any, launch_loader(launch_id))
         if not isinstance(session, dict) or (
             str(session.get("launch_id", "")) != launch_id
             or str(session.get("symbol", "")).upper() != MAINNET_RISK_POLICY.symbol
@@ -893,12 +893,12 @@ class BinanceExecutionAdapter:
                 ):
                     return None
                 if int(session.get("submitted_orders", 0) or 0) > 0:
-                    accounting_reader = getattr(
+                    accounting_reader: Any = getattr(
                         self._worker_authority, "get_local_live_pilot_accounting", None
                     )
                     if not callable(accounting_reader):
                         return None
-                    accounting = await accounting_reader()
+                    accounting = await cast(Any, accounting_reader())
                     if (
                         not isinstance(accounting, Mapping)
                         or accounting.get("status") != "VERIFIED"
@@ -980,7 +980,9 @@ class BinanceExecutionAdapter:
             side = str(self._enum_value(intent.side)).upper()
             if side not in {"BUY", "SELL"} or quantity * entry_price > Decimal("50"):
                 return None
-            async def fetch_observed(key: str, route: str, *, signed: bool = False, params: dict | None = None):
+            async def fetch_observed(
+                key: str, route: str, *, signed: bool = False, params: dict[str, Any] | None = None
+            ) -> tuple[Any, dict[str, Any]]:
                 started_monotonic = time.monotonic()
                 started_at = utc_now()
                 response = await self.rest_client.request(
@@ -1058,7 +1060,7 @@ class BinanceExecutionAdapter:
             if best_ask < best_bid:
                 return None
 
-            def adverse_depth_cost(levels: list, buy: bool, reference: Decimal) -> Decimal:
+            def adverse_depth_cost(levels: list[Any], buy: bool, reference: Decimal) -> Decimal:
                 remaining = quantity
                 total = Decimal("0")
                 for level in levels:
@@ -1184,7 +1186,7 @@ class BinanceExecutionAdapter:
             raise RuntimeError("Worker authority cannot be rebound")
         self._worker_authority = worker
 
-    def _worker_authorized(self, authority: object) -> bool:
+    def _worker_authorized(self, authority: Any) -> bool:
         return self._worker_authority is not None and authority is self._worker_authority
 
     async def _notify_order_submission_result(
@@ -1288,14 +1290,14 @@ class BinanceExecutionAdapter:
                     "Local Pilot lifecycle monitor is stale, stalled, or degraded before submission"
                 )
 
-        gate = None
+        gate: Any = None
         if self.env == BinanceEnvironment.MAINNET:
             gate = getattr(self._worker_authority, "_evaluate_execution_gate", None)
             if not callable(gate):
                 raise LeaseLostError(
                     "Mainnet Worker decision gate is unavailable before submission"
                 )
-            allowed, reason = gate(decision)
+            allowed, reason = cast(Tuple[bool, str], gate(decision))
             if not allowed:
                 raise LeaseLostError(
                     f"Mainnet Worker decision gate closed before submission: {reason}"
@@ -1323,7 +1325,7 @@ class BinanceExecutionAdapter:
         # no further await before returning to the HTTP send boundary.
         await self._assert_execution_lease(decision.risk_class)
         if gate is not None:
-            allowed, reason = gate(decision)
+            allowed, reason = cast(Tuple[bool, str], gate(decision))
             if not allowed:
                 raise LeaseLostError(
                     f"Mainnet Worker decision gate closed before submission: {reason}"
@@ -1626,7 +1628,7 @@ class BinanceExecutionAdapter:
         results = [await self.get_best_bid_ask(symbol) for symbol in symbols]
         return bool(results) and all(result is not None for result in results)
 
-    async def _on_user_stream_disconnect(self):
+    async def _on_user_stream_disconnect(self) -> None:
         logger.warning("[%s] User stream disconnected. Adapter transitioning to DEGRADED.", self.env)
         self.state = ConnectionState.DEGRADED
         try:
@@ -1636,7 +1638,7 @@ class BinanceExecutionAdapter:
         except Exception as exc:
             logger.error("Reconciliation after user-stream disconnect failed: %s", exc)
 
-    async def _on_user_stream_reconnected(self):
+    async def _on_user_stream_reconnected(self) -> None:
         logger.info("[%s] User stream reconnected. Initiating reconciliation.", self.env)
         self.state = ConnectionState.SYNCING
         sync_result = await self.reconciliation.reconcile()
@@ -1689,7 +1691,7 @@ class BinanceExecutionAdapter:
             return False
         return await self.connect()
 
-    async def _on_ws_event(self, event: Any):
+    async def _on_ws_event(self, event: Any) -> None:
         event_type = event.get("e") if isinstance(event, dict) else None
         if event_type == "ORDER_TRADE_UPDATE":
             order_info = event.get("o", {})
@@ -1843,9 +1845,9 @@ class BinanceExecutionAdapter:
                 if authority is not None:
                     authority.reconciliation_status = "UNKNOWN"
 
-            raw_positions = update_data.get("P", [])
-            if not isinstance(raw_positions, list):
-                raw_positions = []
+            raw_positions_val = update_data.get("P", [])
+            raw_positions: list[Any] = raw_positions_val if isinstance(raw_positions_val, list) else []
+            if not isinstance(raw_positions_val, list):
                 mark_account_update_unknown(
                     ReconciliationDiff(
                         code="ACCOUNT_POSITION_UPDATE_INVALID",
@@ -1924,9 +1926,9 @@ class BinanceExecutionAdapter:
                             exchange_value=str(exc),
                         )
                     )
-            raw_balances = update_data.get("B", [])
-            if not isinstance(raw_balances, list):
-                raw_balances = []
+            raw_balances_val = update_data.get("B", [])
+            raw_balances: list[Any] = raw_balances_val if isinstance(raw_balances_val, list) else []
+            if not isinstance(raw_balances_val, list):
                 mark_account_update_unknown(
                     ReconciliationDiff(
                         code="ACCOUNT_BALANCE_UPDATE_INVALID",
@@ -2072,7 +2074,7 @@ class BinanceExecutionAdapter:
     def _order_from_response(
         intent: OrderIntent,
         response: Dict[str, Any],
-        prepared,
+        prepared: Any,
         client_order_id: str,
         decision: Optional[ExecutionDecision] = None,
         allow_terminal_status: bool = False,
@@ -2205,7 +2207,7 @@ class BinanceExecutionAdapter:
     async def _resolve_ambiguous_order(
         self,
         intent: OrderIntent,
-        prepared,
+        prepared: Any,
         client_order_id: str,
         decision: Optional[ExecutionDecision] = None,
         *,
@@ -2216,6 +2218,7 @@ class BinanceExecutionAdapter:
         recovered_order: Optional[ExecutionOrder] = None
         order_status_known = False
         fill_recovery_verified = True
+        executed_quantity = Decimal("0")
         for attempt, delay in enumerate((0.0, 0.1, 0.25)):
             if delay:
                 await asyncio.sleep(delay)
@@ -2249,8 +2252,11 @@ class BinanceExecutionAdapter:
                     )
                     break
                 if (
-                    str(recovered_order.status).upper() in {"FILLED", "PARTIALLY_FILLED"}
-                    or executed_quantity > 0
+                    recovered_order is not None
+                    and (
+                        str(recovered_order.status).upper() in {"FILLED", "PARTIALLY_FILLED"}
+                        or executed_quantity > 0
+                    )
                 ):
                     try:
                         await self.reconciliation._recover_order_fills(
@@ -2478,11 +2484,11 @@ class BinanceExecutionAdapter:
                 "Blocked Testnet risk increase outside the durable post-fill protection lifecycle"
             )
             return []
-        gate = getattr(authority, "_evaluate_execution_gate", None)
+        gate: Any = getattr(authority, "_evaluate_execution_gate", None)
         if not callable(gate):
             logger.error("Blocked Binance mutation because Worker gate is unavailable")
             return []
-        allowed, reason = gate(decision)
+        allowed, reason = cast(Tuple[bool, str], gate(decision))
         if not allowed:
             logger.warning("Worker decision gate blocked adapter mutation: %s", reason)
             return []
@@ -2490,7 +2496,7 @@ class BinanceExecutionAdapter:
             # The first gate check may have happened while another mutation was
             # in flight. Re-evaluate after acquiring the single-flight lock so
             # a kill switch or degraded state cannot release a queued order.
-            allowed, reason = gate(decision)
+            allowed, reason = cast(Tuple[bool, str], gate(decision))
             if not allowed:
                 logger.warning(
                     "Worker decision gate blocked queued adapter mutation: %s", reason
@@ -3372,6 +3378,8 @@ class BinanceExecutionAdapter:
     @staticmethod
     def _fill_event_time_ms(fill: Any) -> Optional[int]:
         value = getattr(fill, "event_time", None)
+        if value is None:
+            return None
         if isinstance(value, datetime):
             if value.tzinfo is None:
                 return None
@@ -3381,6 +3389,15 @@ class BinanceExecutionAdapter:
         except (TypeError, ValueError):
             return None
         return parsed if parsed > 0 else None
+
+    @classmethod
+    def _extract_fill_event_times(cls, fills: Iterable[Any]) -> List[int]:
+        times: List[int] = []
+        for fill in fills:
+            t = cls._fill_event_time_ms(fill)
+            if t is not None:
+                times.append(t)
+        return times
 
     @staticmethod
     def _testnet_protection_client_ids(entry_client_order_id: str) -> tuple[str, str]:
@@ -3512,15 +3529,15 @@ class BinanceExecutionAdapter:
         reserve = getattr(protections, "claim_local_emergency_close", None)
         mark_attempted = getattr(protections, "mark_local_emergency_close_attempted", None)
         loader = getattr(protections, "get_protection", None)
-        if not all(callable(operation) for operation in (reserve, mark_attempted, loader)):
+        if not (callable(reserve) and callable(mark_attempted) and callable(loader)):
             return None
         claimant_id = getattr(self, "_local_close_claimant_id", None)
         if claimant_id is None:
             claimant_id = self._local_close_claimant_id = uuid4().hex
-        reservation = await reserve(
+        reservation = await cast(Any, reserve(
             record["symbol"], record["entry_client_order_id"], close_client_order_id,
             claimant_id=claimant_id,
-        )
+        ))
         if (
             not isinstance(reservation, Mapping)
             or reservation.get("claimed") is not True
@@ -3529,12 +3546,12 @@ class BinanceExecutionAdapter:
             or reservation["fencing_token"] < 1
         ):
             return None
-        if await mark_attempted(
+        if await cast(Any, mark_attempted(
             record["symbol"], record["entry_client_order_id"], close_client_order_id,
             claimant_id=claimant_id, fencing_token=reservation["fencing_token"],
-        ) is not True:
+        )) is not True:
             return None
-        stored = await loader("binance_mainnet", record["symbol"], record["entry_client_order_id"])
+        stored = await cast(Any, loader("binance_mainnet", record["symbol"], record["entry_client_order_id"]))
         if not isinstance(stored, Mapping) or any(
             stored.get(key) != record.get(key) for key in (
                 "environment", "venue", "symbol", "entry_client_order_id", "basket_id",
@@ -3613,7 +3630,7 @@ class BinanceExecutionAdapter:
         trigger_price: Decimal,
         quantity: Decimal,
         client_algo_id: str,
-        authority: object,
+        authority: Any,
         deadline: float,
     ) -> Optional[Dict[str, Any]]:
         """Place one fill-sized reduce-only Algo and resolve ambiguity by ID only."""
@@ -3677,8 +3694,11 @@ class BinanceExecutionAdapter:
             return None
         if not isinstance(response, dict):
             return None
+        algo_id_raw = response.get("algoId")
+        if algo_id_raw is None:
+            return None
         try:
-            algo_id = int(response.get("algoId"))
+            algo_id = int(algo_id_raw)
         except (TypeError, ValueError):
             return None
         if algo_id <= 0 or str(response.get("clientAlgoId") or "") != client_algo_id:
@@ -3763,7 +3783,7 @@ class BinanceExecutionAdapter:
         record: Dict[str, Any],
         close_client_order_id: str,
         *,
-        authority: object,
+        authority: Any,
     ) -> bool:
         """Read back close order, userTrades, flat position and Algo cleanup."""
         try:
@@ -3913,7 +3933,7 @@ class BinanceExecutionAdapter:
         record: Dict[str, Any],
         *,
         reason: str,
-        authority: object,
+        authority: Any,
     ) -> bool:
         async with self._mutation_scope():
             return await self._local_mainnet_close_only_locked(
@@ -3922,7 +3942,7 @@ class BinanceExecutionAdapter:
 
     async def _local_mainnet_close_only_locked(
         self, intent: OrderIntent, order: ExecutionOrder, record: Dict[str, Any],
-        *, reason: str, authority: object,
+        *, reason: str, authority: Any,
     ) -> bool:
         """Reserve a durable client ID, submit at most once, then verify read-only."""
         worker = self._worker_authority
@@ -3938,10 +3958,10 @@ class BinanceExecutionAdapter:
             getattr(getattr(authority, "persistence", None), "repository", None),
             "algo_protections", None,
         )
-        loader = getattr(protections, "get_protection", None)
+        loader: Any = getattr(protections, "get_protection", None)
         if callable(loader):
             try:
-                durable = await loader("binance_mainnet", str(intent.symbol).upper(), order.client_order_id)
+                durable = await cast(Any, loader("binance_mainnet", str(intent.symbol).upper(), order.client_order_id))
             except Exception:
                 durable = None
             if not isinstance(durable, Mapping):
@@ -4341,7 +4361,7 @@ class BinanceExecutionAdapter:
         return (peak - current) >= limit
 
     async def _recover_unprotected_local_pilot_owner(
-        self, owner: Mapping[str, Any], *, authority: object, launch_id: str
+        self, owner: Mapping[str, Any], *, authority: Any, launch_id: str
     ) -> bool:
         """Fence new risk, then make one owner-scoped close attempt for known exposure."""
         if not isinstance(owner, Mapping):
@@ -4361,12 +4381,12 @@ class BinanceExecutionAdapter:
             return False
 
         persistence = getattr(authority, "persistence", None)
-        close_only = getattr(persistence, "enter_local_live_pilot_close_only", None)
+        close_only: Any = getattr(persistence, "enter_local_live_pilot_close_only", None)
         if not callable(close_only):
             return False
-        transitioned = await close_only(
+        transitioned = await cast(Any, close_only(
             launch_id, reason="PILOT_RECONCILIATION_UNKNOWN"
-        )
+        ))
         if (
             not isinstance(transitioned, Mapping)
             or str(transitioned.get("pilot_status") or "").upper()
@@ -4375,7 +4395,7 @@ class BinanceExecutionAdapter:
             not in {"PAUSED_NEW_RISK", "REAUTH_REQUIRED", "RECONCILIATION_REQUIRED"}
         ):
             return False
-        authority._mainnet_launch_session = dict(transitioned)
+        setattr(authority, "_mainnet_launch_session", dict(transitioned))
 
         if str(owner.get("state") or "").upper() == "PENDING" or filled == 0:
             # A zero-fill PENDING owner may still have a live exchange entry.
@@ -4513,7 +4533,7 @@ class BinanceExecutionAdapter:
         )
 
     async def _cancel_and_read_back_pilot_entry(
-        self, record: Mapping[str, Any], *, authority: object
+        self, record: Mapping[str, Any], *, authority: Any
     ) -> Optional[Dict[str, Any]]:
         """Cancel an owned entry remainder once, then prove its terminal fill quantity."""
         worker = self._worker_authority
@@ -4589,12 +4609,12 @@ class BinanceExecutionAdapter:
                 and self._local_close_id_from_reason(record.get("state_reason")) is None
             ):
                 record = dict(record)
-                claim_cancel = getattr(self, "on_local_mainnet_entry_cancel_claim", None)
+                claim_cancel: Any = getattr(self, "on_local_mainnet_entry_cancel_claim", None)
                 if not callable(claim_cancel):
                     await self._degrade_local_mainnet_protection(worker)
                     return None
                 try:
-                    claimed = await claim_cancel(record)
+                    claimed = await cast(Any, claim_cancel(record))
                 except Exception:
                     # The durable claim may have committed despite a lost
                     # acknowledgement. Resolve only by exact-ID read-back.
@@ -4663,12 +4683,12 @@ class BinanceExecutionAdapter:
             return updated
 
         ledger_order = await self.ledger.get_order_by_client_id(client_order_id)
-        recover_fills = getattr(self.reconciliation, "_recover_order_fills", None)
+        recover_fills: Any = getattr(self.reconciliation, "_recover_order_fills", None)
         if ledger_order is None or not callable(recover_fills):
             await self._degrade_local_mainnet_protection(worker)
             return None
         try:
-            await recover_fills(ledger_order, dict(after))
+            await cast(Any, recover_fills(ledger_order, dict(after)))
             fills = [
                 fill for fill in await self.ledger.get_fills()
                 if str(getattr(fill, "client_order_id", "")) == client_order_id
@@ -4735,11 +4755,11 @@ class BinanceExecutionAdapter:
             return True
         return hold_seconds >= float(max_hold)
 
-    async def check_and_enforce_pilot_protections(self, authority: object) -> Dict[str, Any]:
+    async def check_and_enforce_pilot_protections(self, authority: Any) -> Dict[str, Any]:
         async with self._mutation_scope():
             return await self._check_and_enforce_pilot_protections_locked(authority)
 
-    async def _check_and_enforce_pilot_protections_locked(self, authority: object) -> Dict[str, Any]:
+    async def _check_and_enforce_pilot_protections_locked(self, authority: Any) -> Dict[str, Any]:
         """Examine active protections for 24h QUICK hold expiry and drawdown breach."""
         actions: Dict[str, Any] = {
             "drawdown_triggered": False,
@@ -4755,7 +4775,7 @@ class BinanceExecutionAdapter:
         launch_id = str(session.get("launch_id") or "").strip()
         campaign_id = str(session.get("pilot_campaign_id") or "").strip()
         persistence = getattr(authority, "persistence", None)
-        durable_loader = getattr(persistence, "get_mainnet_launch_session", None)
+        durable_loader: Any = getattr(persistence, "get_mainnet_launch_session", None)
         if (
             not self._is_local_mainnet_runtime()
             or not launch_id
@@ -4767,7 +4787,7 @@ class BinanceExecutionAdapter:
             actions["unmatched_owner_count"] = 1
             return actions
         try:
-            durable_session = await durable_loader(launch_id)
+            durable_session = await cast(Any, durable_loader(launch_id))
         except Exception:
             durable_session = None
         if (
@@ -4782,7 +4802,7 @@ class BinanceExecutionAdapter:
             actions["unmatched_owner_count"] = 1
             return actions
         session = dict(durable_session)
-        authority._mainnet_launch_session = session
+        setattr(authority, "_mainnet_launch_session", session)
         repository = getattr(getattr(authority, "persistence", None), "repository", None)
         protections_store = getattr(repository, "algo_protections", None)
         if protections_store is None:
@@ -4943,14 +4963,14 @@ class BinanceExecutionAdapter:
                 not isinstance(last_mark_mono, (int, float))
                 or time.monotonic() - last_mark_mono >= 4
             ):
-                mark_writer = getattr(authority, "_persist_local_live_pilot_mark", None)
-                if not callable(mark_writer) or not await mark_writer(
+                mark_writer: Any = getattr(authority, "_persist_local_live_pilot_mark", None)
+                if not callable(mark_writer) or not await cast(Any, mark_writer(
                     MAINNET_RISK_POLICY.symbol,
                     f"{observed_at_ms}:ETHUSDC:PILOT_MONITOR",
                     unrealized_pnl,
                     observed_at_ms,
                     snapshot_scope="ETHUSDC_SIGNED_POSITION_RISK_REQUEST_WINDOW_START",
-                ):
+                )):
                     raise ValueError("fresh pilot position mark was not durably recorded")
                 authority._last_local_live_pilot_mark_monotonic = time.monotonic()
         except Exception as exc:  # noqa: BLE001 - signed exchange reads must fail closed
@@ -4960,10 +4980,10 @@ class BinanceExecutionAdapter:
             if not quick_expired:
                 return actions
 
-        accounting_reader = getattr(authority, "get_local_live_pilot_accounting", None)
+        accounting_reader: Any = getattr(authority, "get_local_live_pilot_accounting", None)
         if active:
             try:
-                accounting = await accounting_reader() if callable(accounting_reader) else None
+                accounting = await cast(Any, accounting_reader()) if callable(accounting_reader) else None
             except Exception:
                 accounting = None
             if (
@@ -4988,18 +5008,18 @@ class BinanceExecutionAdapter:
             accounting_verified and self.evaluate_pilot_drawdown(session, current_net)
         )
         if dd_breached and not session.get("pilot_drawdown_triggered"):
-            trigger_func = getattr(persistence, "trigger_pilot_drawdown", None)
+            trigger_func: Any = getattr(persistence, "trigger_pilot_drawdown", None)
             if callable(trigger_func):
                 try:
-                    transitioned = await trigger_func(
+                    transitioned = await cast(Any, trigger_func(
                         launch_id, reason="PILOT_DRAWDOWN_LIMIT_REACHED"
-                    )
+                    ))
                 except Exception:
                     transitioned = None
                     await self._degrade_local_mainnet_protection(authority)
                 if isinstance(transitioned, Mapping) and transitioned:
-                    authority._mainnet_launch_session = dict(transitioned)
-                    session = authority._mainnet_launch_session
+                    setattr(authority, "_mainnet_launch_session", dict(transitioned))
+                    session = getattr(authority, "_mainnet_launch_session", None) or {}
                 else:
                     actions["failed_action_count"] += 1
             else:
@@ -5018,15 +5038,15 @@ class BinanceExecutionAdapter:
                 actions["quick_expired_count"] += 1
             if should_close:
                 if is_expired and not dd_breached and session.get("pilot_status") != "CLOSE_ONLY":
-                    transition = getattr(persistence, "enter_local_live_pilot_close_only", None)
+                    transition: Any = getattr(persistence, "enter_local_live_pilot_close_only", None)
                     if callable(transition):
                         try:
-                            transitioned = await transition(
+                            transitioned = await cast(Any, transition(
                                 launch_id, reason="QUICK_MAX_HOLD_EXPIRED"
-                            )
+                            ))
                             if isinstance(transitioned, Mapping) and transitioned:
-                                authority._mainnet_launch_session = dict(transitioned)
-                                session = authority._mainnet_launch_session
+                                setattr(authority, "_mainnet_launch_session", dict(transitioned))
+                                session = getattr(authority, "_mainnet_launch_session", None) or {}
                         except Exception as exc:
                             logger.error(
                                 "QUICK expiry could not persist CLOSE_ONLY: %s",
@@ -5067,7 +5087,7 @@ class BinanceExecutionAdapter:
         order: ExecutionOrder,
         response: Dict[str, Any],
         *,
-        authority: object,
+        authority: Any,
     ) -> bool:
         """Persist the first fill, protect its exact size within 5s, else close once."""
         if (
@@ -5121,8 +5141,8 @@ class BinanceExecutionAdapter:
                 if str(getattr(fill, "client_order_id", "")) == order.client_order_id
                 and str(getattr(fill, "symbol", "")).upper() == symbol
             ]
-            known_times = [self._fill_event_time_ms(fill) for fill in cached_fills]
-            if any(value is None for value in known_times):
+            known_times = self._extract_fill_event_times(cached_fills)
+            if len(known_times) != len(cached_fills):
                 raise RuntimeError("cached first-fill timestamp is unavailable")
             if cached_fills:
                 first_fill_observed = True
@@ -5147,12 +5167,11 @@ class BinanceExecutionAdapter:
             if first_fill_observed and not known_times and submission_deadline is None:
                 raise RuntimeError("first-fill deadline cannot be established")
             existing_fills = await within_deadline(self.ledger.get_fills())
-            tighten_deadline([
-                value for fill in existing_fills
+            tighten_deadline(self._extract_fill_event_times(
+                fill for fill in existing_fills
                 if str(getattr(fill, "client_order_id", "")) == order.client_order_id
                 and str(getattr(fill, "symbol", "")).upper() == symbol
-                and (value := self._fill_event_time_ms(fill)) is not None
-            ])
+            ))
             terminal = {"FILLED", "CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}
             if str(order.status).upper() not in terminal:
                 record["state_reason"] = self._local_recovery_reason(
@@ -5242,8 +5261,8 @@ class BinanceExecutionAdapter:
                 if fill.client_order_id == order.client_order_id
                 and str(fill.symbol).upper() == symbol
             ]
-            fill_times = [self._fill_event_time_ms(fill) for fill in fills]
-            if not fill_times or any(value is None for value in fill_times):
+            fill_times = self._extract_fill_event_times(fills)
+            if not fills or len(fill_times) != len(fills):
                 raise RuntimeError("durable first-fill timestamp is unavailable")
             tighten_deadline(fill_times)
             filled_quantity = sum(
@@ -5454,7 +5473,7 @@ class BinanceExecutionAdapter:
     async def _submit_testnet_protection_algo(
         self, *, symbol: str, side: str, position_side: str,
         order_type: str, trigger_price: Decimal, client_algo_id: str,
-        authority: object, deadline: float,
+        authority: Any, deadline: float,
         quantity: Optional[Decimal] = None,
     ) -> Optional[Dict[str, Any]]:
         qty = quantity if quantity is not None and quantity > 0 else Decimal("0.1")
@@ -5492,7 +5511,7 @@ class BinanceExecutionAdapter:
 
     async def _protect_testnet_entry(
         self, intent: OrderIntent, order: ExecutionOrder,
-        response: Dict[str, Any], *, authority: object,
+        response: Dict[str, Any], *, authority: Any,
     ) -> bool:
         """Cancel any unfilled remainder, protect the filled position, or flatten."""
         if self.env != BinanceEnvironment.TESTNET:
@@ -5537,8 +5556,8 @@ class BinanceExecutionAdapter:
                 fill for fill in await self.ledger.get_fills()
                 if fill.client_order_id == order.client_order_id and fill.symbol == symbol
             ]
-            event_times = [self._fill_event_time_ms(fill) for fill in fills]
-            if not event_times or any(value is None for value in event_times):
+            event_times = self._extract_fill_event_times(fills)
+            if not fills or len(event_times) != len(fills):
                 raise RuntimeError("entry fill time is unavailable")
             filled_quantity = sum(
                 (Decimal(str(fill.quantity)) for fill in fills), Decimal("0")
@@ -5584,7 +5603,10 @@ class BinanceExecutionAdapter:
                 )
                 if confirmed is None:
                     raise RuntimeError(f"{role} Algo order was not confirmed")
-                algo_id = int(confirmed.get("algoId"))
+                algo_id_raw = confirmed.get("algoId")
+                if algo_id_raw is None:
+                    raise RuntimeError(f"{role} Algo order was not confirmed")
+                algo_id = int(algo_id_raw)
                 protection_ids.append((role, algo_id))
                 durable_record[
                     "stop_algo_id" if role == "stop" else "take_profit_algo_id"
@@ -6089,7 +6111,7 @@ class BinanceExecutionAdapter:
         if not callable(worker_gate):
             logger.error("Blocked amendment because the Worker decision gate is unavailable")
             return None
-        decision_allowed, decision_reason = worker_gate(amendment_decision)
+        decision_allowed, decision_reason = cast(Tuple[bool, str], worker_gate(amendment_decision))
         if not decision_allowed:
             logger.warning("Worker decision gate blocked amendment: %s", decision_reason)
             return None
@@ -6230,14 +6252,14 @@ class BinanceExecutionAdapter:
         return f"BAI-TC-{digest}"
 
     async def close_owned_testnet_trial(
-        self, owner: Dict[str, Any], *, authority: object,
+        self, owner: Dict[str, Any], *, authority: Any,
     ) -> List[ExecutionOrder]:
         """Reduce exactly the durable fill quantity for one Testnet trial owner."""
         async with self._mutation_scope():
             return await self._close_owned_testnet_trial_locked(owner, authority=authority)
 
     async def _close_owned_testnet_trial_locked(
-        self, owner: Dict[str, Any], *, authority: object,
+        self, owner: Dict[str, Any], *, authority: Any,
     ) -> List[ExecutionOrder]:
         if (self.env != BinanceEnvironment.TESTNET or not self._worker_authorized(authority)
                 or not isinstance(owner, dict) or owner.get("environment") != "TESTNET"
@@ -6287,12 +6309,12 @@ class BinanceExecutionAdapter:
                 return []
             entry_order_id = str(entry_order.get("orderId") or "")
             local_entry = await self.ledger.get_order_by_client_id(entry_id)
+            local_side_attr = getattr(local_entry, "side", None)
+            local_side_val = getattr(local_side_attr, "value", local_side_attr)
             if (not entry_order_id or local_entry is None
                     or str(getattr(local_entry, "client_order_id", "")) != entry_id
                     or str(getattr(local_entry, "symbol", "")).upper() != "ETHUSDC"
-                    or str(getattr(local_entry, "side", "").value if hasattr(
-                        getattr(local_entry, "side", None), "value"
-                    ) else getattr(local_entry, "side", "")).upper() != entry_side
+                    or str(local_side_val or "").upper() != entry_side
                     or str(getattr(local_entry, "exchange_order_id", "")) != entry_order_id):
                 self.last_emergency_result = {
                     "status": "UNKNOWN", "reason": "trial_entry_order_ledger_lineage_unverified",
@@ -6376,7 +6398,7 @@ class BinanceExecutionAdapter:
                     "client_order_id": client_order_id,
                 }
                 return []
-            submitting_owner = await mark_attempted(owner, client_order_id)
+            submitting_owner = await cast(Any, mark_attempted(owner, client_order_id))
             if not isinstance(submitting_owner, dict) or submitting_owner.get("state_reason") != (
                 f"protected_ethusdc_testnet_trial_close:{client_order_id}:SUBMITTING"
             ):

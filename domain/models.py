@@ -18,10 +18,22 @@ except ImportError:
         def __init__(self, **kwargs):
             for k, v in kwargs.items():
                 setattr(self, k, v)
+        @classmethod
+        def model_validate(cls, obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return cls(**obj)
+            return obj
         def model_dump(self):
             return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
         def dict(self):
             return self.model_dump()
+        def model_copy(self, *, update=None, deep=False):
+            data = {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+            if update:
+                data.update(update)
+            return self.__class__(**data)
+        def copy(self, *, update=None, deep=False):
+            return self.model_copy(update=update, deep=deep)
         def __repr__(self):
             return f"{self.__class__.__name__}({self.__dict__})"
 

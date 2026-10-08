@@ -9,11 +9,12 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+from typing import Any
 
 REVIEW_POLICY_PATH = 'config/risk/track_c_review_policy.json'
 
 
-def read_review_policy(root: Path | str | None = None) -> dict:
+def read_review_policy(root: Path | str | None = None) -> dict[str, Any]:
     policy_path = (Path(root) / REVIEW_POLICY_PATH) if root is not None else Path(REVIEW_POLICY_PATH)
     if not policy_path.exists():
         return {'mode': 'INDEPENDENT', 'operator_github_id': None}
@@ -35,10 +36,10 @@ def read_review_policy(root: Path | str | None = None) -> dict:
 
 CLASSES = ('CHECKS', 'REVIEW_AUTH_RELEASE', 'REVIEW_ORDER_RISK',
            'REVIEW_PERSISTENCE', 'TESTNET_ETHUSDC')
-REPOSITORY = 'kotorn/Blessing-AI'
-REPOSITORY_ID = '1366161771'
-WORKFLOW = f'{REPOSITORY}/.github/workflows/local-pilot-track-c.yml'
-REF = 'refs/heads/main'
+REPOSITORY: str = 'kotorn/Blessing-AI'
+REPOSITORY_ID: str = '1366161771'
+WORKFLOW: str = f'{REPOSITORY}/.github/workflows/local-pilot-track-c.yml'
+REF: str = 'refs/heads/main'
 CHECK_IDS = ('TYPESCRIPT_TESTS', 'PYTHON_TESTS', 'LINT', 'BUILD',
              'POSTGRES_17_MIGRATIONS_RESTART', 'LEASE_FENCING', 'PROTECTION_CLOSE')
 CHECK_STEPS = ('TypeScript Lint', 'TypeScript Unit Tests', 'TypeScript Build',
@@ -51,7 +52,7 @@ def workflow_for(evidence_class: str) -> str:
     return f'{REPOSITORY}/.github/workflows/ci.yml' if evidence_class == 'CHECKS' else WORKFLOW
 
 
-def _testnet_close_protection_is_proven(trial: dict) -> bool:
+def _testnet_close_protection_is_proven(trial: dict[str, Any]) -> bool:
     proof = trial.get('protection_at_close')
     if (not isinstance(proof, dict) or set(proof) != {
             'status', 'observed_at', 'close_submission_at', 'stop', 'target',
@@ -106,7 +107,7 @@ def _testnet_close_protection_is_proven(trial: dict) -> bool:
             and stop.get('quantity') == target.get('quantity'))
 
 
-def validate_payload(statement: dict, *, review_policy: dict | None = None) -> None:
+def validate_payload(statement: dict[str, Any], *, review_policy: dict[str, Any] | None = None) -> None:
     evidence_class = statement['evidenceClass']
     payload = statement['payload']
     if not isinstance(payload, dict):
@@ -197,7 +198,7 @@ def validate_payload(statement: dict, *, review_policy: dict | None = None) -> N
             raise ValueError('TESTNET_ACCOUNT_BASELINE_UNPROVEN')
 
 
-def validate_run(run: dict, statement: dict) -> None:
+def validate_run(run: dict[str, Any], statement: dict[str, Any]) -> None:
     repository = run.get('repository') if isinstance(run, dict) else None
     actor = run.get('actor') if isinstance(run, dict) else None
     if (not isinstance(repository, dict) or type(repository.get('id')) is not int
@@ -213,9 +214,9 @@ def validate_run(run: dict, statement: dict) -> None:
         raise ValueError('ATTESTATION_REST_RUN_MISMATCH')
 
 
-def validate_statement(statement: dict, binding: dict, evidence_class: str,
-                       certificate: dict, *, now: str,
-                       review_policy: dict | None = None) -> None:
+def validate_statement(statement: dict[str, Any], binding: dict[str, Any], evidence_class: str,
+                       certificate: dict[str, Any], *, now: str,
+                       review_policy: dict[str, Any] | None = None) -> None:
     """Certificate fields are accepted only after gh verifies the signed subject."""
     if not isinstance(statement, dict) or evidence_class not in CLASSES or statement.get('evidenceClass') != evidence_class:
         raise ValueError('ATTESTATION_CLASS_MISMATCH')
@@ -250,8 +251,8 @@ def validate_statement(statement: dict, binding: dict, evidence_class: str,
     validate_payload(statement, review_policy=review_policy)
 
 
-def environment_protection(environment: dict, policies: dict, name: str,
-                           *, review_policy: dict | None = None) -> list:
+def environment_protection(environment: dict[str, Any], policies: dict[str, Any], name: str,
+                           *, review_policy: dict[str, Any] | None = None) -> list[Any]:
     if environment.get('name') != name or type(environment.get('id')) is not int:
         raise ValueError('ENVIRONMENT_UNPROVEN')
     rules = [r for r in environment.get('protection_rules', []) if r.get('type') == 'required_reviewers']
@@ -282,9 +283,9 @@ def environment_protection(environment: dict, policies: dict, name: str,
     return reviewers
 
 
-def review_identity(environment: dict, policies: dict, approvals: list,
-                    commit: dict, *, actor_id: int,
-                    review_policy: dict | None = None) -> dict:
+def review_identity(environment: dict[str, Any], policies: dict[str, Any], approvals: list[Any],
+                    commit: dict[str, Any], *, actor_id: int,
+                    review_policy: dict[str, Any] | None = None) -> dict[str, Any]:
     """Reject incomplete/ambiguous API evidence, including unresolved Git authors."""
     policy_cfg = review_policy or read_review_policy()
     reviewers = environment_protection(environment, policies, 'pilot-review', review_policy=policy_cfg)
@@ -303,7 +304,7 @@ def review_identity(environment: dict, policies: dict, approvals: list,
             or not isinstance(user.get('login'), str) or not user['login']):
         raise ValueError('REVIEW_INDEPENDENCE_UNPROVEN')
     if policy_cfg['mode'] == 'INDEPENDENT':
-        if user['id'] == actor_id or any(user['id'] == a.get('id') for a in authors):
+        if user['id'] == actor_id or any(isinstance(a, dict) and user['id'] == a.get('id') for a in authors):
             raise ValueError('REVIEW_INDEPENDENCE_UNPROVEN')
     elif policy_cfg['mode'] == 'SOLO_OPERATOR':
         if user['id'] != policy_cfg['operator_github_id']:
@@ -311,7 +312,7 @@ def review_identity(environment: dict, policies: dict, approvals: list,
     return {'id': user['id'], 'login': user['login'].lower()}
 
 
-def track_c_phases(pass_classes: list[str], source_clean: bool) -> dict:
+def track_c_phases(pass_classes: list[str], source_clean: bool) -> dict[str, Any]:
     """Projection of verifier output only; this function grants no external authority."""
     classes = set(pass_classes) & set(CLASSES) if source_clean else set()
     groups = [('localChecks', ['CHECKS'], 'LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED'),

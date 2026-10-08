@@ -8,7 +8,7 @@ import math
 import os
 import re
 import time
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, cast
 
 from domain.enums import EconomicRiskClass, MarketType, OrderSide, OrderType, PositionSide, TimeInForce
 from domain.models import ExecutionDecision, OrderIntent
@@ -128,7 +128,7 @@ async def _local_mainnet_risk_gate(
     if management_mode == 'HOLD':
         return GateResult(False, 'HOLD management is blocked until no-fixed-target trailing and signal-exit lifecycle is implemented')
 
-    context_provider = getattr(adapter, 'get_local_mainnet_risk_context', None)
+    context_provider: Any = getattr(adapter, 'get_local_mainnet_risk_context', None)
     if not callable(context_provider):
         return GateResult(False, 'Local Mainnet durable basket-risk context is unavailable')
 
@@ -139,7 +139,7 @@ async def _local_mainnet_risk_gate(
         'validated_notional_usdc': quantity * entry_price,
     }
     try:
-        context = await context_provider(validated_intent, context_input)
+        context = await cast(Any, context_provider(validated_intent, context_input))
     except Exception:
         return GateResult(False, 'Local Mainnet durable basket-risk context could not be verified')
     if not isinstance(context, Mapping):
@@ -243,14 +243,14 @@ async def _local_mainnet_risk_gate(
     # Caller/strategy estimates, even when echoed by the adapter, are not
     # authoritative commission, funding, or executable-depth evidence. No
     # Local Mainnet cost evidence provider is implemented yet, so fail closed.
-    cost_provider = getattr(adapter, 'get_local_mainnet_cost_evidence', None)
+    cost_provider: Any = getattr(adapter, 'get_local_mainnet_cost_evidence', None)
     if not callable(cost_provider):
         return GateResult(
             False,
             'Local Mainnet commission/funding/depth cost evidence is unavailable; caller estimates cannot authorize risk',
         )
     try:
-        cost_evidence = await cost_provider(validated_intent, context)
+        cost_evidence = await cast(Any, cost_provider(validated_intent, context))
     except Exception:
         return GateResult(False, 'Local Mainnet exchange-derived cost evidence could not be verified')
     if not isinstance(cost_evidence, Mapping):
@@ -292,7 +292,7 @@ async def _local_mainnet_risk_gate(
             'funding_info': '/fapi/v1/fundingInfo',
             'leverage_brackets': '/papi/v1/um/leverageBracket' if is_pm else '/fapi/v1/leverageBracket',
         }
-        expected_params = {
+        expected_params: dict[str, dict[str, Any]] = {
             'commission': {'symbol': MAINNET_RISK_POLICY.symbol},
             'depth': {'symbol': MAINNET_RISK_POLICY.symbol, 'limit': 1000},
             'funding': {'symbol': MAINNET_RISK_POLICY.symbol, 'limit': 3},
@@ -424,18 +424,30 @@ async def _local_mainnet_risk_gate(
     if isinstance(active_exposure_chains, bool) or not isinstance(active_exposure_chains, int):
         return GateResult(False, 'Local Mainnet active exposure chain count is unknown')
 
+    raw_basket_headroom = context.get('basket_headroom_usdc')
+    raw_daily_loss_headroom = context.get('daily_loss_headroom_usdc')
+    if raw_basket_headroom is None or raw_daily_loss_headroom is None:
+        return GateResult(False, 'Local Mainnet risk headroom is unavailable')
+
+    def _to_optional_decimal(v: Any) -> Decimal | None:
+        if v is None:
+            return None
+        return v if isinstance(v, Decimal) else Decimal(str(v))
+
     try:
+        basket_headroom_usdc = Decimal(str(raw_basket_headroom))
+        daily_loss_headroom_usdc = Decimal(str(raw_daily_loss_headroom))
         validation = validate_risk_increasing_order(
             validated_intent,
             entry_price=entry_price,
-            basket_headroom_usdc=context.get('basket_headroom_usdc'),
-            daily_loss_headroom_usdc=context.get('daily_loss_headroom_usdc'),
-            current_gross_exposure_usdc=context.get('current_gross_exposure_usdc'),
-            current_basket_exposure_usdc=context.get('current_basket_exposure_usdc'),
-            collateral_usdc=context.get('collateral_usdc'),
-            available_balance_usdc=context.get('available_balance_usdc'),
-            configured_leverage=context.get('configured_leverage'),
-            effective_leverage=context.get('effective_leverage'),
+            basket_headroom_usdc=basket_headroom_usdc,
+            daily_loss_headroom_usdc=daily_loss_headroom_usdc,
+            current_gross_exposure_usdc=_to_optional_decimal(context.get('current_gross_exposure_usdc')),
+            current_basket_exposure_usdc=_to_optional_decimal(context.get('current_basket_exposure_usdc')),
+            collateral_usdc=_to_optional_decimal(context.get('collateral_usdc')),
+            available_balance_usdc=_to_optional_decimal(context.get('available_balance_usdc')),
+            configured_leverage=_to_optional_decimal(context.get('configured_leverage')),
+            effective_leverage=_to_optional_decimal(context.get('effective_leverage')),
             active_exposure_chains=active_exposure_chains,
             same_active_basket=same_active_basket,
             is_first_risk_increasing_order=context['is_first_risk_increasing_order'],
@@ -503,10 +515,11 @@ def _disabled_strategy_reason(worker: Any, decision: ExecutionDecision) -> Optio
 
     if not _is_risk_increasing(getattr(decision, "risk_class", None)):
         return None
-    enabled_getter = getattr(worker, "_enabled_strategies", None)
+    enabled_getter: Any = getattr(worker, "_enabled_strategies", None)
+    strategies_iterable: Any = enabled_getter() if callable(enabled_getter) else set()
     enabled = {
         strategy
-        for strategy in (enabled_getter() if callable(enabled_getter) else set())
+        for strategy in (strategies_iterable or set())
         if strategy in _KNOWN_ALPHA_STRATEGIES
     }
     for intent in getattr(decision, "orders", []) or []:
@@ -618,7 +631,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 class DecisionExecutionGate:
     """Checks worker-wide conditions before any decision reaches the adapter."""
 
-    def __init__(self, worker: Any):
+    def __init__(self, worker: Any) -> None:
         self.worker = worker
 
     def check(self, decision: ExecutionDecision) -> GateResult:
@@ -766,7 +779,7 @@ class DecisionExecutionGate:
 class OrderExecutionGate:
     """Validates and prepares each individual OrderIntent at the last boundary."""
 
-    def __init__(self, adapter: Any):
+    def __init__(self, adapter: Any) -> None:
         self.adapter = adapter
 
     async def check(
@@ -1013,24 +1026,30 @@ class OrderExecutionGate:
                 )
             except (InvalidOperation, TypeError, ValueError):
                 return GateResult(False, "Invalid limit price")
-            if not price.is_finite() or price <= 0:
+            if price is None or not price.is_finite() or price <= 0:
                 return GateResult(False, "Limit price must be positive and finite")
             if rules.parsed_from_exchange_info and (
                 price < rules.min_price or price > rules.max_price
             ):
                 return GateResult(False, "Limit price is outside the exchange price bounds")
-            estimated_price = price
+            if price is None:
+                return GateResult(False, "Limit price is invalid")
+            estimated_price: Decimal = price
         else:
             if time_in_force != TimeInForce.GTC:
                 return GateResult(False, "MARKET orders do not support this timeInForce")
             if intent.price is not None:
                 return GateResult(False, "MARKET order must not provide a limit price")
-            estimated_price = await self.adapter.get_fresh_market_price(
+            market_price = await self.adapter.get_fresh_market_price(
                 symbol,
                 getattr(intent.side, "value", intent.side),
             )
-            if estimated_price is None:
+            if market_price is None:
                 return GateResult(False, f"Fresh market price unavailable for {symbol}")
+            estimated_price = market_price
+
+        if not isinstance(estimated_price, Decimal):
+            return GateResult(False, "Estimated price is unavailable")
 
         if order_type == OrderType.LIMIT.value:
             # Binance's percent-price filters apply to submitted limit prices.
@@ -1050,9 +1069,9 @@ class OrderExecutionGate:
                 # Binance evaluates PERCENT_PRICE against mark price. A recent
                 # book-ticker midpoint is not a valid substitute, so obtain a
                 # fresh mark sample before rejecting the order.
-                mark_getter = getattr(self.adapter, "get_fresh_market_price", None)
+                mark_getter: Any = getattr(self.adapter, "get_fresh_market_price", None)
                 if callable(mark_getter):
-                    reference_price = await mark_getter(symbol)
+                    reference_price = await cast(Any, mark_getter(symbol))
             percent_allowed, percent_reason = rules.validate_percent_price(
                 estimated_price,
                 getattr(side, "value", side),
@@ -1164,7 +1183,7 @@ class OrderExecutionGate:
 
             existing_notional = Decimal("0")
             for order in current_open_orders:
-                if order.price <= 0:
+                if order.price is None or not order.price.is_finite() or order.price <= 0:
                     return GateResult(False, "Existing open-order notional is unknown")
                 existing_notional += abs(order.quantity * order.price)
             for position in await self.adapter.ledger.get_positions():

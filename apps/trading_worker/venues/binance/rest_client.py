@@ -124,7 +124,7 @@ class BinanceAPIError(Exception):
         message: str,
         raw_data: Any,
         headers: Optional[Dict[str, str]] = None,
-    ):
+    ) -> None:
         super().__init__(f"Binance API Error {status} (code {code}): {message}")
         self.status = status
         self.code = code
@@ -141,11 +141,11 @@ class BinanceRestClient:
         *,
         read_only: bool = False,
         portfolio_margin: Optional[bool] = None,
-    ):
+    ) -> None:
         if not isinstance(env, BinanceEnvironment):
             raise ValueError("Binance REST execution client requires TESTNET or MAINNET")
-        self.api_key = "".join(str(api_key or "").split())
-        self.api_secret = "".join(str(api_secret or "").split())
+        self.api_key = "".join((api_key or "").split())
+        self.api_secret = "".join((api_secret or "").split())
         self.env = env
         if portfolio_margin is None:
             portfolio_margin = is_portfolio_margin_enabled()
@@ -155,7 +155,7 @@ class BinanceRestClient:
         # A preflight adapter gets a transport-level read-only boundary in
         # addition to the adapter method guards.  This prevents a future
         # preflight code path from reaching the order endpoint accidentally.
-        self.read_only = bool(read_only)
+        self.read_only = read_only
         self.order_endpoint_attempts = 0
         self.base_url = get_rest_url(env)
         self.clock = BinanceClock(self.base_url)
@@ -195,7 +195,7 @@ class BinanceRestClient:
         )
         self._throttle_until = max(self._throttle_until, time.monotonic() + delay)
 
-    async def init_session(self):
+    async def init_session(self) -> None:
         if not self.session:
             headers = {}
             if self.api_key:
@@ -207,7 +207,7 @@ class BinanceRestClient:
         if not await self.clock.synchronize(self.session):
             raise BinanceTransportAmbiguity("Unable to synchronize Binance server clock")
 
-    async def close(self):
+    async def close(self) -> None:
         if self.session:
             await self.session.close()
 
@@ -227,7 +227,7 @@ class BinanceRestClient:
         signed: bool = False,
         *,
         before_mutation: Optional[Callable[[], Awaitable[None]]] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> Any:
         method_upper = method.upper()
         allowed_methods = _ALLOWED_REQUEST_METHODS.get(path)
@@ -281,6 +281,7 @@ class BinanceRestClient:
             if is_order_mutation:
                 self.order_endpoint_attempts += 1
             try:
+                assert self.session is not None
                 async with self.session.request(method_upper, url, **request_kwargs) as resp:
                     try:
                         data = await resp.json()

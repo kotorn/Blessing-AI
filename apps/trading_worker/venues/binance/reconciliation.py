@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from pydantic import BaseModel
 
@@ -457,10 +457,21 @@ def _exchange_fill_from_trade(
         if trade.get("clientOrderId") and str(trade["clientOrderId"]) != str(local_order.client_order_id):
             raise FillRecoveryError("Trade clientOrderId does not match the local order")
     try:
-        side = OrderSide(str(trade.get("side") or local_order.side.value))
-        position_side = PositionSide(
-            str(trade.get("positionSide") or local_order.position_side.value).upper()
-        )
+        local_side = None
+        local_pos_side = None
+        if local_order is not None:
+            order_side = getattr(local_order, "side", None)
+            if order_side is not None:
+                local_side = getattr(order_side, "value", order_side)
+            order_pos_side = getattr(local_order, "position_side", None)
+            if order_pos_side is not None:
+                local_pos_side = getattr(order_pos_side, "value", order_pos_side)
+        raw_side = trade.get("side") or local_side
+        raw_pos_side = trade.get("positionSide") or local_pos_side
+        if raw_side is None or raw_pos_side is None:
+            raise FillRecoveryError("Trade is missing side or positionSide")
+        side = OrderSide(str(raw_side))
+        position_side = PositionSide(str(raw_pos_side).upper())
         quantity = Decimal(str(trade["qty"]))
         price = Decimal(str(trade["price"]))
         commission = Decimal(str(trade["commission"]))
@@ -468,9 +479,11 @@ def _exchange_fill_from_trade(
     except (AttributeError, InvalidOperation, TypeError, ValueError) as exc:
         raise FillRecoveryError("Trade contains invalid fill fields") from exc
     if local_order is not None:
-        if side != local_order.side:
+        expected_side = getattr(local_order, "side", None)
+        if expected_side is not None and side != expected_side:
             raise FillRecoveryError("Trade side does not match the local order")
-        if position_side != local_order.position_side:
+        expected_pos_side = getattr(local_order, "position_side", None)
+        if expected_pos_side is not None and position_side != expected_pos_side:
             raise FillRecoveryError("Trade positionSide does not match the local order")
     if any(not value.is_finite() for value in (quantity, price, commission, realized_pnl)):
         raise FillRecoveryError("Trade contains non-finite fill fields")
@@ -501,7 +514,7 @@ def _exchange_fill_from_trade(
 
 
 class BinanceReconciliation:
-    def __init__(self, rest_client: BinanceRestClient, ledger: ExecutionLedger):
+    def __init__(self, rest_client: BinanceRestClient, ledger: ExecutionLedger) -> None:
         self.rest_client = rest_client
         self.ledger = ledger
         # Test doubles may not expose the enum, but production clients always
@@ -824,9 +837,9 @@ class BinanceReconciliation:
                 client_field=client_field, time_fields=time_fields,
             )
             try:
-                persisted = await observe(
+                persisted = await cast(Any, observe(
                     checkpoint=checkpoint, item=item, observed_at=utc_now(),
-                )
+                ))
                 payloads = self._durable_history_payloads(
                     [persisted], kind, str(checkpoint["symbol"]),
                 )
@@ -1047,13 +1060,13 @@ class BinanceReconciliation:
                 raise FillRecoveryError(
                     "Testnet open Algo orders exist without durable ownership storage"
                 )
-            active_records = (
+            active_records: List[Any] = (
                 await repository.list_active_protections(venue="binance_testnet")
                 if repository is not None else []
             )
             list_all = getattr(repository, "list_protections", None)
             history_records = (
-                await list_all(venue="binance_testnet")
+                await cast(Any, list_all(venue="binance_testnet"))
                 if callable(list_all) else active_records
             )
             expected: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1261,7 +1274,7 @@ class BinanceReconciliation:
     @staticmethod
     def _positive_exchange_id(value: object, *, field: str) -> str:
         try:
-            parsed = int(value)
+            parsed = int(str(value))
         except (TypeError, ValueError) as exc:
             raise FillRecoveryError(f"Binance {field} is missing or invalid") from exc
         if isinstance(value, bool) or parsed <= 0 or str(parsed) != str(value):
@@ -1573,8 +1586,8 @@ class BinanceReconciliation:
         if not mainnet_launch_id:
             raise FillRecoveryError("Mainnet Algo reconciliation has no durable launch identity")
         anchor_at = checkpoint["anchor_at"].astimezone(timezone.utc)
-        all_records = await list_all(venue="binance_mainnet")
-        all_active_records = await list_active(venue="binance_mainnet")
+        all_records = await cast(Any, list_all(venue="binance_mainnet"))
+        all_active_records = await cast(Any, list_active(venue="binance_mainnet"))
         if any(
             not isinstance(record, dict)
             or record.get("environment") != "MAINNET"
@@ -1713,11 +1726,11 @@ class BinanceReconciliation:
                 )
                 exact_item["payload"] = current_row
                 try:
-                    await observe(
+                    await cast(Any, observe(
                         checkpoint=checkpoint,
                         item=exact_item,
                         observed_at=datetime.now(timezone.utc),
-                    )
+                    ))
                 except Exception as exc:
                     raise FillRecoveryError(
                         "fresh exact-ID Algo state could not be durably recorded"
@@ -1869,23 +1882,23 @@ class BinanceReconciliation:
                 for row, owner in triggered:
                     record = owner["record"]
                     if str(record.get("state", "")).upper() not in {"CLOSED", "DEGRADED", "UNKNOWN"}:
-                        await set_state(
+                        await cast(Any, set_state(
                             "binance_mainnet", entry_key[0], entry_key[1], "CLOSE_PENDING",
                             reason=f"multiple Algo triggers; algo {row.get('algoId')}",
-                        )
+                        ))
                 raise FillRecoveryError("multiple Algo protections triggered for one owner")
             algo_row, owner = triggered[0]
             record = owner["record"]
             state = str(record.get("state") or "").upper()
             algo_id = self._positive_exchange_id(algo_row.get("algoId"), field="Algo ID")
             if state not in {"CLOSED", "CLOSE_PENDING"}:
-                pending = await set_state(
+                pending = await cast(Any, set_state(
                     "binance_mainnet", entry_key[0], entry_key[1], "CLOSE_PENDING",
                     reason=f"Algo {algo_id} triggered; child order pending verification",
-                )
+                ))
                 if pending is None or str(pending.get("state", "")).upper() != "CLOSE_PENDING":
                     raise FillRecoveryError("Mainnet Algo owner did not durably enter CLOSE_PENDING")
-            owner_readback = await get_protection("binance_mainnet", entry_key[0], entry_key[1])
+            owner_readback = await cast(Any, get_protection("binance_mainnet", entry_key[0], entry_key[1]))
             if owner_readback is None or str(owner_readback.get("state", "")).upper() not in {
                 "CLOSE_PENDING", "CLOSED"
             }:
@@ -2013,7 +2026,7 @@ class BinanceReconciliation:
                 owner_filled_quantity = Decimal(str(record.get("filled_quantity")))
             except (InvalidOperation, TypeError, ValueError) as exc:
                 raise FillRecoveryError("Mainnet Algo owner fill quantity is invalid") from exc
-            owner_open_algos = [
+            owner_open_algos: List[Any] = [
                 key for key in open_by_owner
                 if key[0] == entry_key[0]
                 and owners[key]["record"] is record
@@ -2056,7 +2069,7 @@ class BinanceReconciliation:
                 continue
 
             if state != "CLOSED":
-                closed_record = await close_with_proof(
+                closed_record = await cast(Any, close_with_proof(
                     entry_key[0],
                     entry_key[1],
                     {
@@ -2071,10 +2084,10 @@ class BinanceReconciliation:
                         "open_owner_algo_ids": [],
                         "verified_at": datetime.now(timezone.utc),
                     },
-                )
+                ))
                 if closed_record is None or str(closed_record.get("state", "")).upper() != "CLOSED":
                     raise FillRecoveryError("Mainnet Algo owner could not durably transition to CLOSED")
-            closed_readback = await get_protection("binance_mainnet", entry_key[0], entry_key[1])
+            closed_readback = await cast(Any, get_protection("binance_mainnet", entry_key[0], entry_key[1]))
             if (
                 closed_readback is None
                 or str(closed_readback.get("state", "")).upper() != "CLOSED"
@@ -2109,7 +2122,8 @@ class BinanceReconciliation:
                     f"allOrders anchor for {symbol} is unavailable for a non-terminal order"
                 )
         if not by_symbol:
-            by_symbol["ETHUSDC"] = []
+            default_orders: List[Any] = []
+            by_symbol["ETHUSDC"] = default_orders
         for symbol, local_orders in sorted(by_symbol.items()):
             expected = {
                 str(order.client_order_id): str(order.exchange_order_id)
@@ -2649,7 +2663,7 @@ class BinanceReconciliation:
         terminal_executed_quantities: dict[int, Decimal] = {}
         get_all_orders = getattr(self.ledger, "get_all_orders", None)
         all_orders = (
-            await get_all_orders()
+            await cast(Any, get_all_orders())
             if callable(get_all_orders)
             else await self.ledger.get_open_orders()
         )
@@ -2883,7 +2897,7 @@ class BinanceReconciliation:
             if not any(key[0] == symbol for key in exchange_position_map):
                 clear_positions = getattr(self.ledger, "clear_positions_for_symbol", None)
                 if callable(clear_positions):
-                    await clear_positions(symbol)
+                    await cast(Any, clear_positions(symbol))
                 else:
                     diffs.append(
                         ReconciliationDiff(
@@ -2934,7 +2948,7 @@ class BinanceReconciliation:
         # canonical fills; canceled/expired/rejected orders also require their
         # canonical totals to equal the freshly queried executedQty.
         get_fills = getattr(self.ledger, "get_fills", None)
-        fills = await get_fills() if callable(get_fills) else []
+        fills: List[Any] = await cast(Any, get_fills()) if callable(get_fills) else []
         for local_order in all_orders:
             local_status = str(local_order.status).upper()
             terminal_executed_qty = terminal_executed_quantities.get(id(local_order))
@@ -3032,10 +3046,10 @@ class BinanceReconciliation:
             local_positions = await self.ledger.get_positions()
             get_all_orders = getattr(self.ledger, "get_all_orders", None)
             local_orders = (
-                await get_all_orders() if callable(get_all_orders) else local_open_orders
+                await cast(Any, get_all_orders()) if callable(get_all_orders) else local_open_orders
             )
             get_fills = getattr(self.ledger, "get_fills", None)
-            local_fills = await get_fills() if callable(get_fills) else []
+            local_fills: List[Any] = await cast(Any, get_fills()) if callable(get_fills) else []
             has_local_exchange_state = bool(local_orders) or bool(local_fills) or any(
                 position.quantity != 0 for position in local_positions
             )
@@ -3063,7 +3077,7 @@ class BinanceReconciliation:
                 str(order.get("symbol")) for order in open_orders if order.get("symbol")
             )
             tracked_orders = (
-                await get_all_orders()
+                await cast(Any, get_all_orders())
                 if callable(get_all_orders)
                 else await self.ledger.get_open_orders()
             )
@@ -3073,7 +3087,7 @@ class BinanceReconciliation:
                 exchange_open_orders=open_orders,
             )
             if callable(get_all_orders):
-                tracked_orders = await get_all_orders()
+                tracked_orders = await cast(Any, get_all_orders())
             await self._resolve_missing_exchange_order_ids(tracked_orders)
             await self._audit_exchange_order_history(tracked_orders)
             symbols.update(
@@ -3165,7 +3179,7 @@ class BinanceReconciliation:
             )
             get_all_orders = getattr(self.ledger, "get_all_orders", None)
             tracked_orders = (
-                await get_all_orders()
+                await cast(Any, get_all_orders())
                 if callable(get_all_orders)
                 else await self.ledger.get_open_orders()
             )
@@ -3175,7 +3189,7 @@ class BinanceReconciliation:
                 exchange_open_orders=exchange_open_orders,
             )
             if callable(get_all_orders):
-                tracked_orders = await get_all_orders()
+                tracked_orders = await cast(Any, get_all_orders())
             await self._resolve_missing_exchange_order_ids(tracked_orders)
             await self._audit_exchange_order_history(tracked_orders)
             symbols.update(

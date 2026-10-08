@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from typing import Any
 
 # -I execution still imports only the script's explicitly resolved directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -17,9 +18,9 @@ from local_pilot_track_c_source import source_binding
 from verify_local_pilot_ci_attestation import _trusted_gh_digest, _gh_digest
 
 
-def verify_class(root: Path, binding: dict, evidence_class: str, now: str,
-                 *, review_policy: dict | None = None) -> dict:
-    failure = {'status': 'FAIL', 'reason': 'TRACK_C_ATTESTATION_INVALID', 'evidenceClass': evidence_class}
+def verify_class(root: Path, binding: dict[str, Any], evidence_class: str, now: str,
+                 *, review_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    failure: dict[str, Any] = {'status': 'FAIL', 'reason': 'TRACK_C_ATTESTATION_INVALID', 'evidenceClass': evidence_class}
     directory = root / 'artifacts/local-pilot-attestations'
     subject = directory / f'{evidence_class}.json'
     bundle = directory / f'{evidence_class}.bundle.json'
@@ -32,20 +33,23 @@ def verify_class(root: Path, binding: dict, evidence_class: str, now: str,
         statement = json.loads(raw)
         gh = shutil.which('gh')
         digest = _trusted_gh_digest(gh) if gh else None
-        if digest is None:
+        if not gh or digest is None:
             return {**failure, 'reason': 'TRACK_C_VERIFIER_UNTRUSTED'}
         environment = {k: v for k, v in os.environ.items()
                        if k.upper() in {'PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP'}}
-        sha = binding['gitSha']
+        sha = str(binding['gitSha'])
         workflow = workflow_for(evidence_class)
-        result = subprocess.run([
-            gh, 'attestation', 'verify', str(subject), '--bundle', str(bundle),
-            '--repo', REPOSITORY,
+        cmd: list[str] = [
+            str(gh), 'attestation', 'verify', str(subject), '--bundle', str(bundle),
+            '--repo', str(REPOSITORY),
             '--cert-identity', f'https://github.com/{workflow}@{REF}',
-            '--source-ref', REF, '--source-digest', sha, '--signer-digest', sha,
+            '--source-ref', str(REF), '--source-digest', sha, '--signer-digest', sha,
             '--deny-self-hosted-runners', '--format', 'json',
-        ], cwd=root, env=environment, capture_output=True, text=True, timeout=40,
-           check=False, shell=False)
+        ]
+        result = subprocess.run(
+            cmd, cwd=root, env=environment, capture_output=True, text=True, timeout=40,
+            check=False, shell=False
+        )
         if result.returncode != 0 or len(result.stdout) > 4194304:
             detail = result.stderr.strip()[:1024] if result.stderr else None
             return {**failure, 'stderr': detail, 'detail': detail} if detail else failure
@@ -64,9 +68,9 @@ def verify_class(root: Path, binding: dict, evidence_class: str, now: str,
         return failure
 
 
-def verify_all(root: Path, binding: dict | None = None, *, now: str | None = None) -> dict:
+def verify_all(root: Path, binding: dict[str, Any] | None = None, *, now: str | None = None) -> dict[str, Any]:
     """Recompute binding before and after verification; supplied binding is an assertion only."""
-    failed = {'classes': [], 'sourceClean': False, 'reason': 'LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN'}
+    failed: dict[str, Any] = {'classes': [], 'sourceClean': False, 'reason': 'LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN'}
     try:
         actual = source_binding(root)
         if binding is not None and binding != actual:
@@ -75,7 +79,8 @@ def verify_all(root: Path, binding: dict | None = None, *, now: str | None = Non
         results = [verify_class(root, actual, c, now or datetime.now(UTC).isoformat(),
                                 review_policy=policy) for c in CLASSES]
         reviewers = [r['reviewer']['id'] for r in results
-                     if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS']
+                     if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS'
+                     and isinstance(r.get('reviewer'), dict) and 'id' in r['reviewer']]
         review_runs = [r['runId'] for r in results
                        if r['evidenceClass'].startswith('REVIEW_') and r['status'] == 'PASS']
         review_ok = False

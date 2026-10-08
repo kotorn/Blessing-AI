@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 from datetime import UTC, datetime
+from typing import Any
 
 REPOSITORY = "kotorn/Blessing-AI"
 WORKFLOW = f"{REPOSITORY}/.github/workflows/ci.yml"
@@ -48,7 +49,7 @@ def _trusted_gh_digest(executable: str) -> str | None:
         return None
 
 
-def verify_ci_attestation(root: Path, expected_sha: str, *, now: datetime | None = None) -> dict:
+def verify_ci_attestation(root: Path, expected_sha: str, *, now: datetime | None = None) -> dict[str, Any]:
     """Require a signed subject and certificate bound to the exact tested source."""
     failure = {"status": "FAIL", "reason": "CI_ATTESTATION_INVALID"}
     if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
@@ -94,13 +95,16 @@ def verify_ci_attestation(root: Path, expected_sha: str, *, now: datetime | None
             name: value for name, value in os.environ.items()
             if name.upper() in {"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"}
         }
+        cmd: list[str] = [
+            str(gh), "attestation", "verify", str(subject), "--bundle", str(bundle),
+            "--repo", REPOSITORY, "--signer-workflow", WORKFLOW,
+            "--cert-identity", f"https://github.com/{WORKFLOW}@{REF}",
+            "--source-ref", REF, "--source-digest", expected_sha,
+            "--signer-digest", expected_sha, "--deny-self-hosted-runners",
+            "--format", "json",
+        ]
         result = subprocess.run(
-            [gh, "attestation", "verify", str(subject), "--bundle", str(bundle),
-             "--repo", REPOSITORY, "--signer-workflow", WORKFLOW,
-             "--cert-identity", f"https://github.com/{WORKFLOW}@{REF}",
-             "--source-ref", REF, "--source-digest", expected_sha,
-             "--signer-digest", expected_sha, "--deny-self-hosted-runners",
-             "--format", "json"],
+            cmd,
             cwd=root.resolve(), env=environment, capture_output=True,
             text=True, timeout=30, check=False,
         )

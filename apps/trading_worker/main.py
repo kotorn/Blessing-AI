@@ -15,10 +15,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Callable, Dict, List, Optional, Literal, Tuple, cast
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import (
     BaseModel,
@@ -227,7 +227,7 @@ def local_mainnet_risk_lifecycle_status(
     if callable(monitor_fn):
         try:
             m_state = monitor_fn()
-            status = m_state.get("status")
+            status = m_state.get("status") if isinstance(m_state, dict) else None
             if status in {"STALLED", "STALE", "DEGRADED"}:
                 missing.append("pilot_monitor_healthy")
         except Exception:
@@ -697,7 +697,7 @@ def local_worker_identity_matches(expected_token: str, authorization: str) -> bo
 
 
 @app.middleware("http")
-async def require_local_worker_identity(request: Request, call_next):
+async def require_local_worker_identity(request: Request, call_next: Any) -> Response:
     """Add a per-launch local service boundary; Cloud Run IAM remains authoritative in prod."""
 
     if not (
@@ -716,11 +716,11 @@ async def require_local_worker_identity(request: Request, call_next):
 
 
 @app.get("/health")
-def health_check():
+def health_check() -> Dict[str, Any]:
     return {"status": "ok", "timestamp": utc_now()}
 
 @app.get("/ready")
-def readiness_probe():
+def readiness_probe() -> Dict[str, Any]:
     """Cloud Run readiness: expose durable persistence truth, never a fixture."""
     if WORKER_ENGINE is None:
         raise HTTPException(status_code=503, detail="Worker is not initialized")
@@ -835,7 +835,7 @@ async def continuation_readiness_endpoint(launch_id: Optional[str] = None):
     runner = getattr(WORKER_ENGINE, "run_mainnet_continuation_readiness", None)
     if not callable(runner):
         raise HTTPException(status_code=503, detail="Autonomous continuation is unavailable")
-    return await runner(launch_id=launch_id)
+    return await cast(Any, runner(launch_id=launch_id))
 
 @app.post("/continue")
 async def continue_endpoint(config: ContinuationRequest):
@@ -846,7 +846,7 @@ async def continue_endpoint(config: ContinuationRequest):
     runner = getattr(WORKER_ENGINE, "continue_autonomous", None)
     if not callable(runner):
         raise HTTPException(status_code=503, detail="Autonomous continuation is unavailable")
-    success, message = await runner(config)
+    success, message = await cast(Any, runner(config))
     if not success:
         raise HTTPException(status_code=409, detail=message)
     state = WORKER_ENGINE.get_state().model_dump()
@@ -874,7 +874,7 @@ async def read_only_preflight_endpoint():
     runner = getattr(WORKER_ENGINE, "run_mainnet_read_only_preflight", None)
     if not callable(runner):
         raise HTTPException(status_code=503, detail="Read-only preflight is unavailable")
-    return await runner()
+    return await cast(Any, runner())
 
 @app.post("/pause-new-risk")
 async def pause_new_risk_endpoint(req: ToggleRequest):
@@ -1492,7 +1492,7 @@ class TradingWorkerApp:
         ):
             return False
         try:
-            stored = await claim(record)
+            stored = await cast(Any, claim(record))
         except Exception as exc:
             logger.error("Local Mainnet entry cancel claim failed: %s", type(exc).__name__)
             return False
@@ -1669,7 +1669,8 @@ class TradingWorkerApp:
             }
             # Fee first: if the process fails between the two idempotent
             # writes, replay can safely complete the missing realized event.
-            fee_result = await append_event(
+            append_event_fn = cast(Callable[..., Any], append_event)
+            fee_result = await append_event_fn(
                 **common,
                 event_key=f"FEE:{fill.exchange_trade_id}",
                 event_type="FEE",
@@ -1682,7 +1683,7 @@ class TradingWorkerApp:
                     "asset": "USDC",
                 },
             )
-            fill_result = await append_event(
+            fill_result = await append_event_fn(
                 **common,
                 event_key=f"FILL:{fill.exchange_trade_id}",
                 event_type="FILL",
@@ -1760,7 +1761,8 @@ class TradingWorkerApp:
             if mark_age < -2 or mark_age > 60:
                 raise ValueError("position mark is stale or from the future")
             launch_id = str(session["launch_id"])
-            result = await append_event(
+            append_event_fn = cast(Callable[..., Any], append_event)
+            result = await append_event_fn(
                 run_id=launch_id,
                 campaign_id=str(session["pilot_campaign_id"]),
                 launch_id=launch_id,
@@ -1890,6 +1892,7 @@ class TradingWorkerApp:
             # Independently verify the ledger identity before publishing values.
             if abs(net - (realized + unrealized - fees + funding)) > Decimal("0.00000001"):
                 return {**unknown, "status": "MISMATCH", "reason": "PNL_COMPONENTS_DO_NOT_RECONCILE"}
+            last_event_at_val = snapshot.get("last_event_at")
             return {
                 "status": "VERIFIED",
                 "evidence_status": "VERIFIED",
@@ -1906,8 +1909,8 @@ class TradingWorkerApp:
                 "mark_age_seconds": max(0.0, mark_age),
                 # No source-backed reference-price model is currently stored.
                 "slippage_usdc": "UNKNOWN",
-                "last_event_at": snapshot.get("last_event_at").isoformat()
-                if isinstance(snapshot.get("last_event_at"), datetime) else None,
+                "last_event_at": last_event_at_val.isoformat()
+                if isinstance(last_event_at_val, datetime) else None,
                 "reason": None,
             }
         except Exception as exc:
@@ -1955,7 +1958,7 @@ class TradingWorkerApp:
                 raise ValueError("Pilot funding history window is invalid or outside Binance retention")
             launch_id = str(session["launch_id"])
             campaign_id = str(session["pilot_campaign_id"])
-            owners = await owner_repository.list_protections("binance_mainnet", "ETHUSDC")
+            owners = await cast(Any, owner_repository).list_protections("binance_mainnet", "ETHUSDC")
             owners = [
                 row for row in owners
                 if isinstance(row, dict)
@@ -1974,7 +1977,7 @@ class TradingWorkerApp:
             attributable = 0
             max_pages = 10
             for page in range(1, max_pages + 1):
-                rows = await rest_client.request(
+                rows = await cast(Any, rest_client).request(
                     "GET",
                     income_path,
                     signed=True,
@@ -1993,7 +1996,7 @@ class TradingWorkerApp:
                     if not isinstance(row, dict):
                         raise ValueError("income-history row is invalid")
                     tran_id = str(row.get("tranId") or "")
-                    income_time = int(row.get("time"))
+                    income_time = int(str(row.get("time") or 0))
                     amount = Decimal(str(row.get("income")))
                     if (
                         str(row.get("incomeType") or "").upper() != "FUNDING_FEE"
@@ -2030,7 +2033,8 @@ class TradingWorkerApp:
                     if len(matching_owners) != 1:
                         raise ValueError("funding income cannot be uniquely matched to one durable exposure owner")
                     owner = matching_owners[0]
-                    saved = await append_event(
+                    append_event_fn = cast(Callable[..., Any], append_event)
+                    saved = await append_event_fn(
                         run_id=launch_id,
                         campaign_id=campaign_id,
                         launch_id=launch_id,
@@ -2116,7 +2120,7 @@ class TradingWorkerApp:
             logger.error("Local Mainnet close proof persistence is unavailable or mis-scoped")
             return False
         try:
-            stored = await repository.close_mainnet_protection_with_proof(
+            stored = await cast(Any, repository).close_mainnet_protection_with_proof(
                 str(record["symbol"]),
                 str(record["entry_client_order_id"]),
                 proof,
@@ -2407,19 +2411,19 @@ class TradingWorkerApp:
         """Require complete, selected-environment exchange rules for all symbols."""
         active_symbols = self._active_instruments()
         adapter = self.execution_adapter
-        return bool(
-            adapter
-            and active_symbols
-            and all(
-                adapter.is_symbol_ready_for_execution(symbol)
-                if hasattr(adapter, "is_symbol_ready_for_execution")
-                else (
-                    symbol in adapter.symbol_rules
-                    and adapter.symbol_rules[symbol].is_ready_for("LIMIT")
-                    and adapter.symbol_rules[symbol].is_ready_for("MARKET")
-                )
-                for symbol in active_symbols
-            )
+        if not adapter or not active_symbols:
+            return False
+        if hasattr(adapter, "is_symbol_ready_for_execution"):
+            return all(adapter.is_symbol_ready_for_execution(symbol) for symbol in active_symbols)
+        symbol_rules = getattr(adapter, "symbol_rules", None)
+        if not isinstance(symbol_rules, dict):
+            return False
+        return all(
+            symbol in symbol_rules
+            and hasattr(symbol_rules[symbol], "is_ready_for")
+            and symbol_rules[symbol].is_ready_for("LIMIT")
+            and symbol_rules[symbol].is_ready_for("MARKET")
+            for symbol in active_symbols
         )
 
     @staticmethod
@@ -2471,7 +2475,8 @@ class TradingWorkerApp:
                 for field in required
             )
             nonnegative = all(
-                Decimal(str(getattr(snapshot, field))) >= 0
+                getattr(snapshot, field, None) is not None
+                and Decimal(str(getattr(snapshot, field))) >= 0
                 for field in (
                     "wallet_balance",
                     "margin_balance",
@@ -2755,21 +2760,22 @@ class TradingWorkerApp:
         return True
 
     def _sync_adapter_state(self) -> None:
-        if self.execution_adapter is None:
+        adapter = self.execution_adapter
+        if adapter is None:
             return
-        if getattr(self.execution_adapter.reconciliation, "authentication_failed", False):
-            self.execution_adapter.invalidate_authentication()
-        adapter_state = self.execution_adapter.connection_state
+        reconciliation = getattr(adapter, "reconciliation", None)
+        if getattr(reconciliation, "authentication_failed", False) and hasattr(adapter, "invalidate_authentication"):
+            adapter.invalidate_authentication()
+        adapter_state = getattr(adapter, "connection_state", None)
         self.connection_state = getattr(adapter_state, "value", str(adapter_state))
-        self.authenticated = self.execution_adapter.authenticated
-        stream_health = getattr(self.execution_adapter, "private_stream_healthy", None)
+        self.authenticated = bool(getattr(adapter, "authenticated", False))
+        stream_health = getattr(adapter, "private_stream_healthy", None)
         if stream_health is None:
-            stream = getattr(self.execution_adapter, "user_stream", None)
+            stream = getattr(adapter, "user_stream", None)
             stream_health = bool(stream and getattr(stream, "is_connected", False))
         self.private_stream_healthy = bool(stream_health)
-        self.reconciliation_status = getattr(
-            self.execution_adapter.reconciliation, "last_status", "UNKNOWN"
-        )
+        reconcil = getattr(adapter, "reconciliation", None)
+        self.reconciliation_status = getattr(reconcil, "last_status", "UNKNOWN") if reconcil else "UNKNOWN"
         self._refresh_engine_state()
 
     def _adapter_trade_authorized(self) -> bool:

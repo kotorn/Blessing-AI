@@ -185,7 +185,7 @@ def _decode_json_mapping(value: object, field_name: str) -> dict[str, Any]:
     return dict(value)
 
 
-def _decode_protection_record(row: Mapping[str, Any]) -> dict[str, Any]:
+def _decode_protection_record(row: Any) -> dict[str, Any]:
     result = dict(row)
     if result.get("closure_evidence") is not None:
         result["closure_evidence"] = _decode_json_mapping(
@@ -1410,6 +1410,8 @@ class AlgoProtectionRepository:
                 )
                 if updated is None:
                     raise RuntimeError("Emergency close owner changed during claim")
+            if current is None:
+                raise RuntimeError("Emergency close claim record unavailable")
             return {**dict(current), "claimed": claimed}
 
     @staticmethod
@@ -2069,6 +2071,10 @@ class BinanceHistoryRepository:
         anchor_at = _utc_datetime(checkpoint.get("anchor_at"))
         covered_through = checkpoint.get("covered_through")
         reference_at = _utc_datetime(covered_through) if covered_through is not None else anchor_at
+        previous_scan_id: Any = None
+        scan_from_at: Optional[datetime] = None
+        scan_to_at: Optional[datetime] = None
+        scan_started: Any = None
         if status == "SCANNING":
             scan_started = checkpoint.get("scan_started_at")
             scan_from = checkpoint.get("scan_from_at")
@@ -2195,7 +2201,7 @@ class BinanceHistoryRepository:
             payload_hash = str(item.get("payload_sha256") or "").strip().lower()
             if not re.fullmatch(r"[0-9a-f]{64}", payload_hash):
                 raise ValueError("history page payload fingerprint is invalid")
-            normalized = {
+            normalized: dict[str, Any] = {
                 "item_id": item_id,
                 "client_id": client_id,
                 "event_at": event_at,
@@ -2205,28 +2211,30 @@ class BinanceHistoryRepository:
                 payload = item.get("payload")
                 if not isinstance(payload, Mapping):
                     raise ValueError("Binance history observation payload is missing")
+                payload_dict: dict[str, Any] = {str(k): v for k, v in payload.items()}
                 try:
                     canonical_payload = json.dumps(
-                        dict(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
+                        payload_dict, sort_keys=True, separators=(",", ":"), allow_nan=False
                     )
                 except (TypeError, ValueError) as exc:
                     raise ValueError("Binance history observation payload is invalid") from exc
                 if hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest() != payload_hash:
                     raise ValueError("Binance history observation payload fingerprint is invalid")
-                normalized["payload"] = dict(payload)
+                normalized["payload"] = payload_dict
             elif history_kind in {"ALL_ORDERS", "USER_TRADES"}:
                 payload = item.get("payload")
                 if not isinstance(payload, Mapping):
                     raise ValueError("Binance history observation payload is missing")
+                payload_dict: dict[str, Any] = {str(k): v for k, v in payload.items()}
                 try:
                     canonical_payload = json.dumps(
-                        dict(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
+                        payload_dict, sort_keys=True, separators=(",", ":"), allow_nan=False
                     )
                 except (TypeError, ValueError) as exc:
                     raise ValueError("Binance history observation payload is invalid") from exc
                 if hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest() != payload_hash:
                     raise ValueError("Binance history observation payload fingerprint is invalid")
-                normalized["payload"] = dict(payload)
+                normalized["payload"] = payload_dict
             previous = normalized_by_id.get(item_id)
             if previous is not None and previous != normalized:
                 raise ValueError("history page repeats an ID with conflicting contents")
@@ -2880,7 +2888,7 @@ class BinanceHistoryRepository:
                 "open_orders_snapshot": row["open_orders_snapshot"],
                 "open_algo_orders_snapshot": row["open_algo_orders_snapshot"],
             }
-            if proof["anchor_at"] != _utc_datetime(anchor["anchor_at"]):
+            if anchor is None or proof["anchor_at"] != _utc_datetime(anchor["anchor_at"]):
                 raise RuntimeError("stored Algo baseline anchor differs from its durable run")
             fingerprint = hashlib.sha256(
                 json.dumps(proof, sort_keys=True, separators=(",", ":"), default=_json_default)
@@ -3448,43 +3456,48 @@ class PersistenceRepository:
         )
         if row is None:
             raise RuntimeError("mainnet launch session could not be read after creation")
+        row_dict: dict[str, Any] = dict(row)
         if (
-            str(row["launch_id"]) != launch_id
+            str(row_dict.get("launch_id", "")) != launch_id
             or (
                 normalized_target == _CLOUD_RUNTIME_TARGET
-                and str(row["image_digest"]) != image_digest
+                and str(row_dict.get("image_digest", "")) != image_digest
             )
             or (
                 normalized_target == _LOCAL_RUNTIME_TARGET
-                and row.get("image_digest") is not None
+                and row_dict.get("image_digest") is not None
             )
-            or str(row.get("runtime_target", _CLOUD_RUNTIME_TARGET)).upper()
+            or str(row_dict.get("runtime_target", _CLOUD_RUNTIME_TARGET)).upper()
             != normalized_target
             or (
                 normalized_target == _LOCAL_RUNTIME_TARGET
-                and str(row.get("runtime_fingerprint", "")).lower()
+                and str(row_dict.get("runtime_fingerprint", "")).lower()
                 != str(runtime_fingerprint).lower()
             )
-            or str(row["symbol"]).upper() != symbol.upper()
-            or str(row["policy"]) != policy
-            or (policy == "LIVE_RESEARCH_PILOT" and any(
-                row.get(column) != value for column, value in (
-                    ("pilot_campaign_id", normalized_pilot["campaign_id"]),
-                    ("pilot_git_sha", normalized_pilot["git_sha"]),
-                    ("pilot_source_hash", normalized_pilot["source_hash"]),
-                    ("pilot_dependency_hash", normalized_pilot["dependency_hash"]),
-                    ("pilot_migration_hash", normalized_pilot["migration_hash"]),
-                    ("pilot_strategy_hash", normalized_pilot["strategy_hash"]),
-                    ("pilot_secret_project_id", normalized_pilot["secret_project_id"]),
-                    ("pilot_api_key_version", normalized_pilot["api_key_version"]),
-                    ("pilot_api_secret_version", normalized_pilot["api_secret_version"]),
-                    ("pilot_management_mode", normalized_pilot["management_mode"]),
-                    ("pilot_risk_policy_hash", normalized_pilot["risk_policy_hash"]),
-                )
-            ))
+            or str(row_dict.get("symbol", "")).upper() != symbol.upper()
+            or str(row_dict.get("policy", "")) != policy
         ):
             raise RuntimeError("existing launch session does not match release approval")
-        return dict(row)
+        if policy == "LIVE_RESEARCH_PILOT":
+            if normalized_pilot is None:
+                raise RuntimeError("existing launch session does not match release approval")
+            pilot_data = normalized_pilot
+            for column, value in (
+                ("pilot_campaign_id", pilot_data["campaign_id"]),
+                ("pilot_git_sha", pilot_data["git_sha"]),
+                ("pilot_source_hash", pilot_data["source_hash"]),
+                ("pilot_dependency_hash", pilot_data["dependency_hash"]),
+                ("pilot_migration_hash", pilot_data["migration_hash"]),
+                ("pilot_strategy_hash", pilot_data["strategy_hash"]),
+                ("pilot_secret_project_id", pilot_data["secret_project_id"]),
+                ("pilot_api_key_version", pilot_data["api_key_version"]),
+                ("pilot_api_secret_version", pilot_data["api_secret_version"]),
+                ("pilot_management_mode", pilot_data["management_mode"]),
+                ("pilot_risk_policy_hash", pilot_data["risk_policy_hash"]),
+            ):
+                if row_dict.get(column) != value:
+                    raise RuntimeError("existing launch session does not match release approval")
+        return row_dict
 
     async def reserve_mainnet_risk_order(
         self, launch_id: str, client_order_id: str, basket_id: str | None = None
