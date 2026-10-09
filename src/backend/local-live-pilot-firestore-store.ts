@@ -72,19 +72,23 @@ function validateBindingShape(expected: LocalLivePilotExpectedBinding, campaignI
   if (expected.symbol !== 'ETHUSDC' || expected.market !== 'USD_M_FUTURES') throw new Error('Local live pilot market binding is invalid');
   if (expected.managementMode !== 'QUICK') throw new Error('first Local live pilot management binding must be QUICK');
   if (!/^run-[A-Za-z0-9][A-Za-z0-9_-]{7,126}$/.test(expected.runId)) throw new Error('Local live pilot run binding is invalid');
-  if (!['grid', 'trend', 'shock', 'carry'].includes(expected.strategyId)) throw new Error('Local live pilot strategy binding is invalid');
+  if (expected.strategyId !== 'grid') throw new Error('Local live pilot strategy binding is invalid');
   if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(expected.secretManagerProjectId)
     || !/^[1-9][0-9]*$/.test(expected.apiKeyVersion)
     || !/^[1-9][0-9]*$/.test(expected.apiSecretVersion)) {
     throw new Error('Local live pilot Secret Manager binding is invalid');
   }
   assertExactKeys(expected.limits, [
-    'positionNotionalUsdc', 'orderNotionalUsdc', 'totalExposureUsdc', 'plannedRiskUsdc',
+    'positionNotionalUsdc', 'orderNotionalUsdc', 'entryTargetNotionalUsdc',
+    'executionRiskBufferUsdc', 'totalExposureUsdc', 'plannedRiskUsdc',
     'campaignDrawdownUsdc', 'maxLeverage', 'quickTargetNetUsdc', 'quickMaxHoldMs',
+    'sessionEntryCutoffSeconds', 'sessionCloseAfterSeconds', 'sessionEndSeconds',
   ], 'Local live pilot limits binding');
   if (!sameKeys(Object.keys(expected.limits), [
-    'positionNotionalUsdc', 'orderNotionalUsdc', 'totalExposureUsdc', 'plannedRiskUsdc',
+    'positionNotionalUsdc', 'orderNotionalUsdc', 'entryTargetNotionalUsdc',
+    'executionRiskBufferUsdc', 'totalExposureUsdc', 'plannedRiskUsdc',
     'campaignDrawdownUsdc', 'maxLeverage', 'quickTargetNetUsdc', 'quickMaxHoldMs',
+    'sessionEntryCutoffSeconds', 'sessionCloseAfterSeconds', 'sessionEndSeconds',
   ])) throw new Error('Local live pilot limits binding is incomplete');
 }
 

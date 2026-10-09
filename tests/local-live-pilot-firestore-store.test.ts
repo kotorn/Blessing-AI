@@ -26,7 +26,7 @@ function input(overrides: Partial<LocalLivePilotInput> = {}): LocalLivePilotInpu
     role: ADMIN.role,
     ...HASHES,
     gitSha: 'f'.repeat(40),
-    strategyId: 'trend',
+    strategyId: 'grid',
     secretManagerProjectId: 'blessing-project-123',
     apiKeyVersion: '1',
     apiSecretVersion: '1',
