@@ -1289,8 +1289,9 @@ class TradingWorkerApp:
         session = self._mainnet_launch_session
         if not isinstance(session, dict) or session.get("policy") != "LIVE_RESEARCH_PILOT":
             return None
-        if self._pilot_session_timer is not None:
-            return self._pilot_session_timer
+        existing_timer = getattr(self, "_pilot_session_timer", None)
+        if existing_timer is not None:
+            return existing_timer
         try:
             armed_at = self._session_timestamp(session.get("pilot_session_armed_at"))
             entry_cutoff_at = self._session_timestamp(session.get("pilot_session_entry_cutoff_at"))
@@ -1459,7 +1460,7 @@ class TradingWorkerApp:
                 "close_side": session.get("pilot_session_close_side"),
                 "close_position_side": session.get("pilot_session_close_position_side"),
                 "close_attempt_count": int(session.get("pilot_session_close_attempt_count") or 0),
-                "clock_status": self._pilot_session_clock_error or "T0_UNAVAILABLE",
+                "clock_status": getattr(self, "_pilot_session_clock_error", None) or "T0_UNAVAILABLE",
             }
         try:
             phase = timer.phase(

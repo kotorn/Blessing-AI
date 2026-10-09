@@ -258,6 +258,18 @@ def create_fake_persistence():
         async def create_mainnet_launch_session(self, **kwargs):
             return dict(self._session)
 
+        async def record_local_live_pilot_session_armed(
+            self, launch_id, *, armed_at, entry_cutoff_seconds, close_after_seconds, end_seconds
+        ):
+            assert launch_id == self._session["launch_id"]
+            self._session.update({
+                "pilot_session_armed_at": armed_at.isoformat().replace("+00:00", "Z"),
+                "pilot_session_entry_cutoff_at": (armed_at + timedelta(seconds=entry_cutoff_seconds)).isoformat().replace("+00:00", "Z"),
+                "pilot_session_close_after_at": (armed_at + timedelta(seconds=close_after_seconds)).isoformat().replace("+00:00", "Z"),
+                "pilot_session_end_at": (armed_at + timedelta(seconds=end_seconds)).isoformat().replace("+00:00", "Z"),
+            })
+            return dict(self._session)
+
         async def ensure_order_durable(self, order):
             return True
 
