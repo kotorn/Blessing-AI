@@ -916,6 +916,13 @@ class BinanceExecutionAdapter:
                 result["daily_loss_headroom_usdc"] = min(
                     Decimal("5"), runtime["snapshot_risk"].daily_loss_headroom_usdc
                 )
+                # The gate requires the campaign's bound hashes to equal the
+                # hashes of the runtime actually executing (set by the Local
+                # supervisor); a missing value stays empty and blocks.
+                for hash_key in ("source_hash", "dependency_hash", "migration_hash"):
+                    result[hash_key] = os.getenv(
+                        f"LOCAL_LIVE_PILOT_{hash_key.upper()}", ""
+                    ).strip().lower()
                 result["live_research_pilot"] = {
                     "approval_verified": True,
                     "approval_role": "trading_admin",
@@ -1130,7 +1137,9 @@ class BinanceExecutionAdapter:
             if symbol_info:
                 interval = self._decimal_value(symbol_info[0].get("fundingIntervalHours"), positive=True)
                 rate_cap = abs(self._decimal_value(symbol_info[0].get("adjustedFundingRateCap"), nonnegative=True))
-                rate_floor = abs(self._decimal_value(symbol_info[0].get("adjustedFundingRateFloor"), nonnegative=True))
+                # The floor is negative on Binance (e.g. -0.003); only its
+                # magnitude bounds funding paid.
+                rate_floor = abs(self._decimal_value(symbol_info[0].get("adjustedFundingRateFloor")))
                 funding_cap = max(rate_cap, rate_floor)
             else:
                 # Binance documents the default 8h interval and derives the

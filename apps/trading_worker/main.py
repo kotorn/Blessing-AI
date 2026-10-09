@@ -4992,6 +4992,34 @@ class TradingWorkerApp:
             clear_local_mainnet_secrets()
         logger.info("Worker DISARMED")
 
+    # The risk context needs the account snapshot <= 5s old across the whole
+    # entry chain (clamp, gate #1, final fence: several seconds), while the
+    # general worker tolerance is 30s. Refresh just before the chain starts.
+    PILOT_ENTRY_SNAPSHOT_MAX_AGE_SEC = 1.5
+
+    async def _ensure_fresh_pilot_account_snapshot(self) -> bool:
+        adapter = self.execution_adapter
+        if adapter is None:
+            return False
+        snapshot = getattr(adapter, "account_snapshot", None)
+        timestamp = getattr(snapshot, "timestamp", None)
+        if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
+            age = (utc_now() - timestamp).total_seconds()
+            if 0 <= age <= self.PILOT_ENTRY_SNAPSHOT_MAX_AGE_SEC:
+                return True
+        reconciler = getattr(getattr(adapter, "reconciliation", None), "reconcile", None)
+        if not callable(reconciler):
+            return False
+        try:
+            result = await reconciler()
+        except Exception as exc:
+            logger.warning("Pilot entry snapshot refresh failed: %s", type(exc).__name__)
+            return False
+        if result != "IN_SYNC":
+            return False
+        self.reconciliation_status = "IN_SYNC"
+        return True
+
     def _pilot_basket_id(self) -> Optional[str]:
         """One stable basket per launch for every pilot bracket.
 
@@ -5104,7 +5132,9 @@ class TradingWorkerApp:
                                             if inspect.iscoroutine(ctx_res):
                                                 ctx_res = await ctx_res
                                             if isinstance(ctx_res, dict):
-                                                context = ctx_res
+                                                # Keep validated_quantity/entry_price: the cost
+                                                # provider reads them from this same dict.
+                                                context = {**context, **ctx_res}
                                         except Exception as ctx_err:
                                             logger.warning(
                                                 "Risk context resolution before cost evidence failed: %s", ctx_err
@@ -5840,6 +5870,16 @@ class TradingWorkerApp:
                         environment_name = "TESTNET"
                         is_ready = autonomous_enabled and bool(launch_readiness.get(readiness_key, False))
                     if is_ready:
+                        if (
+                            self.execution_mode == WorkerExecutionMode.LIVE
+                            and policy == "LIVE_RESEARCH_PILOT"
+                            and not await self._ensure_fresh_pilot_account_snapshot()
+                        ):
+                            self._note_pilot_attempt(
+                                "EXECUTION_BLOCKED",
+                                "Account snapshot could not be refreshed and reconciled before entry",
+                            )
+                            return decision
                         try:
                             decision = await self._clamp_order_notional_if_needed(decision, event.last_price)
                         except Exception as clamp_err:

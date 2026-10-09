@@ -250,7 +250,9 @@ async def _local_mainnet_risk_gate(
             'Local Mainnet commission/funding/depth cost evidence is unavailable; caller estimates cannot authorize risk',
         )
     try:
-        cost_evidence = await cast(Any, cost_provider(validated_intent, context))
+        cost_evidence = await cast(
+            Any, cost_provider(validated_intent, {**context, **context_input})
+        )
     except Exception:
         return GateResult(False, 'Local Mainnet exchange-derived cost evidence could not be verified')
     if not isinstance(cost_evidence, Mapping):
