@@ -10,12 +10,12 @@ import { trackCPhases, verifierDiagnosticCode, verifyTrackCAttestations } from '
 export const LOCAL_PILOT_CAPABILITY_EVIDENCE_PATH = 'artifacts/local-pilot-capability.json';
 export const LOCAL_PILOT_CAPABILITY_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
 
-/** Exact opt-in PostgreSQL acceptance suite must run all three tests, not skip. */
+/** Migration, process-kill, session and fill acceptance must run all five tests. */
 export function localPilotPostgresAcceptancePassed(output: string): boolean {
   const uncolored = output.split(String.fromCharCode(27))
     .map((part) => part.replace(/^\[[0-9;]*m/, '')).join('');
   const lines = uncolored.trim().split(/\r?\n/);
-  return /^3 passed(?:, \d+ warnings?)? in \d+(?:\.\d+)?s(?: \([^\r\n]*\))?$/.test(lines.at(-1) || '');
+  return /^5 passed(?:, \d+ warnings?)? in \d+(?:\.\d+)?s(?: \([^\r\n]*\))?$/.test(lines.at(-1) || '');
 }
 
 const REQUIRED_CHECKS = [

@@ -132,7 +132,9 @@ function main(): void {
   checks.push(runCheck(
     'POSTGRES_17_MIGRATIONS_RESTART', python, ['-I', '-m', 'pytest', '-q',
       'tests/python/test_local_postgres_migrations.py::test_populated_migration_upgrade_through_020_survives_reconnect',
-      'tests/python/test_local_pilot_process_kill.py'],
+      'tests/python/test_local_pilot_process_kill.py',
+      'tests/python/test_pilot_session_pg_acceptance.py',
+      'tests/python/test_pg_pilot_launch_lifecycle.py'],
     postgresTestEnvironment, gitSha, verifyPythonBeforeUse,
   ));
   checks.push(runCheck('LEASE_FENCING', python, ['-I', '-m', 'pytest', '-q',

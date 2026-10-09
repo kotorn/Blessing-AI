@@ -102,15 +102,17 @@ jobs:
             '-p', 'no:cacheprovider', '--basetemp=/tmp/blessing-pilot-ci-acceptance',
             'tests/python/test_local_postgres_migrations.py::test_populated_migration_upgrade_through_020_survives_reconnect',
             'tests/python/test_local_pilot_process_kill.py',
+            'tests/python/test_pilot_session_pg_acceptance.py',
+            'tests/python/test_pg_pilot_launch_lifecycle.py',
         ], capture_output=True, text=True, timeout=180, shell=False)
         lines = result.stdout.strip().splitlines()
         summary = lines[-1] if lines else ''
         if result.returncode != 0 or not re.fullmatch(
-            r'3 passed(?:, \d+ warnings?)? in \d+(?:\.\d+)?s(?: \([^\r\n]*\))?', summary,
+            r'5 passed(?:, \d+ warnings?)? in \d+(?:\.\d+)?s(?: \([^\r\n]*\))?', summary,
         ):
             print(result.stdout[-6000:])
             print(result.stderr[-2000:], file=sys.stderr)
-            raise SystemExit('PostgreSQL acceptance failed or did not execute all three tests')
+            raise SystemExit('PostgreSQL acceptance failed or did not execute all five tests')
         print(summary)
         PY
 

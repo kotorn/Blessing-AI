@@ -18,9 +18,12 @@ import type { LocalReleaseFingerprint } from '../src/backend/local-release-runti
 
 const fixtures: string[] = [];
 
-it('requires all three real PostgreSQL acceptance tests with no skipped cases', () => {
-  expect(localPilotPostgresAcceptancePassed('... [100%]\n3 passed in 12.34s\n')).toBe(true);
-  expect(localPilotPostgresAcceptancePassed('3 passed, 1 warning in 12.34s')).toBe(true);
+it('requires all five PostgreSQL migration, crash, session and fill acceptance tests with no skipped cases', () => {
+  expect(localPilotPostgresAcceptancePassed('..... [100%]\n5 passed in 12.34s\n')).toBe(true);
+  expect(localPilotPostgresAcceptancePassed('5 passed, 1 warning in 12.34s')).toBe(true);
+  expect(localPilotPostgresAcceptancePassed('3 passed in 12.34s')).toBe(false);
+  expect(localPilotPostgresAcceptancePassed('3 passed, 2 skipped in 12.34s')).toBe(false);
+  expect(localPilotPostgresAcceptancePassed('5 passed, 1 deselected in 12.34s')).toBe(false);
   expect(localPilotPostgresAcceptancePassed('1 passed, 2 skipped in 1.00s')).toBe(false);
   expect(localPilotPostgresAcceptancePassed('3 skipped in 0.01s')).toBe(false);
   expect(localPilotPostgresAcceptancePassed('2 passed in 1.00s')).toBe(false);
