@@ -20,7 +20,42 @@ from scripts.local_pilot_track_c_source import source_binding
 
 API_ROOT = "https://api.github.com"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+# Verifiers reject subjects over 64 KiB; keep headroom so oversize fails here, at dispatch time.
+SUBJECT_MAX_BYTES = 60 * 1024
 SHA_RE = re.compile(r"[a-f0-9]{40}")
+
+
+class TrackCSubjectTooLarge(ValueError):
+    """Raised when a signed subject would exceed the verifier's size cap."""
+
+
+def _verifier_commit(commit: dict) -> dict:
+    """Keep only the commit fields the verifier reads (validate_payload, review_identity).
+
+    The full REST commit carries a files[] entry per changed file; on a large merge
+    commit that alone exceeds the verifier's subject cap.
+    """
+    projected: dict = {"sha": commit.get("sha")}
+    for role in ("author", "committer"):
+        person = commit.get(role)
+        projected[role] = {"id": person.get("id")} if isinstance(person, dict) else person
+    return projected
+
+
+def _verifier_run(run: dict) -> dict:
+    """Keep only the run fields validate_run and the review path read."""
+    repository = run.get("repository")
+    actor = run.get("actor")
+    return {
+        "id": run.get("id"),
+        "run_attempt": run.get("run_attempt"),
+        "head_sha": run.get("head_sha"),
+        "head_branch": run.get("head_branch"),
+        "event": run.get("event"),
+        "repository": {"id": repository.get("id")} if isinstance(repository, dict) else repository,
+        "actor": ({"id": actor.get("id"), "type": actor.get("type"), "login": actor.get("login")}
+                  if isinstance(actor, dict) else actor),
+    }
 
 
 def api_get_json(path: str, token: str) -> object:
@@ -188,9 +223,10 @@ def _build_dispatch_statement(root: Path, context: dict[str, str], token: str,
         if not isinstance(approvals, list) or len(approvals) >= 100 or not isinstance(commit, dict):
             raise ValueError("TRACK_C_REVIEW_APPROVALS_UNPROVEN")
         actor_id = run.get("actor", {}).get("id") if isinstance(run.get("actor"), dict) else None
+        commit = _verifier_commit(commit)
         reviewer = review_identity(proof["environment"], proof["branchPolicies"], approvals,
                                    commit, actor_id=actor_id, review_policy=read_review_policy(root))
-        payload = {"reviewProof": {"run": run, "actorId": actor_id, "commit": commit,
+        payload = {"reviewProof": {"run": _verifier_run(run), "actorId": actor_id, "commit": commit,
                                    "environment": proof["environment"],
                                    "branchPolicies": proof["branchPolicies"],
                                    "approvals": approvals},
@@ -214,7 +250,7 @@ def _build_dispatch_statement(root: Path, context: dict[str, str], token: str,
         if not resolved.is_relative_to((root / "artifacts").resolve()) or resolved.stat().st_size > 65536:
             raise ValueError("TRACK_C_TESTNET_ARTIFACT_INVALID")
         trial = json.loads(resolved.read_text(encoding="utf-8"))
-        payload = {"trial": trial, "environmentProof": proof, "run": run,
+        payload = {"trial": trial, "environmentProof": proof, "run": _verifier_run(run),
                    "approvals": approvals}
     statement = _statement(base, binding, payload, evidence_class=evidence_class)
     # The GitHub certificate is validated separately by the local verifier after signing.
@@ -248,11 +284,13 @@ def _statement(base: dict, binding: dict, payload: dict, *, evidence_class: str 
 
 
 def write_statement(root: Path, statement: dict) -> Path:
+    encoded = (json.dumps(statement, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(encoded) > SUBJECT_MAX_BYTES:
+        raise TrackCSubjectTooLarge("TRACK_C_SUBJECT_TOO_LARGE")
     directory = root / "artifacts/local-pilot-attestations"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{statement['evidenceClass']}.json"
-    path.write_text(json.dumps(statement, sort_keys=True, separators=(",", ":")) + "\n",
-                    encoding="utf-8")
+    path.write_bytes(encoded)
     return path
 
 
@@ -302,6 +340,9 @@ def main() -> int:
         write_statement(root, statement)
         print(f"TRACK_C_SUBJECT_CREATED:{args.evidence_class}")
         return 0
+    except TrackCSubjectTooLarge:
+        print("TRACK_C_SUBJECT_TOO_LARGE")
+        return 1
     except (OSError, ValueError, KeyError, TypeError, HTTPError, URLError):
         print("TRACK_C_PRODUCER_FAILED")
         return 1
