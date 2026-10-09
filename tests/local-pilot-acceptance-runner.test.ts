@@ -23,7 +23,7 @@ function options() {
       migrationSha256: 'd'.repeat(64), policySha256: 'e'.repeat(64) },
     audit: { begin: vi.fn<PilotAcceptanceAudit['begin']>(async () => {}),
       finish: vi.fn<PilotAcceptanceAudit['finish']>(async (_id, result) => { auditStatus.status = result.status; }),
-      read: vi.fn(async (runId: string, binding: PilotAcceptanceBinding) => ({
+      read: vi.fn(async (runId: string, _binding: PilotAcceptanceBinding) => ({
         runId, status: auditStatus.status, check: 'TYPESCRIPT_TESTS' as const,
       })) },
     assertBindingUnchanged: vi.fn(),
