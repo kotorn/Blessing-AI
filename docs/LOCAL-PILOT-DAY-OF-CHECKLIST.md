@@ -95,6 +95,8 @@ window.
 
 - [ ] The Docker host clock agrees with Binance server time within a second (market-data freshness is 3 s and compares your clock with Binance timestamps; a skewed host reads as permanently stale). Check with `w32tm /query /status` and re-sync before ARM.
 - [ ] Python 3.13 at `C:\Python313` is on PATH for the shell that runs `start-local.ps1` (the resolver reads `where.exe python.exe`).
+- [ ] Local PostgreSQL volume: migrations 020-022 are refused on a database that already holds trading data (`Existing local trading data found while migrations are pending`). If your `blessing_postgres_local_data` volume has rows from earlier campaigns, back it up with `scripts/backup-local-postgres.ps1`, then recreate the volume. A fresh volume works: `init_schema.sql` now records migrations 001-012 so only 013+ are applied.
+- [ ] `git status --porcelain --untracked-files=all` is empty and `start-local.ps1` is run from the reviewed commit (the launcher now refuses a dirty tree and labels the Worker image with the commit).
 - [ ] You know how to cancel leftover stop/target Algo orders by hand on Binance and how to close the position by hand (the kill switch does neither).
 
 GO only if every line is YES:
