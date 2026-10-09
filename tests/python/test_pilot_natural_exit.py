@@ -12,9 +12,9 @@ from tests.python import _real_path_support as support
 from tests.python._real_path_support import Config, Harness
 
 
-def _scenario(pm: bool, *, reconcile_result: str = "IN_SYNC", flat: bool = True):
+def _scenario(monkeypatch, pm: bool, *, reconcile_result: str = "IN_SYNC", flat: bool = True):
     async def scenario():
-        harness = Harness(pytest.MonkeyPatch(), Config(portfolio_margin=pm))
+        harness = Harness(monkeypatch, Config(portfolio_margin=pm))
         await harness.build()
         result = await harness.attempt()
         assert result.outcome == "PROTECTED", result.outcome
@@ -41,27 +41,26 @@ def _scenario(pm: bool, *, reconcile_result: str = "IN_SYNC", flat: bool = True)
 
 
 @pytest.mark.parametrize("pm", [False, True], ids=["fapi", "papi"])
-def test_flat_after_triggered_exit_is_reconciled_not_degraded_or_closed(pm):
-    harness, actions, new_calls = _scenario(pm)
+def test_flat_after_triggered_exit_is_reconciled_not_degraded_or_closed(monkeypatch, pm):
+    harness, actions, new_calls = _scenario(monkeypatch, pm)
     ex = harness.exchange
     assert harness.adapter.reconciliation.reconcile_calls == 1
     assert actions["failed_action_count"] == 0, actions
     assert not any(c.method == "POST" and c.path == ex.order_path for c in new_calls), "no close order"
-    assert harness.worker.pause_new_risk is False or True  # pause state is owned by accounting, not the monitor
 
 
 @pytest.mark.parametrize("pm", [False, True], ids=["fapi", "papi"])
-def test_flat_but_not_in_sync_still_fails_closed_without_a_close_attempt(pm):
-    harness, actions, new_calls = _scenario(pm, reconcile_result="MISMATCH")
+def test_flat_but_not_in_sync_still_fails_closed_without_a_close_attempt(monkeypatch, pm):
+    harness, actions, new_calls = _scenario(monkeypatch, pm, reconcile_result="MISMATCH")
     ex = harness.exchange
     assert actions["failed_action_count"] >= 1
     assert not any(c.method == "POST" and c.path == ex.order_path for c in new_calls)
 
 
 @pytest.mark.parametrize("pm", [False, True], ids=["fapi", "papi"])
-def test_open_position_with_missing_protection_still_runs_close_only(pm):
+def test_open_position_with_missing_protection_still_runs_close_only(monkeypatch, pm):
     async def scenario():
-        harness = Harness(pytest.MonkeyPatch(), Config(portfolio_margin=pm))
+        harness = Harness(monkeypatch, Config(portfolio_margin=pm))
         await harness.build()
         result = await harness.attempt()
         assert result.outcome == "PROTECTED"
