@@ -35,6 +35,7 @@ stay as regression guards and run WITHOUT any bypass.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -215,28 +216,54 @@ def test_post_fill_protection_window_expires_at_0p7s_calls(monkeypatch, pm):
 # Fragility findings (characterisation; all deterministic, ~0 latency)
 # --------------------------------------------------------------------------
 @PM
-def test_one_adverse_tick_after_clamp_blocks_entry_because_bracket_has_zero_slack(monkeypatch, pm):
-    # plan_pilot_bracket sizes the stop so total risk sits at the 2 USDC cap; an
-    # ask that is one tick higher at gate #1 pushes the order over the cap.
+def test_adverse_tick_inside_reserved_buffer_passes_with_exchange_quantity_and_weighted_fill(monkeypatch, pm):
+    # The bracket normally lands exactly on the reward floor. Give the synthetic
+    # strategy one extra target tick so this path isolates risk-buffer behavior.
+    original_plan = support.worker_main.plan_pilot_bracket
+    plans = []
+
+    def plan_with_reward_slack(**kwargs):
+        plan = original_plan(**kwargs)
+        rules = kwargs["rules"]
+        plan = replace(
+            plan,
+            take_profit_price=plan.take_profit_price + rules.tick_size,
+            planned_net_reward_usdc=plan.planned_net_reward_usdc + plan.quantity * rules.tick_size,
+        )
+        plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(support.worker_main, "plan_pilot_bracket", plan_with_reward_slack)
     result, harness = run(monkeypatch, pm, shim=True, ask_step_after="clamp", ask_step_ticks=1)
     assert_clean(result, harness)
-    assert not result.order_posted
-    assert result.last_order_block == {
-        "stage": "ORDER_GATE",
-        "reason": "Local Mainnet risk policy blocked order: risk exceeds the available basket/daily headroom",
-    }
-    assert result.adapter_state == "READY" and result.fail_closed == []
+    assert result.outcome == "PROTECTED", f"{result.outcome}: {result.reason}"
+    assert result.order_posted and result.protected
+
+    # Sizing remains exchange-filter normalized at the $40 target; the simulated
+    # fill is the actual post-move ask and the same submitted quantity.
+    rules = harness.adapter.symbol_rules[support.SYMBOL]
+    expected_qty = rules.normalize_quantity(Decimal("40") / Decimal("2610.59"), is_market=True)
+    assert Decimal(harness.exchange.orders_posted[0]["quantity"]) == expected_qty
+    assert harness.exchange.fill_qty == expected_qty
+    assert harness.exchange.fill_price == Decimal("2610.60")
+    assert plans
+    actual_stop = min(Decimal(row["triggerPrice"]) for row in harness.exchange.algos.values())
+    actual_stop_risk = (harness.exchange.fill_price - actual_stop) * harness.exchange.fill_qty
+    assert actual_stop_risk + plans[-1].estimated_costs_usdc <= Decimal("2.0")
+    assert (harness.exchange.fill_price - plans[-1].entry_price) * harness.exchange.fill_qty <= Decimal("0.20")
 
 
 @PM
-def test_one_adverse_tick_after_gate1_aborts_at_fence_and_trips_kill_switch_flow(monkeypatch, pm):
-    result, harness = run(monkeypatch, pm, shim=True, ask_step_after="gate1", ask_step_ticks=1)
+def test_adverse_move_beyond_buffer_is_stopped_by_final_fence_and_kill_switch(monkeypatch, pm):
+    # 2,000 ETHUSDC ticks is a $20 entry move (> $0.20 risk reserve at the
+    # exchange-filtered quantity). The immutable final fence must still close.
+    result, harness = run(monkeypatch, pm, shim=True, ask_step_after="gate1", ask_step_ticks=2000)
     assert_clean(result, harness)
     assert not result.order_posted
     assert result.last_order_block["stage"] == "FINAL_FENCE"
-    assert "risk exceeds the available basket/daily headroom" in result.last_order_block["reason"]
     assert result.adapter_state == "DEGRADED" and result.fail_closed
-
+    planned_qty = Decimal("40") / Decimal("2610.59")
+    assert planned_qty * Decimal("20") > Decimal("0.20")
 
 @PM
 def test_one_favourable_tick_after_gate1_aborts_with_inputs_changed(monkeypatch, pm):
