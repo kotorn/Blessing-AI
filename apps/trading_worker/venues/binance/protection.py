@@ -6,8 +6,23 @@ See https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trad
 """
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Mapping, Sequence
+
+# Scale of the protection owner's entry_average_price, NUMERIC(28, 10).
+ENTRY_AVERAGE_PRICE_SCALE = Decimal("0.0000000001")
+
+
+def weighted_entry_average_price(total_quote: Decimal, filled_quantity: Decimal) -> Decimal:
+    """Weighted-average entry price bounded to the persisted NUMERIC(28, 10) scale.
+
+    Multi-level fills divide to a non-terminating decimal that the strict protection
+    writer rejects. Quantizing here, once, keeps the persisted value and every later
+    equality check computed from the same fills identical.
+    """
+    return (total_quote / filled_quantity).quantize(
+        ENTRY_AVERAGE_PRICE_SCALE, rounding=ROUND_HALF_EVEN
+    )
 
 
 @dataclass(frozen=True)

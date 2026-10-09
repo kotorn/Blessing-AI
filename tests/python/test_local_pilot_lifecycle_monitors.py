@@ -865,6 +865,48 @@ async def test_partial_fill_entry_remainder_is_cancelled_and_fills_reconciled(mo
 
 
 @pytest.mark.asyncio
+async def test_multi_level_entry_average_is_bounded_to_protection_scale(monkeypatch):
+    # 0.01 @ 2610.55 + 0.009 @ 2610.61 averages to a non-terminating decimal
+    # (2610.578421052631...). The stored NUMERIC(28, 10) owner must accept it.
+    owner = _pilot_entry_owner(filled="0.019", status="PARTIALLY_FILLED")
+    before = {
+        "clientOrderId": owner["entry_client_order_id"], "symbol": "ETHUSDC",
+        "side": "BUY", "origQty": "0.5", "executedQty": "0.019",
+        "status": "PARTIALLY_FILLED", "orderId": 103,
+    }
+    after = {**before, "status": "CANCELED"}
+    fills = [
+        SimpleNamespace(
+            client_order_id=owner["entry_client_order_id"],
+            quantity=Decimal("0.01"), price=Decimal("2610.55"),
+        ),
+        SimpleNamespace(
+            client_order_id=owner["entry_client_order_id"],
+            quantity=Decimal("0.009"), price=Decimal("2610.61"),
+        ),
+    ]
+    adapter, authority, _cancellations, persisted = _pilot_cancel_adapter(
+        monkeypatch, before, after, fills=fills
+    )
+
+    result = await adapter._cancel_and_read_back_pilot_entry(owner, authority=authority)
+
+    assert result is not None
+    assert result["entry_average_price"] == Decimal("2610.5784210526")
+    assert persisted[-1]["state"] == "PROTECTED"
+    stored = persisted[-1]["entry_average_price"]
+    assert stored == stored.quantize(Decimal("0.0000000001"))
+    # The strict NUMERIC(28, 10) validator used by the real writer must accept it.
+    from apps.trading_worker.persistence.postgres.repositories import _protection_decimal
+
+    assert _protection_decimal(stored, "entry_average_price") == stored
+    # The validator itself is unchanged: an unquantized value from an untrusted source
+    # still fails closed.
+    with pytest.raises(ValueError, match="NUMERIC"):
+        _protection_decimal(Decimal("2610.578421052631578947368421"), "entry_average_price")
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_entry_cancel_is_read_back_once_and_never_retried(monkeypatch):
     owner = _pilot_entry_owner()
     still_open = {

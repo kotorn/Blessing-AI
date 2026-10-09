@@ -51,7 +51,12 @@ from .mainnet_risk import (
     MAINNET_RISK_POLICY_SHA256,
     derive_local_mainnet_snapshot_risk,
 )
-from .protection import ProtectionIntent, ProtectionResult, verify_protection
+from .protection import (
+    ProtectionIntent,
+    ProtectionResult,
+    verify_protection,
+    weighted_entry_average_price,
+)
 from .ledger import ExecutionLedger, InMemoryLedger
 from .models import (
     BinanceAuthenticationError,
@@ -3187,8 +3192,10 @@ class BinanceExecutionAdapter:
                 Decimal("0"),
             )
             average_entry_price = (
-                sum((Decimal(str(fill.quantity)) * Decimal(str(fill.price)) for fill in entry_fills), Decimal("0"))
-                / filled_qty
+                weighted_entry_average_price(
+                    sum((Decimal(str(fill.quantity)) * Decimal(str(fill.price)) for fill in entry_fills), Decimal("0")),
+                    filled_qty,
+                )
                 if filled_qty > 0 else None
             )
             entry_order = await self.ledger.get_order_by_client_id(entry_client_order_id)
@@ -3342,14 +3349,17 @@ class BinanceExecutionAdapter:
                 (self._decimal_value(fill.quantity, positive=True) for fill in fills),
                 Decimal("0"),
             )
-            weighted_entry = sum(
-                (
-                    self._decimal_value(fill.quantity, positive=True)
-                    * self._decimal_value(fill.price, positive=True)
-                    for fill in fills
+            weighted_entry = weighted_entry_average_price(
+                sum(
+                    (
+                        self._decimal_value(fill.quantity, positive=True)
+                        * self._decimal_value(fill.price, positive=True)
+                        for fill in fills
+                    ),
+                    Decimal("0"),
                 ),
-                Decimal("0"),
-            ) / filled_quantity
+                filled_quantity,
+            )
             if (
                 Decimal(str(owner.get("filled_quantity"))) != filled_quantity
                 or Decimal(str(owner.get("entry_average_price"))) != weighted_entry
@@ -4788,7 +4798,7 @@ class BinanceExecutionAdapter:
             )
             if total_filled != executed or total_filled <= 0:
                 raise ValueError("durable fill total differs from terminal entry read-back")
-            updated["entry_average_price"] = total_quote / total_filled
+            updated["entry_average_price"] = weighted_entry_average_price(total_quote, total_filled)
             updated["last_reconciled_at"] = utc_now()
             if not await self._persist_local_mainnet_protection(updated):
                 raise ValueError("updated pilot protection owner was not persisted")
@@ -5365,13 +5375,16 @@ class BinanceExecutionAdapter:
             )
             if filled_quantity != executed_qty or filled_quantity <= 0:
                 raise RuntimeError("durable fill quantity does not match Binance")
-            weighted_entry = sum(
-                (
-                    Decimal(str(fill.quantity)) * Decimal(str(fill.price))
-                    for fill in fills
+            weighted_entry = weighted_entry_average_price(
+                sum(
+                    (
+                        Decimal(str(fill.quantity)) * Decimal(str(fill.price))
+                        for fill in fills
+                    ),
+                    Decimal("0"),
                 ),
-                Decimal("0"),
-            ) / filled_quantity
+                filled_quantity,
+            )
             first_fill_ms = min(fill_times)
             record.update(
                 filled_quantity=filled_quantity,
@@ -5659,13 +5672,16 @@ class BinanceExecutionAdapter:
             )
             if filled_quantity != executed_qty or filled_quantity <= 0:
                 raise RuntimeError("durable entry fills do not match exchange executed quantity")
-            average_entry_price = sum(
-                (
-                    Decimal(str(fill.quantity)) * Decimal(str(fill.price))
-                    for fill in fills
+            average_entry_price = weighted_entry_average_price(
+                sum(
+                    (
+                        Decimal(str(fill.quantity)) * Decimal(str(fill.price))
+                        for fill in fills
+                    ),
+                    Decimal("0"),
                 ),
-                Decimal("0"),
-            ) / filled_quantity
+                filled_quantity,
+            )
             durable_record.update(
                 filled_quantity=filled_quantity,
                 entry_average_price=average_entry_price,
