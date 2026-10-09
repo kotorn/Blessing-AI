@@ -158,4 +158,3 @@ async def test_restart_after_close_does_not_submit_a_second_close_order(monkeypa
     recovered_worker = restarted_worker()
     await recovered_worker._enforce_pilot_session_deadlines()
     assert adapter.close_orders == 1
-
