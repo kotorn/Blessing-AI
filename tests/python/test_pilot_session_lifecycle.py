@@ -108,8 +108,9 @@ async def test_restart_after_close_does_not_submit_a_second_close_order(monkeypa
         def __init__(self):
             self.position_open = True
             self.close_orders = 0
+            self.last_emergency_result = {"status": "CONFIRMED"}
 
-        async def emergency_flatten(self, _symbol, *, authority):
+        async def emergency_flatten(self, _symbol, *, authority, **_kwargs):
             assert authority is not None
             # Mirrors the adapter's authoritative positionRisk read before it
             # decides whether another reduce-only close order is needed.

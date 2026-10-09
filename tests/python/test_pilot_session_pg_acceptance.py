@@ -9,6 +9,7 @@ import os
 import shutil
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -155,6 +156,27 @@ def test_fresh_020_population_021_022_and_concurrent_session_arm(tmp_path):
             assert readback["pilot_session_end_at"] is not None
 
             repository = PersistenceRepository(connection)
+            await connection.execute(
+                "UPDATE mainnet_launch_sessions SET state='REAUTH_REQUIRED' "
+                "WHERE launch_id='fresh-session'"
+            )
+            close_readback = await repository.record_local_live_pilot_session_close_claim(
+                "fresh-session",
+                client_order_id="BAI-abcdef012345-0-1",
+                side="SELL",
+                position_side="BOTH",
+                quantity=Decimal("0.1"),
+                claimed_at=now,
+            )
+            assert close_readback["pilot_session_close_client_order_id"] == "BAI-abcdef012345-0-1"
+            attempt_readback = await repository.record_local_live_pilot_session_close_attempt(
+                "fresh-session",
+                client_order_id="BAI-abcdef012345-0-1",
+                attempt=1,
+                attempted_at=now,
+            )
+            assert attempt_readback["pilot_session_close_attempt_count"] == 1
+
             for launch_id in ("preexisting-populated", "preexisting-nullcap"):
                 with pytest.raises(RuntimeError):
                     await repository.record_local_live_pilot_session_armed(

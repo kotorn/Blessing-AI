@@ -3054,15 +3054,39 @@ class PersistenceRepository:
                    FROM mainnet_launch_sessions WHERE launch_id = $1 FOR UPDATE""",
                 launch_id,
             )
+            closing_state_event = (
+                normalized_type == "STATE"
+                and safe_payload.get("kind") in {
+                    "SESSION_CLOSE_CLAIMED", "SESSION_CLOSE_SUBMITTING"
+                }
+            )
             if (
                 session is None
                 or str(session["symbol"]).upper() != normalized_symbol
                 or session["policy"] != "LIVE_RESEARCH_PILOT"
                 or session["runtime_target"] != "LOCAL"
                 or session["pilot_campaign_id"] != campaign_id
-                or session["state"] in {"REAUTH_REQUIRED", "RECONCILIATION_REQUIRED"}
+                or (
+                    session["state"] in {"REAUTH_REQUIRED", "RECONCILIATION_REQUIRED"}
+                    and not closing_state_event
+                )
             ):
                 raise RuntimeError("pilot event does not match its durable Local campaign")
+            if closing_state_event:
+                armed = await connection.fetchrow(
+                    """SELECT event_id FROM local_live_pilot_events
+                       WHERE campaign_id = $1 AND event_type = 'STATE'
+                         AND payload->>'kind' = 'SESSION_ARMED'
+                       LIMIT 1""",
+                    campaign_id,
+                )
+                if (
+                    armed is None
+                    or session["state"] == "CLOSED"
+                    or normalized_source != "WORKER"
+                    or not str(safe_payload.get("close_client_order_id") or "")
+                ):
+                    raise RuntimeError("pilot session close event lacks its durable ARM binding")
             if safe_payload.get("kind") == "SESSION_ARMED":
                 if (
                     normalized_type != "STATE"
@@ -3366,6 +3390,152 @@ class PersistenceRepository:
         readback = await self.get_mainnet_launch(launch_id)
         if not readback or readback.get("pilot_session_armed_at") != armed_at_text:
             raise RuntimeError("durable SESSION_ARMED event failed read-back")
+        return readback
+
+    async def record_local_live_pilot_session_close_claim(
+        self,
+        launch_id: str,
+        *,
+        client_order_id: str,
+        side: str,
+        position_side: str,
+        quantity: Decimal,
+        claimed_at: datetime,
+    ) -> Mapping[str, Any]:
+        """Persist the immutable close identity before the exchange submission."""
+        normalized_side = str(side).strip().upper()
+        normalized_position_side = str(position_side).strip().upper()
+        normalized_quantity = Decimal(str(quantity))
+        normalized_claimed_at = _utc_datetime(claimed_at)
+        if (
+            not client_order_id
+            or normalized_side not in {"BUY", "SELL"}
+            or normalized_position_side not in {"BOTH", "LONG", "SHORT"}
+            or not normalized_quantity.is_finite()
+            or normalized_quantity <= 0
+            or normalized_claimed_at is None
+        ):
+            raise ValueError("pilot session close identity is invalid")
+        session = await self.get_mainnet_launch(launch_id)
+        if (
+            not session
+            or not session.get("pilot_campaign_id")
+            or not session.get("pilot_session_armed_at")
+        ):
+            raise RuntimeError("pilot session close has no durable ARM binding")
+        campaign_id = str(session["pilot_campaign_id"])
+        payload = {
+            "run_id": launch_id,
+            "kind": "SESSION_CLOSE_CLAIMED",
+            "close_client_order_id": client_order_id,
+            "close_symbol": "ETHUSDC",
+            "close_side": normalized_side,
+            "close_position_side": normalized_position_side,
+            "close_quantity": str(normalized_quantity),
+            "claimed_at": normalized_claimed_at.isoformat().replace("+00:00", "Z"),
+        }
+        prior = await self.db.fetchrow(
+            """SELECT observed_at, payload FROM local_live_pilot_events
+               WHERE campaign_id = $1 AND launch_id = $2
+                 AND event_key = 'STATE:SESSION_CLOSE_CLAIMED'""",
+            campaign_id, launch_id,
+        )
+        event_time = normalized_claimed_at
+        if prior is not None:
+            prior_payload = prior["payload"]
+            if isinstance(prior_payload, str):
+                prior_payload = json.loads(prior_payload)
+            if not isinstance(prior_payload, Mapping) or any(
+                prior_payload.get(key) != value
+                for key, value in payload.items()
+                if key != "claimed_at"
+            ):
+                raise RuntimeError("pilot session close identity changed after durable claim")
+            event_time = prior["observed_at"]
+            payload["claimed_at"] = str(prior_payload.get("claimed_at") or "")
+        saved = await self.append_local_live_pilot_event(
+            campaign_id=campaign_id,
+            launch_id=launch_id,
+            run_id=launch_id,
+            symbol="ETHUSDC",
+            event_key="STATE:SESSION_CLOSE_CLAIMED",
+            event_type="STATE",
+            source="WORKER",
+            observed_at=event_time,
+            payload=payload,
+        )
+        if not isinstance(saved, dict):
+            raise RuntimeError("pilot session close identity was not durably acknowledged")
+        readback = await self.get_mainnet_launch(launch_id)
+        if (
+            not readback
+            or readback.get("pilot_session_close_client_order_id") != client_order_id
+            or str(readback.get("pilot_session_close_quantity")) != str(normalized_quantity)
+        ):
+            raise RuntimeError("pilot session close identity failed read-back")
+        return readback
+
+    async def record_local_live_pilot_session_close_attempt(
+        self,
+        launch_id: str,
+        *,
+        client_order_id: str,
+        attempt: int,
+        attempted_at: datetime,
+    ) -> Mapping[str, Any]:
+        """Append a bounded attempt marker before each emergency close POST."""
+        if type(attempt) is not int or attempt not in {1, 2}:
+            raise ValueError("pilot session close attempt exceeds its two-attempt bound")
+        normalized_at = _utc_datetime(attempted_at)
+        if normalized_at is None:
+            raise ValueError("pilot session close attempt time must be timezone-aware")
+        session = await self.get_mainnet_launch(launch_id)
+        if (
+            not session
+            or session.get("pilot_session_close_client_order_id") != client_order_id
+            or not session.get("pilot_session_armed_at")
+        ):
+            raise RuntimeError("pilot session close attempt lacks its durable claim")
+        campaign_id = str(session["pilot_campaign_id"])
+        event_key = f"STATE:SESSION_CLOSE_SUBMITTING:{attempt}"
+        payload = {
+            "run_id": launch_id,
+            "kind": "SESSION_CLOSE_SUBMITTING",
+            "close_client_order_id": client_order_id,
+            "attempt": attempt,
+        }
+        prior = await self.db.fetchrow(
+            """SELECT observed_at, payload FROM local_live_pilot_events
+               WHERE campaign_id = $1 AND launch_id = $2 AND event_key = $3""",
+            campaign_id, launch_id, event_key,
+        )
+        if prior is not None:
+            prior_payload = prior["payload"]
+            if isinstance(prior_payload, str):
+                prior_payload = json.loads(prior_payload)
+            if not isinstance(prior_payload, Mapping) or any(
+                prior_payload.get(key) != value for key, value in payload.items()
+            ):
+                raise RuntimeError("pilot session close attempt conflicts with durable evidence")
+            normalized_at = prior["observed_at"]
+        elif attempt != int(session.get("pilot_session_close_attempt_count") or 0) + 1:
+            raise RuntimeError("pilot session close attempt sequence is not contiguous")
+        saved = await self.append_local_live_pilot_event(
+            campaign_id=campaign_id,
+            launch_id=launch_id,
+            run_id=launch_id,
+            symbol="ETHUSDC",
+            event_key=event_key,
+            event_type="STATE",
+            source="WORKER",
+            observed_at=normalized_at,
+            payload=payload,
+        )
+        if not isinstance(saved, dict):
+            raise RuntimeError("pilot session close attempt was not durably acknowledged")
+        readback = await self.get_mainnet_launch(launch_id)
+        if int(readback.get("pilot_session_close_attempt_count") or 0) < attempt:
+            raise RuntimeError("pilot session close attempt failed read-back")
         return readback
 
     async def create_mainnet_launch_session(
@@ -4088,6 +4258,30 @@ class PersistenceRepository:
                     WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
                       AND e.event_type = 'FILL' AND e.payload->>'pilot_entry' = 'true'
                    ) AS pilot_session_entry_count,
+                   (SELECT e.payload->>'close_client_order_id' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_client_order_id,
+                   (SELECT e.payload->>'close_side' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_side,
+                   (SELECT e.payload->>'close_position_side' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_position_side,
+                   (SELECT e.payload->>'close_quantity' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_quantity,
+                   (SELECT e.payload->>'claimed_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_claimed_at,
+                   (SELECT COUNT(*) FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_SUBMITTING'
+                   ) AS pilot_session_close_attempt_count,
                    COALESCE(
                        state IN ('PAUSED_NEW_RISK', 'REAUTH_REQUIRED', 'RECONCILIATION_REQUIRED')
                        AND pilot_status = 'ACTIVE'
@@ -4152,6 +4346,30 @@ class PersistenceRepository:
                     WHERE e.campaign_id = s.pilot_campaign_id
                       AND e.event_type = 'FILL' AND e.payload->>'pilot_entry' = 'true'
                    ) AS pilot_session_entry_count,
+                   (SELECT e.payload->>'close_client_order_id' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_client_order_id,
+                   (SELECT e.payload->>'close_side' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_side,
+                   (SELECT e.payload->>'close_position_side' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_position_side,
+                   (SELECT e.payload->>'close_quantity' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_quantity,
+                   (SELECT e.payload->>'claimed_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_claimed_at,
+                   (SELECT COUNT(*) FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_SUBMITTING'
+                   ) AS pilot_session_close_attempt_count,
                    COALESCE((SELECT SUM(e.net_pnl_delta_usdc)
                              FROM local_live_pilot_events e
                              WHERE e.campaign_id = s.pilot_campaign_id
@@ -4229,6 +4447,30 @@ class PersistenceRepository:
                     WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
                       AND e.event_type = 'FILL' AND e.payload->>'pilot_entry' = 'true'
                    ) AS pilot_session_entry_count,
+                   (SELECT e.payload->>'close_client_order_id' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_client_order_id,
+                   (SELECT e.payload->>'close_side' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_side,
+                   (SELECT e.payload->>'close_position_side' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_position_side,
+                   (SELECT e.payload->>'close_quantity' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_quantity,
+                   (SELECT e.payload->>'claimed_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_CLAIMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_claimed_at,
+                   (SELECT COUNT(*) FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_CLOSE_SUBMITTING'
+                   ) AS pilot_session_close_attempt_count,
                    COALESCE(
                        state IN ('PAUSED_NEW_RISK', 'REAUTH_REQUIRED', 'RECONCILIATION_REQUIRED')
                        AND pilot_status = 'ACTIVE'

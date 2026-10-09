@@ -401,6 +401,46 @@ class PersistenceManager:
         self._mainnet_launch_session = dict(record)
         return dict(record)
 
+    async def record_local_live_pilot_session_close_claim(
+        self,
+        launch_id: str,
+        *,
+        client_order_id: str,
+        side: str,
+        position_side: str,
+        quantity: Decimal,
+        claimed_at: datetime,
+    ) -> dict[str, Any]:
+        repository = self._require_durable_launch_repository()
+        record = await repository.record_local_live_pilot_session_close_claim(
+            launch_id,
+            client_order_id=client_order_id,
+            side=side,
+            position_side=position_side,
+            quantity=quantity,
+            claimed_at=claimed_at,
+        )
+        self._mainnet_launch_session = dict(record)
+        return dict(record)
+
+    async def record_local_live_pilot_session_close_attempt(
+        self,
+        launch_id: str,
+        *,
+        client_order_id: str,
+        attempt: int,
+        attempted_at: datetime,
+    ) -> dict[str, Any]:
+        repository = self._require_durable_launch_repository()
+        record = await repository.record_local_live_pilot_session_close_attempt(
+            launch_id,
+            client_order_id=client_order_id,
+            attempt=attempt,
+            attempted_at=attempted_at,
+        )
+        self._mainnet_launch_session = dict(record)
+        return dict(record)
+
     async def get_local_live_pilot_accounting(
         self, launch_id: str
     ) -> Optional[dict[str, Any]]:

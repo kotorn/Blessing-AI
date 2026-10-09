@@ -1397,6 +1397,51 @@ class TradingWorkerApp:
         self._refresh_engine_state()
         return False, self._pilot_session_clock_error or (phase.value if phase else "SESSION_UNAVAILABLE")
 
+    async def _persist_pilot_session_close_claim(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        position_side: str,
+        quantity: Decimal,
+    ) -> dict[str, Any]:
+        session = self._mainnet_launch_session
+        if (
+            not isinstance(session, dict)
+            or session.get("policy") != "LIVE_RESEARCH_PILOT"
+            or not callable(getattr(self.persistence, "record_local_live_pilot_session_close_claim", None))
+        ):
+            raise RuntimeError("durable pilot session close claim is unavailable")
+        record = await self.persistence.record_local_live_pilot_session_close_claim(
+            str(session["launch_id"]),
+            client_order_id=client_order_id,
+            side=side,
+            position_side=position_side,
+            quantity=quantity,
+            claimed_at=utc_now(),
+        )
+        self._set_mainnet_launch_session(dict(record))
+        return dict(record)
+
+    async def _persist_pilot_session_close_attempt(
+        self, *, client_order_id: str, attempt: int
+    ) -> dict[str, Any]:
+        session = self._mainnet_launch_session
+        if (
+            not isinstance(session, dict)
+            or session.get("policy") != "LIVE_RESEARCH_PILOT"
+            or not callable(getattr(self.persistence, "record_local_live_pilot_session_close_attempt", None))
+        ):
+            raise RuntimeError("durable pilot session close attempt is unavailable")
+        record = await self.persistence.record_local_live_pilot_session_close_attempt(
+            str(session["launch_id"]),
+            client_order_id=client_order_id,
+            attempt=attempt,
+            attempted_at=utc_now(),
+        )
+        self._set_mainnet_launch_session(dict(record))
+        return dict(record)
+
     def _pilot_session_state_readback(self) -> dict[str, Any]:
         session = self._mainnet_launch_session
         if not isinstance(session, dict) or session.get("policy") != "LIVE_RESEARCH_PILOT":
@@ -1409,6 +1454,11 @@ class TradingWorkerApp:
                 "entry_cutoff_at": session.get("pilot_session_entry_cutoff_at"),
                 "close_after_at": session.get("pilot_session_close_after_at"),
                 "end_at": session.get("pilot_session_end_at"),
+                "close_client_order_id": session.get("pilot_session_close_client_order_id"),
+                "close_quantity": session.get("pilot_session_close_quantity"),
+                "close_side": session.get("pilot_session_close_side"),
+                "close_position_side": session.get("pilot_session_close_position_side"),
+                "close_attempt_count": int(session.get("pilot_session_close_attempt_count") or 0),
                 "clock_status": self._pilot_session_clock_error or "T0_UNAVAILABLE",
             }
         try:
@@ -1428,6 +1478,11 @@ class TradingWorkerApp:
         return {
             **timer.readback(SessionPhase(stage)),
             "entry_count": int(session.get("pilot_session_entry_count") or 0),
+            "close_client_order_id": session.get("pilot_session_close_client_order_id"),
+            "close_quantity": session.get("pilot_session_close_quantity"),
+            "close_side": session.get("pilot_session_close_side"),
+            "close_position_side": session.get("pilot_session_close_position_side"),
+            "close_attempt_count": int(session.get("pilot_session_close_attempt_count") or 0),
             "clock_status": clock_status,
         }
 
@@ -1458,7 +1513,33 @@ class TradingWorkerApp:
             return
         self._pilot_session_flatten_claimed = True
         try:
-            await self.execution_adapter.emergency_flatten("ETHUSDC", authority=self)
+            session = self._mainnet_launch_session
+            launch_id = str(session.get("launch_id") or "") if isinstance(session, dict) else ""
+            prior_claim = None
+            if isinstance(session, dict) and session.get("pilot_session_close_client_order_id"):
+                prior_claim = {
+                    "client_order_id": session.get("pilot_session_close_client_order_id"),
+                    "side": session.get("pilot_session_close_side"),
+                    "position_side": session.get("pilot_session_close_position_side"),
+                    "quantity": session.get("pilot_session_close_quantity"),
+                    "attempt_count": int(session.get("pilot_session_close_attempt_count") or 0),
+                }
+            await self.execution_adapter.emergency_flatten(
+                "ETHUSDC",
+                authority=self,
+                pilot_session_id=launch_id,
+                pilot_close_claim=prior_claim,
+                pilot_close_claim_callback=self._persist_pilot_session_close_claim,
+                pilot_close_attempt_callback=self._persist_pilot_session_close_attempt,
+            )
+            close_result = getattr(self.execution_adapter, "last_emergency_result", None)
+            if not isinstance(close_result, dict) or close_result.get("status") != "CONFIRMED":
+                self.pause_new_risk = True
+                self.engine_state = WorkerEngineState.DEGRADED
+                logger.error(
+                    "Pilot session close remains unresolved: %s",
+                    str(close_result.get("reason") if isinstance(close_result, dict) else "UNKNOWN")[:200],
+                )
         except Exception as exc:
             self.pause_new_risk = True
             self.engine_state = WorkerEngineState.DEGRADED

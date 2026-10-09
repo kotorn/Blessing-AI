@@ -42,7 +42,7 @@ from apps.trading_worker.execution_lease import (
 
 from .capabilities import BinanceCapabilities
 from .config import BinanceEnvironment, environment_label
-from .gates import OrderExecutionGate
+from .gates import OrderExecutionGate, PreparedOrder
 from .local_pilot_readiness import local_live_pilot_readiness
 from .mainnet_risk import (
     LOCAL_LIVE_PILOT_POLICY,
@@ -6379,6 +6379,10 @@ class BinanceExecutionAdapter:
         symbol: Optional[str] = None,
         *,
         authority: Optional[object] = None,
+        pilot_session_id: Optional[str] = None,
+        pilot_close_claim: Optional[Mapping[str, Any]] = None,
+        pilot_close_claim_callback: Optional[Callable[..., Awaitable[Mapping[str, Any]]]] = None,
+        pilot_close_attempt_callback: Optional[Callable[..., Awaitable[Mapping[str, Any]]]] = None,
     ) -> List[ExecutionOrder]:
         if self.preflight_only:
             logger.error("Blocked emergency flatten from a read-only preflight adapter")
@@ -6395,7 +6399,14 @@ class BinanceExecutionAdapter:
             }
             return []
         async with self._mutation_scope():
-            return await self._emergency_flatten(symbol, authority=authority)
+            return await self._emergency_flatten(
+                symbol,
+                authority=authority,
+                pilot_session_id=pilot_session_id,
+                pilot_close_claim=pilot_close_claim,
+                pilot_close_claim_callback=pilot_close_claim_callback,
+                pilot_close_attempt_callback=pilot_close_attempt_callback,
+            )
 
     @staticmethod
     def testnet_trial_close_client_order_id(entry_client_order_id: str) -> str:
@@ -6695,12 +6706,93 @@ class BinanceExecutionAdapter:
             }
             return []
 
+    async def _recover_pilot_session_close_order(
+        self,
+        intent: OrderIntent,
+        client_order_id: str,
+        response: Mapping[str, Any],
+        decision: ExecutionDecision,
+    ) -> ExecutionOrder:
+        """Adopt and account an existing close by its exact durable client ID."""
+        quantity = self._decimal_value(response.get("origQty"), positive=True)
+        if (
+            str(response.get("clientOrderId") or "") != client_order_id
+            or quantity != intent.quantity
+        ):
+            raise BinanceTransportAmbiguity(
+                "Recovered close order does not match its durable client ID and quantity"
+            )
+        price_value: Optional[Decimal] = None
+        for candidate in (response.get("avgPrice"), response.get("price")):
+            try:
+                parsed = Decimal(str(candidate))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if parsed.is_finite() and parsed > 0:
+                price_value = parsed
+                break
+        if price_value is None:
+            mark = self.last_market_reference_price.get(intent.symbol)
+            if mark is not None and mark.is_finite() and mark > 0:
+                price_value = mark
+        if price_value is None:
+            raise BinanceTransportAmbiguity(
+                "Recovered open close order has no authoritative positive price reference"
+            )
+        prepared = PreparedOrder(
+            symbol=intent.symbol,
+            order_type="MARKET",
+            quantity=quantity,
+            price=None,
+            estimated_price=price_value,
+            notional=quantity * price_value,
+        )
+        order = self._order_from_response(
+            intent,
+            dict(response),
+            prepared,
+            client_order_id,
+            decision,
+            allow_terminal_status=True,
+        )
+        await self.ledger.upsert_order(order)
+        executed_quantity = Decimal(str(response.get("executedQty") or "0"))
+        if (
+            str(response.get("status") or "").upper() in {"FILLED", "PARTIALLY_FILLED"}
+            or executed_quantity > 0
+        ):
+            await self.reconciliation._recover_order_fills(order, dict(response))
+        return order
+
+    async def _query_pilot_session_close_order(
+        self,
+        symbol: str,
+        client_order_id: str,
+        *,
+        prior_attempt_count: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Return an exact-ID match, or None only after definitive absence reads."""
+        delays = (0.0, 0.1, 0.25) if prior_attempt_count > 0 else (0.0,)
+        for delay in delays:
+            if delay:
+                await asyncio.sleep(delay)
+            result = await self.query_order(symbol, client_order_id)
+            if isinstance(result, dict):
+                return result
+            if result is not None:
+                raise BinanceTransportAmbiguity("close order lookup returned invalid evidence")
+        return None
+
     async def _emergency_flatten(
         self,
         symbol: Optional[str] = None,
         *,
         authority: Optional[object] = None,
         only_position_side: Optional[PositionSide] = None,
+        pilot_session_id: Optional[str] = None,
+        pilot_close_claim: Optional[Mapping[str, Any]] = None,
+        pilot_close_claim_callback: Optional[Callable[..., Awaitable[Mapping[str, Any]]]] = None,
+        pilot_close_attempt_callback: Optional[Callable[..., Awaitable[Mapping[str, Any]]]] = None,
     ) -> List[ExecutionOrder]:
         """Reduce only Binance positions through the Worker-owned emergency path."""
         if self.preflight_only:
@@ -6717,6 +6809,87 @@ class BinanceExecutionAdapter:
                 "reason": "Worker authority is required for emergency execution",
             }
             return []
+
+        session_close_decision_id: Optional[str] = None
+        session_close_client_order_id: Optional[str] = None
+        session_close_intent: Optional[OrderIntent] = None
+        session_close_response: Optional[Dict[str, Any]] = None
+        session_close_attempt_count = 0
+        recovered_session_close: Optional[ExecutionOrder] = None
+        if pilot_session_id is not None:
+            if (
+                not str(pilot_session_id).strip()
+                or self.env != BinanceEnvironment.MAINNET
+                or symbol is None
+                or str(symbol).upper() != "ETHUSDC"
+                or not callable(pilot_close_claim_callback)
+                or not callable(pilot_close_attempt_callback)
+            ):
+                self.last_emergency_result = {
+                    "status": "UNKNOWN",
+                    "reason": "Durable Local Pilot close identity is unavailable",
+                }
+                return []
+            session_close_decision_id = f"PILOT-SESSION-CLOSE-{pilot_session_id}"
+            expected_close_id = self._generate_client_order_id(
+                session_close_decision_id, "ETHUSDC", order_index=0
+            )
+            if pilot_close_claim is not None:
+                session_close_client_order_id = str(
+                    pilot_close_claim.get("client_order_id") or ""
+                )
+                try:
+                    close_side = OrderSide(str(pilot_close_claim.get("side") or "").upper())
+                    close_position_side = PositionSide(
+                        str(pilot_close_claim.get("position_side") or "").upper()
+                    )
+                    close_quantity = self._decimal_value(
+                        pilot_close_claim.get("quantity"), positive=True
+                    )
+                    session_close_attempt_count = int(
+                        pilot_close_claim.get("attempt_count") or 0
+                    )
+                except (InvalidOperation, TypeError, ValueError):
+                    self.last_emergency_result = {
+                        "status": "UNKNOWN",
+                        "reason": "Persisted Local Pilot close identity is invalid",
+                    }
+                    return []
+                if (
+                    session_close_client_order_id != expected_close_id
+                    or session_close_attempt_count < 0
+                    or session_close_attempt_count > 2
+                ):
+                    self.last_emergency_result = {
+                        "status": "UNKNOWN",
+                        "reason": "Persisted Local Pilot close identity does not match its launch",
+                    }
+                    return []
+                session_close_intent = OrderIntent(
+                    client_order_id=session_close_client_order_id,
+                    symbol="ETHUSDC",
+                    market_type=MarketType.USDM_FUTURES,
+                    side=close_side,
+                    position_side=close_position_side,
+                    order_type=OrderType.MARKET,
+                    time_in_force=TimeInForce.GTC,
+                    quantity=close_quantity,
+                    reduce_only=True,
+                )
+                try:
+                    session_close_response = await self._query_pilot_session_close_order(
+                        "ETHUSDC",
+                        session_close_client_order_id,
+                        prior_attempt_count=session_close_attempt_count,
+                    )
+                except Exception as exc:
+                    self.last_emergency_result = {
+                        "status": "UNKNOWN",
+                        "reason": f"Persisted close order lookup is ambiguous: {type(exc).__name__}",
+                        "client_order_id": session_close_client_order_id,
+                    }
+                    self.state = ConnectionState.DEGRADED
+                    return []
 
         self.last_emergency_result = {"status": "UNKNOWN", "submitted_orders": 0}
         try:
@@ -6759,58 +6932,269 @@ class BinanceExecutionAdapter:
             return []
         flattened: List[ExecutionOrder] = []
         attempted = 0
-        for position in positions:
-            current_symbol = str(position.get("symbol", "")).upper()
+        if session_close_response is not None and session_close_intent is not None:
             try:
-                amount = Decimal(str(position.get("positionAmt", "0")))
-                current_position_side = PositionSide(
-                    str(position.get("positionSide", "BOTH")).upper()
+                decision = ExecutionDecision(
+                    decision_id=str(session_close_decision_id),
+                    symbol="ETHUSDC",
+                    action="CLOSE_POSITION",
+                    risk_class=EconomicRiskClass.EMERGENCY,
+                    orders=[session_close_intent],
                 )
-            except (InvalidOperation, TypeError, ValueError):
+                recovered_session_close = await self._recover_pilot_session_close_order(
+                    session_close_intent,
+                    str(session_close_client_order_id),
+                    session_close_response,
+                    decision,
+                )
+                flattened.append(recovered_session_close)
+                attempted = 1
+            except Exception as exc:
                 self.last_emergency_result = {
                     "status": "UNKNOWN",
-                    "reason": f"Active {self.environment_label} position contained invalid emergency fields",
+                    "reason": f"Persisted close order recovery is incomplete: {type(exc).__name__}",
+                    "client_order_id": session_close_client_order_id,
                 }
+                self.reconciliation.last_status = "UNKNOWN"
+                self.state = ConnectionState.DEGRADED
+                return []
+
+        if pilot_session_id is not None:
+            scoped_active_positions = []
+            for position in positions:
+                if not isinstance(position, Mapping):
+                    self.last_emergency_result = {
+                        "status": "UNKNOWN",
+                        "reason": "Emergency position response contains an invalid row",
+                    }
+                    self.state = ConnectionState.DEGRADED
+                    return flattened
+                if str(position.get("symbol") or "").upper() != "ETHUSDC":
+                    continue
+                try:
+                    amount = Decimal(str(position.get("positionAmt", "0")))
+                except (InvalidOperation, TypeError, ValueError):
+                    self.last_emergency_result = {
+                        "status": "UNKNOWN",
+                        "reason": "Pilot session close position amount is invalid",
+                    }
+                    self.state = ConnectionState.DEGRADED
+                    return flattened
+                if amount != 0:
+                    scoped_active_positions.append((position, amount))
+            if len(scoped_active_positions) > 1:
+                self.last_emergency_result = {
+                    "status": "UNKNOWN",
+                    "reason": "Pilot session close requires exactly one durable position owner",
+                }
+                self.state = ConnectionState.DEGRADED
                 return flattened
-            if (
-                not current_symbol
-                or amount == 0
-                or (symbol and current_symbol != symbol.upper())
-                or (
-                    only_position_side is not None
-                    and current_position_side != only_position_side
+            if recovered_session_close is None and scoped_active_positions:
+                position, amount = scoped_active_positions[0]
+                try:
+                    position_side = PositionSide(
+                        str(position.get("positionSide", "BOTH")).upper()
+                    )
+                except ValueError:
+                    self.last_emergency_result = {
+                        "status": "UNKNOWN",
+                        "reason": "Pilot session close position side is invalid",
+                    }
+                    self.state = ConnectionState.DEGRADED
+                    return flattened
+                side = OrderSide.SELL if amount > 0 else OrderSide.BUY
+                quantity = abs(amount)
+                if session_close_intent is not None:
+                    if (
+                        session_close_intent.side != side
+                        or session_close_intent.position_side != position_side
+                        or session_close_intent.quantity != quantity
+                    ):
+                        self.last_emergency_result = {
+                            "status": "UNKNOWN",
+                            "reason": "Exchange position differs from the persisted close intent",
+                            "client_order_id": session_close_client_order_id,
+                        }
+                        self.state = ConnectionState.DEGRADED
+                        return flattened
+                    intent = session_close_intent
+                else:
+                    session_close_client_order_id = self._generate_client_order_id(
+                        str(session_close_decision_id), "ETHUSDC", order_index=0
+                    )
+                    intent = OrderIntent(
+                        client_order_id=session_close_client_order_id,
+                        symbol="ETHUSDC",
+                        market_type=MarketType.USDM_FUTURES,
+                        side=side,
+                        position_side=position_side,
+                        order_type=OrderType.MARKET,
+                        time_in_force=TimeInForce.GTC,
+                        quantity=quantity,
+                        reduce_only=True,
+                    )
+                    try:
+                        persisted = await pilot_close_claim_callback(
+                            client_order_id=session_close_client_order_id,
+                            side=side.value,
+                            position_side=position_side.value,
+                            quantity=quantity,
+                        )
+                        if (
+                            not isinstance(persisted, Mapping)
+                            or persisted.get("pilot_session_close_client_order_id")
+                            != session_close_client_order_id
+                        ):
+                            raise RuntimeError("close claim did not read back")
+                        session_close_attempt_count = int(
+                            persisted.get("pilot_session_close_attempt_count") or 0
+                        )
+                        if session_close_attempt_count != 0:
+                            raise RuntimeError("new close claim already has an attempt")
+                    except Exception as exc:
+                        self.last_emergency_result = {
+                            "status": "UNKNOWN",
+                            "reason": f"Durable close claim failed: {type(exc).__name__}",
+                            "client_order_id": session_close_client_order_id,
+                        }
+                        self.state = ConnectionState.DEGRADED
+                        return flattened
+                    try:
+                        session_close_response = await self._query_pilot_session_close_order(
+                            "ETHUSDC",
+                            session_close_client_order_id,
+                            prior_attempt_count=0,
+                        )
+                    except Exception as exc:
+                        self.last_emergency_result = {
+                            "status": "UNKNOWN",
+                            "reason": f"New close identity lookup is ambiguous: {type(exc).__name__}",
+                            "client_order_id": session_close_client_order_id,
+                        }
+                        self.state = ConnectionState.DEGRADED
+                        return flattened
+                    if session_close_response is not None:
+                        try:
+                            decision = ExecutionDecision(
+                                decision_id=str(session_close_decision_id),
+                                symbol="ETHUSDC",
+                                action="CLOSE_POSITION",
+                                risk_class=EconomicRiskClass.EMERGENCY,
+                                orders=[intent],
+                            )
+                            recovered_session_close = await self._recover_pilot_session_close_order(
+                                intent,
+                                str(session_close_client_order_id),
+                                session_close_response,
+                                decision,
+                            )
+                            flattened.append(recovered_session_close)
+                            attempted = 1
+                        except Exception as exc:
+                            self.last_emergency_result = {
+                                "status": "UNKNOWN",
+                                "reason": f"Pre-existing close lookup recovery failed: {type(exc).__name__}",
+                                "client_order_id": session_close_client_order_id,
+                            }
+                            self.state = ConnectionState.DEGRADED
+                            return flattened
+                if recovered_session_close is None:
+                    next_attempt = session_close_attempt_count + 1
+                    if next_attempt > 2:
+                        self.last_emergency_result = {
+                            "status": "UNKNOWN",
+                            "reason": "Pilot close retry limit reached after exact-ID absence reads",
+                            "client_order_id": session_close_client_order_id,
+                        }
+                        self.state = ConnectionState.DEGRADED
+                        return flattened
+                    try:
+                        saved_attempt = await pilot_close_attempt_callback(
+                            client_order_id=str(session_close_client_order_id),
+                            attempt=next_attempt,
+                        )
+                        if (
+                            not isinstance(saved_attempt, Mapping)
+                            or int(saved_attempt.get("pilot_session_close_attempt_count") or 0)
+                            < next_attempt
+                        ):
+                            raise RuntimeError("close attempt marker did not read back")
+                    except Exception as exc:
+                        self.last_emergency_result = {
+                            "status": "UNKNOWN",
+                            "reason": f"Close submission marker failed: {type(exc).__name__}",
+                            "client_order_id": session_close_client_order_id,
+                        }
+                        self.state = ConnectionState.DEGRADED
+                        return flattened
+                    decision = ExecutionDecision(
+                        decision_id=str(session_close_decision_id),
+                        symbol="ETHUSDC",
+                        action="CLOSE_POSITION",
+                        risk_class=EconomicRiskClass.EMERGENCY,
+                        orders=[intent],
+                    )
+                    attempted = 1
+                    flattened.extend(
+                        await self._execute_decision(
+                            decision,
+                            allow_emergency_fallback=True,
+                            authority=authority,
+                        )
+                    )
+        else:
+            for position in positions:
+                current_symbol = str(position.get("symbol", "")).upper()
+                try:
+                    amount = Decimal(str(position.get("positionAmt", "0")))
+                    current_position_side = PositionSide(
+                        str(position.get("positionSide", "BOTH")).upper()
+                    )
+                except (InvalidOperation, TypeError, ValueError):
+                    self.last_emergency_result = {
+                        "status": "UNKNOWN",
+                        "reason": f"Active {self.environment_label} position contained invalid emergency fields",
+                    }
+                    return flattened
+                if (
+                    not current_symbol
+                    or amount == 0
+                    or (symbol and current_symbol != symbol.upper())
+                    or (
+                        only_position_side is not None
+                        and current_position_side != only_position_side
+                    )
+                ):
+                    continue
+                attempted += 1
+                side = OrderSide.SELL if amount > 0 else OrderSide.BUY
+                intent = OrderIntent(
+                    client_order_id=self._generate_client_order_id(
+                        "EMERGENCY", current_symbol, attempted
+                    ),
+                    symbol=current_symbol,
+                    market_type=MarketType.USDM_FUTURES,
+                    side=side,
+                    position_side=current_position_side,
+                    order_type=OrderType.MARKET,
+                    time_in_force=TimeInForce.GTC,
+                    quantity=abs(amount),
+                    reduce_only=True,
                 )
-            ):
-                continue
-            attempted += 1
-            side = OrderSide.SELL if amount > 0 else OrderSide.BUY
-            intent = OrderIntent(
-                client_order_id=self._generate_client_order_id(
-                    "EMERGENCY", current_symbol, attempted
-                ),
-                symbol=current_symbol,
-                market_type=MarketType.USDM_FUTURES,
-                side=side,
-                position_side=current_position_side,
-                order_type=OrderType.MARKET,
-                time_in_force=TimeInForce.GTC,
-                quantity=abs(amount),
-                reduce_only=True,
-            )
-            decision = ExecutionDecision(
-                decision_id=f"EMERGENCY-{current_symbol}",
-                symbol=current_symbol,
-                action="CLOSE_POSITION",
-                risk_class=EconomicRiskClass.EMERGENCY,
-                orders=[intent],
-            )
-            flattened.extend(
-                await self._execute_decision(
-                    decision,
-                    allow_emergency_fallback=True,
-                    authority=authority,
+                decision = ExecutionDecision(
+                    decision_id=f"EMERGENCY-{current_symbol}",
+                    symbol=current_symbol,
+                    action="CLOSE_POSITION",
+                    risk_class=EconomicRiskClass.EMERGENCY,
+                    orders=[intent],
                 )
-            )
+                flattened.extend(
+                    await self._execute_decision(
+                        decision,
+                        allow_emergency_fallback=True,
+                        authority=authority,
+                    )
+                )
 
         sync_result = self.reconciliation.last_status
         try:
