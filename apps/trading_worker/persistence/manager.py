@@ -832,6 +832,38 @@ class PersistenceManager:
             self._state = "DEGRADED"
             return False
 
+    async def wait_until_idle(self, timeout_seconds: float = 2.0) -> bool:
+        """Drain the outbox and write queue so readiness can report zero pending.
+
+        The pre-send fence requires pending_outbox == 0 and queue_size == 0,
+        but the order barrier has just added an outbox row that the background
+        dispatcher only picks up on its next poll. dispatch_one() claims rows
+        with FOR UPDATE SKIP LOCKED, so draining here is safe alongside it.
+        """
+        if self.repository is None:
+            return False
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            try:
+                for _ in range(100):
+                    if not await self.repository.dispatch_one():
+                        break
+                await self._refresh_pending_count()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._record_failure(exc)
+                return False
+            if (
+                self._write_queue.empty()
+                and self._inflight is None
+                and self._pending_outbox == 0
+            ):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.02)
+
     def enqueue_order(self, order: ExecutionOrder) -> bool:
         event = self._order_event(order)
         if event is None:

@@ -426,6 +426,24 @@ class BinanceExecutionAdapter:
         return parsed
 
     @staticmethod
+    def _fp_number(value: Any) -> str:
+        """Scale-insensitive text for ledger comparison.
+
+        PostgreSQL NUMERIC(28,10) reloads 0.019 as 0.0190000000; str() would
+        then never equal the in-memory value. Non-numeric or missing values keep
+        their literal text so they cannot collide with zero.
+        """
+        if value is None:
+            return ""
+        try:
+            parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return str(value)
+        if not parsed.is_finite():
+            return str(value)
+        return format(parsed.normalize(), "f") if parsed != 0 else "0"
+
+    @staticmethod
     def _local_order_fingerprint(order: Any) -> tuple[str, ...]:
         return (
             str(getattr(order, "client_order_id", "")),
@@ -434,8 +452,8 @@ class BinanceExecutionAdapter:
             str(getattr(order, "symbol", "")).upper(),
             str(getattr(getattr(order, "side", None), "value", getattr(order, "side", ""))).upper(),
             str(getattr(order, "order_type", "")).upper(),
-            str(getattr(order, "quantity", "")),
-            str(getattr(order, "price", "")),
+            BinanceExecutionAdapter._fp_number(getattr(order, "quantity", None)),
+            BinanceExecutionAdapter._fp_number(getattr(order, "price", None)),
             str(getattr(order, "status", "")).upper(),
             str(getattr(getattr(order, "position_side", None), "value", getattr(order, "position_side", ""))).upper(),
         )
@@ -449,9 +467,9 @@ class BinanceExecutionAdapter:
             str(getattr(fill, "symbol", "")).upper(),
             str(getattr(getattr(fill, "side", None), "value", getattr(fill, "side", ""))).upper(),
             str(getattr(getattr(fill, "position_side", None), "value", getattr(fill, "position_side", ""))).upper(),
-            str(getattr(fill, "quantity", "")),
-            str(getattr(fill, "price", "")),
-            str(getattr(fill, "commission", "")),
+            BinanceExecutionAdapter._fp_number(getattr(fill, "quantity", None)),
+            BinanceExecutionAdapter._fp_number(getattr(fill, "price", None)),
+            BinanceExecutionAdapter._fp_number(getattr(fill, "commission", None)),
             str(getattr(fill, "commission_asset", "")).upper(),
         )
 
@@ -460,12 +478,12 @@ class BinanceExecutionAdapter:
         return (
             str(getattr(position, "symbol", "")).upper(),
             str(getattr(getattr(position, "position_side", None), "value", getattr(position, "position_side", ""))).upper(),
-            str(getattr(position, "quantity", "")),
-            str(getattr(position, "entry_price", "")),
-            str(getattr(position, "mark_price", "")),
-            str(getattr(position, "liquidation_price", "")),
-            str(getattr(position, "unrealized_pnl", "")),
-            str(getattr(position, "leverage", "")),
+            BinanceExecutionAdapter._fp_number(getattr(position, "quantity", None)),
+            BinanceExecutionAdapter._fp_number(getattr(position, "entry_price", None)),
+            BinanceExecutionAdapter._fp_number(getattr(position, "mark_price", None)),
+            BinanceExecutionAdapter._fp_number(getattr(position, "liquidation_price", None)),
+            BinanceExecutionAdapter._fp_number(getattr(position, "unrealized_pnl", None)),
+            BinanceExecutionAdapter._fp_number(getattr(position, "leverage", None)),
             str(getattr(position, "margin_type", "")).upper(),
         )
 
@@ -1273,6 +1291,22 @@ class BinanceExecutionAdapter:
                 raise LeaseLostError(
                     "Local supervisor heartbeat is missing or stale before Mainnet submission"
                 )
+
+    async def _drain_local_persistence_before_fence(self) -> None:
+        """Let the outbox row written by the order barrier reach PostgreSQL.
+
+        The fence's risk context requires pending_outbox == 0 and a ledger equal
+        to a fresh database reload, which cannot hold until the barrier's own
+        outbox row has been applied. Still fail-closed if it does not drain.
+        """
+        if not self._is_local_mainnet_runtime():
+            return
+        persistence = getattr(self._worker_authority, "persistence", None)
+        waiter = getattr(persistence, "wait_until_idle", None)
+        if callable(waiter) and not await waiter(2.0):
+            raise LeaseLostError(
+                "Durable outbox did not drain before the final pre-send fence"
+            )
 
     async def _final_risk_increase_fence(
         self,
@@ -2805,6 +2839,7 @@ class BinanceExecutionAdapter:
                         is_risk_increasing
                         and self.env == BinanceEnvironment.MAINNET
                     ):
+                        await self._drain_local_persistence_before_fence()
                         await self._final_risk_increase_fence(
                             decision,
                             intent,
