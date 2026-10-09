@@ -2,7 +2,11 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { TrackCBinding } from './local-release-runtime.js';
-import { buildTrustedPythonVerificationEnvironment, resolveTrustedLocalPythonRuntime } from './local-python-runtime.js';
+import {
+  TRUSTED_PYTHON_RESOLVER_CODES, buildTrustedPythonVerificationEnvironment, resolveTrustedLocalPythonRuntime,
+} from './local-python-runtime.js';
+
+export const LOCAL_PILOT_VERIFIER_RUNTIME_UNAVAILABLE = 'LOCAL_PILOT_VERIFIER_RUNTIME_UNAVAILABLE';
 
 export const TRACK_C_CLASSES = ['CHECKS', 'REVIEW_AUTH_RELEASE', 'REVIEW_ORDER_RISK', 'REVIEW_PERSISTENCE', 'TESTNET_ETHUSDC'] as const;
 export type { TrackCBinding };
@@ -39,9 +43,22 @@ export function trackCPhases(passClasses: string[], sourceClean: boolean) {
   };
 }
 
+/**
+ * Maps a thrown error to a fixed code. Only exact resolver codes pass through; raw stderr,
+ * paths, tokens and any other message collapse to the generic runtime code.
+ */
+export function verifierDiagnosticCode(error: unknown): string {
+  if (error instanceof Error && (TRUSTED_PYTHON_RESOLVER_CODES as readonly string[]).includes(error.message)) {
+    return error.message;
+  }
+  return LOCAL_PILOT_VERIFIER_RUNTIME_UNAVAILABLE;
+}
+
 /** Production has no injectable verifier and never consumes a stored PASS result. */
-export function verifiedTrackCClasses(root: string, binding: TrackCBinding, now: Date): string[] {
-  if (!TRACK_C_CLASSES.some((c) => existsSync(path.join(root, 'artifacts/local-pilot-attestations', `${c}.json`)))) return [];
+export function verifyTrackCAttestations(
+  root: string, binding: TrackCBinding, now: Date,
+): { classes: string[]; diagnostic?: string } {
+  if (!TRACK_C_CLASSES.some((c) => existsSync(path.join(root, 'artifacts/local-pilot-attestations', `${c}.json`)))) return { classes: [] };
   try {
     const runtime = resolveTrustedLocalPythonRuntime(process.env, root);
     runtime.assertUnchanged();
@@ -54,7 +71,13 @@ export function verifiedTrackCClasses(root: string, binding: TrackCBinding, now:
     if (result.sourceClean !== true || Object.keys(binding).some((k) => result.binding?.[k] !== binding[k as keyof TrackCBinding])
       || !Array.isArray(result.classes) || result.classes.length !== TRACK_C_CLASSES.length
       || TRACK_C_CLASSES.some((c) => result.classes.filter((r: any) => r?.evidenceClass === c).length !== 1)
-      || result.classes.some((r: any) => !['PASS', 'FAIL', 'NOT_RUN'].includes(r.status))) return [];
-    return result.classes.filter((r: any) => r.status === 'PASS' && r.reason === 'TRACK_C_ATTESTATION_VERIFIED').map((r: any) => r.evidenceClass);
-  } catch { return []; }
+      || result.classes.some((r: any) => !['PASS', 'FAIL', 'NOT_RUN'].includes(r.status))) return { classes: [] };
+    return { classes: result.classes.filter((r: any) => r.status === 'PASS' && r.reason === 'TRACK_C_ATTESTATION_VERIFIED').map((r: any) => r.evidenceClass) };
+  } catch (error) {
+    return { classes: [], diagnostic: verifierDiagnosticCode(error) };
+  }
+}
+
+export function verifiedTrackCClasses(root: string, binding: TrackCBinding, now: Date): string[] {
+  return verifyTrackCAttestations(root, binding, now).classes;
 }

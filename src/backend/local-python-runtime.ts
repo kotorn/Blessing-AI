@@ -11,6 +11,13 @@ export interface TrustedLocalPythonRuntime {
   assertUnchanged(): void;
 }
 
+/** Fixed, non-secret codes thrown by this module. Only these may reach operator-facing output. */
+export const TRUSTED_PYTHON_RESOLVER_CODES = [
+  'LOCAL_PILOT_TRUSTED_PYTHON_EXECUTABLE_NOT_VERIFIED',
+  'LOCAL_PILOT_PYTHON_DEPENDENCIES_MISSING',
+  'LOCAL_PILOT_TRUSTED_PYTHON_EXECUTABLE_CHANGED',
+] as const;
+
 function hasWorkerDependencies(executable: string, source: NodeJS.ProcessEnv, cwd: string): boolean {
   try {
     execFileSync(executable, ['-I', '-c', [

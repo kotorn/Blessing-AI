@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { type LocalReleaseFingerprint, type TrackCReviewPolicy, readTrackCReviewPolicy } from './local-release-runtime.js';
 import { buildTrustedPythonVerificationEnvironment, resolveTrustedLocalPythonRuntime } from './local-python-runtime.js';
-import { trackCPhases, verifiedTrackCClasses } from './local-pilot-attestation.js';
+import { trackCPhases, verifierDiagnosticCode, verifyTrackCAttestations } from './local-pilot-attestation.js';
 
 export const LOCAL_PILOT_CAPABILITY_EVIDENCE_PATH = 'artifacts/local-pilot-capability.json';
 export const LOCAL_PILOT_CAPABILITY_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
@@ -89,7 +89,8 @@ export interface LocalPilotReadiness {
     testnet: 'VERIFIED' | 'UNVERIFIED';
   };
   blockers: string[];
-  ciAttestation?: { status: 'PASS' | 'FAIL' | 'NOT_RUN'; reason: string; scope?: 'CI_ONLY'; gitSha?: string };
+  /** `diagnostic` is a fixed, whitelisted code only; it never carries raw verifier output. */
+  ciAttestation?: { status: 'PASS' | 'FAIL' | 'NOT_RUN'; reason: string; scope?: 'CI_ONLY'; gitSha?: string; diagnostic?: string };
 }
 
 /** CI cannot authorize local DB receipts, independent reviews, or exchange trials. */
@@ -122,8 +123,8 @@ export function localPilotCiAttestation(root: string, gitSha: string): NonNullab
       throw new Error('invalid attestation result');
     }
     return { status: 'PASS', reason: 'CI_ATTESTATION_VERIFIED', scope: 'CI_ONLY', gitSha };
-  } catch {
-    return { status: 'FAIL', reason: 'CI_ATTESTATION_INVALID' };
+  } catch (error) {
+    return { status: 'FAIL', reason: 'CI_ATTESTATION_INVALID', diagnostic: verifierDiagnosticCode(error) };
   }
 }
 
@@ -308,11 +309,14 @@ export function localLivePilotReadiness(options?: LocalPilotReadinessOptions): L
       reason: sourceVerified ? 'LOCAL_PILOT_SOURCE_COMMIT_CLEAN' : 'LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN',
     };
     if (!sourceVerified) capabilityBlockers.push('LOCAL_PILOT_REVIEWED_COMMIT_NOT_CLEAN');
-    const verifiedClasses = sourceVerified ? verifiedTrackCClasses(root, {
+    const verification = sourceVerified ? verifyTrackCAttestations(root, {
       gitSha: expected.gitSha, sourceSha256: expected.sourceSha256,
       dependencySha256: expected.dependencySha256, migrationSha256: expected.migrationSha256,
       pilotPolicySha256: options.pilotPolicySha256,
-    }, now) : [];
+    }, now) : { classes: [] as string[] };
+    // Surfaces why the verifier produced no classes; a diagnostic only ever adds a blocker.
+    if (verification.diagnostic) capabilityBlockers.push(verification.diagnostic);
+    const verifiedClasses = verification.classes;
     // Source must still match after the external signature verifier returns.
     attestedPhases = trackCPhases(verifiedClasses, sourceVerified && committedClean(root, expected.gitSha));
     provenanceBlockers = attestedPhases.blockers.filter((b) => b.includes('PROVENANCE'));
