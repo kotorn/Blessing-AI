@@ -3049,7 +3049,8 @@ class PersistenceRepository:
             session = await connection.fetchrow(
                 """SELECT launch_id, symbol, policy, runtime_target, pilot_campaign_id,
                           pilot_net_pnl_usdc, pilot_peak_pnl_usdc, pilot_drawdown_triggered,
-                          pilot_status, pilot_last_account_snapshot_at, state
+                          pilot_status, pilot_last_account_snapshot_at, state,
+                          max_risk_increasing_orders, reserved_orders, submitted_orders
                    FROM mainnet_launch_sessions WHERE launch_id = $1 FOR UPDATE""",
                 launch_id,
             )
@@ -3062,6 +3063,34 @@ class PersistenceRepository:
                 or session["state"] in {"REAUTH_REQUIRED", "RECONCILIATION_REQUIRED"}
             ):
                 raise RuntimeError("pilot event does not match its durable Local campaign")
+            if safe_payload.get("kind") == "SESSION_ARMED":
+                if (
+                    normalized_type != "STATE"
+                    or normalized_source != "WORKER"
+                    or str(event_key) != "STATE:SESSION_ARMED"
+                    or session["state"] != "ACTIVE"
+                    or session["max_risk_increasing_orders"] != 1
+                    or int(session["reserved_orders"] or 0) != 0
+                    or int(session["submitted_orders"] or 0) != 0
+                ):
+                    raise RuntimeError("pilot session ARM is already used or not safely reserved")
+                session_armed = await connection.fetchrow(
+                    """SELECT launch_id FROM local_live_pilot_events
+                       WHERE campaign_id = $1 AND event_type = 'STATE'
+                         AND payload->>'kind' = 'SESSION_ARMED'
+                       LIMIT 1""",
+                    campaign_id,
+                )
+                if session_armed is not None:
+                    raise RuntimeError("pilot campaign already has a durable SESSION_ARMED event")
+                if any(
+                    not isinstance(safe_payload.get(field), str)
+                    or not safe_payload[field]
+                    for field in (
+                        "armed_at", "entry_cutoff_at", "close_after_at", "end_at"
+                    )
+                ):
+                    raise ValueError("pilot SESSION_ARMED event is missing immutable deadlines")
             prior = await connection.fetchrow(
                 """SELECT launch_id, event_type, source, observed_at,
                           net_pnl_delta_usdc, payload_sha256
@@ -3284,6 +3313,60 @@ class PersistenceRepository:
                 normalized_type == "MARK" and launch_state == "ACTIVE"
             )
             return result
+
+    async def record_local_live_pilot_session_armed(
+        self,
+        launch_id: str,
+        *,
+        armed_at: datetime,
+        entry_cutoff_seconds: int,
+        close_after_seconds: int,
+        end_seconds: int,
+    ) -> Mapping[str, Any]:
+        """Persist the one allowed T0 event before the Worker exposes ARMED."""
+        from apps.trading_worker.venues.binance.session import SessionLimits
+
+        limits = SessionLimits(
+            entry_cutoff_seconds=entry_cutoff_seconds,
+            close_after_seconds=close_after_seconds,
+            end_seconds=end_seconds,
+        )
+        normalized_armed_at = _utc_datetime(armed_at)
+        if normalized_armed_at is None:
+            raise ValueError("pilot SESSION_ARMED timestamp must be timezone-aware")
+        armed_at_text = normalized_armed_at.isoformat().replace("+00:00", "Z")
+        payload = {
+            "run_id": launch_id,
+            "kind": "SESSION_ARMED",
+            "armed_at": armed_at_text,
+            "entry_cutoff_at": (
+                normalized_armed_at + timedelta(seconds=limits.entry_cutoff_seconds)
+            ).isoformat().replace("+00:00", "Z"),
+            "close_after_at": (
+                normalized_armed_at + timedelta(seconds=limits.close_after_seconds)
+            ).isoformat().replace("+00:00", "Z"),
+            "end_at": (
+                normalized_armed_at + timedelta(seconds=limits.end_seconds)
+            ).isoformat().replace("+00:00", "Z"),
+        }
+        session = await self.get_mainnet_launch(launch_id)
+        if not session or not session.get("pilot_campaign_id"):
+            raise RuntimeError("pilot session ARM has no durable campaign binding")
+        await self.append_local_live_pilot_event(
+            campaign_id=str(session["pilot_campaign_id"]),
+            launch_id=launch_id,
+            run_id=launch_id,
+            symbol=str(session.get("symbol") or ""),
+            event_key="STATE:SESSION_ARMED",
+            event_type="STATE",
+            source="WORKER",
+            observed_at=normalized_armed_at,
+            payload=payload,
+        )
+        readback = await self.get_mainnet_launch(launch_id)
+        if not readback or readback.get("pilot_session_armed_at") != armed_at_text:
+            raise RuntimeError("durable SESSION_ARMED event failed read-back")
+        return readback
 
     async def create_mainnet_launch_session(
         self,
@@ -3985,6 +4068,26 @@ class PersistenceRepository:
                    pilot_quick_max_hold_seconds, pilot_max_leverage, pilot_status,
                    pilot_net_pnl_usdc, pilot_peak_pnl_usdc, pilot_drawdown_triggered,
                    pilot_last_account_snapshot_at,
+                   (SELECT e.payload->>'armed_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_armed_at,
+                   (SELECT e.payload->>'entry_cutoff_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_entry_cutoff_at,
+                   (SELECT e.payload->>'close_after_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_after_at,
+                   (SELECT e.payload->>'end_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_end_at,
+                   (SELECT COUNT(*) FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'FILL' AND e.payload->>'pilot_entry' = 'true'
+                   ) AS pilot_session_entry_count,
                    COALESCE(
                        state IN ('PAUSED_NEW_RISK', 'REAUTH_REQUIRED', 'RECONCILIATION_REQUIRED')
                        AND pilot_status = 'ACTIVE'
@@ -4029,6 +4132,26 @@ class PersistenceRepository:
                    s.pilot_net_pnl_usdc, s.pilot_peak_pnl_usdc,
                    s.pilot_drawdown_triggered, s.pilot_status,
                    s.pilot_last_account_snapshot_at,
+                   (SELECT e.payload->>'armed_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_armed_at,
+                   (SELECT e.payload->>'entry_cutoff_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_entry_cutoff_at,
+                   (SELECT e.payload->>'close_after_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_after_at,
+                   (SELECT e.payload->>'end_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_end_at,
+                   (SELECT COUNT(*) FROM local_live_pilot_events e
+                    WHERE e.campaign_id = s.pilot_campaign_id
+                      AND e.event_type = 'FILL' AND e.payload->>'pilot_entry' = 'true'
+                   ) AS pilot_session_entry_count,
                    COALESCE((SELECT SUM(e.net_pnl_delta_usdc)
                              FROM local_live_pilot_events e
                              WHERE e.campaign_id = s.pilot_campaign_id
@@ -4086,6 +4209,26 @@ class PersistenceRepository:
                    pilot_quick_max_hold_seconds, pilot_max_leverage, pilot_status,
                    pilot_net_pnl_usdc, pilot_peak_pnl_usdc, pilot_drawdown_triggered,
                    pilot_last_account_snapshot_at,
+                   (SELECT e.payload->>'armed_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_armed_at,
+                   (SELECT e.payload->>'entry_cutoff_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_entry_cutoff_at,
+                   (SELECT e.payload->>'close_after_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_close_after_at,
+                   (SELECT e.payload->>'end_at' FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'STATE' AND e.payload->>'kind' = 'SESSION_ARMED'
+                    ORDER BY e.event_id LIMIT 1) AS pilot_session_end_at,
+                   (SELECT COUNT(*) FROM local_live_pilot_events e
+                    WHERE e.campaign_id = mainnet_launch_sessions.pilot_campaign_id
+                      AND e.event_type = 'FILL' AND e.payload->>'pilot_entry' = 'true'
+                   ) AS pilot_session_entry_count,
                    COALESCE(
                        state IN ('PAUSED_NEW_RISK', 'REAUTH_REQUIRED', 'RECONCILIATION_REQUIRED')
                        AND pilot_status = 'ACTIVE'

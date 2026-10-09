@@ -380,6 +380,27 @@ class PersistenceManager:
             self._mainnet_launch_session = dict(updated)
         return dict(updated) if updated else None
 
+    async def record_local_live_pilot_session_armed(
+        self,
+        launch_id: str,
+        *,
+        armed_at: datetime,
+        entry_cutoff_seconds: int,
+        close_after_seconds: int,
+        end_seconds: int,
+    ) -> dict[str, Any]:
+        """Durably acknowledge the immutable T0 before the Worker reaches ARMED."""
+        repository = self._require_durable_launch_repository()
+        record = await repository.record_local_live_pilot_session_armed(
+            launch_id,
+            armed_at=armed_at,
+            entry_cutoff_seconds=entry_cutoff_seconds,
+            close_after_seconds=close_after_seconds,
+            end_seconds=end_seconds,
+        )
+        self._mainnet_launch_session = dict(record)
+        return dict(record)
+
     async def get_local_live_pilot_accounting(
         self, launch_id: str
     ) -> Optional[dict[str, Any]]:

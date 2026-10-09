@@ -311,10 +311,11 @@ async def test_missing_persistence_api_fails_closed():
 
 async def terminal_scenario(
     status, *, local_status="NEW", quantity="0.1", trades=None, initial_fill=None,
+    pilot_fill_callback=None, side="BUY",
 ):
     ledger = InMemoryLedger()
     order = ExecutionOrder(
-        symbol="ETHUSDC", side=OrderSide.BUY, quantity=Decimal("0.2"),
+        symbol="ETHUSDC", side=OrderSide(side), quantity=Decimal("0.2"),
         price=Decimal(2000), client_order_id="terminal-900", exchange_order_id="900",
         status=local_status,
     )
@@ -325,7 +326,7 @@ async def terminal_scenario(
         ))
     raw = {
         "symbol": "ETHUSDC", "orderId": 900, "clientOrderId": order.client_order_id,
-        "side": "BUY", "positionSide": "BOTH", "status": status,
+        "side": side, "positionSide": "BOTH", "status": status,
         "origQty": "0.2", "executedQty": quantity,
     }
     page = trades if trades is not None else [trade_row(quantity=quantity, side="BUY")]
@@ -338,8 +339,55 @@ async def terminal_scenario(
         raise AssertionError(f"Unexpected offline request {path}")
 
     reconciliation = BinanceReconciliation(OfflineRest(handler), ledger)
+    reconciliation.on_local_live_pilot_fill = pilot_fill_callback
     diffs = await reconciliation._collect_diffs([], [])
     return reconciliation, order, diffs
+
+
+@pytest.mark.asyncio
+async def test_rest_recovered_exit_fill_reaches_idempotent_campaign_accounting():
+    persisted_trade_ids = set()
+    callback_calls = []
+
+    async def persist(fill):
+        callback_calls.append(fill.exchange_trade_id)
+        persisted_trade_ids.add(fill.exchange_trade_id)
+        return True
+
+    reconciliation, order, diffs = await terminal_scenario(
+        "CANCELED", local_status="NEW", quantity="0.1",
+        trades=[trade_row(quantity="0.1", side="SELL")],
+        pilot_fill_callback=persist,
+        side="SELL",
+    )
+    assert diffs == []
+    assert callback_calls == ["901"]
+    assert persisted_trade_ids == {"901"}
+
+    # A restart or REST overlap can replay the same actualOrderId/userTrades
+    # row; durable campaign event keys absorb that replay by exchange trade ID.
+    await reconciliation._recover_order_fills(
+        order,
+        {
+            "orderId": "900", "status": "CANCELED", "executedQty": "0.1",
+        },
+    )
+    assert callback_calls == ["901", "901"]
+    assert persisted_trade_ids == {"901"}
+
+
+@pytest.mark.asyncio
+async def test_rest_recovered_fill_accounting_failure_blocks_reconciliation():
+    async def fail(_fill):
+        return False
+
+    _, _, diffs = await terminal_scenario(
+        "CANCELED", local_status="NEW", quantity="0.1",
+        trades=[trade_row(quantity="0.1", side="SELL")],
+        pilot_fill_callback=fail,
+        side="SELL",
+    )
+    assert "FILL_RECOVERY_FAILED" in {diff.code for diff in diffs}
 
 
 @pytest.mark.asyncio

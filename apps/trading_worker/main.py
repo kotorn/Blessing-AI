@@ -82,6 +82,13 @@ from apps.trading_worker.venues.binance.models import (
     ConnectionState,
     TestnetSafetyLimits,
 )
+from apps.trading_worker.venues.binance.session import (
+    ClockDriftError,
+    SessionLimits,
+    SessionPhase,
+    SessionTimer,
+)
+from apps.trading_worker.venues.binance.mainnet_risk import LOCAL_LIVE_PILOT_POLICY
 from apps.trading_worker.persistence.manager import PersistenceManager
 from apps.trading_worker.venues.binance.public_ws import BinancePublicWebSocket
 from domain.wealth_metrics import (
@@ -429,6 +436,7 @@ class WorkerRuntimeState(BaseModel):
     # process heartbeat does not prove the Local Pilot lifecycle monitor ran.
     pilot_lifecycle_monitor: Dict[str, Any] = Field(default_factory=dict)
     pilot_verdict_status: Optional[str] = None
+    pilot_session: Dict[str, Any] = Field(default_factory=dict)
     # Why pilot signals did or did not become orders (non-secret, truncated).
     pilot_attempt_diagnostics: Dict[str, Any] = Field(default_factory=dict)
 
@@ -1049,6 +1057,10 @@ class TradingWorkerApp:
         self._execution_lease_last_renewed_at = 0.0
         self._mainnet_launch_id: Optional[str] = None
         self._mainnet_launch_session: Optional[dict[str, Any]] = None
+        self._pilot_session_timer: Optional[SessionTimer] = None
+        self._pilot_session_clock_error: Optional[str] = None
+        self._pilot_session_flatten_claimed = False
+        self._pilot_session_last_phase: Optional[str] = None
         self._last_risk_snapshot_enqueued_at: float = 0.0
         self._pilot_attempt_counts: Dict[str, int] = {}
         self._pilot_attempt_last: Dict[str, Optional[str]] = {
@@ -1236,6 +1248,11 @@ class TradingWorkerApp:
         adapter.on_local_live_pilot_funding_reconcile = (
             self._reconcile_local_live_pilot_funding if pilot_runtime else None
         )
+        reconciliation = getattr(adapter, "reconciliation", None)
+        if reconciliation is not None:
+            reconciliation.on_local_live_pilot_fill = (
+                self._persist_local_live_pilot_fill if pilot_runtime else None
+            )
         return pilot_runtime
 
     def _set_mainnet_launch_session(self, session: Optional[dict[str, Any]]) -> None:
@@ -1245,6 +1262,12 @@ class TradingWorkerApp:
             getattr(self, "_pilot_accounting_pause_active", False)
         )
         self._mainnet_launch_session = dict(session) if session else None
+        launch_id = str(session.get("launch_id") or "") if session else ""
+        if launch_id != str(previous_launch_id or ""):
+            self._pilot_session_timer = None
+            self._pilot_session_clock_error = None
+            self._pilot_session_flatten_claimed = False
+            self._pilot_session_last_phase = None
         self._pilot_accounting_pause_active = bool(
             session
             and (
@@ -1261,6 +1284,185 @@ class TradingWorkerApp:
             self._mainnet_launch_id = str(launch_id) if launch_id else None
         else:
             self._mainnet_launch_id = None
+
+    def _pilot_session_timer_for_session(self) -> Optional[SessionTimer]:
+        session = self._mainnet_launch_session
+        if not isinstance(session, dict) or session.get("policy") != "LIVE_RESEARCH_PILOT":
+            return None
+        if self._pilot_session_timer is not None:
+            return self._pilot_session_timer
+        try:
+            armed_at = self._session_timestamp(session.get("pilot_session_armed_at"))
+            entry_cutoff_at = self._session_timestamp(session.get("pilot_session_entry_cutoff_at"))
+            close_after_at = self._session_timestamp(session.get("pilot_session_close_after_at"))
+            end_at = self._session_timestamp(session.get("pilot_session_end_at"))
+            if None in (armed_at, entry_cutoff_at, close_after_at, end_at):
+                return None
+            limits = SessionLimits.from_deadlines(
+                armed_at=armed_at,
+                entry_cutoff_at=entry_cutoff_at,
+                close_after_at=close_after_at,
+                end_at=end_at,
+            )
+            self._pilot_session_timer = SessionTimer.start(
+                armed_at,
+                wall_now=utc_now(),
+                monotonic_now=time.monotonic(),
+                limits=limits,
+            )
+            self._pilot_session_clock_error = None
+            return self._pilot_session_timer
+        except (ClockDriftError, TypeError, ValueError) as exc:
+            self._pilot_session_clock_error = type(exc).__name__
+            self.pause_new_risk = True
+            return None
+
+    async def _pilot_session_completion_evidence(self) -> tuple[bool, int, bool]:
+        """Return exchange-flat, open-algo count, and sync only on verified readback."""
+        adapter = self.execution_adapter
+        reconciliation = getattr(adapter, "reconciliation", None) if adapter else None
+        repository = getattr(self.persistence, "repository", None)
+        protections = getattr(repository, "algo_protections", None)
+        ledger = getattr(reconciliation, "ledger", None)
+        if (
+            reconciliation is None
+            or getattr(reconciliation, "last_status", None) != "IN_SYNC"
+            or self.reconciliation_status != "IN_SYNC"
+            or not callable(getattr(ledger, "get_positions", None))
+            or not callable(getattr(protections, "list_protections", None))
+        ):
+            return False, 1, False
+        try:
+            positions = await cast(Any, ledger).get_positions()
+            if not isinstance(positions, list):
+                return False, 1, False
+            exchange_flat = all(
+                Decimal(str(getattr(position, "quantity", "0"))) == 0
+                for position in positions
+            )
+            owners = await cast(Any, protections).list_protections(
+                "binance_mainnet", "ETHUSDC"
+            )
+            if not isinstance(owners, list):
+                return False, 1, False
+            terminal = {"CANCELLED", "CANCELED", "FILLED", "EXPIRED", "REJECTED", "CLOSED"}
+            open_algos = sum(
+                1
+                for row in owners
+                if not isinstance(row, dict)
+                or str(row.get("state") or row.get("status") or "UNKNOWN").upper() not in terminal
+            )
+            return exchange_flat, open_algos, True
+        except Exception:
+            return False, 1, False
+
+    async def _pilot_session_phase(self) -> Optional[SessionPhase]:
+        session = self._mainnet_launch_session
+        if not isinstance(session, dict) or session.get("policy") != "LIVE_RESEARCH_PILOT":
+            return None
+        timer = self._pilot_session_timer_for_session()
+        if timer is None:
+            return SessionPhase.CLOSE_ONLY
+        try:
+            exchange_flat, open_algos, in_sync = await self._pilot_session_completion_evidence()
+            phase = timer.phase(
+                wall_now=utc_now(),
+                monotonic_now=time.monotonic(),
+                entry_count=int(session.get("pilot_session_entry_count") or 0),
+                exchange_flat=exchange_flat,
+                open_algo_count=open_algos,
+                ledger_in_sync=in_sync,
+            )
+            self._pilot_session_last_phase = phase.value
+            return phase
+        except ClockDriftError as exc:
+            self._pilot_session_clock_error = type(exc).__name__
+            self.pause_new_risk = True
+            return SessionPhase.CLOSE_ONLY
+
+    async def _pilot_session_gate(self) -> tuple[bool, str]:
+        """Final Worker-side guard for all risk-increasing pilot decisions."""
+        session = self._mainnet_launch_session
+        if not isinstance(session, dict) or session.get("policy") != "LIVE_RESEARCH_PILOT":
+            return True, ""
+        phase = await self._pilot_session_phase()
+        if (
+            phase is SessionPhase.ENTRY_ALLOWED
+            and session.get("state") == "ACTIVE"
+            and int(session.get("pilot_session_entry_count") or 0) == 0
+            and session.get("pilot_session_armed_at")
+        ):
+            return True, ""
+        self.pause_new_risk = True
+        self._refresh_engine_state()
+        return False, self._pilot_session_clock_error or (phase.value if phase else "SESSION_UNAVAILABLE")
+
+    def _pilot_session_state_readback(self) -> dict[str, Any]:
+        session = self._mainnet_launch_session
+        if not isinstance(session, dict) or session.get("policy") != "LIVE_RESEARCH_PILOT":
+            return {}
+        timer = self._pilot_session_timer_for_session()
+        if timer is None:
+            return {
+                "stage": "CLOSE_ONLY",
+                "armed_at": session.get("pilot_session_armed_at"),
+                "entry_cutoff_at": session.get("pilot_session_entry_cutoff_at"),
+                "close_after_at": session.get("pilot_session_close_after_at"),
+                "end_at": session.get("pilot_session_end_at"),
+                "clock_status": self._pilot_session_clock_error or "T0_UNAVAILABLE",
+            }
+        try:
+            phase = timer.phase(
+                wall_now=utc_now(),
+                monotonic_now=time.monotonic(),
+                entry_count=int(session.get("pilot_session_entry_count") or 0),
+                exchange_flat=False,
+                open_algo_count=1,
+                ledger_in_sync=False,
+            )
+            stage = self._pilot_session_last_phase or phase.value
+            clock_status = "OK"
+        except ClockDriftError as exc:
+            stage = SessionPhase.CLOSE_ONLY.value
+            clock_status = type(exc).__name__
+        return {
+            **timer.readback(SessionPhase(stage)),
+            "entry_count": int(session.get("pilot_session_entry_count") or 0),
+            "clock_status": clock_status,
+        }
+
+    async def _enforce_pilot_session_deadlines(self) -> None:
+        """Keep stale-entry blocking and deterministic close-only flatten on the heartbeat."""
+        session = self._mainnet_launch_session
+        if not isinstance(session, dict) or session.get("policy") != "LIVE_RESEARCH_PILOT":
+            return
+        phase = await self._pilot_session_phase()
+        self._pilot_session_last_phase = phase.value if phase else None
+        if phase in {SessionPhase.NO_ENTRY, SessionPhase.CLOSE_ONLY, SessionPhase.ENDED}:
+            self.pause_new_risk = True
+        timer = self._pilot_session_timer_for_session()
+        if (
+            timer is None
+            or self._pilot_session_flatten_claimed
+            or self.execution_mode != WorkerExecutionMode.LIVE
+            or phase not in {SessionPhase.CLOSE_ONLY, SessionPhase.ENDED}
+            or self.execution_adapter is None
+            or not callable(getattr(self.execution_adapter, "emergency_flatten", None))
+        ):
+            return
+        try:
+            elapsed = timer.elapsed_seconds(wall_now=utc_now(), monotonic_now=time.monotonic())
+        except ClockDriftError:
+            elapsed = timer.limits.close_after_seconds
+        if elapsed < timer.limits.close_after_seconds:
+            return
+        self._pilot_session_flatten_claimed = True
+        try:
+            await self.execution_adapter.emergency_flatten("ETHUSDC", authority=self)
+        except Exception as exc:
+            self.pause_new_risk = True
+            self.engine_state = WorkerEngineState.DEGRADED
+            logger.error("Pilot deadline emergency flatten did not verify: %s", type(exc).__name__)
 
     def _launch_session_value(self, key: str, default: Any = None) -> Any:
         if self._mainnet_launch_session is None:
@@ -1769,6 +1971,8 @@ class TradingWorkerApp:
                     "realized_pnl_usdc": str(fill.realized_pnl),
                     "side": str(getattr(fill.side, "value", fill.side)),
                     "position_side": str(getattr(fill.position_side, "value", fill.position_side)),
+                    "pilot_entry": str(fill.client_order_id)
+                    == str(session.get("first_order_client_order_id") or ""),
                 },
             )
             if not isinstance(fee_result, dict) or not isinstance(fill_result, dict):
@@ -1907,6 +2111,8 @@ class TradingWorkerApp:
             "mark_age_seconds": None,
             "last_event_at": None,
             "reason": "PILOT_ACCOUNTING_EVIDENCE_UNAVAILABLE",
+            "accounting_complete": False,
+            "session": self._pilot_session_state_readback(),
         }
         session = self._mainnet_launch_session
         adapter = self.execution_adapter
@@ -1983,6 +2189,8 @@ class TradingWorkerApp:
                 "last_event_at": last_event_at_val.isoformat()
                 if isinstance(last_event_at_val, datetime) else None,
                 "reason": None,
+                "accounting_complete": True,
+                "session": self._pilot_session_state_readback(),
             }
         except Exception as exc:
             logger.error("Local Pilot accounting readback failed: %s", type(exc).__name__)
@@ -3011,6 +3219,7 @@ class TradingWorkerApp:
             local_supervisor_instance_id=os.getenv("LOCAL_SUPERVISOR_INSTANCE_ID", "").strip() if _env_enabled("LOCAL_ONLY") else "",
             pilot_lifecycle_monitor=self._local_pilot_lifecycle_monitor_state(),
             pilot_verdict_status=get_pilot_verdict_status(),
+            pilot_session=self._pilot_session_state_readback(),
             pilot_attempt_diagnostics=self._pilot_attempt_diagnostics(),
             engine_state=self.engine_state,
             connection_state=self.connection_state,
@@ -4944,6 +5153,39 @@ class TradingWorkerApp:
                 if str(session.get("policy", "")) == "LIVE_RESEARCH_PILOT" and not pilot_hooks_bound:
                     await self._reset_after_failed_exchange_arm()
                     return False, "LIVE Pilot accounting hooks are not bound; execution remains disarmed."
+                if str(session.get("policy", "")) == "LIVE_RESEARCH_PILOT":
+                    try:
+                        limits = SessionLimits.from_policy(LOCAL_LIVE_PILOT_POLICY)
+                        armed_at = utc_now()
+                        acknowledged = await self.persistence.record_local_live_pilot_session_armed(
+                            str(session["launch_id"]),
+                            armed_at=armed_at,
+                            entry_cutoff_seconds=limits.entry_cutoff_seconds,
+                            close_after_seconds=limits.close_after_seconds,
+                            end_seconds=limits.end_seconds,
+                        )
+                        if (
+                            acknowledged.get("pilot_session_armed_at")
+                            != armed_at.isoformat().replace("+00:00", "Z")
+                            or acknowledged.get("pilot_session_entry_cutoff_at") is None
+                            or acknowledged.get("pilot_session_close_after_at") is None
+                            or acknowledged.get("pilot_session_end_at") is None
+                        ):
+                            raise RuntimeError("durable session ARM acknowledgment did not read back")
+                        self._set_mainnet_launch_session(dict(acknowledged))
+                        self._pilot_session_timer = SessionTimer.start(
+                            armed_at,
+                            wall_now=utc_now(),
+                            monotonic_now=time.monotonic(),
+                            limits=limits,
+                        )
+                        self._pilot_session_clock_error = None
+                        self._pilot_session_flatten_claimed = False
+                        self._pilot_session_last_phase = SessionPhase.ENTRY_ALLOWED.value
+                    except Exception as exc:
+                        logger.error("Local Pilot session ARM acknowledgment failed: %s", type(exc).__name__)
+                        await self._reset_after_failed_exchange_arm()
+                        return False, "LIVE Pilot session ARM was not durably acknowledged; execution remains disarmed."
 
             self.engine_state = WorkerEngineState.ARMED
             self.active_configuration = req.model_dump()
@@ -6181,6 +6423,17 @@ class TradingWorkerApp:
                     adapter.state = ConnectionState.DEGRADED
                     adapter.reconciliation.last_status = "UNKNOWN"
                     logger.error("Execution lease renewal failed: %s", type(exc).__name__)
+            if (
+                self.execution_mode == WorkerExecutionMode.LIVE
+                and isinstance(self._mainnet_launch_session, dict)
+                and self._mainnet_launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
+            ):
+                try:
+                    await self._enforce_pilot_session_deadlines()
+                except Exception as exc:
+                    self.pause_new_risk = True
+                    self.engine_state = WorkerEngineState.DEGRADED
+                    logger.error("Pilot session deadline monitor failed: %s", type(exc).__name__)
             if (
                 adapter is not None
                 and self.execution_mode == WorkerExecutionMode.LIVE

@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 
 from pydantic import BaseModel
 
@@ -517,6 +517,9 @@ class BinanceReconciliation:
     def __init__(self, rest_client: BinanceRestClient, ledger: ExecutionLedger) -> None:
         self.rest_client = rest_client
         self.ledger = ledger
+        self.on_local_live_pilot_fill: Optional[
+            Callable[[ExchangeFill], Awaitable[bool]]
+        ] = None
         # Test doubles may not expose the enum, but production clients always
         # do.  Keeping this fallback preserves read-only reconciliation tests
         # without weakening the fixed-environment production client.
@@ -2525,6 +2528,17 @@ class BinanceReconciliation:
             raise FillRecoveryError("PARTIALLY_FILLED order has invalid recovered fill quantity")
         for fill in recovered_fills:
             await self.ledger.append_fill(fill)
+            if self.on_local_live_pilot_fill is not None:
+                try:
+                    accounted = await self.on_local_live_pilot_fill(fill)
+                except Exception as exc:
+                    raise FillRecoveryError(
+                        "Recovered fill could not be durably attributed to the Local Pilot"
+                    ) from exc
+                if accounted is not True:
+                    raise FillRecoveryError(
+                        "Recovered fill campaign accounting did not read back"
+                    )
         return len(recovered_fills)
 
     @staticmethod
