@@ -14,6 +14,10 @@ export interface PilotAcceptanceAudit {
   finish(id: string, result: {
     status: 'PASS' | 'FAIL'; observedAt: string; outputSha256: string; reason: string;
   }): Promise<void>;
+  /** Read from the durable store after finish; write acknowledgement alone is not evidence. */
+  read(id: string, expected: PilotAcceptanceBinding): Promise<{
+    runId: string; status: 'PASS' | 'FAIL' | 'RUNNING' | 'UNKNOWN'; check?: PilotOfflineCheck;
+  }>;
 }
 
 export class PilotAcceptanceAcknowledgementError extends Error {
@@ -69,6 +73,10 @@ export async function runPilotOfflineAcceptance(options: {
   // A lost audit acknowledgement never returns PASS to the caller.
   try {
     await options.audit.finish(runId, { status, reason, outputSha256, observedAt: new Date().toISOString() });
+    const persisted = await options.audit.read(runId, structuredClone(binding));
+    if (persisted.runId !== runId || persisted.status !== status || persisted.check !== options.check) {
+      throw new Error('LOCAL_PILOT_AUDIT_READBACK_MISMATCH');
+    }
   } catch {
     throw new PilotAcceptanceAcknowledgementError(runId);
   }

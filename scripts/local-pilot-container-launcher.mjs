@@ -142,9 +142,29 @@ async function inventory(root) {
   return result;
 }
 
+export async function createSealManifest(root) {
+  const entries = await inventory(root);
+  verifySeal({ version: 1, entries }, entries);
+  return { version: 1, entries };
+}
+
+export async function verifySealAt(root, expectedSha256) {
+  const bytes = await fs.readFile(path.join(root, SEAL_NAME));
+  const manifest = parseApprovedSeal(bytes, expectedSha256);
+  verifySeal(manifest, await inventory(root));
+  return true;
+}
+
 // Fixed image paths and mount roots; no caller-selected commands or locations.
 // /sealed must stay immutable throughout verification and copy (supervisor gate).
 export async function launch(argv) {
+  if (argv.length === 3 && argv[0] === 'verify-seal' && argv[1] === '--seal-sha256'
+    && typeof argv[2] === 'string' && /^[a-f0-9]{64}$/.test(argv[2])) {
+    const sealed = '/sealed';
+    if (!(await fs.lstat(sealed)).isDirectory() || (await fs.realpath(sealed)) !== sealed) fail();
+    await verifySealAt(sealed, argv[2]);
+    return { stdout: 'LOCAL_PILOT_SEAL_VERIFIED\n', stderr: '' };
+  }
   const { check, sealSha256 } = launcherArguments(argv);
   const [command, args] = checkCommand(check);
   const sealed = '/sealed';

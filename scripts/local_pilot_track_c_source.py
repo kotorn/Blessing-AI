@@ -12,7 +12,12 @@ SOURCE_PATHS = ('server.ts', 'Dockerfile.worker', 'src/backend', 'apps/trading_w
                 'config/risk/track_c_review_policy.json',
                 'scripts/local_pilot_track_c.py', 'scripts/local_pilot_track_c_source.py',
                 'scripts/verify_local_pilot_track_c.py', 'scripts/produce_local_pilot_track_c.py',
-                'scripts/run_local_pilot_ci_regressions.py', 'scripts/probe_papi_readonly.py',
+                'scripts/run_local_pilot_ci_regressions.py',
+                'scripts/probe_papi_readonly.py',
+                'scripts/local-pilot-acceptance-provision.ts',
+                'scripts/local-pilot-container-launcher.mjs',
+                'config/local_pilot_acceptance_policy.json',
+                'infra/acceptance',
                 '.github/workflows/ci.yml', '.github/workflows/local-pilot-track-c.yml')
 DEPENDENCY_PATHS = ('package.json', 'package-lock.json', 'pyproject.toml', 'requirements-worker.txt',
                     'requirements-worker.lock')

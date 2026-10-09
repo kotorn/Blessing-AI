@@ -8,6 +8,11 @@ export const LOCAL_LIVE_PILOT_PENDING_WINDOW_MS = 60 * 60 * 1_000;
 export const LOCAL_LIVE_PILOT_DURATION_MS = 7 * 24 * 60 * 60 * 1_000;
 export const LOCAL_LIVE_PILOT_POSITION_NOTIONAL_USDC = 50 as const;
 export const LOCAL_LIVE_PILOT_ORDER_NOTIONAL_USDC = 50 as const;
+export const LOCAL_LIVE_PILOT_ENTRY_TARGET_NOTIONAL_USDC = 40 as const;
+export const LOCAL_LIVE_PILOT_EXECUTION_RISK_BUFFER_USDC = 0.20 as const;
+export const LOCAL_LIVE_PILOT_SESSION_ENTRY_CUTOFF_SECONDS = 5_400 as const;
+export const LOCAL_LIVE_PILOT_SESSION_CLOSE_AFTER_SECONDS = 6_600 as const;
+export const LOCAL_LIVE_PILOT_SESSION_END_SECONDS = 7_200 as const;
 export const LOCAL_LIVE_PILOT_TOTAL_EXPOSURE_USDC = 50 as const;
 export const LOCAL_LIVE_PILOT_PLANNED_RISK_USDC = 2 as const;
 export const LOCAL_LIVE_PILOT_DRAWDOWN_USDC = 5 as const;
@@ -72,6 +77,11 @@ export interface LocalLivePilotBinding {
   limits: {
     positionNotionalUsdc: typeof LOCAL_LIVE_PILOT_POSITION_NOTIONAL_USDC;
     orderNotionalUsdc: typeof LOCAL_LIVE_PILOT_ORDER_NOTIONAL_USDC;
+    entryTargetNotionalUsdc: typeof LOCAL_LIVE_PILOT_ENTRY_TARGET_NOTIONAL_USDC;
+    executionRiskBufferUsdc: typeof LOCAL_LIVE_PILOT_EXECUTION_RISK_BUFFER_USDC;
+    sessionEntryCutoffSeconds: typeof LOCAL_LIVE_PILOT_SESSION_ENTRY_CUTOFF_SECONDS;
+    sessionCloseAfterSeconds: typeof LOCAL_LIVE_PILOT_SESSION_CLOSE_AFTER_SECONDS;
+    sessionEndSeconds: typeof LOCAL_LIVE_PILOT_SESSION_END_SECONDS;
     totalExposureUsdc: typeof LOCAL_LIVE_PILOT_TOTAL_EXPOSURE_USDC;
     plannedRiskUsdc: typeof LOCAL_LIVE_PILOT_PLANNED_RISK_USDC;
     campaignDrawdownUsdc: typeof LOCAL_LIVE_PILOT_DRAWDOWN_USDC;
@@ -98,6 +108,25 @@ export interface LocalLivePilotCampaign extends LocalLivePilotBinding {
 }
 
 export type LocalLivePilotExpectedBinding = LocalLivePilotBinding;
+
+export function mapLocalPilotSession(value: unknown): {
+  armedAt: string | null; entryCutoffAt: string | null; closeAfterAt: string | null;
+  endAt: string | null; stage: string;
+} | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const session = value as Record<string, unknown>;
+  const timestamp = (candidate: unknown) => typeof candidate === 'string'
+    && Number.isFinite(Date.parse(candidate)) ? candidate : null;
+  const stage = typeof session.stage === 'string' && /^[A-Z_]{1,32}$/.test(session.stage)
+    ? session.stage : 'UNKNOWN';
+  return {
+    armedAt: timestamp(session.armed_at),
+    entryCutoffAt: timestamp(session.entry_cutoff_at),
+    closeAfterAt: timestamp(session.close_after_at),
+    endAt: timestamp(session.end_at),
+    stage,
+  };
+}
 
 const HASH_RE = /^[a-f0-9]{64}$/i;
 const UID_RE = /^[A-Za-z0-9:_-]{1,256}$/;
@@ -161,7 +190,7 @@ export function newLocalLivePilotCampaign(input: LocalLivePilotInput, now = new 
     if (!HASH_RE.test(clean(input[field]))) throw new Error(`${field} must be a SHA-256 hash`);
   }
   if (!/^[a-f0-9]{40,64}$/i.test(clean(input.gitSha))) throw new Error('gitSha must identify the approved commit');
-  if (!['grid', 'trend', 'shock', 'carry'].includes(input.strategyId)) throw new Error('strategyId is invalid');
+  if (input.strategyId !== 'grid') throw new Error('LOCAL_PILOT_GRID_STRATEGY_REQUIRED');
   if (input.managementMode !== 'QUICK') {
     throw new Error('the first Local live research pilot only supports QUICK management');
   }
@@ -193,6 +222,11 @@ export function newLocalLivePilotCampaign(input: LocalLivePilotInput, now = new 
     limits: {
       positionNotionalUsdc: LOCAL_LIVE_PILOT_POSITION_NOTIONAL_USDC,
       orderNotionalUsdc: LOCAL_LIVE_PILOT_ORDER_NOTIONAL_USDC,
+      entryTargetNotionalUsdc: LOCAL_LIVE_PILOT_ENTRY_TARGET_NOTIONAL_USDC,
+      executionRiskBufferUsdc: LOCAL_LIVE_PILOT_EXECUTION_RISK_BUFFER_USDC,
+      sessionEntryCutoffSeconds: LOCAL_LIVE_PILOT_SESSION_ENTRY_CUTOFF_SECONDS,
+      sessionCloseAfterSeconds: LOCAL_LIVE_PILOT_SESSION_CLOSE_AFTER_SECONDS,
+      sessionEndSeconds: LOCAL_LIVE_PILOT_SESSION_END_SECONDS,
       totalExposureUsdc: LOCAL_LIVE_PILOT_TOTAL_EXPOSURE_USDC,
       plannedRiskUsdc: LOCAL_LIVE_PILOT_PLANNED_RISK_USDC,
       campaignDrawdownUsdc: LOCAL_LIVE_PILOT_DRAWDOWN_USDC,
@@ -222,12 +256,17 @@ export function validateLocalLivePilotCampaign(campaign: LocalLivePilotCampaign,
   if (campaign?.symbol !== LOCAL_LIVE_PILOT_SYMBOL || campaign?.market !== LOCAL_LIVE_PILOT_MARKET) errors.push('pilot market binding is invalid');
   if (campaign?.managementMode !== 'QUICK') errors.push('first pilot management mode must be QUICK');
   if (!/^run-[A-Za-z0-9][A-Za-z0-9_-]{7,126}$/.test(clean(campaign?.runId))) errors.push('runId is invalid');
-  if (!['grid', 'trend', 'shock', 'carry'].includes(String(campaign?.strategyId))) errors.push('strategyId is invalid');
+  if (campaign?.strategyId !== 'grid') errors.push('strategyId must be grid');
   if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(clean(campaign?.secretManagerProjectId))) errors.push('secretManagerProjectId is invalid');
   if (!/^[1-9][0-9]*$/.test(clean(campaign?.apiKeyVersion)) || !/^[1-9][0-9]*$/.test(clean(campaign?.apiSecretVersion))) errors.push('secret version binding is invalid');
   const expectedLimits = {
     positionNotionalUsdc: LOCAL_LIVE_PILOT_POSITION_NOTIONAL_USDC,
     orderNotionalUsdc: LOCAL_LIVE_PILOT_ORDER_NOTIONAL_USDC,
+    entryTargetNotionalUsdc: LOCAL_LIVE_PILOT_ENTRY_TARGET_NOTIONAL_USDC,
+    executionRiskBufferUsdc: LOCAL_LIVE_PILOT_EXECUTION_RISK_BUFFER_USDC,
+    sessionEntryCutoffSeconds: LOCAL_LIVE_PILOT_SESSION_ENTRY_CUTOFF_SECONDS,
+    sessionCloseAfterSeconds: LOCAL_LIVE_PILOT_SESSION_CLOSE_AFTER_SECONDS,
+    sessionEndSeconds: LOCAL_LIVE_PILOT_SESSION_END_SECONDS,
     totalExposureUsdc: LOCAL_LIVE_PILOT_TOTAL_EXPOSURE_USDC,
     plannedRiskUsdc: LOCAL_LIVE_PILOT_PLANNED_RISK_USDC,
     campaignDrawdownUsdc: LOCAL_LIVE_PILOT_DRAWDOWN_USDC,

@@ -22,8 +22,11 @@ export interface LocalWorkerSupervisorOptions {
   pythonRuntimeResolver?: () => TrustedLocalPythonRuntime;
   workerRuntime?: 'HOST_PYTHON' | 'DOCKER';
   workerImageId?: string;
+  expectedWorkerImageLabels?: Readonly<Record<string, string>>;
   dockerExecutable?: string;
-  dockerRuntimeResolver?: (imageId: string) => TrustedLocalDockerRuntime;
+  dockerRuntimeResolver?: (
+    imageId: string, expectedLabels: Readonly<Record<string, string>>,
+  ) => TrustedLocalDockerRuntime;
   dockerExecFileSync?: typeof execFileSync;
   fetcher?: typeof fetch;
 }
@@ -156,8 +159,11 @@ export class LocalWorkerSupervisor {
   private readonly pythonRuntimeResolver: () => TrustedLocalPythonRuntime;
   private readonly workerRuntime: 'HOST_PYTHON' | 'DOCKER';
   private readonly workerImageId: string;
+  private readonly expectedWorkerImageLabels: Readonly<Record<string, string>> | undefined;
   private readonly dockerExecutable: string | undefined;
-  private readonly dockerRuntimeResolver: (imageId: string) => TrustedLocalDockerRuntime;
+  private readonly dockerRuntimeResolver: (
+    imageId: string, expectedLabels: Readonly<Record<string, string>>,
+  ) => TrustedLocalDockerRuntime;
   private readonly dockerExecFileSync: typeof execFileSync;
   private readonly fetcher: typeof fetch;
   private pythonRuntime: TrustedLocalPythonRuntime | null = null;
@@ -191,10 +197,11 @@ export class LocalWorkerSupervisor {
     this.workerRuntime = options.workerRuntime || (this.environment.LOCAL_WORKER_RUNTIME === 'DOCKER'
       ? 'DOCKER' : 'HOST_PYTHON');
     this.workerImageId = options.workerImageId || this.environment.LOCAL_WORKER_IMAGE_ID || '';
+    this.expectedWorkerImageLabels = options.expectedWorkerImageLabels;
     this.dockerExecutable = options.dockerExecutable;
-    this.dockerRuntimeResolver = options.dockerRuntimeResolver || ((imageId) =>
+    this.dockerRuntimeResolver = options.dockerRuntimeResolver || ((imageId, expectedLabels) =>
       resolveTrustedLocalDockerRuntime({
-        imageId, environment: this.environment, dockerExecutable: this.dockerExecutable,
+        imageId, expectedLabels, environment: this.environment, dockerExecutable: this.dockerExecutable,
         execFileSync: this.dockerExecFileSync,
       }));
     this.dockerExecFileSync = options.dockerExecFileSync || execFileSync;
@@ -463,8 +470,7 @@ export class LocalWorkerSupervisor {
     },
   ): ChildProcess {
     if (!this.workerImageId) throw new Error('LOCAL_WORKER_IMAGE_ID_UNAVAILABLE');
-    this.dockerRuntime ||= this.dockerRuntimeResolver(this.workerImageId);
-    this.dockerRuntime.assertUnchanged();
+    this.assertWorkerImageUnchanged();
     const token = String(sourceEnvironment.WORKER_IDENTITY_TOKEN || '');
     const databasePassword = String(sourceEnvironment.POSTGRES_PASSWORD || '');
     const databaseName = String(sourceEnvironment.POSTGRES_DB || '');
@@ -537,6 +543,18 @@ export class LocalWorkerSupervisor {
     }
     child.stdin.end(payload, () => payload.fill(0));
     return child;
+  }
+
+  /** Called again before Local Pilot Prepare and Start/ARM, not only at spawn. */
+  assertWorkerImageUnchanged(): void {
+    if (this.workerRuntime !== 'DOCKER') return;
+    if (!this.workerImageId) throw new Error('LOCAL_WORKER_IMAGE_ID_UNAVAILABLE');
+    if (!this.expectedWorkerImageLabels) throw new Error('LOCAL_WORKER_IMAGE_ATTESTATION_UNAVAILABLE');
+    this.dockerRuntime ||= this.dockerRuntimeResolver(this.workerImageId, this.expectedWorkerImageLabels);
+    if (JSON.stringify(this.dockerRuntime.expectedLabels) !== JSON.stringify(this.expectedWorkerImageLabels)) {
+      throw new Error('LOCAL_WORKER_IMAGE_ATTESTATION_CHANGED');
+    }
+    this.dockerRuntime.assertUnchanged();
   }
 
   private async stopDockerContainer(name: string, child: ChildProcess | null): Promise<void> {

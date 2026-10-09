@@ -4,7 +4,8 @@ vi.mock('../src/backend/local-pilot-check-command.js', () => ({
   localPilotNpmCommand: () => ['node', ['npm-cli.js', 'run', 'test']],
 }));
 import { execFile } from 'node:child_process';
-import { runPilotOfflineAcceptance, type PilotAcceptanceAudit } from '../src/backend/local-pilot-acceptance-runner.js';
+import { runPilotOfflineAcceptance, type PilotAcceptanceAudit, type PilotAcceptanceBinding }
+  from '../src/backend/local-pilot-acceptance-runner.js';
 
 afterEach(() => vi.resetAllMocks());
 function successfulProcess() {
@@ -15,12 +16,16 @@ function successfulProcess() {
   });
 }
 function options() {
+  const auditStatus: { status: 'PASS' | 'FAIL' } = { status: 'PASS' };
   return {
     root: process.cwd(), isolatedHome: process.cwd(), check: 'TYPESCRIPT_TESTS' as const,
     binding: { gitSha: 'a'.repeat(40), sourceSha256: 'b'.repeat(64), dependencySha256: 'c'.repeat(64),
       migrationSha256: 'd'.repeat(64), policySha256: 'e'.repeat(64) },
     audit: { begin: vi.fn<PilotAcceptanceAudit['begin']>(async () => {}),
-      finish: vi.fn<PilotAcceptanceAudit['finish']>(async () => {}) },
+      finish: vi.fn<PilotAcceptanceAudit['finish']>(async (_id, result) => { auditStatus.status = result.status; }),
+      read: vi.fn(async (runId: string, binding: PilotAcceptanceBinding) => ({
+        runId, status: auditStatus.status, check: 'TYPESCRIPT_TESTS' as const,
+      })) },
     assertBindingUnchanged: vi.fn(),
     executeIsolated: vi.fn(async () => await new Promise<{ error: unknown; stdout: Buffer; stderr: Buffer }>((resolve) => {
       execFile('isolated-fixture', [], { shell: false }, (error, stdout, stderr) => resolve({
@@ -61,6 +66,17 @@ it('cannot return success when finish acknowledgment is lost', async () => {
     runId: expect.stringMatching(/^[a-f0-9-]{36}$/),
   });
   expect(input.audit.begin.mock.calls[0][0]).toBe(input.audit.finish.mock.calls[0][0]);
+});
+
+it('requires durable audit read-back to match the completed run before returning', async () => {
+  successfulProcess();
+  const input = options();
+  input.audit.read.mockResolvedValueOnce({ runId: '0'.repeat(8) + '-0000-4000-8000-000000000000',
+    status: 'PASS', check: input.check });
+  await expect(runPilotOfflineAcceptance(input)).rejects.toMatchObject({
+    message: 'LOCAL_PILOT_ACCEPTANCE_ACKNOWLEDGEMENT_UNKNOWN',
+  });
+  expect(input.audit.read).toHaveBeenCalledOnce();
 });
 it('records failure when the source changes after execution', async () => {
   const input = options();

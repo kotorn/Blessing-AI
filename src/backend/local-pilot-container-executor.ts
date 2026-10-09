@@ -10,7 +10,7 @@ type Result = { error: unknown; stdout: Buffer; stderr: Buffer };
  * snapshot provenance and absence of concurrent writers; these are not inferred
  * from a passing test or an immutable image identifier. */
 export async function executePilotContainer(options: {
-  dockerExecutable: string; configuration: Configuration;
+  dockerExecutable: string; dockerHost?: string; configuration: Configuration;
   assertApprovedSnapshot: () => Promise<void>;
 }): Promise<Result> {
   if (!path.isAbsolute(options.dockerExecutable)) throw new Error('LOCAL_PILOT_DOCKER_EXECUTABLE_INVALID');
@@ -18,7 +18,8 @@ export async function executePilotContainer(options: {
   const name = `blessing-acceptance-${options.configuration.runId}`;
   const invoke = (argv: string[], timeout = 30_000): Promise<Result> => new Promise((resolve) => {
     execFile(options.dockerExecutable, argv, {
-      env: buildLocalPilotGitEnvironment(process.env), shell: false, windowsHide: true,
+      env: { ...buildLocalPilotGitEnvironment(process.env),
+        ...(options.dockerHost ? { DOCKER_HOST: options.dockerHost } : {}) }, shell: false, windowsHide: true,
       encoding: 'buffer', timeout, maxBuffer: 16 * 1024 * 1024,
     }, (error, stdout, stderr) => resolve({ error, stdout, stderr }));
   });

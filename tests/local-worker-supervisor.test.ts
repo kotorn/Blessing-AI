@@ -267,19 +267,24 @@ describe('LocalWorkerSupervisor Docker secret handoff', () => {
     const apiSecret = 'mainnet-api-secret-sensitive';
     const workerToken = 'worker-identity-token-sensitive';
     const postgresPassword = 'postgres-password-sensitive';
+    const expectedImageLabels = { 'org.blessing.git.sha': '1'.repeat(40),
+      'org.blessing.source.sha256': '2'.repeat(64) };
+    const assertImageUnchanged = vi.fn();
     const supervisor = new LocalWorkerSupervisor({
       workerUrl: 'http://127.0.0.1:8000',
       workerIdentityToken: workerToken,
       runId: 'local-docker-run',
       workerRuntime: 'DOCKER',
       workerImageId: `sha256:${'a'.repeat(64)}`,
+      expectedWorkerImageLabels: expectedImageLabels,
       dockerExecutable: 'trusted-test-docker',
-      dockerRuntimeResolver: (imageId) => ({
+      dockerRuntimeResolver: (imageId, labels) => ({
         executable: 'trusted-test-docker',
         imageId,
+        expectedLabels: labels!,
         serverVersion: 'test',
         engineHost: 'npipe:////./pipe/dockerDesktopLinuxEngine',
-        assertUnchanged: vi.fn(),
+        assertUnchanged: assertImageUnchanged,
       }),
       spawnProcess: spawnMock as unknown as typeof spawn,
       environment: {
@@ -307,6 +312,8 @@ describe('LocalWorkerSupervisor Docker secret handoff', () => {
     };
 
     invoke.spawnDockerWorker(sourceEnvironment, { mode: 'LIVE', apiKey, apiSecret });
+    supervisor.assertWorkerImageUnchanged();
+    expect(assertImageUnchanged).toHaveBeenCalled();
     await stdinEnded;
 
     const [command, args, spawnOptions] = spawnMock.mock.calls[0] as unknown as [

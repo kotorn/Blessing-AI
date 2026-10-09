@@ -4,6 +4,11 @@ import {
   LOCAL_LIVE_PILOT_DRAWDOWN_USDC,
   LOCAL_LIVE_PILOT_MAX_LEVERAGE,
   LOCAL_LIVE_PILOT_ORDER_NOTIONAL_USDC,
+  LOCAL_LIVE_PILOT_ENTRY_TARGET_NOTIONAL_USDC,
+  LOCAL_LIVE_PILOT_EXECUTION_RISK_BUFFER_USDC,
+  LOCAL_LIVE_PILOT_SESSION_ENTRY_CUTOFF_SECONDS,
+  LOCAL_LIVE_PILOT_SESSION_CLOSE_AFTER_SECONDS,
+  LOCAL_LIVE_PILOT_SESSION_END_SECONDS,
   LOCAL_LIVE_PILOT_PENDING_WINDOW_MS,
   LOCAL_LIVE_PILOT_PLANNED_RISK_USDC,
   LOCAL_LIVE_PILOT_POSITION_NOTIONAL_USDC,
@@ -17,6 +22,7 @@ import {
   assertLocalLivePilotRecoveryReleaseAllowed,
   localLivePilotBinding,
   newLocalLivePilotCampaign,
+  mapLocalPilotSession,
   type LocalLivePilotInput,
 } from '../src/backend/local-live-pilot.js';
 import { InMemoryLocalLivePilotStore } from '../src/backend/local-live-pilot-store.js';
@@ -40,7 +46,7 @@ function input(overrides: Partial<LocalLivePilotInput> = {}): LocalLivePilotInpu
     role: ADMIN.role,
     ...HASHES,
     gitSha: 'f'.repeat(40),
-    strategyId: 'trend',
+    strategyId: 'grid',
     secretManagerProjectId: 'blessing-project-123',
     apiKeyVersion: '1',
     apiSecretVersion: '1',
@@ -56,6 +62,36 @@ async function pending() {
 }
 
 describe('Local 7-day live research pilot domain', () => {
+  it('binds the approved entry sizing and bounded session timing while keeping the hard caps', async () => {
+    const { campaign } = await pending();
+    expect(campaign.limits).toMatchObject({
+      orderNotionalUsdc: LOCAL_LIVE_PILOT_ORDER_NOTIONAL_USDC,
+      entryTargetNotionalUsdc: LOCAL_LIVE_PILOT_ENTRY_TARGET_NOTIONAL_USDC,
+      executionRiskBufferUsdc: LOCAL_LIVE_PILOT_EXECUTION_RISK_BUFFER_USDC,
+      sessionEntryCutoffSeconds: LOCAL_LIVE_PILOT_SESSION_ENTRY_CUTOFF_SECONDS,
+      sessionCloseAfterSeconds: LOCAL_LIVE_PILOT_SESSION_CLOSE_AFTER_SECONDS,
+      sessionEndSeconds: LOCAL_LIVE_PILOT_SESSION_END_SECONDS,
+      positionNotionalUsdc: 50, plannedRiskUsdc: 2, campaignDrawdownUsdc: 5, maxLeverage: 10,
+    });
+  });
+
+  it('rejects strategies outside the approved grid-only pilot', () => {
+    expect(() => newLocalLivePilotCampaign(input({ strategyId: 'trend' }), NOW))
+      .toThrow('LOCAL_PILOT_GRID_STRATEGY_REQUIRED');
+  });
+
+  it('maps only server-owned worker session timestamps into the control-plane response shape', () => {
+    expect(mapLocalPilotSession({ armed_at: '2026-10-10T00:00:00.000Z',
+      entry_cutoff_at: '2026-10-10T01:30:00.000Z', close_after_at: '2026-10-10T01:50:00.000Z',
+      end_at: '2026-10-10T02:00:00.000Z', stage: 'ENTRY_CUTOFF', browserValue: true })).toEqual({
+      armedAt: '2026-10-10T00:00:00.000Z', entryCutoffAt: '2026-10-10T01:30:00.000Z',
+      closeAfterAt: '2026-10-10T01:50:00.000Z', endAt: '2026-10-10T02:00:00.000Z', stage: 'ENTRY_CUTOFF',
+    });
+    expect(mapLocalPilotSession({ armed_at: 'invalid', stage: '<script>' })).toMatchObject({
+      armedAt: null, stage: 'UNKNOWN',
+    });
+    expect(mapLocalPilotSession(null)).toBeNull();
+  });
   it('permits a current approved campaign to prepare without granting risk authority', async () => {
     const { store, campaign, expected } = await pending();
     const approved = await store.approve(campaign.campaignId, ADMIN, expected, NOW);
@@ -159,6 +195,11 @@ describe('Local 7-day live research pilot domain', () => {
     expect(campaign.limits).toEqual({
       positionNotionalUsdc: LOCAL_LIVE_PILOT_POSITION_NOTIONAL_USDC,
       orderNotionalUsdc: LOCAL_LIVE_PILOT_ORDER_NOTIONAL_USDC,
+      entryTargetNotionalUsdc: LOCAL_LIVE_PILOT_ENTRY_TARGET_NOTIONAL_USDC,
+      executionRiskBufferUsdc: LOCAL_LIVE_PILOT_EXECUTION_RISK_BUFFER_USDC,
+      sessionEntryCutoffSeconds: LOCAL_LIVE_PILOT_SESSION_ENTRY_CUTOFF_SECONDS,
+      sessionCloseAfterSeconds: LOCAL_LIVE_PILOT_SESSION_CLOSE_AFTER_SECONDS,
+      sessionEndSeconds: LOCAL_LIVE_PILOT_SESSION_END_SECONDS,
       totalExposureUsdc: LOCAL_LIVE_PILOT_TOTAL_EXPOSURE_USDC,
       plannedRiskUsdc: LOCAL_LIVE_PILOT_PLANNED_RISK_USDC,
       campaignDrawdownUsdc: LOCAL_LIVE_PILOT_DRAWDOWN_USDC,

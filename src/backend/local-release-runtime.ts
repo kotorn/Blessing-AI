@@ -24,6 +24,11 @@ export const TRACK_C_SOURCE_PATHS = [
   'scripts/local_pilot_track_c.py', 'scripts/local_pilot_track_c_source.py',
   'scripts/verify_local_pilot_track_c.py', 'scripts/produce_local_pilot_track_c.py',
   'scripts/run_local_pilot_ci_regressions.py',
+  'scripts/probe_papi_readonly.py',
+  'scripts/local-pilot-acceptance-provision.ts',
+  'scripts/local-pilot-container-launcher.mjs',
+  'config/local_pilot_acceptance_policy.json',
+  'infra/acceptance',
   '.github/workflows/ci.yml', '.github/workflows/local-pilot-track-c.yml',
 ] as const;
 export const TRACK_C_DEPENDENCY_PATHS = [
@@ -65,6 +70,11 @@ const EXPECTED_LOCAL_LIVE_PILOT_POLICY = {
   market: 'USD_M_FUTURES',
   position_notional_usdc: '50',
   order_notional_usdc: '50',
+  entry_target_notional_usdc: '40',
+  execution_risk_buffer_usdc: '0.20',
+  session_entry_cutoff_seconds: 5400,
+  session_close_after_seconds: 6600,
+  session_end_seconds: 7200,
   total_exposure_usdc: '50',
   planned_stop_risk_usdc: '2',
   campaign_drawdown_usdc: '5',

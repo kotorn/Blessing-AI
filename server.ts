@@ -9,10 +9,9 @@ import { GoogleAuth } from 'google-auth-library';
 import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { PilotAcceptanceAcknowledgementError, runPilotOfflineAcceptance, type PilotOfflineCheck } from './src/backend/local-pilot-acceptance-runner.js';
 import { FirestorePilotAcceptanceAudit } from './src/backend/local-pilot-acceptance-audit.js';
+import { createLocalPilotAcceptanceExecutor } from './src/backend/local-pilot-acceptance-runtime.js';
 import { TradingSystemState, RiskConfiguration } from './src/backend/types.js';
 import {  validateStateTransition, RISK_PROFILES, canExecuteAction, EXECUTION_CAPABILITIES, isWorkerTradingConnectionHealthy } from './src/backend/system.js';
 import { auditRepository } from './src/backend/audit.js';
@@ -85,6 +84,7 @@ import {
   localLivePilotBinding,
   localLivePilotCanPrepare,
   localLivePilotCanStart,
+  mapLocalPilotSession,
   assertLocalLivePilotRecoveryReleaseAllowed,
   newLocalLivePilotCampaign,
   validateLocalLivePilotActor,
@@ -104,6 +104,7 @@ import {
 } from './src/backend/local-release-runtime.js';
 import { localSecretSourceIdentity } from './src/backend/local-secret-manager.js';
 import { createPilotReadinessVerdict } from './src/backend/local-pilot-verdict.js';
+import { hasPapiProtectionRiskAcknowledgement } from './src/backend/local-pilot-risk-ack.js';
 
 
 const isLocalOnlyBoot = ['1', 'true', 'yes', 'on'].includes(
@@ -1246,11 +1247,22 @@ const WORKER_URL = (process.env.WORKER_URL?.trim() || (process.env.NODE_ENV === 
 // audience; Firebase user tokens never cross this service boundary.
 const LOCAL_WORKER_IDENTITY_TOKEN = process.env.WORKER_IDENTITY_TOKEN?.trim() || '';
 const LOCAL_RUN_ID = (process.env.LOCAL_RUN_ID || '').trim();
+const localWorkerImageLabels = LOCAL_ONLY && (process.env.LOCAL_WORKER_RUNTIME || '').trim().toUpperCase() === 'DOCKER'
+  ? (() => {
+    const fingerprint = currentLocalFingerprint(
+      (process.env.LOCAL_MAINNET_API_KEY_VERSION || '').trim(),
+      (process.env.LOCAL_MAINNET_API_SECRET_VERSION || '').trim(),
+    );
+    return { 'org.blessing.git.sha': fingerprint.gitSha,
+      'org.blessing.source.sha256': fingerprint.sourceSha256 };
+  })()
+  : undefined;
 const localWorkerSupervisor = LOCAL_ONLY
   ? new LocalWorkerSupervisor({
     workerUrl: WORKER_URL,
     workerIdentityToken: LOCAL_WORKER_IDENTITY_TOKEN,
     runId: LOCAL_RUN_ID,
+    expectedWorkerImageLabels: localWorkerImageLabels,
   })
   : null;
 const workerGoogleAuth = new GoogleAuth();
@@ -2425,7 +2437,6 @@ app.post('/api/local/pilot/acceptance', async (req: Request, res: Response) => {
   if (!res.locals.firebaseUid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
   if (pilotAcceptanceRunning) return res.status(409).json({ error: 'LOCAL_PILOT_ACCEPTANCE_BUSY' });
   pilotAcceptanceRunning = true;
-  let scratch: string | undefined;
   try {
     assertCommittedPilotCandidate();
     if (!localWorkerIsPaperDisarmed(await readLocalWorkerState()) || !(await localPersistenceIsDurable())) {
@@ -2443,9 +2454,11 @@ app.post('/api/local/pilot/acceptance', async (req: Request, res: Response) => {
     const firebaseApp = getApps()[0] || initializeApp({ credential: applicationDefault(), projectId: GCP_PROJECT_ID });
     const audit = new FirestorePilotAcceptanceAudit(getFirestore(firebaseApp), pilotAcceptanceInstanceId,
       res.locals.firebaseUid);
-    scratch = mkdtempSync(path.join(tmpdir(), 'blessing-acceptance-'));
     const result = await runPilotOfflineAcceptance({
-      root: process.cwd(), isolatedHome: scratch, check: body.check as PilotOfflineCheck, binding, audit,
+      root: process.cwd(), isolatedHome: '', check: body.check as PilotOfflineCheck, binding, audit,
+      executeIsolated: (runId, check, executionBinding) => createLocalPilotAcceptanceExecutor({
+        root: process.cwd(), binding: executionBinding,
+      })(runId, check, executionBinding),
       assertBindingUnchanged: () => {
         assertCommittedPilotCandidate();
         if (JSON.stringify(bindingNow()) !== JSON.stringify(binding)) throw new Error('LOCAL_PILOT_FINGERPRINT_CHANGED');
@@ -2460,7 +2473,6 @@ app.post('/api/local/pilot/acceptance', async (req: Request, res: Response) => {
     return res.status(503).json({ error: 'LOCAL_PILOT_ACCEPTANCE_FAILED', evidence_status: 'UNVERIFIED' });
   } finally {
     pilotAcceptanceRunning = false;
-    if (scratch) rmSync(scratch, { recursive: true, force: true });
   }
 });
 
@@ -2471,8 +2483,8 @@ app.post('/api/local/pilot/request', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'LOCAL_PILOT_REQUEST_INVALID' });
   }
   const strategyId = String(body.strategyId || 'grid').trim().toLowerCase() as LocalLivePilotStrategyId;
-  if (!['grid', 'trend', 'shock', 'carry'].includes(strategyId)) {
-    return res.status(400).json({ error: 'LOCAL_PILOT_STRATEGY_REQUIRED' });
+  if (strategyId !== 'grid') {
+    return res.status(400).json({ error: 'LOCAL_PILOT_GRID_STRATEGY_REQUIRED' });
   }
   const uid = res.locals.firebaseUid;
   if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
@@ -2611,6 +2623,7 @@ app.get('/api/local/pilot/:campaignId', async (req: Request, res: Response) => {
         realizedPnlUsdc: accountingData?.realized_pnl_usdc ?? 'UNKNOWN',
         unrealizedPnlUsdc: accountingData?.unrealized_pnl_usdc ?? 'UNKNOWN',
         feesUsdc: accountingData?.fees_usdc ?? 'UNKNOWN',
+        session: accountingData ? mapLocalPilotSession(accountingData.session) || 'UNKNOWN' : 'UNKNOWN',
         fundingUsdc: accountingData?.funding_usdc ?? 'UNKNOWN',
         slippageUsdc: 'UNKNOWN',
         lastEventAt: accountingData?.last_event_at || null,
@@ -2629,8 +2642,12 @@ app.post('/api/local/pilot/approve', async (req: Request, res: Response) => {
   if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
   if (rejectUnreadyLocalPilot(res, uid)) return;
   const body = releaseRequestObject(req.body) || {};
-  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
+  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) =>
+    !['campaignId', 'papiProtectionRiskAcknowledged'].includes(key))) {
     return res.status(400).json({ error: 'LOCAL_PILOT_APPROVAL_INVALID' });
+  }
+  if (!hasPapiProtectionRiskAcknowledgement(body)) {
+    return res.status(409).json({ error: 'LOCAL_PILOT_PAPI_RISK_ACK_REQUIRED' });
   }
   const campaignId = String(body.campaignId || '').trim();
   try {
@@ -2656,7 +2673,8 @@ app.post('/api/local/pilot/approve', async (req: Request, res: Response) => {
       return res.status(409).json({ error: 'LOCAL_PILOT_REQUIRES_PAPER_DISARMED_DURABLE_RUNTIME' });
     }
     const approved = await store.approve(campaignId, pilotActor(uid), localLivePilotBinding(pending));
-    return res.json({ ...safeLocalLivePilotCampaign(approved), evidence_status: 'VERIFIED', executionActivated: false });
+    return res.json({ ...safeLocalLivePilotCampaign(approved), evidence_status: 'VERIFIED', executionActivated: false,
+      papiProtectionRiskAcknowledgement: { acknowledged: true, actorUid: uid, observedAt: new Date().toISOString() } });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'LOCAL_PILOT_APPROVAL_FAILED';
     return res.status(/expired|binding|UID|pending/i.test(message) ? 409 : 503).json({
@@ -2682,6 +2700,7 @@ app.post('/api/local/pilot/prepare', async (req: Request, res: Response) => {
   let workerReplacementStarted = false;
   try {
     assertCommittedPilotCandidate();
+    localWorkerSupervisor.assertWorkerImageUnchanged();
     campaign = await store.get(campaignId);
     if (!campaign) return res.status(404).json({ error: 'LOCAL_PILOT_NOT_FOUND' });
     if (campaign.adminUid !== uid || campaign.approvedByUid !== uid
@@ -2895,8 +2914,12 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
   if (!LOCAL_ONLY || !localWorkerSupervisor) return res.status(404).json({ error: 'LOCAL_RUNTIME_NOT_AVAILABLE' });
   if (rejectUnreadyLocalPilot(res)) return;
   const body = releaseRequestObject(req.body) || {};
-  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) => key !== 'campaignId')) {
+  if (hasCredentialLikeKey(body) || Object.keys(body).some((key) =>
+    !['campaignId', 'papiProtectionRiskAcknowledged'].includes(key))) {
     return res.status(400).json({ error: 'LOCAL_PILOT_START_INVALID' });
+  }
+  if (!hasPapiProtectionRiskAcknowledgement(body)) {
+    return res.status(409).json({ error: 'LOCAL_PILOT_PAPI_RISK_ACK_REQUIRED' });
   }
   const uid = res.locals.firebaseUid;
   if (typeof uid !== 'string' || !uid) return res.status(401).json({ error: 'FIREBASE_IDENTITY_MISSING' });
@@ -2906,6 +2929,7 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
   let armAttempted = false;
   try {
     assertCommittedPilotCandidate();
+    localWorkerSupervisor.assertWorkerImageUnchanged();
     campaign = await getServerLocalLivePilotStore().get(String(body.campaignId || '').trim());
     if (!campaign) return res.status(404).json({ error: 'LOCAL_PILOT_NOT_FOUND' });
     if (campaign.adminUid !== uid || campaign.approvedByUid !== uid || !localLivePilotCanStart(campaign)) {
@@ -3040,6 +3064,7 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
         orderSubmissionAttempts: finalState.data.order_submission_attempts ?? 'UNKNOWN',
       },
       evidence_status: 'VERIFIED',
+      papiProtectionRiskAcknowledgement: { acknowledged: true, actorUid: uid, observedAt: new Date().toISOString() },
     });
   } catch (error) {
     if (activated && campaign) {
