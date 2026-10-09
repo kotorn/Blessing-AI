@@ -590,3 +590,99 @@ async def test_local_pilot_negative_cases_stay_monitor_only(monkeypatch, portfol
 
     # In all negative cases, execute_manual_decision must NEVER be called
     assert len(executed_decisions) == 0, f"Case {negative_case} unexpectedly executed a decision!"
+
+
+def _prepare_arm_ready_worker(monkeypatch, portfolio_margin: bool):
+    """Build a LOCAL LIVE worker with a fresh (no active launch) persistence and mocked preflight."""
+    setup_pilot_env(monkeypatch, portfolio_margin)
+    FakeExecutionAdapter.instances.clear()
+    monkeypatch.setattr("apps.trading_worker.main.BinanceExecutionAdapter", FakeExecutionAdapter)
+    monkeypatch.setattr(
+        "apps.trading_worker.main.local_live_pilot_readiness",
+        lambda: {"can_start": True, "blockers": [], "status": "READY"},
+    )
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    # create_fake_persistence starts with no active launch: worker._mainnet_launch_session
+    # stays None until ARM creates the session.
+    persistence = create_fake_persistence()
+    worker.persistence = persistence
+    worker.symbols = ["ETHUSDC"]
+    worker.reconciliation_status = "IN_SYNC"
+    worker.market_data_healthy = True
+    worker.private_stream_healthy = True
+    worker.authenticated = True
+
+    monkeypatch.setattr(worker, "_mainnet_configured", lambda: True)
+    monkeypatch.setattr(worker, "_adapter_trade_authorized", lambda: True)
+    monkeypatch.setattr(worker, "_symbol_rules_ready", lambda: True)
+    monkeypatch.setattr(worker, "is_market_data_fresh", lambda symbols=None: True)
+    monkeypatch.setattr(worker, "is_account_snapshot_ready", lambda: True)
+    monkeypatch.setattr(worker, "is_mainnet_account_risk_ready", lambda: True)
+    monkeypatch.setattr(worker, "local_supervisor_heartbeat_is_fresh", lambda: True)
+    monkeypatch.setattr(worker, "_restart_public_market_stream", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        worker,
+        "run_mainnet_read_only_preflight",
+        AsyncMock(
+            return_value={
+                "preflightPassed": True,
+                "orderSubmissionAttempts": 0,
+                "orderEndpointAttempts": 0,
+                "checks": [
+                    {"id": check_id, "status": "PASS"}
+                    for check_id in (
+                        "CHK-PREFLIGHT-PERSISTENCE",
+                        "CHK-PREFLIGHT-DURABLE-LEDGER",
+                        "CHK-PREFLIGHT-KILL-SWITCH",
+                        "CHK-PREFLIGHT-PILOT-MONITOR",
+                        "CHK-PREFLIGHT-PILOT-FLAT-ACCOUNT",
+                        "CHK-PREFLIGHT-CONNECTION",
+                        "CHK-PREFLIGHT-AUTH",
+                        "CHK-PREFLIGHT-CAN-TRADE",
+                        "CHK-PREFLIGHT-POSITION-MODE",
+                        "CHK-PREFLIGHT-RULES",
+                        "CHK-PREFLIGHT-RECONCILIATION",
+                        "CHK-PREFLIGHT-PRIVATE-STREAM",
+                        "CHK-PREFLIGHT-ACCOUNT-RISK",
+                        "CHK-PREFLIGHT-MARKET",
+                    )
+                ],
+            }
+        ),
+    )
+    return worker
+
+
+@pytest.mark.asyncio
+async def test_local_pilot_arm_binds_accounting_callbacks_to_new_session(monkeypatch):
+    """Pilot accounting hooks must be callable after a successful ARM.
+
+    On a fresh ARM no launch session exists before ARM creates one, so hooks gated
+    only on the pre-ARM session would stay None and fills, fees and marks would
+    never reach the campaign ledger. The hooks must be bound once the session
+    created during ARM is known.
+    """
+    worker = _prepare_arm_ready_worker(monkeypatch, portfolio_margin=False)
+    arm_req = ArmRequest(
+        executionMode="LIVE",
+        instruments=["ETHUSDC"],
+        strategies={"grid": True},
+        riskProfile="CONSERVATIVE",
+        enforcePreflight=True,
+        releaseApprovalId="local-approval-12345678-1234-1234-1234-123456789abc",
+        launchPolicy="LIVE_RESEARCH_PILOT",
+        pilotCampaignId="pilot-campaign-001",
+    )
+
+    armed, reason = await worker.arm(arm_req)
+    assert armed is True, f"ARM failed: {reason}"
+
+    adapter = worker.execution_adapter
+    assert adapter is not None
+    assert callable(adapter.on_local_live_pilot_fill), "fill/fee accounting hook unbound after ARM"
+    assert callable(adapter.on_local_live_pilot_mark), "mark accounting hook unbound after ARM"
+    assert callable(adapter.on_local_live_pilot_funding_reconcile), "funding hook unbound after ARM"
+    assert adapter.on_local_live_pilot_fill == worker._persist_local_live_pilot_fill
+    assert adapter.on_local_live_pilot_mark == worker._persist_local_live_pilot_mark
+    assert adapter.on_local_live_pilot_funding_reconcile == worker._reconcile_local_live_pilot_funding

@@ -1207,6 +1207,34 @@ class TradingWorkerApp:
         if lineage.requires_8d:
             self.eight_d_manager.create_incident_from_lineage(lineage)
 
+    def _bind_local_live_pilot_callbacks(self, local_mainnet_runtime: bool) -> bool:
+        """Bind Pilot fill/mark/funding accounting hooks to the adapter.
+
+        The hooks are gated on the launch session currently held by the worker.
+        Callers must invoke this again once ARM has created or refreshed that
+        session, because a fresh ARM has no session before it runs. Returns True
+        when the hooks were bound for a LIVE_RESEARCH_PILOT session.
+        """
+        session = self._mainnet_launch_session
+        pilot_runtime = bool(
+            local_mainnet_runtime
+            and isinstance(session, dict)
+            and session.get("policy") == "LIVE_RESEARCH_PILOT"
+        )
+        adapter = self.execution_adapter
+        if adapter is None:
+            raise RuntimeError("no execution adapter available for Pilot accounting hooks")
+        adapter.on_local_live_pilot_fill = (
+            self._persist_local_live_pilot_fill if pilot_runtime else None
+        )
+        adapter.on_local_live_pilot_mark = (
+            self._persist_local_live_pilot_mark if pilot_runtime else None
+        )
+        adapter.on_local_live_pilot_funding_reconcile = (
+            self._reconcile_local_live_pilot_funding if pilot_runtime else None
+        )
+        return pilot_runtime
+
     def _set_mainnet_launch_session(self, session: Optional[dict[str, Any]]) -> None:
         """Project durable launch identity into the process-local API state."""
         previous_launch_id = getattr(self, "_mainnet_launch_id", None)
@@ -4765,20 +4793,10 @@ class TradingWorkerApp:
                     if local_mainnet_runtime
                     else None
                 )
-                pilot_runtime = bool(
-                    local_mainnet_runtime
-                    and isinstance(self._mainnet_launch_session, dict)
-                    and self._mainnet_launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
-                )
-                self.execution_adapter.on_local_live_pilot_fill = (
-                    self._persist_local_live_pilot_fill if pilot_runtime else None
-                )
-                self.execution_adapter.on_local_live_pilot_mark = (
-                    self._persist_local_live_pilot_mark if pilot_runtime else None
-                )
-                self.execution_adapter.on_local_live_pilot_funding_reconcile = (
-                    self._reconcile_local_live_pilot_funding if pilot_runtime else None
-                )
+                # Provisional binding: a fresh ARM has no launch session yet, so
+                # this only clears stale hooks. The hooks are bound for real after
+                # the launch session is created below.
+                self._bind_local_live_pilot_callbacks(local_mainnet_runtime)
                 if mode == "TESTNET":
                     self.execution_adapter.require_testnet_protection = True
                     repository = getattr(self.persistence, "repository", None)
@@ -4910,6 +4928,19 @@ class TradingWorkerApp:
                     await self._reset_after_failed_exchange_arm()
                     return False, "LIVE staged launch session is already used or requires reconciliation."
                 self._set_mainnet_launch_session(dict(session))
+                # Bind the Pilot accounting hooks against the session just created.
+                # Fail closed if they cannot be bound for a Pilot session.
+                try:
+                    pilot_hooks_bound = self._bind_local_live_pilot_callbacks(
+                        local_mainnet_runtime
+                    )
+                except Exception as exc:
+                    logger.error("Local Pilot accounting hook binding failed: %s", type(exc).__name__)
+                    await self._reset_after_failed_exchange_arm()
+                    return False, "LIVE staged launch accounting binding failed; execution remains disarmed."
+                if str(session.get("policy", "")) == "LIVE_RESEARCH_PILOT" and not pilot_hooks_bound:
+                    await self._reset_after_failed_exchange_arm()
+                    return False, "LIVE Pilot accounting hooks are not bound; execution remains disarmed."
 
             self.engine_state = WorkerEngineState.ARMED
             self.active_configuration = req.model_dump()
