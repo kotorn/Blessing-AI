@@ -63,6 +63,28 @@ function campaignFrom(value: PilotResponse): Campaign | null {
     : null;
 }
 
+const PILOT_CAMPAIGN_STORAGE_KEY = 'local-live-pilot:campaignId';
+const TERMINAL_CAMPAIGN_STATUSES = ['COMPLETED', 'REVOKED'];
+
+// Only the non-secret campaign id is kept, so navigation or a reload can re-read the
+// campaign from the server. Storage may be unavailable; the panel then keeps in-memory state only.
+function rememberCampaignId(campaign: Campaign) {
+  try {
+    if (TERMINAL_CAMPAIGN_STATUSES.includes(campaign.status)) sessionStorage.removeItem(PILOT_CAMPAIGN_STORAGE_KEY);
+    else sessionStorage.setItem(PILOT_CAMPAIGN_STORAGE_KEY, campaign.campaignId);
+  } catch {
+    // sessionStorage unavailable (private mode, blocked site data): nothing to remember.
+  }
+}
+
+function storedCampaignId(): string | null {
+  try {
+    return sessionStorage.getItem(PILOT_CAMPAIGN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 export function formatLocalPilotFailure(error: unknown, fallback: string): string {
   if (!error || typeof error !== 'object') return fallback;
   const data = (error as { data?: { error?: unknown; reason?: unknown } }).data;
@@ -103,6 +125,30 @@ export const LocalLivePilotPanel: React.FC = () => {
     return () => { active = false; };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const storedId = storedCampaignId();
+    if (storedId) {
+      void apiClient.get<PilotResponse>(`/api/local/pilot/${encodeURIComponent(storedId)}`)
+        .then((latest) => {
+          if (!active) return;
+          const restored = campaignFrom(latest);
+          if (!restored) return;
+          rememberCampaignId(restored);
+          if (TERMINAL_CAMPAIGN_STATUSES.includes(restored.status)) return;
+          setCampaign(restored);
+          setAccounting(latest.accounting);
+          setReadiness(latest.readiness);
+          setPreparation(latest.preparation);
+          setRuntime(latest.runtime);
+          setEvidence(latest.evidence_status === 'VERIFIED' ? 'PASS' : 'UNKNOWN');
+          setMessage(`กู้คืนแคมเปญ: ${restored.status}`);
+        })
+        .catch(() => {});
+    }
+    return () => { active = false; };
+  }, []);
+
   const runAction = useCallback(async (action: string, payload?: Record<string, unknown>) => {
     setBusy(true);
     setMessage('กำลังตรวจสอบกับระบบ');
@@ -110,7 +156,10 @@ export const LocalLivePilotPanel: React.FC = () => {
     try {
       const result = await apiClient.post<PilotResponse>(`/api/local/pilot/${action}`, payload);
       const next = campaignFrom(result);
-      if (next) setCampaign(next);
+      if (next) {
+        setCampaign(next);
+        rememberCampaignId(next);
+      }
       let refreshFailed = false;
       if (next?.campaignId) {
         try {
@@ -149,7 +198,10 @@ export const LocalLivePilotPanel: React.FC = () => {
     try {
       const result = await apiClient.get<PilotResponse>(`/api/local/pilot/${encodeURIComponent(campaign.campaignId)}`);
       const next = campaignFrom(result);
-      if (next) setCampaign(next);
+      if (next) {
+        setCampaign(next);
+        rememberCampaignId(next);
+      }
       setAccounting(result.accounting);
       setReadiness(result.readiness);
       setPreparation(result.preparation);
