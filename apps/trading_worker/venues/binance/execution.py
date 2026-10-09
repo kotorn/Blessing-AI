@@ -426,6 +426,32 @@ class BinanceExecutionAdapter:
         return parsed
 
     @staticmethod
+    def _position_rows_for_symbol(
+        positions: Any, symbol: str, *, portfolio_margin: bool, position_side: str = "BOTH"
+    ) -> list:
+        """Rows for one symbol/side from a positionRisk list.
+
+        Portfolio Margin positionRisk omits flat symbols (the repo's real-account
+        PM fixtures return []), so zero rows there means flat and is returned as
+        one explicit zero row. Duplicates and classic-futures gaps stay visible
+        so the callers' uniqueness checks still fail closed.
+        """
+        wanted = str(symbol).upper()
+        rows = [
+            row for row in positions
+            if isinstance(row, dict)
+            and str(row.get("symbol") or "").upper() == wanted
+            and str(row.get("positionSide") or "BOTH").upper() == position_side
+        ]
+        if not rows and portfolio_margin:
+            return [{
+                "symbol": wanted, "positionSide": position_side, "positionAmt": "0",
+                "unRealizedProfit": "0", "entryPrice": "0", "markPrice": "0",
+                "liquidationPrice": "0", "leverage": "0", "marginType": "cross",
+            }]
+        return rows
+
+    @staticmethod
     def _fp_number(value: Any) -> str:
         """Scale-insensitive text for ledger comparison.
 
@@ -3177,12 +3203,10 @@ class BinanceExecutionAdapter:
             position_observed_ms = int(time.time() * 1000)
             if not isinstance(positions, list):
                 raise ValueError("position response is not a list")
-            matching = [
-                row for row in positions
-                if isinstance(row, dict)
-                and row.get("symbol") == intent.symbol
-                and row.get("positionSide", "BOTH") == intent.position_side
-            ]
+            matching = self._position_rows_for_symbol(
+                positions, intent.symbol, portfolio_margin=self.portfolio_margin,
+                position_side=str(getattr(intent.position_side, "value", intent.position_side)).upper(),
+            )
             if len(matching) != 1:
                 raise ValueError("position identity is not unique")
             position_qty = Decimal(str(matching[0]["positionAmt"]))
@@ -3830,13 +3854,9 @@ class BinanceExecutionAdapter:
             )
             if not isinstance(positions, list):
                 return False
-            matching = [
-                row
-                for row in positions
-                if isinstance(row, dict)
-                and str(row.get("symbol") or "").upper() == str(intent.symbol).upper()
-                and str(row.get("positionSide") or "BOTH").upper() == "BOTH"
-            ]
+            matching = self._position_rows_for_symbol(
+                positions, intent.symbol, portfolio_margin=self.portfolio_margin
+            )
             if len(matching) != 1:
                 return False
             amount = Decimal(str(matching[0].get("positionAmt")))
@@ -3915,12 +3935,9 @@ class BinanceExecutionAdapter:
             )
             if not isinstance(positions, list):
                 return False
-            matching = [
-                row for row in positions
-                if isinstance(row, dict)
-                and str(row.get("symbol") or "").upper() == str(intent.symbol).upper()
-                and str(row.get("positionSide") or "BOTH").upper() == "BOTH"
-            ]
+            matching = self._position_rows_for_symbol(
+                positions, intent.symbol, portfolio_margin=self.portfolio_margin
+            )
             if len(matching) != 1 or Decimal(str(matching[0].get("positionAmt"))) != 0:
                 return False
             open_orders = await self.rest_client.request(
@@ -4211,12 +4228,9 @@ class BinanceExecutionAdapter:
             )
             if not isinstance(positions, list):
                 raise ValueError("signed position snapshot is invalid")
-            matching = [
-                row for row in positions
-                if isinstance(row, dict)
-                and str(row.get("symbol") or "").upper() == str(intent.symbol).upper()
-                and str(row.get("positionSide") or "BOTH").upper() == "BOTH"
-            ]
+            matching = self._position_rows_for_symbol(
+                positions, intent.symbol, portfolio_margin=self.portfolio_margin
+            )
             if len(matching) != 1:
                 raise ValueError("signed close position identity is not unique")
             amount = Decimal(str(matching[0].get("positionAmt")))
@@ -5003,11 +5017,9 @@ class BinanceExecutionAdapter:
                 not isinstance(row, dict) for row in positions
             ):
                 raise ValueError("position-risk snapshot is not a complete list")
-            symbol_positions = [
-                row for row in positions
-                if str(row.get("symbol", "")).strip().upper() == MAINNET_RISK_POLICY.symbol
-                and str(row.get("positionSide", "BOTH")).strip().upper() == "BOTH"
-            ]
+            symbol_positions = self._position_rows_for_symbol(
+                positions, MAINNET_RISK_POLICY.symbol, portfolio_margin=self.portfolio_margin
+            )
             if len(symbol_positions) != 1:
                 raise ValueError("pilot symbol position identity is not unique")
             position = symbol_positions[0]

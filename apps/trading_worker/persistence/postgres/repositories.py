@@ -3520,14 +3520,14 @@ class PersistenceRepository:
             UPDATE mainnet_launch_sessions
             SET reserved_orders = reserved_orders + 1,
                 pending_order_client_order_id = $2,
-                basket_id = COALESCE(basket_id, $3),
+                basket_id = COALESCE(basket_id, $3::varchar),
                 updated_at = CURRENT_TIMESTAMP
             WHERE launch_id = $1
               AND pending_order_client_order_id IS NULL
               AND (
-                (runtime_target = 'LOCAL' AND $3 IS NOT NULL
-                 AND (basket_id IS NULL OR basket_id = $3))
-                OR (runtime_target = 'CLOUD_RUN' AND $3 IS NULL)
+                (runtime_target = 'LOCAL' AND $3::varchar IS NOT NULL
+                 AND (basket_id IS NULL OR basket_id = $3::varchar))
+                OR (runtime_target = 'CLOUD_RUN' AND $3::varchar IS NULL)
               )
               AND (
                 (policy = 'STAGED_FIRST_ORDER'
@@ -3622,12 +3622,17 @@ class PersistenceRepository:
                 state = CASE
                     WHEN state = 'RECONCILIATION_REQUIRED' THEN 'RECONCILIATION_REQUIRED'
                     WHEN policy = 'STAGED_FIRST_ORDER' THEN 'PAUSED_NEW_RISK'
-                    WHEN policy = 'LIVE_RESEARCH_PILOT' THEN 'ACTIVE'
+                    -- The entry fill's FILL/FEE accounting pauses new risk before
+                    -- this mark; keep that pause (it waits for a fresh MARK).
+                    WHEN policy = 'LIVE_RESEARCH_PILOT' THEN state
                     ELSE 'AUTONOMOUS_ACTIVE'
                 END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE launch_id = $1
-              AND state IN ('ACTIVE', 'AUTONOMOUS_ACTIVE', 'RECONCILIATION_REQUIRED')
+              AND (
+                state IN ('ACTIVE', 'AUTONOMOUS_ACTIVE', 'RECONCILIATION_REQUIRED')
+                OR (policy = 'LIVE_RESEARCH_PILOT' AND state = 'PAUSED_NEW_RISK')
+              )
               AND reserved_orders > submitted_orders
               AND pending_order_client_order_id = $2
               AND (

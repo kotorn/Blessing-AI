@@ -823,3 +823,27 @@ DO $$ BEGIN
         FOR EACH ROW EXECUTE FUNCTION reject_binance_history_immutable_mutation();
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
+-- A fresh volume starts from this complete base schema. Record the migrations it
+-- already contains so apply_local_postgres_migrations.py applies only 013+ instead of
+-- re-running 001-012 (which fail on objects that already exist, e.g. migration 010's
+-- trigger). tests/python/test_init_schema_ledger.py pins these checksums.
+CREATE TABLE IF NOT EXISTS public.local_schema_migrations (
+    version VARCHAR(128) PRIMARY KEY,
+    checksum CHAR(64) NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO public.local_schema_migrations (version, checksum) VALUES
+    ('001_persistence_outbox_and_hedge_identity.sql', 'c7259ab9fdd4f9f186d2ecab9027a7b7971d85080dce19dab5d5eb81b6ea462f'),
+    ('002_execution_leases.sql', 'd99a267a1a5a158366756fb45c62f399a494e56866144ab81eb2ed8b31de3185'),
+    ('003_mainnet_launch_sessions.sql', '8e644963e3c5009cfe13d6c809a04076f2e163b1d33e503016a521a569eb5a89'),
+    ('004_environment_scoped_fill_identity.sql', '3126168d425e169b059f0a6f1aa064f03598458540591c20f305ea781b01a2b2'),
+    ('005_mainnet_autonomous_continuation.sql', '689ac5d9d3a6554251876db02eefa5854e83dfc6a55602dbd60419ccffc3c419'),
+    ('006_backfill_environment_scoped_venue.sql', '7c319518050cd5acf899c7879dbb30540b69410ece3a667a910aa998c12efbe3'),
+    ('007_mainnet_launch_runtime_identity.sql', '4df64f954486eabf118fb36044dfe875aebf7f467b503eeadf99ffd7d6e9cc13'),
+    ('008_mainnet_launch_order_identity.sql', '6a73a7bd9620c3c6a297fcc1173701ed1b8b8ee5785b7f6a04918a2829a84d50'),
+    ('009_binance_algo_protection_ownership.sql', 'ae93d7c03c0954f72057a05ee7072bf3c370379ccc8dff40a730e579e28310c8'),
+    ('010_binance_history_checkpoints.sql', '7a644ce9a2b32733518b89ccbe42aae1ba480868f30d24b1124a9c79f4a219c3'),
+    ('011_local_mainnet_basket_identity.sql', '29eb75acdc445433517be032a7230f0729ea9a01b95d37fefb70069788a4a9a2'),
+    ('012_mainnet_basket_owner_link.sql', '0511b2549641736a26ebc815aea5e5a7440e1cb29661c9d5f9a2ac9ba4326f14')
+ON CONFLICT (version) DO NOTHING;

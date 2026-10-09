@@ -239,6 +239,8 @@ class FakeExchange:
         if method == "GET" and path == self.open_orders_path:
             return []
         if method == "GET" and path == self.position_path:
+            if getattr(self, "flat_positions_empty", False) and self.position_qty == 0:
+                return []  # PAPI positionRisk omits flat symbols
             return [{"symbol": SYMBOL, "positionAmt": str(self.position_qty), "positionSide": "BOTH",
                      "entryPrice": str(self.fill_price), "markPrice": "2610.66", "leverage": "5",
                      "marginType": "cross", "liquidationPrice": "0", "unRealizedProfit": "0"}]
@@ -379,6 +381,12 @@ class FakeProtectionStore:
 class _Repo:
     def __init__(self) -> None:
         self.algo_protections = FakeProtectionStore()
+        self.pilot_events: List[Dict[str, Any]] = []
+        self.launch_id = LAUNCH_ID
+
+    async def append_local_live_pilot_event(self, **event: Any) -> Dict[str, Any]:
+        self.pilot_events.append(event)
+        return {"launch_id": self.launch_id, "pilot_drawdown_triggered": False}
 
 
 class FakePersistence:
