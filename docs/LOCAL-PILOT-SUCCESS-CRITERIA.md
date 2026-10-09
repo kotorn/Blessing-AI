@@ -71,9 +71,9 @@ The pilot must be **IMMEDIATELY ABORTED** (triggering Kill Switch and operator i
 
 | Condition | Trigger / Detection | Required Action |
 | :--- | :--- | :--- |
-| **Missing Protection Bracket** | Either SL or TP algo order fails to place or confirm within 15 seconds of entry fill. | Trigger emergency flatten immediately. If Worker fails to flatten, operator closes via Binance App/Web immediately. |
-| **Attestation Clock Expiration** | 24-hour attestation window expires before order execution. | Worker automatically disarms and refuses `can_start`. Refresh Track C evidence before proceeding. |
-| **Verdict Signature Failure** | Worker receives invalid or expired HMAC verdict from Control Plane. | Worker disarms instantly and enters fail-closed state (`can_start = False`). |
+| **Missing Protection Bracket** | Either SL or TP algo order fails to place or confirm within 5 seconds of the entry's first fill (`execution.py`, `gates.py`). | The Worker starts one close-only flow (reduce-only market close) and degrades; it never retries. Timing against real PAPI latency is **UNVERIFIED** until the first live order. Measured on a fake exchange: protection still completes at 0.3 s per REST round trip and times out at about 0.7 s. If Worker fails to flatten, operator closes via Binance App/Web immediately. |
+| **Attestation Clock Expiration** | 24-hour attestation window expires before order execution. | New risk-increasing orders are refused (`can_start` false at the adapter send path and at ARM). Exchange-native stop and target stay on Binance and the lifecycle monitor keeps running; the Worker does **not** disarm or close a position by itself on this condition. Refresh Track C evidence before a new campaign. |
+| **Verdict Signature Failure** | Worker receives invalid or expired HMAC verdict from Control Plane. | `can_start` becomes false, so new risk-increasing orders are refused. This is not an automatic disarm or position close. |
 | **Reconciliation Desync** | Worker detects position or order state mismatch (`DEGRADED` or diff > 0). | Activate kill switch, halt trading, operator inspects exchange state manually. |
 | **WebSocket / Heartbeat Loss** | Private user data stream or Control Plane heartbeat drops for > 30 seconds. | Worker pauses risk; if prolonged, Worker disarms. Operator verifies position status on Binance. |
 | **Account Exposure Leak** | Any position or order detected outside `ETHUSDC` or exceeding the 50 USDC cap. | Emergency flatten all positions, revoke API keys, freeze system. |

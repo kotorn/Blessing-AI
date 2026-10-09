@@ -44,9 +44,7 @@ signed REST run/environment/branch-policy/approval/commit identity proof.
 Official reference:
 https://docs.github.com/en/rest/actions/workflow-runs#get-the-review-history-for-a-workflow-run
 
-Operator-provided configuration snapshot: pilot-review returns 404; testnet
-has no protection rules and null deployment branch policy; main has no branch
-protection. Settings were not
+Read-only GitHub check on 2026-10-08: `pilot-review` and `testnet` exist, each with one required reviewer (the operator, id 12929483), a `main`-only custom branch policy and admin bypass enabled; `main` requires 1 review and the `build_and_test` check. No `testnet` secrets are configured yet. Settings were not
 changed. No real signed Track C bundles have been produced or verified in
 this worktree. Unit fixtures establish rejection behavior, not real signing
 or exchange acceptance.
@@ -103,12 +101,11 @@ the emergency close barrier (`_close_owned_testnet_trial_locked`), and the Worke
 
 Human prerequisites are to configure main branch protection, pilot-review
 required user reviewers/prevent_self_review/main-only branch policy, and the
-protected testnet Environment. Three independent non-author users must
-approve separate review dispatches, and an authorized Testnet lifecycle
-dispatch must generate its real bundle. No such dispatch or configuration
-change occurred in this worktree. The prior environment/protection snapshot
-reported missing protections; it was not revalidated in this implementation
-turn and must not be treated as current evidence.
+protected testnet Environment. Under the SOLO_OPERATOR review policy the
+operator approves each of the three review dispatches through "Review
+deployments" (never admin bypass), and an authorized Testnet lifecycle
+dispatch must generate its real bundle. No such dispatch has run yet; the
+workflow can only be dispatched after it exists on `main`.
 
 Focused tests exercise shared complete TS/Python phase outputs, signed-class
 readiness wiring with an explicitly mocked cryptographic verifier, malformed

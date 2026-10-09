@@ -1,6 +1,6 @@
 # Local Pilot day-of checklist (ETHUSDC, Local Mainnet)
 
-Status: derived from a static reading of the code at base commit `52015b2`.
+Status: derived from a static reading of the code (originally at `52015b2`, revised for Plan v4 and re-checked at `985d162`).
 This checklist does not approve anything, does not replace the readiness
 gates, and is not evidence that the pilot is ready. Items marked
 **UNVERIFIED** are assumptions or things the code does not check; confirm them
@@ -78,6 +78,24 @@ seven days from approval.
   before you start.
 
 ## E. Go / no-go
+
+## While armed: why is nothing happening?
+
+Entry comes only from the grid strategy, so an armed pilot can sit for hours
+without trading. The Worker `/state` endpoint (served by the local Worker
+container) reports `pilot_attempt_diagnostics`: counts of signals, preplan
+failures, blocked and executed attempts, the last stage and reason, the last
+signal time and the adapter's last order-gate or final-fence block. A rising
+`signals` count with rising `execution_blocked` means signals arrive but a gate
+refuses them; read `last_reason`. Zero signals means the strategy has not fired.
+Stop the campaign at the deadline you agreed beforehand; do not stretch the
+window.
+
+## Extra host checks (Plan v4)
+
+- [ ] The Docker host clock agrees with Binance server time within a second (market-data freshness is 3 s and compares your clock with Binance timestamps; a skewed host reads as permanently stale). Check with `w32tm /query /status` and re-sync before ARM.
+- [ ] Python 3.13 at `C:\Python313` is on PATH for the shell that runs `start-local.ps1` (the resolver reads `where.exe python.exe`).
+- [ ] You know how to cancel leftover stop/target Algo orders by hand on Binance and how to close the position by hand (the kill switch does neither).
 
 GO only if every line is YES:
 

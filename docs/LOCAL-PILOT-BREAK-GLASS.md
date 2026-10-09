@@ -1,6 +1,6 @@
 # Local Pilot break-glass procedure (ETHUSDC, Local Mainnet)
 
-Status: written from a static reading of the code at base commit `52015b2`.
+Status: written from a static reading of the code (originally at `52015b2`, revised for Plan v4 and re-checked at `985d162`). None of it has been run against a real account.
 Nothing here has been exercised against a running Worker or against Binance.
 Anything marked **UNVERIFIED** is an assumption the operator must confirm
 before relying on it. Binance screen names change; treat menu names as
@@ -43,7 +43,11 @@ re-placing protections or sending its own emergency close).
    and, by static reading, does **not** cancel conditional (Algo) stop/target
    orders, which live on a separate `openAlgoOrders` endpoint. Runtime
    behavior is **UNVERIFIED**. Treat the kill switch as necessary but not
-   sufficient.
+   sufficient. After a kill switch or a restart with an open position: cancel
+   any leftover stop/target Algo orders manually on Binance (they are not
+   cancelled for you) once the position is flat, and close the position by
+   hand if it is still open. A restart moves the campaign to REAUTH_REQUIRED
+   and nothing then monitors the 24h expiry, so close manually.
 2. If the UI does not respond or you cannot confirm the state: stop the Worker
    container. In PowerShell:
 

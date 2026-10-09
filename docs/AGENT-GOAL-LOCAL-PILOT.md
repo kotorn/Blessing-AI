@@ -196,12 +196,11 @@ missing, continue independent work and leave this acceptance `NOT_RUN`.
 - Accept: artifact PASS, `PROTECTED_VERIFIED`, `IN_SYNC`, `diff_count` 0, and
   it confirms that a reduce-only market close is accepted while the stop and
   target Algo orders are open. Be precise about which protection shape that
-  proves: the *Testnet* runner places the Algo orders with
-  `closePosition=true` (no `reduceOnly`), whereas the *Local Mainnet* path
-  places them with `reduceOnly=true`, `closePosition=false` and a fill-sized
-  quantity (`execution.py` `_submit_local_mainnet_protection_algo`). The
-  Testnet artifact therefore does not prove the Mainnet protection shape
-  coexists with a reduce-only close; treat that as an open gap and report it.
+  proves: since WP5 the *Testnet* runner and the *Local Mainnet* path both
+  place the Algo orders with `reduceOnly=true`, `closePosition=false` and a
+  fill-sized quantity (`execution.py` `_submit_local_mainnet_protection_algo`).
+  The remaining gap is Portfolio Margin: Testnet has no `/papi`, so the first
+  `/papi/v1/um/algo/order` with this shape is sent live on Mainnet.
   If the close is rejected, stop and report: the emergency-close path would
   not work.
 
