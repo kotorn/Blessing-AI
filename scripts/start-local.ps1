@@ -7,6 +7,19 @@ Set-StrictMode -Version Latest
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repoRoot
 
+# The Worker image is built from this working tree, so it is bound to one reviewed commit.
+# A dirty or unreadable tree is refused before any Docker, Postgres, or Worker step runs.
+$gitCommand = Get-Command git.exe -ErrorAction Stop
+$launchHeadSha = (& $gitCommand.Source rev-parse --verify HEAD 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $launchHeadSha -notmatch '^[0-9a-f]{40}$') {
+    throw "The git HEAD of this checkout cannot be read; start-local refuses to build or start anything."
+}
+$launchDirtyEntries = (& $gitCommand.Source status --porcelain --untracked-files=all 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw "git status cannot be read; start-local refuses to build or start anything." }
+if ($launchDirtyEntries) {
+    throw "The working tree is not clean; start-local refuses to build the Worker image from unreviewed files. Commit or remove these entries, then rerun:`n$launchDirtyEntries"
+}
+
 function Get-LocalConfigValue([string]$Name, [string]$Default = "") {
     $processValue = [Environment]::GetEnvironmentVariable($Name, "Process")
     if (-not [string]::IsNullOrWhiteSpace($processValue)) { return $processValue.Trim() }
@@ -252,6 +265,14 @@ if ([string]::IsNullOrWhiteSpace($script:dockerContext)) {
 }
 $python = Get-Command python.exe -ErrorAction Stop
 $npm = Get-Command npm.cmd -ErrorAction Stop
+# Compute the source binding once with the same read-only helper the pilot uses. It refuses a dirty tree
+# and CRLF in bound files; its gitSha must be the HEAD read above, or nothing is built.
+$launchBindingJson = & $python.Source -c "import json; from pathlib import Path; from scripts.local_pilot_track_c_source import source_binding; print(json.dumps(source_binding(Path('.').resolve())))"
+if ($LASTEXITCODE -ne 0) { throw "The source binding for this commit could not be computed; start-local refuses to build or start anything." }
+$launchBinding = "$launchBindingJson" | ConvertFrom-Json -ErrorAction Stop
+if ([string]$launchBinding.gitSha -ne $launchHeadSha -or [string]$launchBinding.sourceSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw "The source binding does not match the checked-out HEAD; start-local refuses to build or start anything."
+}
 $database = Get-LocalConfigValue "POSTGRES_DB" "blessing_trading"
 $databaseUser = Get-LocalConfigValue "POSTGRES_USER" "blessing_worker"
 if ($database -notmatch "^[A-Za-z0-9_-]+$" -or $databaseUser -notmatch "^[A-Za-z0-9_-]+$") {
@@ -351,9 +372,30 @@ try {
 
 Assert-RequiredPortsAvailable -Ports @(3001, 8000)
 $workerImageTag = "blessing-worker:local-runtime"
-Write-Host "Building the pinned local Worker image from this checkout..."
-& $docker.Source --context $script:dockerContext build --file Dockerfile.worker --tag $workerImageTag $repoRoot
+$workerCommitTag = "blessing-worker:" + $launchHeadSha.Substring(0, 12)
+Write-Host "Building the pinned local Worker image from commit $launchHeadSha..."
+& $docker.Source --context $script:dockerContext build --file Dockerfile.worker --tag $workerImageTag --tag $workerCommitTag --label "org.blessing.git.sha=$launchHeadSha" --label "org.blessing.source.sha256=$($launchBinding.sourceSha256)" $repoRoot
 if ($LASTEXITCODE -ne 0) { throw "The local Worker image could not be built; the control plane was not started." }
+
+# Fail closed: the built image must carry the exact HEAD and source hash reviewed above, and the tree must
+# still be clean and at that HEAD (a change made during the build would make the image unreviewed).
+$builtLabelsJson = & $docker.Source --context $script:dockerContext image inspect --format "{{json .Config.Labels}}" $workerImageTag 2>$null
+if ($LASTEXITCODE -ne 0) { throw "The local Worker image labels could not be read; the control plane was not started." }
+$builtLabelTable = @{}
+try {
+    $builtLabelObject = "$builtLabelsJson" | ConvertFrom-Json -ErrorAction Stop
+    foreach ($property in @($builtLabelObject.PSObject.Properties)) { $builtLabelTable[$property.Name] = [string]$property.Value }
+} catch { }
+$currentHeadSha = (& $gitCommand.Source rev-parse --verify HEAD 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw "The current git HEAD could not be read; the control plane was not started." }
+$currentDirtyEntries = (& $gitCommand.Source status --porcelain --untracked-files=all 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw "git status could not be read after the build; the control plane was not started." }
+if ($currentDirtyEntries -or $currentHeadSha -ne $launchHeadSha -or
+    $builtLabelTable['org.blessing.git.sha'] -ne $launchHeadSha -or
+    $builtLabelTable['org.blessing.source.sha256'] -ne [string]$launchBinding.sourceSha256) {
+    throw "The local Worker image is not bound to the current clean HEAD ($launchHeadSha); the control plane was not started."
+}
+
 $workerImageId = & $docker.Source --context $script:dockerContext image inspect --format "{{.Id}}" $workerImageTag
 if ($LASTEXITCODE -ne 0 -or "$workerImageId".Trim() -notmatch '^sha256:[0-9a-f]{64}$') {
     throw "The local Worker image identity could not be verified; the control plane was not started."
