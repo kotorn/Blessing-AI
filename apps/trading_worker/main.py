@@ -71,9 +71,12 @@ from apps.trading_worker.venues.binance.local_pilot_verdict import (
     verify_pilot_readiness_verdict,
 )
 from apps.trading_worker.venues.binance.pilot_bracket import (
+    DEFAULT_ENTRY_TARGET_NOTIONAL_USDC,
+    DEFAULT_EXECUTION_RISK_BUFFER_USDC,
     apply_pilot_bracket_to_intent,
     plan_pilot_bracket,
 )
+from apps.trading_worker.venues.binance.mainnet_risk import LOCAL_LIVE_PILOT_POLICY
 from apps.trading_worker.venues.binance.models import (
     BinanceAuthenticationError,
     ConnectionState,
@@ -5076,6 +5079,23 @@ class TradingWorkerApp:
         reference_price: Optional[Decimal] = None,
     ):
         """Clamp risk-increasing orders to safely satisfy venue single-order notional caps."""
+        pilot_session = getattr(self, "_mainnet_launch_session", None)
+        is_local_pilot_decision = (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and str(getattr(decision, "symbol", "")).upper() == "ETHUSDC"
+            and (
+                bool(os.getenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "").strip())
+                or (
+                    isinstance(pilot_session, dict)
+                    and pilot_session.get("policy") == "LIVE_RESEARCH_PILOT"
+                )
+            )
+        )
+        if is_local_pilot_decision and any(
+            not getattr(order, "reduce_only", False) and order.side != OrderSide.BUY
+            for order in getattr(decision, "orders", [])
+        ):
+            raise ValueError("Local live pilot accepts BUY entries only")
         if self.execution_adapter is None:
             return decision
         limits = getattr(self.execution_adapter, "safety_limits", None)
@@ -5139,6 +5159,13 @@ class TradingWorkerApp:
                                     rules=rules,
                                     entry_price=side_price,
                                     side=order.side,
+                                    notional_cap_usdc=Decimal(str(LOCAL_LIVE_PILOT_POLICY.get("order_notional_usdc", "50"))),
+                                    entry_target_notional_usdc=Decimal(str(LOCAL_LIVE_PILOT_POLICY.get(
+                                        "entry_target_notional_usdc", DEFAULT_ENTRY_TARGET_NOTIONAL_USDC
+                                    ))),
+                                    execution_risk_buffer_usdc=Decimal(str(LOCAL_LIVE_PILOT_POLICY.get(
+                                        "execution_risk_buffer_usdc", DEFAULT_EXECUTION_RISK_BUFFER_USDC
+                                    ))),
                                 )
                                 provisional_order = apply_pilot_bracket_to_intent(
                                     order, provisional_plan, basket_id=self._pilot_basket_id()
@@ -5183,11 +5210,29 @@ class TradingWorkerApp:
                                     actual_fees = Decimal(str(cost_evidence.get("fees_upper_bound_usdc", "0")))
                                     actual_funding = Decimal(str(cost_evidence.get("funding_upper_bound_usdc", "0")))
                                     actual_slippage = Decimal(str(cost_evidence.get("slippage_upper_bound_usdc", "0")))
+                                    campaign_headroom = Decimal(str(LOCAL_LIVE_PILOT_POLICY.get(
+                                        "campaign_drawdown_usdc", "5"
+                                    )))
+                                    context_headrooms = [
+                                        Decimal(str(context[name]))
+                                        for name in ("basket_headroom_usdc", "daily_loss_headroom_usdc")
+                                        if context.get(name) is not None
+                                    ]
+                                    if context_headrooms:
+                                        campaign_headroom = min(campaign_headroom, *context_headrooms)
 
                                     re_planned = plan_pilot_bracket(
                                         rules=rules,
                                         entry_price=side_price,
                                         side=order.side,
+                                        notional_cap_usdc=Decimal(str(LOCAL_LIVE_PILOT_POLICY.get("order_notional_usdc", "50"))),
+                                        entry_target_notional_usdc=Decimal(str(LOCAL_LIVE_PILOT_POLICY.get(
+                                            "entry_target_notional_usdc", DEFAULT_ENTRY_TARGET_NOTIONAL_USDC
+                                        ))),
+                                        execution_risk_buffer_usdc=Decimal(str(LOCAL_LIVE_PILOT_POLICY.get(
+                                            "execution_risk_buffer_usdc", DEFAULT_EXECUTION_RISK_BUFFER_USDC
+                                        ))),
+                                        campaign_drawdown_headroom_usdc=campaign_headroom,
                                         estimated_fees_usdc=actual_fees,
                                         estimated_funding_usdc=actual_funding,
                                         estimated_slippage_usdc=actual_slippage,
@@ -5635,11 +5680,72 @@ class TradingWorkerApp:
         symbol = str(event.symbol).upper()
         if symbol != event.symbol:
             event = event.model_copy(update={"symbol": symbol})
+        pilot_session = getattr(self, "_mainnet_launch_session", None)
+        is_local_pilot = (
+            self.execution_mode == WorkerExecutionMode.LIVE
+            and (
+                (isinstance(pilot_session, dict) and pilot_session.get("policy") == "LIVE_RESEARCH_PILOT")
+                or bool(os.getenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "").strip())
+            )
+        )
+        pilot_market_recorded = False
+        if is_local_pilot:
+            now = utc_now()
+            age_sec = (now - event_timestamp.astimezone(timezone.utc)).total_seconds()
+            adapter = self.execution_adapter
+            age_limit = 3.0
+            if adapter is not None and callable(getattr(adapter, "_market_data_max_age", None)):
+                try:
+                    age_limit = float(adapter._market_data_max_age())
+                except (TypeError, ValueError):
+                    age_limit = 0.0
+            if not math.isfinite(age_limit) or age_limit <= 0 or age_sec < -0.5 or age_sec > age_limit:
+                logger.warning("Ignoring stale or future Local Pilot market sample for %s", symbol)
+                return
+            source = "mark" if event.mark_price is not None else "book"
+            try:
+                bid = Decimal(str(event.best_bid))
+                ask = Decimal(str(event.best_ask))
+                mark = Decimal(str(event.mark_price if event.mark_price is not None else event.last_price))
+            except (InvalidOperation, TypeError, ValueError):
+                return
+            if not mark.is_finite() or mark <= 0:
+                return
+            if source == "book" and (
+                not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask <= bid
+            ):
+                logger.warning("Ignoring invalid Local Pilot bookTicker quote for %s", symbol)
+                return
+            event_id = str(event.event_id or "").strip()
+            suffix = re.search(r"(\d+)$", event_id)
+            sequence = int(suffix.group(1)) if suffix else -1
+            sample_order = (event_timestamp.astimezone(timezone.utc), sequence, event_id)
+            if not event_id:
+                return
+            previous = getattr(self, "_local_pilot_market_samples", {}).get((symbol, source))
+            if previous is not None and sample_order <= previous:
+                logger.warning("Ignoring duplicate or out-of-order Local Pilot %s sample for %s", source, symbol)
+                return
+            samples = getattr(self, "_local_pilot_market_samples", None)
+            if samples is None:
+                samples = self._local_pilot_market_samples = {}
+            samples[(symbol, source)] = sample_order
+            if adapter is None or not callable(getattr(adapter, "record_market_event", None)):
+                return
+            if not adapter.record_market_event(event):
+                return
+            pilot_market_recorded = True
+            if source == "mark":
+                # Keep mark/reference freshness separate. It is never a grid
+                # or price-action signal input for the real-money pilot.
+                return
+            midpoint = (bid + ask) / Decimal("2")
+            event = event.model_copy(update={"last_price": midpoint})
         if self.execution_mode in {
             WorkerExecutionMode.TESTNET,
             WorkerExecutionMode.LIVE,
         } and self.execution_adapter is not None:
-            if not self.execution_adapter.record_market_event(event):
+            if not pilot_market_recorded and not self.execution_adapter.record_market_event(event):
                 logger.warning(
                     "Ignoring invalid %s market event for %s",
                     self._current_exchange_label(),
@@ -5901,6 +6007,15 @@ class TradingWorkerApp:
                         environment_name = "TESTNET"
                         is_ready = autonomous_enabled and bool(launch_readiness.get(readiness_key, False))
                     if is_ready:
+                        if self.execution_mode == WorkerExecutionMode.LIVE and policy == "LIVE_RESEARCH_PILOT":
+                            session_gate = getattr(self, "_pilot_session_gate", None)
+                            if not callable(session_gate):
+                                self._note_pilot_attempt("EXECUTION_BLOCKED", "Durable pilot session timer gate is unavailable")
+                                return decision
+                            session_allowed, session_reason = await session_gate()
+                            if not session_allowed:
+                                self._note_pilot_attempt("EXECUTION_BLOCKED", session_reason)
+                                return decision
                         if (
                             self.execution_mode == WorkerExecutionMode.LIVE
                             and policy == "LIVE_RESEARCH_PILOT"

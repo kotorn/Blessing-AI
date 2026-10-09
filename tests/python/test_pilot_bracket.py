@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import pytest
 
 from domain.enums import MarketType, OrderSide, OrderType, PositionSide, TimeInForce
-from domain.models import OrderIntent
+from domain.models import MarketEvent, OrderIntent
 from apps.trading_worker.venues.binance.symbol_rules import SymbolTradingRules
 from apps.trading_worker.venues.binance.pilot_bracket import (
     DEFAULT_NOTIONAL_CAP_USDC,
@@ -62,6 +63,98 @@ def test_buy_bracket_within_pilot_caps():
     assert rules.normalize_price(plan.stop_loss_price) == plan.stop_loss_price
     assert rules.normalize_price(plan.take_profit_price) == plan.take_profit_price
     assert rules.normalize_quantity(plan.quantity, is_market=True) == plan.quantity
+
+
+def test_pilot_targets_40_and_reserves_execution_risk_buffer():
+    plan = plan_pilot_bracket(
+        rules=_ethusdc_rules(),
+        entry_price=Decimal("2713.39"),
+        side=OrderSide.BUY,
+        estimated_fees_usdc=Decimal("0.05"),
+        estimated_funding_usdc=Decimal("0.60"),
+        estimated_slippage_usdc=Decimal("0.05"),
+    )
+
+    assert plan.notional_usdc <= Decimal(40)
+    assert plan.notional_usdc <= Decimal(50)
+    assert plan.total_risk_usdc + Decimal("0.20") <= Decimal(2)
+
+
+def test_actual_fill_validation_uses_weighted_price_and_does_not_widen_stop():
+    from apps.trading_worker.venues.binance.pilot_bracket import validate_pilot_fill
+
+    plan = plan_pilot_bracket(
+        rules=_ethusdc_rules(),
+        entry_price=Decimal("2500"),
+        side=OrderSide.BUY,
+        estimated_fees_usdc=Decimal("0.05"),
+        estimated_funding_usdc=Decimal("0.60"),
+        estimated_slippage_usdc=Decimal("0.05"),
+    )
+
+    # A modest fill deviation is evaluated from the actual weighted average.
+    validate_pilot_fill(
+        side=OrderSide.BUY,
+        average_entry_price=Decimal("2500.10"),
+        filled_quantity=plan.quantity,
+        stop_loss_price=plan.stop_loss_price,
+        take_profit_price=plan.take_profit_price,
+        estimated_costs_usdc=plan.estimated_costs_usdc,
+    )
+    with pytest.raises(ValueError, match="post-fill risk"):
+        validate_pilot_fill(
+            side=OrderSide.BUY,
+            average_entry_price=Decimal(2550),
+            filled_quantity=plan.quantity,
+            stop_loss_price=plan.stop_loss_price,
+            take_profit_price=plan.take_profit_price,
+            estimated_costs_usdc=plan.estimated_costs_usdc,
+        )
+
+
+@pytest.mark.asyncio
+async def test_local_pilot_market_signal_uses_fresh_ordered_book_midpoint_only():
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+
+    now = datetime.now(UTC)
+    recorded = []
+    signaled = []
+    adapter = type("Adapter", (), {
+        "record_market_event": lambda self, event: recorded.append(event) or True,
+        "_market_data_max_age": lambda self: 3.0,
+    })()
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    worker._mainnet_launch_session = {"policy": "LIVE_RESEARCH_PILOT"}
+    worker.execution_adapter = adapter
+    worker.pa_engine.process_event = lambda event: signaled.append(event) or None
+
+    def event(event_id, event_time, *, mark_price=None, bid="2499", ask="2501", last="2600"):
+        return MarketEvent(
+            event_id=event_id,
+            event_time=event_time,
+            venue="BINANCE_MAINNET",
+            symbol="ETHUSDC",
+            market_type=MarketType.USDM_FUTURES,
+            last_price=Decimal(last),
+            best_bid=Decimal(bid),
+            best_ask=Decimal(ask),
+            mark_price=Decimal(mark_price) if mark_price is not None else None,
+        )
+
+    await worker.handle_market_event(event("mp_100", now, mark_price="2500"))
+    assert len(recorded) == 1
+    assert signaled == []
+
+    book = event("ws_100", now + timedelta(milliseconds=1))
+    await worker.handle_market_event(book)
+    await worker.handle_market_event(book)
+    await worker.handle_market_event(event("ws_99", now))
+    await worker.handle_market_event(event("ws_101", now - timedelta(seconds=10)))
+
+    assert len(recorded) == 2
+    assert len(signaled) == 1
+    assert signaled[0].last_price == Decimal("2500")
 
 
 def test_sell_bracket_within_pilot_caps():
@@ -288,7 +381,7 @@ async def test_worker_clamp_applies_pilot_bracket_to_unprotected_pilot_order(mon
 
 
 @pytest.mark.asyncio
-async def test_worker_clamp_sizes_at_side_price_for_buy_and_sell(monkeypatch):
+async def test_worker_clamp_targets_40_at_fresh_buy_ask(monkeypatch):
     from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
     from domain.models import ExecutionDecision
     from domain.enums import EconomicRiskClass
@@ -300,12 +393,11 @@ async def test_worker_clamp_sizes_at_side_price_for_buy_and_sell(monkeypatch):
 
     rules = _ethusdc_rules()
     ask_price = Decimal("2750.00")
-    bid_price = Decimal("2700.00")
 
     async def mock_fresh_price(_self, symbol, side=None):
         if str(side).upper() == "BUY":
             return ask_price
-        return bid_price
+        return ask_price
 
     worker.execution_adapter = type("MockAdapter", (), {
         "safety_limits": type("Limits", (), {"max_single_order_notional": Decimal("50.0")})(),
@@ -314,7 +406,7 @@ async def test_worker_clamp_sizes_at_side_price_for_buy_and_sell(monkeypatch):
         "_is_local_live_pilot_bound": lambda _self: True,
     })()
 
-    for side, expected_price in [(OrderSide.BUY, ask_price), (OrderSide.SELL, bid_price)]:
+    for side, expected_price in [(OrderSide.BUY, ask_price)]:
         raw_order = OrderIntent(
             client_order_id=f"raw-{side.value}",
             symbol="ETHUSDC",
@@ -335,13 +427,47 @@ async def test_worker_clamp_sizes_at_side_price_for_buy_and_sell(monkeypatch):
 
         clamped = await worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2500.00"))
         bracketed = clamped.orders[0]
-        # Sizing must satisfy 50 USDC cap at the side price (ask for BUY, bid for SELL)
+        # Target 40 USDC at the executable BUY ask, below the hard 50 cap.
         assert bracketed.quantity * expected_price <= Decimal("50.0")
-        expected_qty = rules.normalize_quantity(Decimal("50.0") / expected_price, is_market=True)
-        while expected_qty * expected_price > Decimal("50.0"):
+        expected_qty = rules.normalize_quantity(Decimal("40.0") / expected_price, is_market=True)
+        while expected_qty * expected_price > Decimal("40.0"):
             expected_qty -= rules.step_size
             expected_qty = rules.normalize_quantity(expected_qty, is_market=True)
         assert bracketed.quantity == expected_qty
+
+
+@pytest.mark.asyncio
+async def test_worker_clamp_rejects_local_pilot_sell_before_reservation(monkeypatch):
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+    from domain.models import ExecutionDecision
+    from domain.enums import EconomicRiskClass
+
+    monkeypatch.setenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "test-campaign-sell")
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    worker.execution_adapter = type("Adapter", (), {
+        "safety_limits": type("Limits", (), {"max_single_order_notional": Decimal("50")})(),
+        "symbol_rules": {"ETHUSDC": _ethusdc_rules()},
+    })()
+    order = OrderIntent(
+        client_order_id="raw-sell",
+        symbol="ETHUSDC",
+        market_type=MarketType.USDM_FUTURES,
+        side=OrderSide.SELL,
+        position_side=PositionSide.BOTH,
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.GTC,
+        quantity=Decimal("0.01"),
+    )
+    decision = ExecutionDecision(
+        decision_id="dec-sell",
+        symbol="ETHUSDC",
+        action="SUBMIT_ORDER",
+        risk_class=EconomicRiskClass.NEW_RISK,
+        orders=[order],
+    )
+    with pytest.raises(ValueError, match="BUY entries only"):
+        await worker._clamp_order_notional_if_needed(decision, reference_price=Decimal(2500))
 
 
 @pytest.mark.asyncio

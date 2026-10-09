@@ -17,7 +17,9 @@ from domain.models import OrderIntent
 from .symbol_rules import SymbolTradingRules
 
 DEFAULT_NOTIONAL_CAP_USDC = Decimal("50.0")
+DEFAULT_ENTRY_TARGET_NOTIONAL_USDC = Decimal("40.0")
 DEFAULT_MAX_STOP_RISK_USDC = Decimal("2.0")
+DEFAULT_EXECUTION_RISK_BUFFER_USDC = Decimal("0.20")
 DEFAULT_MIN_NET_REWARD_USDC = Decimal("0.25")
 DEFAULT_MIN_REWARD_TO_RISK = Decimal("0.125")
 DEFAULT_CAMPAIGN_DRAWDOWN_CAP_USDC = Decimal("5.0")
@@ -68,7 +70,9 @@ def plan_pilot_bracket(
     estimated_funding_usdc: Decimal | None = None,
     estimated_slippage_usdc: Decimal | None = None,
     notional_cap_usdc: Decimal = DEFAULT_NOTIONAL_CAP_USDC,
+    entry_target_notional_usdc: Decimal = DEFAULT_ENTRY_TARGET_NOTIONAL_USDC,
     max_stop_risk_usdc: Decimal = DEFAULT_MAX_STOP_RISK_USDC,
+    execution_risk_buffer_usdc: Decimal = DEFAULT_EXECUTION_RISK_BUFFER_USDC,
     min_net_reward_usdc: Decimal = DEFAULT_MIN_NET_REWARD_USDC,
     min_reward_to_risk: Decimal = DEFAULT_MIN_REWARD_TO_RISK,
     campaign_drawdown_headroom_usdc: Decimal = DEFAULT_CAMPAIGN_DRAWDOWN_CAP_USDC,
@@ -85,7 +89,13 @@ def plan_pilot_bracket(
 
     entry = _decimal(entry_price, "entry_price", positive=True)
     notional_cap = _decimal(notional_cap_usdc, "notional_cap_usdc", positive=True)
+    entry_target = _decimal(entry_target_notional_usdc, "entry_target_notional_usdc", positive=True)
+    if entry_target > notional_cap:
+        raise ValueError("entry_target_notional_usdc cannot exceed the hard notional cap")
     max_stop_risk = _decimal(max_stop_risk_usdc, "max_stop_risk_usdc", positive=True)
+    execution_buffer = _decimal(
+        execution_risk_buffer_usdc, "execution_risk_buffer_usdc", nonnegative=True
+    )
     min_net_reward = _decimal(min_net_reward_usdc, "min_net_reward_usdc", positive=True)
     min_r2r = _decimal(min_reward_to_risk, "min_reward_to_risk", nonnegative=True)
     dd_headroom = _decimal(campaign_drawdown_headroom_usdc, "campaign_drawdown_headroom_usdc", positive=True)
@@ -94,7 +104,7 @@ def plan_pilot_bracket(
         raise ValueError("side must be OrderSide.BUY or OrderSide.SELL")
 
     # 1. Quantity sizing: strictly capped at notional_cap (50 USDC)
-    raw_qty = notional_cap / entry
+    raw_qty = entry_target / entry
     quantity = rules.normalize_quantity(raw_qty, is_market=True)
     while quantity * entry > notional_cap:
         quantity -= rules.step_size
@@ -137,7 +147,7 @@ def plan_pilot_bracket(
         raise ValueError(f"Estimated costs {costs} exceed or equal the planned stop risk cap {max_stop_risk}")
 
     # 3. Stop loss: total risk = stop_loss_risk + costs <= min(max_stop_risk, dd_headroom)
-    allowed_stop_risk = min(max_stop_risk, dd_headroom) - costs
+    allowed_stop_risk = min(max_stop_risk, dd_headroom) - costs - execution_buffer
     if allowed_stop_risk <= 0:
         raise ValueError("No risk budget remaining after transaction costs")
     stop_distance = allowed_stop_risk / quantity
@@ -146,7 +156,7 @@ def plan_pilot_bracket(
         raw_stop = entry - stop_distance
         stop_price = rules.normalize_price(raw_stop)
         # Verify tick rounding didn't push risk above cap
-        while (entry - stop_price) * quantity + costs > max_stop_risk:
+        while (entry - stop_price) * quantity > allowed_stop_risk:
             stop_price += rules.tick_size
             stop_price = rules.normalize_price(stop_price)
         if stop_price >= entry or stop_price <= 0:
@@ -155,7 +165,7 @@ def plan_pilot_bracket(
     else:  # SELL
         raw_stop = entry + stop_distance
         stop_price = rules.normalize_price(raw_stop, round_up=True)
-        while (stop_price - entry) * quantity + costs > max_stop_risk:
+        while (stop_price - entry) * quantity > allowed_stop_risk:
             stop_price -= rules.tick_size
             stop_price = rules.normalize_price(stop_price)
         if stop_price <= entry or stop_price <= 0:
@@ -163,7 +173,10 @@ def plan_pilot_bracket(
         actual_stop_risk = (stop_price - entry) * quantity
 
     total_risk = actual_stop_risk + costs
-    if total_risk > max_stop_risk or total_risk > dd_headroom:
+    if (
+        total_risk + execution_buffer > max_stop_risk
+        or total_risk + execution_buffer > dd_headroom
+    ):
         raise ValueError(f"Calculated total risk {total_risk} exceeds limit")
 
     # 4. Take profit: net reward = gross_reward - costs >= max(min_net_reward, min_r2r * total_risk)
@@ -238,13 +251,61 @@ def apply_pilot_bracket_to_intent(
     )
 
 
+def validate_pilot_fill(
+    *,
+    side: OrderSide,
+    average_entry_price: Decimal,
+    filled_quantity: Decimal,
+    stop_loss_price: Decimal,
+    take_profit_price: Decimal,
+    estimated_costs_usdc: Decimal,
+    notional_cap_usdc: Decimal = DEFAULT_NOTIONAL_CAP_USDC,
+    max_stop_risk_usdc: Decimal = DEFAULT_MAX_STOP_RISK_USDC,
+    campaign_drawdown_headroom_usdc: Decimal = DEFAULT_CAMPAIGN_DRAWDOWN_CAP_USDC,
+) -> None:
+    """Fail closed when the actual weighted fill breaks the planned bracket.
+
+    The bracket prices stay fixed after entry. A fill outside the planned
+    risk and exposure envelope is a close-only condition for the caller.
+    """
+    entry = _decimal(average_entry_price, "average_entry_price", positive=True)
+    quantity = _decimal(filled_quantity, "filled_quantity", positive=True)
+    stop = _decimal(stop_loss_price, "stop_loss_price", positive=True)
+    target = _decimal(take_profit_price, "take_profit_price", positive=True)
+    costs = _decimal(estimated_costs_usdc, "estimated_costs_usdc", nonnegative=True)
+    cap = _decimal(notional_cap_usdc, "notional_cap_usdc", positive=True)
+    risk_cap = _decimal(max_stop_risk_usdc, "max_stop_risk_usdc", positive=True)
+    headroom = _decimal(
+        campaign_drawdown_headroom_usdc,
+        "campaign_drawdown_headroom_usdc",
+        positive=True,
+    )
+    if side == OrderSide.BUY:
+        if not stop < entry < target:
+            raise ValueError("post-fill risk: BUY fill is outside the existing bracket")
+        stop_risk = (entry - stop) * quantity
+    elif side == OrderSide.SELL:
+        if not target < entry < stop:
+            raise ValueError("post-fill risk: SELL fill is outside the existing bracket")
+        stop_risk = (stop - entry) * quantity
+    else:
+        raise ValueError("post-fill risk: side must be BUY or SELL")
+    if entry * quantity > cap:
+        raise ValueError("post-fill risk: actual entry exposure exceeds the hard notional cap")
+    if stop_risk + costs > min(risk_cap, headroom):
+        raise ValueError("post-fill risk exceeds the reserved campaign risk budget")
+
+
 __all__ = [
-    "PilotBracketPlan",
-    "plan_pilot_bracket",
-    "apply_pilot_bracket_to_intent",
-    "DEFAULT_NOTIONAL_CAP_USDC",
+    "DEFAULT_CAMPAIGN_DRAWDOWN_CAP_USDC",
+    "DEFAULT_ENTRY_TARGET_NOTIONAL_USDC",
+    "DEFAULT_EXECUTION_RISK_BUFFER_USDC",
     "DEFAULT_MAX_STOP_RISK_USDC",
     "DEFAULT_MIN_NET_REWARD_USDC",
     "DEFAULT_MIN_REWARD_TO_RISK",
-    "DEFAULT_CAMPAIGN_DRAWDOWN_CAP_USDC",
+    "DEFAULT_NOTIONAL_CAP_USDC",
+    "PilotBracketPlan",
+    "apply_pilot_bracket_to_intent",
+    "plan_pilot_bracket",
+    "validate_pilot_fill",
 ]

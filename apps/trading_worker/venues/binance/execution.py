@@ -57,6 +57,7 @@ from .protection import (
     verify_protection,
     weighted_entry_average_price,
 )
+from .pilot_bracket import validate_pilot_fill
 from .ledger import ExecutionLedger, InMemoryLedger
 from .models import (
     BinanceAuthenticationError,
@@ -3402,7 +3403,7 @@ class BinanceExecutionAdapter:
                     await self._degrade_local_mainnet_protection(runtime["worker"])
                 return None
 
-            entry_price = self._decimal_value(
+            planned_entry_price = self._decimal_value(
                 verification_context.get("validated_entry_price"), positive=True
             )
             quantity = self._decimal_value(
@@ -3412,12 +3413,34 @@ class BinanceExecutionAdapter:
                 owner.get("requested_quantity"), positive=True
             )
             if (
-                entry_price != weighted_entry
+                planned_entry_price <= 0
                 or quantity != requested_quantity
                 or filled_quantity > requested_quantity
             ):
                 await self._degrade_local_mainnet_protection(runtime["worker"])
                 return None
+            if session.get("policy") == "LIVE_RESEARCH_PILOT":
+                try:
+                    validate_pilot_fill(
+                        side=getattr(intent, "side"),
+                        average_entry_price=weighted_entry,
+                        filled_quantity=filled_quantity,
+                        stop_loss_price=self._decimal_value(owner.get("stop_trigger_price"), positive=True),
+                        take_profit_price=self._decimal_value(
+                            owner.get("take_profit_trigger_price"), positive=True
+                        ),
+                        estimated_costs_usdc=sum((
+                            self._decimal_value(getattr(intent, name, None) or 0, nonnegative=True)
+                            for name in (
+                                "estimated_fees_usdc",
+                                "estimated_funding_usdc",
+                                "estimated_slippage_usdc",
+                            )
+                        ), Decimal("0")),
+                    )
+                except (TypeError, ValueError):
+                    await self._degrade_local_mainnet_protection(runtime["worker"])
+                    return None
             evidence = dict(result.evidence)
             now = utc_now()
             output = {
@@ -5393,6 +5416,23 @@ class BinanceExecutionAdapter:
             )
             if not await within_deadline(self._persist_local_mainnet_protection(record)):
                 raise RuntimeError("filled owner was not read back from PostgreSQL")
+            session = getattr(authority, "_mainnet_launch_session", None)
+            if isinstance(session, dict) and session.get("policy") == "LIVE_RESEARCH_PILOT":
+                validate_pilot_fill(
+                    side=intent.side,
+                    average_entry_price=weighted_entry,
+                    filled_quantity=filled_quantity,
+                    stop_loss_price=Decimal(str(intent.stop_loss_price)),
+                    take_profit_price=Decimal(str(intent.take_profit_price)),
+                    estimated_costs_usdc=sum((
+                        Decimal(str(getattr(intent, name, None)))
+                        for name in (
+                            "estimated_fees_usdc",
+                            "estimated_funding_usdc",
+                            "estimated_slippage_usdc",
+                        )
+                    ), Decimal("0")),
+                )
             tighten_deadline(fill_times)
 
             exit_side = "SELL" if str(getattr(intent.side, "value", intent.side)).upper() == "BUY" else "BUY"

@@ -793,6 +793,7 @@ async def add_local_mainnet_entry_fill(
     event_time=None,
     requested_quantity=Decimal("0.2"),
     filled_quantity=Decimal("0.2"),
+    fill_price=Decimal("2000"),
     status="FILLED",
 ):
     event_time = event_time or datetime.now(timezone.utc)
@@ -808,7 +809,7 @@ async def add_local_mainnet_entry_fill(
             side=OrderSide.BUY,
             position_side=PositionSide.BOTH,
             quantity=filled_quantity,
-            price=Decimal("2000"),
+            price=fill_price,
             commission=Decimal("0.01"),
             commission_asset="USDC",
             realized_pnl=Decimal("0"),
@@ -876,13 +877,21 @@ async def test_local_mainnet_post_fill_protection_uses_actual_fill_quantity(monk
     await add_local_mainnet_entry_fill(
         ledger,
         entry_id,
-        requested_quantity=Decimal("0.4"),
-        filled_quantity=Decimal("0.2"),
+        requested_quantity=Decimal("0.02"),
+        filled_quantity=Decimal("0.02"),
+        fill_price=Decimal("2000.10"),
         status="PARTIALLY_FILLED",
     )
     adapter, authority = make_local_mainnet_adapter(monkeypatch, ledger)
-    intent = local_mainnet_intent(entry_id, quantity=Decimal("0.4"))
-    order = local_mainnet_entry_order(entry_id, quantity=Decimal("0.4"))
+    authority._mainnet_launch_session = {"policy": "LIVE_RESEARCH_PILOT"}
+    intent = local_mainnet_intent(entry_id, quantity=Decimal("0.02")).model_copy(update={
+        "stop_loss_price": Decimal("1950"),
+        "take_profit_price": Decimal("2100"),
+        "estimated_fees_usdc": Decimal("0"),
+        "estimated_funding_usdc": Decimal("0"),
+        "estimated_slippage_usdc": Decimal("0"),
+    })
+    order = local_mainnet_entry_order(entry_id, quantity=Decimal("0.02"))
     order.status = "PARTIALLY_FILLED"
     written = []
     algos = {}
@@ -918,7 +927,7 @@ async def test_local_mainnet_post_fill_protection_uses_actual_fill_quantity(monk
         async def request(self, method, path, **kwargs):
             assert method == "GET" and kwargs.get("signed") is True
             if path == "/fapi/v2/positionRisk":
-                return [{"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0.2"}]
+                return [{"symbol": "ETHUSDC", "positionSide": "BOTH", "positionAmt": "0.02"}]
             if path == "/fapi/v1/algoOrder":
                 return dict(algos[int(kwargs["params"]["algoId"])])
             if path == "/fapi/v1/openAlgoOrders":
@@ -930,22 +939,23 @@ async def test_local_mainnet_post_fill_protection_uses_actual_fill_quantity(monk
     adapter._submit_local_mainnet_protection_algo = submit
 
     async def cancel_entry(_symbol, _client_order_id):
-        return {"status": "CANCELED", "executedQty": "0.2"}
+        return {"status": "CANCELED", "executedQty": "0.02"}
 
     adapter._cancel_testnet_entry_for_protection = cancel_entry
 
     assert await adapter._protect_local_mainnet_entry(
         intent,
         order,
-        {"status": "PARTIALLY_FILLED", "executedQty": "0.2"},
+        {"status": "PARTIALLY_FILLED", "executedQty": "0.02"},
         authority=authority,
     ) is True
     assert [call["order_type"] for call in submitted] == ["STOP_MARKET", "TAKE_PROFIT_MARKET"]
-    assert all(call["quantity"] == Decimal("0.2") for call in submitted)
+    assert all(call["quantity"] == Decimal("0.02") for call in submitted)
     assert all(call["position_side"] == "BOTH" for call in submitted)
     assert [row["state"] for row in written][-1] == "PROTECTED"
-    assert written[-1]["requested_quantity"] == Decimal("0.4")
-    assert written[-1]["filled_quantity"] == Decimal("0.2")
+    assert written[-1]["requested_quantity"] == Decimal("0.02")
+    assert written[-1]["filled_quantity"] == Decimal("0.02")
+    assert written[-1]["entry_average_price"] == Decimal("2000.10")
     assert adapter.last_local_mainnet_protection["status"] == "PROTECTED"
 
 
