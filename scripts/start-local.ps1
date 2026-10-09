@@ -377,9 +377,20 @@ Write-Host "Building the pinned local Worker image from commit $launchHeadSha...
 & $docker.Source --context $script:dockerContext build --file Dockerfile.worker --tag $workerImageTag --tag $workerCommitTag --label "org.blessing.git.sha=$launchHeadSha" --label "org.blessing.source.sha256=$($launchBinding.sourceSha256)" $repoRoot
 if ($LASTEXITCODE -ne 0) { throw "The local Worker image could not be built; the control plane was not started." }
 
-# Fail closed: the built image must carry the exact HEAD and source hash reviewed above, and the tree must
-# still be clean and at that HEAD (a change made during the build would make the image unreviewed).
-$builtLabelsJson = & $docker.Source --context $script:dockerContext image inspect --format "{{json .Config.Labels}}" $workerImageTag 2>$null
+# Fail closed: the image ID that will be pinned is read first, and its labels are checked by that ID, so a tag
+# moved after this point cannot change what was verified. The commit tag must resolve to the same image.
+$workerImageId = & $docker.Source --context $script:dockerContext image inspect --format "{{.Id}}" $workerImageTag
+if ($LASTEXITCODE -ne 0 -or "$workerImageId".Trim() -notmatch '^sha256:[0-9a-f]{64}$') {
+    throw "The local Worker image identity could not be verified; the control plane was not started."
+}
+$workerImageId = "$workerImageId".Trim()
+$commitTagImageId = (& $docker.Source --context $script:dockerContext image inspect --format "{{.Id}}" $workerCommitTag 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $commitTagImageId -ne $workerImageId) {
+    throw "The local Worker commit tag does not resolve to the verified image; the control plane was not started."
+}
+# The image must carry the exact HEAD and source hash reviewed above, and the tree must still be clean and at
+# that HEAD (a change made during the build would make the image unreviewed).
+$builtLabelsJson = & $docker.Source --context $script:dockerContext image inspect --format "{{json .Config.Labels}}" $workerImageId 2>$null
 if ($LASTEXITCODE -ne 0) { throw "The local Worker image labels could not be read; the control plane was not started." }
 $builtLabelTable = @{}
 try {
@@ -396,10 +407,6 @@ if ($currentDirtyEntries -or $currentHeadSha -ne $launchHeadSha -or
     throw "The local Worker image is not bound to the current clean HEAD ($launchHeadSha); the control plane was not started."
 }
 
-$workerImageId = & $docker.Source --context $script:dockerContext image inspect --format "{{.Id}}" $workerImageTag
-if ($LASTEXITCODE -ne 0 -or "$workerImageId".Trim() -notmatch '^sha256:[0-9a-f]{64}$') {
-    throw "The local Worker image identity could not be verified; the control plane was not started."
-}
 $env:LOCAL_ONLY = "true"
 $env:LOCAL_RUNTIME_TARGET = "LOCAL"
 $env:LOCAL_RUN_ID = "run-" + [guid]::NewGuid().ToString()

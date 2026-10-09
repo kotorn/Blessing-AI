@@ -64,19 +64,20 @@ def test_source_fingerprint_comes_from_the_existing_helper_not_a_new_algorithm()
 def test_post_build_verification_is_between_build_and_worker_start_in_order():
     text = _text()
     build = _index(text, 'build --file Dockerfile.worker')
-    label_read = _index(text, 'image inspect --format "{{json .Config.Labels}}" $workerImageTag')
+    id_read = _index(text, 'image inspect --format "{{.Id}}" $workerImageTag')
+    commit_tag_id = _index(text, 'image inspect --format "{{.Id}}" $workerCommitTag')
+    label_read = _index(text, 'image inspect --format "{{json .Config.Labels}}" $workerImageId')
+    tree_recheck = _index(text, '$currentDirtyEntries -or')
+    head_recheck = _index(text, '$currentHeadSha -ne $launchHeadSha')
     label_check = _index(text, "$builtLabelTable['org.blessing.git.sha'] -ne $launchHeadSha")
     source_check = _index(text, "$builtLabelTable['org.blessing.source.sha256'] -ne")
-    head_recheck = _index(text, '$currentHeadSha -ne $launchHeadSha')
-    tree_recheck = _index(text, '$currentDirtyEntries -or')
+    # The HEAD, tree and label comparisons share one fail-closed if-condition, so they precede the refusal.
     refusal = text.index('is not bound to the current clean HEAD', label_check)
-    image_id = _index(text, 'image inspect --format "{{.Id}}" $workerImageTag')
     worker_image_env = _index(text, '$env:LOCAL_WORKER_IMAGE_ID = ')
     supervisor_start = _index(text, '& $npm.Source run dev')
 
-    # The HEAD, tree and label comparisons share one fail-closed if-condition, so they precede the refusal.
-    assert build < label_read < tree_recheck < head_recheck < label_check < source_check < refusal
-    assert refusal < image_id < worker_image_env < supervisor_start
+    assert build < id_read < commit_tag_id < label_read < tree_recheck < head_recheck < label_check
+    assert label_check < source_check < refusal < worker_image_env < supervisor_start
 
 
 def test_existing_build_fragment_used_by_the_typescript_launcher_test_is_unchanged():
