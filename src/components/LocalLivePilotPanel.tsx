@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, AlertTriangle, CheckCircle2, LoaderCircle, ShieldAlert } from 'lucide-react';
 import { apiClient } from '../api/client';
 import type { LocalLivePilotStrategyId } from '../backend/local-live-pilot';
@@ -85,6 +85,27 @@ function storedCampaignId(): string | null {
   }
 }
 
+function forgetCampaignId(campaignId: string) {
+  try {
+    if (sessionStorage.getItem(PILOT_CAMPAIGN_STORAGE_KEY) === campaignId) sessionStorage.removeItem(PILOT_CAMPAIGN_STORAGE_KEY);
+  } catch {
+    // sessionStorage unavailable: nothing was stored.
+  }
+}
+
+// The server's supervisor reports the campaign of a running pilot worker (null when none runs).
+// That is authoritative; the remembered id covers campaigns that are not armed yet.
+async function discoverCampaignId(): Promise<string | null> {
+  try {
+    const runtime = await apiClient.get<{ supervisor?: { pilotCampaignId?: unknown } | null }>('/api/local/runtime');
+    const supervised = runtime.supervisor?.pilotCampaignId;
+    if (typeof supervised === 'string' && supervised) return supervised;
+  } catch {
+    // Runtime status unavailable: fall back to the remembered campaign id.
+  }
+  return storedCampaignId();
+}
+
 export function formatLocalPilotFailure(error: unknown, fallback: string): string {
   if (!error || typeof error !== 'object') return fallback;
   const data = (error as { data?: { error?: unknown; reason?: unknown } }).data;
@@ -113,6 +134,7 @@ export const LocalLivePilotPanel: React.FC = () => {
   const [readiness, setReadiness] = useState<PilotResponse['readiness']>();
   const [preparation, setPreparation] = useState<PilotResponse['preparation']>();
   const [runtime, setRuntime] = useState<PilotResponse['runtime']>();
+  const campaignChosenRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -127,25 +149,28 @@ export const LocalLivePilotPanel: React.FC = () => {
 
   useEffect(() => {
     let active = true;
-    const storedId = storedCampaignId();
-    if (storedId) {
-      void apiClient.get<PilotResponse>(`/api/local/pilot/${encodeURIComponent(storedId)}`)
-        .then((latest) => {
-          if (!active) return;
-          const restored = campaignFrom(latest);
-          if (!restored) return;
-          rememberCampaignId(restored);
-          if (TERMINAL_CAMPAIGN_STATUSES.includes(restored.status)) return;
-          setCampaign(restored);
-          setAccounting(latest.accounting);
-          setReadiness(latest.readiness);
-          setPreparation(latest.preparation);
-          setRuntime(latest.runtime);
-          setEvidence(latest.evidence_status === 'VERIFIED' ? 'PASS' : 'UNKNOWN');
-          setMessage(`กู้คืนแคมเปญ: ${restored.status}`);
-        })
-        .catch(() => {});
-    }
+    let campaignId: string | null = null;
+    void (async () => {
+      campaignId = await discoverCampaignId();
+      if (!campaignId || !active) return;
+      const latest = await apiClient.get<PilotResponse>(`/api/local/pilot/${encodeURIComponent(campaignId)}`);
+      if (!active || campaignChosenRef.current) return;
+      const restored = campaignFrom(latest);
+      if (!restored) return;
+      rememberCampaignId(restored);
+      if (TERMINAL_CAMPAIGN_STATUSES.includes(restored.status)) return;
+      setCampaign(restored);
+      setAccounting(latest.accounting);
+      setReadiness(latest.readiness);
+      setPreparation(latest.preparation);
+      setRuntime(latest.runtime);
+      setEvidence(latest.evidence_status === 'VERIFIED' ? 'PASS' : 'UNKNOWN');
+      setMessage(`กู้คืนแคมเปญ: ${restored.status}`);
+    })().catch((error: unknown) => {
+      if (campaignId && (error as { data?: { error?: unknown } } | null)?.data?.error === 'LOCAL_PILOT_NOT_FOUND') {
+        forgetCampaignId(campaignId);
+      }
+    });
     return () => { active = false; };
   }, []);
 
@@ -157,6 +182,7 @@ export const LocalLivePilotPanel: React.FC = () => {
       const result = await apiClient.post<PilotResponse>(`/api/local/pilot/${action}`, payload);
       const next = campaignFrom(result);
       if (next) {
+        campaignChosenRef.current = true;
         setCampaign(next);
         rememberCampaignId(next);
       }

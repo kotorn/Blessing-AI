@@ -28,12 +28,23 @@ const hooks = vi.hoisted(() => {
     useCallback<T>(fn: T) {
       return fn;
     },
+    useRef<T>(initial: T) {
+      const [ref] = hooks.useState(() => ({ current: initial }));
+      return ref;
+    },
   };
 });
 
 vi.mock('react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react')>();
-  return { ...actual, default: actual, useState: hooks.useState, useEffect: hooks.useEffect, useCallback: hooks.useCallback };
+  return {
+    ...actual,
+    default: actual,
+    useState: hooks.useState,
+    useEffect: hooks.useEffect,
+    useCallback: hooks.useCallback,
+    useRef: hooks.useRef,
+  };
 });
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
@@ -128,6 +139,7 @@ const activeCampaign = {
 };
 
 let serverCampaign: Record<string, unknown> = pendingCampaign;
+let supervisedCampaignId: string | null = null;
 let storageMap: Map<string, string>;
 
 function installSessionStorage(store: Storage | null) {
@@ -149,9 +161,13 @@ beforeEach(() => {
   } as unknown as Storage;
   installSessionStorage(memory);
   serverCampaign = pendingCampaign;
+  supervisedCampaignId = null;
   api.get.mockReset();
   api.post.mockReset();
   api.get.mockImplementation(async (url: string) => {
+    if (url === '/api/local/runtime') {
+      return { supervisor: supervisedCampaignId ? { pilotCampaignId: supervisedCampaignId } : null };
+    }
     if (url === '/api/local/pilot/readiness') return { readiness: readiness(false) };
     if (url === `/api/local/pilot/${CAMPAIGN_ID}`) return serverCampaign;
     throw new Error(`unexpected GET ${url}`);
@@ -203,6 +219,65 @@ describe('LocalLivePilotPanel campaign rediscovery after remount', () => {
     expect(storageMap.has(STORAGE_KEY)).toBe(false);
     expect(renderToStaticMarkup(element)).not.toContain(CAMPAIGN_ID);
     expect(findButton(element, 'สร้างคำขออนุมัติ')?.props.disabled).toBe(false);
+  });
+
+  it('restores the campaign the server is supervising when browser storage is empty', async () => {
+    supervisedCampaignId = CAMPAIGN_ID;
+    serverCampaign = activeCampaign;
+
+    const inst = mount();
+    await flush();
+    const html = renderToStaticMarkup(render(inst));
+
+    expect(api.get).toHaveBeenCalledWith(`/api/local/pilot/${CAMPAIGN_ID}`);
+    expect(html).toContain(CAMPAIGN_ID);
+    expect(findButton(render(inst), 'หยุดเพิ่มความเสี่ยง')).not.toBeNull();
+    expect(storageMap.get(STORAGE_KEY)).toBe(CAMPAIGN_ID);
+  });
+
+  it('does not overwrite a campaign the operator created while the restore was in flight', async () => {
+    storageMap.set(STORAGE_KEY, CAMPAIGN_ID);
+    let releaseRestore: () => void = () => {};
+    let campaignReads = 0;
+    api.get.mockImplementation(async (url: string) => {
+      if (url === '/api/local/runtime') return { supervisor: null };
+      if (url === '/api/local/pilot/readiness') return { readiness: readiness(false) };
+      if (url === `/api/local/pilot/${CAMPAIGN_ID}`) {
+        campaignReads += 1;
+        if (campaignReads === 1) {
+          await new Promise<void>((resolve) => { releaseRestore = resolve; });
+          return activeCampaign;
+        }
+        return serverCampaign;
+      }
+      throw new Error(`unexpected GET ${url}`);
+    });
+
+    const inst = mount();
+    await flush();
+    findButton(render(inst), 'สร้างคำขออนุมัติ')!.props.onClick?.();
+    await flush();
+    releaseRestore();
+    await flush();
+    const element = render(inst);
+
+    expect(findButton(element, 'อนุมัติแคมเปญ')).not.toBeNull();
+    expect(findButton(element, 'หยุดเพิ่มความเสี่ยง')).toBeNull();
+  });
+
+  it('forgets a stored campaign id that the server reports as not found', async () => {
+    storageMap.set(STORAGE_KEY, CAMPAIGN_ID);
+    api.get.mockImplementation(async (url: string) => {
+      if (url === '/api/local/runtime') return { supervisor: null };
+      if (url === '/api/local/pilot/readiness') return { readiness: readiness(false) };
+      throw Object.assign(new Error('LOCAL_PILOT_NOT_FOUND'), { status: 404, data: { error: 'LOCAL_PILOT_NOT_FOUND' } });
+    });
+
+    const inst = mount();
+    await flush();
+    renderToStaticMarkup(render(inst));
+
+    expect(storageMap.has(STORAGE_KEY)).toBe(false);
   });
 
   it('renders normally when sessionStorage is unavailable', async () => {
