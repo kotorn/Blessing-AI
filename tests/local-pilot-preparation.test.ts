@@ -69,6 +69,26 @@ describe('Local pilot preparation attestation', () => {
     expect(() => attestPreparedLocalPilot(wrongSupervisor)).toThrow('WORKER_IDENTITY_UNVERIFIED');
   });
 
+  it('ignores only the age bound when requireFresh is false', () => {
+    const input = validInput();
+    const prepared = attestPreparedLocalPilot(input);
+    const expected = {
+      campaignId: input.campaignId, runId: input.runId, sourceFingerprint: input.sourceFingerprint,
+      approvalId: input.approvalId, workerGeneration: input.workerGeneration,
+      supervisorInstanceId: input.supervisorInstanceId,
+    };
+    const later = new Date(input.now.getTime() + 10 * 60_000);
+    expect(preparedLocalPilotMatches(prepared, expected, later)).toBe(false);
+    expect(preparedLocalPilotMatches(prepared, expected, later, { requireFresh: false })).toBe(true);
+    // identity and evidence integrity still apply
+    expect(preparedLocalPilotMatches(prepared, { ...expected, workerGeneration: input.workerGeneration + 1 },
+      later, { requireFresh: false })).toBe(false);
+    expect(preparedLocalPilotMatches(prepared, { ...expected, runId: 'another-run' },
+      later, { requireFresh: false })).toBe(false);
+    const tampered = { ...prepared, preflightSha256: '0'.repeat(64) };
+    expect(preparedLocalPilotMatches(tampered, expected, later, { requireFresh: false })).toBe(false);
+  });
+
   it('allows the monitor to be NOT_RUN only after signed flat-account evidence while DISARMED', () => {
     const input = validInput();
     input.workerState.pilot_lifecycle_monitor.status = 'NOT_RUN';

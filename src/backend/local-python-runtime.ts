@@ -41,8 +41,41 @@ export function buildTrustedPythonVerificationEnvironment(
   return environment;
 }
 
-export function verifyPython(executable: string, source: NodeJS.ProcessEnv = process.env, verifyTree = true): string {
+export interface VerifyPythonDeps {
+  run?: typeof execFileSync;
+  now?: () => number;
+}
+
+// The recursive ACL walk of the interpreter tree takes tens of seconds on a real
+// installation and every readiness evaluation repeated it several times on the
+// control plane's event loop, starving the Worker heartbeat. A successful tree
+// verification is reused for a short window; the interpreter's own digest is still
+// re-hashed on every call, so a replaced python.exe is never accepted from cache.
+// BLESSING_TRUSTED_PYTHON_CACHE_SECONDS=0 restores verify-every-time.
+const treeVerifiedCache = new Map<string, { at: number; digest: string }>();
+
+function treeCacheTtlMs(source: NodeJS.ProcessEnv): number {
+  const seconds = Number(source.BLESSING_TRUSTED_PYTHON_CACHE_SECONDS ?? '60');
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 300) * 1000 : 0;
+}
+
+export function resetTrustedPythonVerificationCache(): void {
+  treeVerifiedCache.clear();
+}
+
+export function verifyPython(
+  executable: string,
+  source: NodeJS.ProcessEnv = process.env,
+  verifyTree = true,
+  deps: VerifyPythonDeps = {},
+): string {
+  const run = deps.run ?? execFileSync;
+  const now = deps.now ?? Date.now;
   const digestBefore = createHash('sha256').update(readFileSync(executable)).digest('hex');
+  const cacheKey = `${path.resolve(executable).toLowerCase()}|${verifyTree ? 'tree' : 'file'}`;
+  const ttl = treeCacheTtlMs(source);
+  const cached = treeVerifiedCache.get(cacheKey);
+  if (ttl > 0 && cached && cached.digest === digestBefore && now() - cached.at < ttl) return cached.digest;
   const environment = buildTrustedPythonVerificationEnvironment(source, executable);
   environment.BLESSING_VERIFY_PYTHON_TREE = verifyTree ? '1' : '0';
   const script = [
@@ -90,14 +123,15 @@ export function verifyPython(executable: string, source: NodeJS.ProcessEnv = pro
     `if ($signature.Status -eq 'Valid' -and $signature.SignerCertificate.Subject -eq '${TRUSTED_PYTHON_SIGNER}') { Write-Output TRUSTED } else { exit 1 }`,
   ].join('; ');
   try {
-    const trusted = execFileSync(path.join(WINDOWS_ROOT, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+    const trusted = run(path.join(WINDOWS_ROOT, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
       '-NoProfile', '-NonInteractive', '-Command', script,
     ], {
       cwd: process.cwd(), env: environment, encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'], timeout: 120_000, maxBuffer: 1_048_576,
     }).trim();
     const digestAfter = createHash('sha256').update(readFileSync(executable)).digest('hex');
-    if (trusted !== 'TRUSTED' || digestBefore !== digestAfter) throw new Error('python runtime changed');
+    if (String(trusted).trim() !== 'TRUSTED' || digestBefore !== digestAfter) throw new Error('python runtime changed');
+    if (ttl > 0) treeVerifiedCache.set(cacheKey, { at: now(), digest: digestAfter });
     return digestAfter;
   } catch {
     throw new Error('LOCAL_PILOT_TRUSTED_PYTHON_EXECUTABLE_NOT_VERIFIED');

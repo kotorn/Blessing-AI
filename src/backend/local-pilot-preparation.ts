@@ -168,7 +168,14 @@ export function preparedLocalPilotMatches(
   prepared: PreparedLocalPilot | null,
   expected: Omit<PreparedLocalPilot, 'preflightObservedAt' | 'preparedAt' | 'preflightSha256' | 'preflightEvidence'>,
   now = new Date(),
+  options: { requireFresh?: boolean } = {},
 ): boolean {
+  // requireFresh=false keeps every identity/evidence check but not the 120 s age
+  // bound. Only the start route uses it, because it refreshes the read-only
+  // preflight (and fails closed if that fails) before it arms. Without it, a human
+  // pause longer than 120 s after Prepare dead-ends the campaign: Prepare requires an
+  // unused PAPER worker, but the worker is already LIVE/DISARMED.
+  const requireFresh = options.requireFresh !== false;
   return prepared !== null
     && prepared.campaignId === expected.campaignId
     && prepared.runId === expected.runId
@@ -178,7 +185,7 @@ export function preparedLocalPilotMatches(
     && prepared.supervisorInstanceId === expected.supervisorInstanceId
     && prepared.preflightSha256 === preparedLocalPilotEvidenceHash(prepared.preflightEvidence)
     && Number.isFinite(Date.parse(prepared.preflightObservedAt))
-    && now.getTime() - Date.parse(prepared.preflightObservedAt) <= LOCAL_PILOT_PREFLIGHT_MAX_AGE_MS
+    && (!requireFresh || now.getTime() - Date.parse(prepared.preflightObservedAt) <= LOCAL_PILOT_PREFLIGHT_MAX_AGE_MS)
     && Date.parse(prepared.preflightObservedAt) <= now.getTime() + 2_000;
 }
 

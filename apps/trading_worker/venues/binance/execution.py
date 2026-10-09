@@ -4969,10 +4969,26 @@ class BinanceExecutionAdapter:
             except Exception:
                 observed = ProtectionResult(False, "AMBIGUOUS", ("owner_protection_identity_invalid",))
             if not observed.protected:
+                intent, order = self._reconstruct_intent_and_order_from_record(owner)
+                if observed.state in {"UNPROTECTED", "AMBIGUOUS"} and await self._local_mainnet_position_is_flat(intent):
+                    # A triggered stop/target is the intended exit, not lost
+                    # protection. With the signed position flat, closing again is
+                    # impossible; reconciliation adopts the exit fill, cancels the
+                    # sibling Algo and closes the owner with proof (Gap B).
+                    try:
+                        exit_status = await self.reconciliation.reconcile()
+                    except Exception as exc:
+                        logger.error("Pilot exit reconciliation failed: %s", type(exc).__name__)
+                        exit_status = "UNKNOWN"
+                    if exit_status == "IN_SYNC":
+                        actions["exit_reconciled_count"] = actions.get("exit_reconciled_count", 0) + 1
+                        return actions
+                    await self._degrade_local_mainnet_protection(authority)
+                    actions["failed_action_count"] += 1
+                    return actions
                 await self._degrade_local_mainnet_protection(authority)
                 actions["failed_action_count"] += 1
                 if observed.state in {"UNPROTECTED", "AMBIGUOUS"}:
-                    intent, order = self._reconstruct_intent_and_order_from_record(owner)
                     try:
                         if await self._local_mainnet_close_only_once(
                             intent, order, owner,

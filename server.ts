@@ -2577,7 +2577,7 @@ app.get('/api/local/pilot/:campaignId', async (req: Request, res: Response) => {
         approvalId: `local-approval-${campaign.campaignId.slice('pilot-'.length)}`,
         workerGeneration: supervisor?.workerGeneration ?? -1,
         supervisorInstanceId: supervisor?.supervisorInstanceId || '',
-      });
+      }, new Date(), { requireFresh: false });
     const accountingData = workerAccounting?.response.ok === true
       && workerAccounting.data?.evidence_status === 'VERIFIED'
       && workerAccounting.data?.campaign_id === campaign.campaignId
@@ -2944,7 +2944,9 @@ app.post('/api/local/pilot/start', async (req: Request, res: Response) => {
         approvalId,
         workerGeneration: supervisor.workerGeneration,
         supervisorInstanceId: supervisor.supervisorInstanceId,
-      })) {
+      }, new Date(), { requireFresh: false })) {
+      // Identity and evidence integrity only. Freshness is re-established by the
+      // read-only preflight below, which must pass before the worker is armed.
       return res.status(409).json({ error: 'LOCAL_PILOT_PREPARE_REQUIRED' });
     }
     const beforeArm = await readLocalWorkerState();

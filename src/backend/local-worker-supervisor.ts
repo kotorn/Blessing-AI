@@ -1,3 +1,4 @@
+import { startHeartbeatThread, type HeartbeatThread } from './local-heartbeat-thread.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -173,6 +174,7 @@ export class LocalWorkerSupervisor {
   private readonly supervisorInstanceId = randomUUID();
   private mode: 'STOPPED' | 'PAPER' | 'LIVE' = 'STOPPED';
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatThread: HeartbeatThread | null = null;
   private stateMonitorTimer: ReturnType<typeof setInterval> | null = null;
   private activePilotVerdict: PilotReadinessVerdict | null = null;
   private stateMonitorInFlightFor: ChildProcess | null = null;
@@ -201,6 +203,14 @@ export class LocalWorkerSupervisor {
 
   public setPilotReadinessVerdict(verdict: PilotReadinessVerdict | null): void {
     this.activePilotVerdict = verdict;
+    this.heartbeatThread?.setVerdict(verdict);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    this.heartbeatThread?.stop();
+    this.heartbeatThread = null;
   }
 
   status(): {
@@ -329,8 +339,7 @@ export class LocalWorkerSupervisor {
 
   async stopWorker(): Promise<void> {
     const current = this.worker;
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.heartbeatTimer = null;
+    this.stopHeartbeat();
     if (this.stateMonitorTimer) clearInterval(this.stateMonitorTimer);
     this.stateMonitorTimer = null;
     if (this.workerContainerName) {
@@ -564,7 +573,18 @@ export class LocalWorkerSupervisor {
   }
 
   private startSupervisorHeartbeat(child: ChildProcess): void {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.stopHeartbeat();
+    if (!this.options.fetcher) {
+      // Production: heartbeat on its own thread so a blocked event loop (synchronous
+      // readiness verification) cannot trip the Worker's 15 s liveness watchdog.
+      this.heartbeatThread = startHeartbeatThread({
+        url: `${this.options.workerUrl.replace(/\/+$/, '')}/supervisor/heartbeat`,
+        token: this.options.workerIdentityToken,
+        intervalMs: 3_000,
+        verdict: this.activePilotVerdict,
+      });
+      return;
+    }
     const send = async () => {
       if (this.worker !== child || !this.childIsRunning(child)) return;
       try {
@@ -686,8 +706,7 @@ export class LocalWorkerSupervisor {
 
   private clearWorkerState(child: ChildProcess): void {
     if (this.worker !== child) return;
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.heartbeatTimer = null;
+    this.stopHeartbeat();
     if (this.stateMonitorTimer) clearInterval(this.stateMonitorTimer);
     this.stateMonitorTimer = null;
     this.activePilotVerdict = null;
