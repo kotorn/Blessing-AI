@@ -185,6 +185,8 @@ _LOCAL_LIVE_PILOT_EXPECTED = {
     "market": "USD_M_FUTURES",
     "position_notional_usdc": "50",
     "order_notional_usdc": "50",
+    "entry_target_notional_usdc": "40",
+    "execution_risk_buffer_usdc": "0.20",
     "total_exposure_usdc": "50",
     "planned_stop_risk_usdc": "2",
     "campaign_drawdown_usdc": "5",
@@ -197,6 +199,9 @@ _LOCAL_LIVE_PILOT_EXPECTED = {
     "min_reward_to_risk": "0.125",
     "management_mode": "QUICK",
     "max_entries": 1,
+    "session_entry_cutoff_seconds": 5400,
+    "session_close_after_seconds": 6600,
+    "session_end_seconds": 7200,
 }
 
 

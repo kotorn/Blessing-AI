@@ -239,17 +239,19 @@ def _docker_container_healthy(container_name: str) -> bool:
 
 
 @pytest.mark.skipif(
-    not _docker_container_healthy("blessing-postgres-local"),
-    reason="blessing-postgres-local container is not running or healthy",
+    not os.environ.get('BLESSING_BACKUP_TEST_CONTAINER', '').startswith('blessing-pilot-acceptance-'),
+    reason='Requires an explicitly named disposable backup fixture; never the trading container',
 )
 def test_live_docker_backup_roundtrip(tmp_path: Path):
-    """Hermetic live integration test running real pg_dump against the local container."""
+    """Real pg_dump only against the explicitly opted-in disposable fixture."""
+    container = os.environ['BLESSING_BACKUP_TEST_CONTAINER']
+    assert _docker_container_healthy(container)
     output_file = tmp_path / "live_backup.sql"
     dump_local_postgres(
         output_path=output_file,
-        container="blessing-postgres-local",
-        user="blessing_user",
-        db="blessing_ai",
+        container=container,
+        user="pilot_ci",
+        db=os.environ['BLESSING_BACKUP_TEST_DB'],
         tables=["mainnet_launch_sessions", "binance_algo_protections"],
     )
 

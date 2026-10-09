@@ -12,6 +12,10 @@ type Campaign = {
 };
 
 type PilotResponse = {
+  session?: {
+    armedAt?: string; entryCutoffAt?: string; closeAfterAt?: string; endAt?: string;
+    stage?: string;
+  };
   campaign?: Campaign;
   campaignId?: string;
   strategyId?: LocalLivePilotStrategyId;
@@ -40,14 +44,12 @@ type PilotResponse = {
     slippageUsdc?: string;
     lastEventAt?: string | null;
     reason?: string | null;
+    completeness?: string;
   };
 };
 
 const STRATEGIES: Array<{ id: LocalLivePilotStrategyId; label: string }> = [
-  { id: 'trend', label: 'Trend' },
-  { id: 'shock', label: 'Shock' },
-  { id: 'carry', label: 'Funding Carry' },
-  { id: 'grid', label: 'Grid' },
+  { id: 'grid', label: 'Grid · BUY-only · 1 entry' },
 ];
 
 function campaignFrom(value: PilotResponse): Campaign | null {
@@ -134,6 +136,8 @@ export const LocalLivePilotPanel: React.FC = () => {
   const [readiness, setReadiness] = useState<PilotResponse['readiness']>();
   const [preparation, setPreparation] = useState<PilotResponse['preparation']>();
   const [runtime, setRuntime] = useState<PilotResponse['runtime']>();
+  const [session, setSession] = useState<PilotResponse['session']>();
+  const [papiProtectionRiskAcknowledged, setPapiProtectionRiskAcknowledged] = useState(false);
   const campaignChosenRef = useRef(false);
 
   useEffect(() => {
@@ -164,6 +168,7 @@ export const LocalLivePilotPanel: React.FC = () => {
       setReadiness(latest.readiness);
       setPreparation(latest.preparation);
       setRuntime(latest.runtime);
+      setSession(latest.session);
       setEvidence(latest.evidence_status === 'VERIFIED' ? 'PASS' : 'UNKNOWN');
       setMessage(`กู้คืนแคมเปญ: ${restored.status}`);
     })().catch((error: unknown) => {
@@ -194,11 +199,13 @@ export const LocalLivePilotPanel: React.FC = () => {
           setReadiness(latest.readiness);
           setPreparation(latest.preparation);
           setRuntime(latest.runtime);
+          setSession(latest.session);
         } catch {
           refreshFailed = true;
           setReadiness(undefined);
           setPreparation(undefined);
           setRuntime('UNKNOWN');
+          setSession(undefined);
         }
       }
       setEvidence(result.evidence_status === 'VERIFIED' && !refreshFailed ? 'PASS' : 'UNKNOWN');
@@ -213,6 +220,7 @@ export const LocalLivePilotPanel: React.FC = () => {
       setMessage(formatLocalPilotFailure(error, 'ตรวจสอบไม่สำเร็จ'));
     } finally {
       setBusy(false);
+      if (action === 'approve' || action === 'start') setPapiProtectionRiskAcknowledged(false);
     }
   }, []);
 
@@ -232,6 +240,7 @@ export const LocalLivePilotPanel: React.FC = () => {
       setReadiness(result.readiness);
       setPreparation(result.preparation);
       setRuntime(result.runtime);
+      setSession(result.session);
       setEvidence(result.evidence_status === 'VERIFIED' ? 'PASS' : 'UNKNOWN');
       setMessage(`สถานะแคมเปญ: ${next?.status || 'UNKNOWN'}`);
     } catch (error) {
@@ -249,7 +258,7 @@ export const LocalLivePilotPanel: React.FC = () => {
         <div>
           <h3 id="pilot-title" className="text-sm font-semibold text-zinc-100">Local Live Research Pilot</h3>
           <p className="mt-1 text-xs leading-5 text-zinc-400">
-            ETHUSDC Futures · QUICK เท่านั้น · 7 วัน · notional สูงสุด 50 USDC · planned risk 2 USDC · drawdown stop 5 USDC · leverage ไม่เกิน 10x
+            ETHUSDC Futures · 1 entry · เป้าหมาย 40 USDC · buffer 0.20 USDC · notional สูงสุด 50 USDC · planned risk 2 USDC · drawdown stop 5 USDC · leverage ไม่เกิน 10x
           </p>
         </div>
       </div>
@@ -259,6 +268,25 @@ export const LocalLivePilotPanel: React.FC = () => {
           คำสั่ง Start อาจเปิดความเสี่ยงด้วยเงินจริง
         </div>
         <p className="mt-1 text-red-200/80">วงเงินเป็นเกณฑ์สั่งหยุด ไม่ใช่การรับประกันขาดทุนสูงสุด หากข้อมูลหรือการยืนยันสถานะไม่ครบ ระบบต้องหยุดเพิ่มความเสี่ยง</p>
+        <p className="mt-2">Signed GET ไม่พิสูจน์การส่ง SL/TP จริง: acceptance และ latency ของ PAPI protection ยังเป็น NOT_RUN จนอ่านกลับจากไม้แรก</p>
+        <p className="mt-1">Kill switch หยุดเพิ่มความเสี่ยง แต่ไม่ได้ปิด position ให้ flat ต้องพร้อมปิดและถอนคำสั่งค้างผ่าน Binance</p>
+        <label className="mt-3 flex items-start gap-2">
+          <input type="checkbox" name="papiProtectionRiskAcknowledged" checked={papiProtectionRiskAcknowledged}
+            disabled={busy} onChange={(event) => setPapiProtectionRiskAcknowledged(event.target.checked)}
+            className="mt-1 shrink-0" />
+          <span>ฉันรับทราบความเสี่ยง PAPI ที่ยังไม่พิสูจน์ จะเฝ้า session 2 ชั่วโมง และเฝ้าต่อเมื่อฉุกเฉินจนยืนยัน flat</span>
+        </label>
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 p-3 text-xs leading-5 text-zinc-300">
+        <p>Session: {session?.stage || 'NOT_ARMED'} · หยุด entry ที่ 90 นาที · เริ่มปิดที่ 110 นาที · ตรวจ flat ภายใน 120 นาที</p>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          {[
+            ['ARM', session?.armedAt], ['หยุด entry', session?.entryCutoffAt],
+            ['เริ่ม close-only', session?.closeAfterAt], ['สิ้นสุด session', session?.endAt],
+          ].map(([label, value]) => <div key={label}>{label}: {value ? new Date(value).toLocaleString() : 'UNKNOWN'}</div>)}
+        </div>
+        <p className="mt-2 text-amber-200">ไม่มี entry ก่อน cutoff = NO_ENTRY; ยังพิสูจน์เงินจริงไม่สำเร็จ หากยังไม่ flat ต้องเฝ้าต่อ</p>
       </div>
 
       <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100">
@@ -312,15 +340,15 @@ export const LocalLivePilotPanel: React.FC = () => {
       </div>}
 
       <div className="flex flex-wrap gap-2">
-        {campaign?.status === 'PENDING_APPROVAL' && <button type="button" disabled={busy || readiness?.canApprove !== true}
-          onClick={() => void runAction('approve', { campaignId: campaign.campaignId })}
+        {campaign?.status === 'PENDING_APPROVAL' && <button type="button" disabled={busy || readiness?.canApprove !== true || !papiProtectionRiskAcknowledged}
+          onClick={() => void runAction('approve', { campaignId: campaign.campaignId, papiProtectionRiskAcknowledged })}
           className="rounded-md bg-amber-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">อนุมัติแคมเปญ</button>}
         {campaign && ['APPROVED', 'ACTIVE'].includes(campaign.status) && <button type="button" disabled={busy || readiness?.canApprove !== true || preparation?.status === 'PASS'}
           onClick={() => void runAction('prepare', { campaignId: campaign.campaignId })}
           className="rounded-md bg-cyan-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">เตรียม LIVE/DISARMED</button>}
         {campaign && ['APPROVED', 'ACTIVE'].includes(campaign.status) && <button type="button"
-          disabled={busy || readiness?.canStart !== true || preparation?.status !== 'PASS'}
-          onClick={() => void runAction('start', { campaignId: campaign.campaignId })}
+          disabled={busy || readiness?.canStart !== true || preparation?.status !== 'PASS' || !papiProtectionRiskAcknowledged}
+          onClick={() => void runAction('start', { campaignId: campaign.campaignId, papiProtectionRiskAcknowledged })}
           className="rounded-md bg-red-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">เริ่ม Live Pilot (ARM)</button>}
         {campaign && <button type="button" disabled={busy} onClick={() => void refresh()}
           className="rounded-md border border-zinc-700 px-3 py-2 text-xs text-zinc-200 disabled:opacity-50"><Activity className="mr-1 inline h-3.5 w-3.5" />อ่านสถานะ</button>}

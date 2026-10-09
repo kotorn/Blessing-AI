@@ -112,6 +112,22 @@ function findButton(node: unknown, label: string): ReactElement<{ disabled?: boo
   return findButton(element.props.children, label);
 }
 
+function findAcknowledgement(node: unknown): ReactElement<{ checked: boolean; onChange: (event: { target: { checked: boolean } }) => void }> | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findAcknowledgement(child);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (!node || typeof node !== 'object' || !('props' in node)) return null;
+  const element = node as ReactElement<{ children?: unknown; name?: string }>;
+  if (element.type === 'input' && element.props.name === 'papiProtectionRiskAcknowledged') {
+    return element as ReturnType<typeof findAcknowledgement>;
+  }
+  return findAcknowledgement(element.props.children);
+}
+
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const readiness = (canStart: boolean) => ({
@@ -183,6 +199,43 @@ afterEach(() => {
 });
 
 describe('LocalLivePilotPanel campaign rediscovery after remount', () => {
+  it('requires a fresh acknowledgement before approval and includes it in the request', async () => {
+    supervisedCampaignId = CAMPAIGN_ID;
+    const inst = mount();
+    await flush();
+    expect(findButton(render(inst), 'อนุมัติแคมเปญ')?.props.disabled).toBe(true);
+    const acknowledgement = findAcknowledgement(render(inst));
+    expect(acknowledgement).not.toBeNull();
+    acknowledgement!.props.onChange({ target: { checked: true } });
+    api.post.mockResolvedValue(pendingCampaign);
+    findButton(render(inst), 'อนุมัติแคมเปญ')!.props.onClick?.();
+    await flush();
+    expect(api.post).toHaveBeenCalledWith('/api/local/pilot/approve', {
+      campaignId: CAMPAIGN_ID, papiProtectionRiskAcknowledged: true,
+    });
+    unmount(inst);
+    const restored = mount();
+    await flush();
+    expect(findAcknowledgement(render(restored))?.props.checked).toBe(false);
+    unmount(restored);
+  });
+
+  it('shows PAPI uncertainty and restores only the server session deadlines', async () => {
+    supervisedCampaignId = CAMPAIGN_ID;
+    serverCampaign = { ...activeCampaign, session: {
+      armedAt: '2026-10-09T10:00:00Z', entryCutoffAt: '2026-10-09T11:30:00Z',
+      closeAfterAt: '2026-10-09T11:50:00Z', endAt: '2026-10-09T12:00:00Z', stage: 'CLOSE_ONLY',
+    } };
+    const inst = mount();
+    await flush();
+    const html = renderToStaticMarkup(render(inst));
+    expect(html).toContain('SL/TP');
+    expect(html).toContain('NOT_RUN');
+    expect(html).toContain('CLOSE_ONLY');
+    expect(html).toContain('Kill switch');
+    unmount(inst);
+  });
+
   it('restores the active campaign and its close-only/revoke controls after navigation', async () => {
     const first = mount();
     await flush();

@@ -1,5 +1,7 @@
 # Local Pilot day-of checklist (ETHUSDC, Local Mainnet)
 
+> **Release-specific update (2026-10-10):** For the one-entry, two-hour plumbing trial, [`LOCAL-PILOT-TWO-HOUR-SESSION.md`](LOCAL-PILOT-TWO-HOUR-SESSION.md) supersedes any conflicting size, database, Testnet, evidence, and session-duration instruction below. In particular, the session is 120 minutes (not a 24-hour attended trial), the entry target is 40 USDC with a 0.20 USDC risk reserve, the old database volume must be preserved, and a real protected Testnet lifecycle trial is required. The readiness state for this implementation is **NOT ARMABLE** until the new release SHA passes every gate.
+
 Status: derived from a static reading of the code (originally at `52015b2`, revised for Plan v4 and re-checked at `985d162`).
 This checklist does not approve anything, does not replace the readiness
 gates, and is not evidence that the pilot is ready. Items marked
