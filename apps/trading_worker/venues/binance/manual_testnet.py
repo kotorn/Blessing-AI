@@ -246,19 +246,17 @@ def _passive_order(adapter, symbol: str, bid: Decimal, ask: Decimal):
 
 
 async def manual_testnet_workflow() -> Optional[Dict[str, Any]]:
-    """Run one trial only when explicit local mutation approval is present."""
+    """Legacy Testnet runner, disabled until replaced by the protected ETHUSDC flow."""
 
     if not _enabled("TESTNET_MANUAL_TRIAL_APPROVED"):
         logger.info(
             "Manual Testnet mutation not run; TESTNET_MANUAL_TRIAL_APPROVED is not enabled"
         )
         return None
-    if not _enabled("BINANCE_TESTNET"):
-        raise RuntimeError("ABORT: BINANCE_TESTNET must be true")
-    if not os.getenv("BINANCE_TESTNET_API_KEY", "").strip() or not os.getenv(
-        "BINANCE_TESTNET_API_SECRET", ""
-    ).strip():
-        raise RuntimeError("ABORT: Testnet credentials are not configured")
+    raise RuntimeError(
+        "ABORT: legacy BTCUSDT LIMIT/amend Testnet runner is disabled; "
+        "it does not use durable ETHUSDC post-fill protection"
+    )
 
     build_sha = _current_sha()
     _require_current_readonly_evidence(build_sha)

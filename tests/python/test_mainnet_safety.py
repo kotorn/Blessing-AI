@@ -154,7 +154,7 @@ async def test_read_only_mainnet_adapter_bypasses_approval_but_blocks_mutations(
     )
     assert await adapter.emergency_flatten(authority=authority) == []
     assert adapter.last_emergency_result["status"] == "BLOCKED"
-    with pytest.raises(PermissionError, match="cannot call the order endpoint"):
+    with pytest.raises(PermissionError, match="cannot mutate an order endpoint"):
         await adapter.rest_client.request(
             "POST",
             "/fapi/v1/order",
@@ -439,7 +439,8 @@ async def test_disarmed_worker_ignores_market_event_without_pausing_risk():
     assert worker.get_state().engine_state == WorkerEngineState.DISARMED
 
 
-def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
+@pytest.mark.asyncio
+async def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
     """Verify that ETHUSDC grid sizing and dynamic notional clamp honor the 50 USDC pilot limit."""
     from apps.trading_worker.engines.grid_strategy import GridStrategyEngine
     from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
@@ -529,7 +530,7 @@ def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
         timestamp=now,
     )
 
-    decision = worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2500.0"))
+    decision = await worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2500.0"))
 
     clamped_order = decision.orders[0]
     clamped_notional = clamped_order.quantity * Decimal("2500.0")
@@ -539,7 +540,8 @@ def test_ethusdc_grid_strategy_sizing_and_notional_clamp():
     assert decision.net_exposure_delta == Decimal("0.018")
 
 
-def test_clamp_order_notional_bumps_undersized_order_to_satisfy_min_notional():
+@pytest.mark.asyncio
+async def test_clamp_order_notional_bumps_undersized_order_to_satisfy_min_notional():
     from datetime import datetime, timezone
 
     from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
@@ -595,7 +597,7 @@ def test_clamp_order_notional_bumps_undersized_order_to_satisfy_min_notional():
         timestamp=now,
     )
 
-    decision = worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2500.0"))
+    decision = await worker._clamp_order_notional_if_needed(decision, reference_price=Decimal("2500.0"))
 
     clamped_order = decision.orders[0]
     clamped_notional = clamped_order.quantity * Decimal("2500.0")
@@ -603,6 +605,5 @@ def test_clamp_order_notional_bumps_undersized_order_to_satisfy_min_notional():
     assert clamped_notional <= Decimal("50.0"), f"Expected <= 50, got {clamped_notional}"
     assert clamped_order.quantity == Decimal("0.010")  # 25 / 2500 = 0.010
     assert decision.net_exposure_delta == Decimal("0.010")
-
 
 

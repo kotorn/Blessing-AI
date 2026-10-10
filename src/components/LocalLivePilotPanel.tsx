@@ -1,0 +1,364 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Activity, AlertTriangle, CheckCircle2, LoaderCircle, ShieldAlert } from 'lucide-react';
+import { apiClient } from '../api/client';
+import type { LocalLivePilotStrategyId } from '../backend/local-live-pilot';
+
+type Campaign = {
+  campaignId: string;
+  status: string;
+  strategyId: LocalLivePilotStrategyId;
+  campaignExpiresAt?: string;
+  version: number;
+};
+
+type PilotResponse = {
+  session?: {
+    armedAt?: string; entryCutoffAt?: string; closeAfterAt?: string; endAt?: string;
+    stage?: string;
+  };
+  campaign?: Campaign;
+  campaignId?: string;
+  strategyId?: LocalLivePilotStrategyId;
+  campaignExpiresAt?: string;
+  version?: number;
+  status?: string;
+  error?: string;
+  evidence_status?: string;
+  preflight?: { status?: string };
+  worker?: { status?: string; mainnetLiveApproved?: boolean; orderSubmissionAttempts?: number };
+  readiness?: { status?: string; canApprove?: boolean; canStart?: boolean; blockers?: string[] };
+  preparation?: { status?: string; observedAt?: string | null };
+  runtime?: {
+    executionMode?: string; engineState?: string; mainnetLiveApproved?: boolean;
+    orderSubmissionAttempts?: number | 'UNKNOWN';
+  } | 'UNKNOWN';
+  accounting?: {
+    status?: string;
+    netPnlUsdc?: string;
+    peakNetPnlUsdc?: string;
+    drawdownUsdc?: string;
+    realizedPnlUsdc?: string;
+    unrealizedPnlUsdc?: string;
+    feesUsdc?: string;
+    fundingUsdc?: string;
+    slippageUsdc?: string;
+    lastEventAt?: string | null;
+    reason?: string | null;
+    completeness?: string;
+  };
+};
+
+const STRATEGIES: Array<{ id: LocalLivePilotStrategyId; label: string }> = [
+  { id: 'grid', label: 'Grid · BUY-only · 1 entry' },
+];
+
+function campaignFrom(value: PilotResponse): Campaign | null {
+  if (value.campaign) return value.campaign;
+  return typeof value.campaignId === 'string' && typeof value.status === 'string'
+    ? {
+        campaignId: value.campaignId,
+        status: value.status,
+        strategyId: value.strategyId || 'grid',
+        campaignExpiresAt: value.campaignExpiresAt,
+        version: value.version ?? 0,
+      }
+    : null;
+}
+
+const PILOT_CAMPAIGN_STORAGE_KEY = 'local-live-pilot:campaignId';
+const TERMINAL_CAMPAIGN_STATUSES = ['COMPLETED', 'REVOKED'];
+
+// Only the non-secret campaign id is kept, so navigation or a reload can re-read the
+// campaign from the server. Storage may be unavailable; the panel then keeps in-memory state only.
+function rememberCampaignId(campaign: Campaign) {
+  try {
+    if (TERMINAL_CAMPAIGN_STATUSES.includes(campaign.status)) sessionStorage.removeItem(PILOT_CAMPAIGN_STORAGE_KEY);
+    else sessionStorage.setItem(PILOT_CAMPAIGN_STORAGE_KEY, campaign.campaignId);
+  } catch {
+    // sessionStorage unavailable (private mode, blocked site data): nothing to remember.
+  }
+}
+
+function storedCampaignId(): string | null {
+  try {
+    return sessionStorage.getItem(PILOT_CAMPAIGN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function forgetCampaignId(campaignId: string) {
+  try {
+    if (sessionStorage.getItem(PILOT_CAMPAIGN_STORAGE_KEY) === campaignId) sessionStorage.removeItem(PILOT_CAMPAIGN_STORAGE_KEY);
+  } catch {
+    // sessionStorage unavailable: nothing was stored.
+  }
+}
+
+// The server's supervisor reports the campaign of a running pilot worker (null when none runs).
+// That is authoritative; the remembered id covers campaigns that are not armed yet.
+async function discoverCampaignId(): Promise<string | null> {
+  try {
+    const runtime = await apiClient.get<{ supervisor?: { pilotCampaignId?: unknown } | null }>('/api/local/runtime');
+    const supervised = runtime.supervisor?.pilotCampaignId;
+    if (typeof supervised === 'string' && supervised) return supervised;
+  } catch {
+    // Runtime status unavailable: fall back to the remembered campaign id.
+  }
+  return storedCampaignId();
+}
+
+export function formatLocalPilotFailure(error: unknown, fallback: string): string {
+  if (!error || typeof error !== 'object') return fallback;
+  const data = (error as { data?: { error?: unknown; reason?: unknown } }).data;
+  if (typeof data?.error !== 'string' || !/^[A-Z][A-Z0-9_]{1,100}$/.test(data.error)) return fallback;
+  return typeof data.reason === 'string' ? `${data.error} · ${data.reason}` : data.error;
+}
+
+export function LocalPilotStatusMessage({ busy, evidence, message }: {
+  busy: boolean; evidence: 'UNKNOWN' | 'PASS' | 'FAIL'; message: string;
+}) {
+  return <div role="status" aria-live="polite" className="flex items-center gap-2 border-t border-zinc-800 pt-3 text-xs text-zinc-400">
+    {busy ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />
+      : evidence === 'PASS' ? <CheckCircle2 className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+        : evidence === 'FAIL' ? <AlertTriangle className="h-4 w-4 text-red-400" aria-hidden="true" /> : null}
+    <span>หลักฐาน: {evidence} · {message}</span>
+  </div>;
+}
+
+export const LocalLivePilotPanel: React.FC = () => {
+  const [strategyId, setStrategyId] = useState<LocalLivePilotStrategyId>('grid');
+  const [campaign, setCampaign] = useState<Campaign | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('ยังไม่มีผลตรวจจากแคมเปญนี้');
+  const [evidence, setEvidence] = useState<'UNKNOWN' | 'PASS' | 'FAIL'>('UNKNOWN');
+  const [accounting, setAccounting] = useState<PilotResponse['accounting']>();
+  const [readiness, setReadiness] = useState<PilotResponse['readiness']>();
+  const [preparation, setPreparation] = useState<PilotResponse['preparation']>();
+  const [runtime, setRuntime] = useState<PilotResponse['runtime']>();
+  const [session, setSession] = useState<PilotResponse['session']>();
+  const [papiProtectionRiskAcknowledged, setPapiProtectionRiskAcknowledged] = useState(false);
+  const campaignChosenRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    void apiClient.get<PilotResponse>('/api/local/pilot/readiness')
+      .then((res) => {
+        if (!active) return;
+        if (res.readiness) setReadiness(res.readiness);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let campaignId: string | null = null;
+    void (async () => {
+      campaignId = await discoverCampaignId();
+      if (!campaignId || !active) return;
+      const latest = await apiClient.get<PilotResponse>(`/api/local/pilot/${encodeURIComponent(campaignId)}`);
+      if (!active || campaignChosenRef.current) return;
+      const restored = campaignFrom(latest);
+      if (!restored) return;
+      rememberCampaignId(restored);
+      if (TERMINAL_CAMPAIGN_STATUSES.includes(restored.status)) return;
+      setCampaign(restored);
+      setAccounting(latest.accounting);
+      setReadiness(latest.readiness);
+      setPreparation(latest.preparation);
+      setRuntime(latest.runtime);
+      setSession(latest.session);
+      setEvidence(latest.evidence_status === 'VERIFIED' ? 'PASS' : 'UNKNOWN');
+      setMessage(`กู้คืนแคมเปญ: ${restored.status}`);
+    })().catch((error: unknown) => {
+      if (campaignId && (error as { data?: { error?: unknown } } | null)?.data?.error === 'LOCAL_PILOT_NOT_FOUND') {
+        forgetCampaignId(campaignId);
+      }
+    });
+    return () => { active = false; };
+  }, []);
+
+  const runAction = useCallback(async (action: string, payload?: Record<string, unknown>) => {
+    setBusy(true);
+    setMessage('กำลังตรวจสอบกับระบบ');
+    setEvidence('UNKNOWN');
+    try {
+      const result = await apiClient.post<PilotResponse>(`/api/local/pilot/${action}`, payload);
+      const next = campaignFrom(result);
+      if (next) {
+        campaignChosenRef.current = true;
+        setCampaign(next);
+        rememberCampaignId(next);
+      }
+      let refreshFailed = false;
+      if (next?.campaignId) {
+        try {
+          const latest = await apiClient.get<PilotResponse>(`/api/local/pilot/${encodeURIComponent(next.campaignId)}`);
+          setAccounting(latest.accounting);
+          setReadiness(latest.readiness);
+          setPreparation(latest.preparation);
+          setRuntime(latest.runtime);
+          setSession(latest.session);
+        } catch {
+          refreshFailed = true;
+          setReadiness(undefined);
+          setPreparation(undefined);
+          setRuntime('UNKNOWN');
+          setSession(undefined);
+        }
+      }
+      setEvidence(result.evidence_status === 'VERIFIED' && !refreshFailed ? 'PASS' : 'UNKNOWN');
+      setMessage(action === 'prepare'
+        ? `Worker: ${result.worker?.status || 'UNKNOWN'}; อนุมัติ Live: ${result.worker?.mainnetLiveApproved === true ? 'true' : 'UNKNOWN'}; จำนวนครั้งส่งออร์เดอร์ ${result.worker?.orderSubmissionAttempts ?? 'UNKNOWN'}`
+        : action === 'start'
+          ? `เริ่มระบบแล้ว: ${result.worker?.status || 'UNKNOWN'}; จำนวนครั้งส่งออร์เดอร์ที่ตรวจกลับได้ ${result.worker?.orderSubmissionAttempts ?? 'UNKNOWN'}`
+          : `ผล ${action}: ${next?.status || result.status || result.evidence_status || 'UNKNOWN'}`);
+      if (refreshFailed) setMessage('Action ตอบกลับแล้ว แต่การอ่านสถานะล่าสุดล้มเหลว; ตรวจ Worker ก่อนดำเนินการต่อ');
+    } catch (error) {
+      setEvidence('FAIL');
+      setMessage(formatLocalPilotFailure(error, 'ตรวจสอบไม่สำเร็จ'));
+    } finally {
+      setBusy(false);
+      if (action === 'approve' || action === 'start') setPapiProtectionRiskAcknowledged(false);
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    if (!campaign?.campaignId) return;
+    setBusy(true);
+    setMessage('กำลังอ่านสถานะแคมเปญ');
+    setEvidence('UNKNOWN');
+    try {
+      const result = await apiClient.get<PilotResponse>(`/api/local/pilot/${encodeURIComponent(campaign.campaignId)}`);
+      const next = campaignFrom(result);
+      if (next) {
+        setCampaign(next);
+        rememberCampaignId(next);
+      }
+      setAccounting(result.accounting);
+      setReadiness(result.readiness);
+      setPreparation(result.preparation);
+      setRuntime(result.runtime);
+      setSession(result.session);
+      setEvidence(result.evidence_status === 'VERIFIED' ? 'PASS' : 'UNKNOWN');
+      setMessage(`สถานะแคมเปญ: ${next?.status || 'UNKNOWN'}`);
+    } catch (error) {
+      setEvidence('FAIL');
+      setMessage(formatLocalPilotFailure(error, 'อ่านสถานะไม่สำเร็จ'));
+    } finally {
+      setBusy(false);
+    }
+  }, [campaign?.campaignId]);
+
+  return (
+    <section className="rounded-xl border border-amber-500/30 bg-zinc-950/70 p-5 space-y-4" aria-labelledby="pilot-title">
+      <div className="flex items-start gap-3">
+        <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" aria-hidden="true" />
+        <div>
+          <h3 id="pilot-title" className="text-sm font-semibold text-zinc-100">Local Live Research Pilot</h3>
+          <p className="mt-1 text-xs leading-5 text-zinc-400">
+            ETHUSDC Futures · 1 entry · เป้าหมาย 40 USDC · buffer 0.20 USDC · notional สูงสุด 50 USDC · planned risk 2 USDC · drawdown stop 5 USDC · leverage ไม่เกิน 10x
+          </p>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-red-500/30 bg-red-950/20 p-3 text-xs leading-5 text-red-100">
+        <div className="flex gap-2 font-semibold"><AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
+          คำสั่ง Start อาจเปิดความเสี่ยงด้วยเงินจริง
+        </div>
+        <p className="mt-1 text-red-200/80">วงเงินเป็นเกณฑ์สั่งหยุด ไม่ใช่การรับประกันขาดทุนสูงสุด หากข้อมูลหรือการยืนยันสถานะไม่ครบ ระบบต้องหยุดเพิ่มความเสี่ยง</p>
+        <p className="mt-2">Signed GET ไม่พิสูจน์การส่ง SL/TP จริง: acceptance และ latency ของ PAPI protection ยังเป็น NOT_RUN จนอ่านกลับจากไม้แรก</p>
+        <p className="mt-1">Kill switch หยุดเพิ่มความเสี่ยง แต่ไม่ได้ปิด position ให้ flat ต้องพร้อมปิดและถอนคำสั่งค้างผ่าน Binance</p>
+        <label className="mt-3 flex items-start gap-2">
+          <input type="checkbox" name="papiProtectionRiskAcknowledged" checked={papiProtectionRiskAcknowledged}
+            disabled={busy} onChange={(event) => setPapiProtectionRiskAcknowledged(event.target.checked)}
+            className="mt-1 shrink-0" />
+          <span>ฉันรับทราบความเสี่ยง PAPI ที่ยังไม่พิสูจน์ จะเฝ้า session 2 ชั่วโมง และเฝ้าต่อเมื่อฉุกเฉินจนยืนยัน flat</span>
+        </label>
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 p-3 text-xs leading-5 text-zinc-300">
+        <p>Session: {session?.stage || 'NOT_ARMED'} · หยุด entry ที่ 90 นาที · เริ่มปิดที่ 110 นาที · ตรวจ flat ภายใน 120 นาที</p>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          {[
+            ['ARM', session?.armedAt], ['หยุด entry', session?.entryCutoffAt],
+            ['เริ่ม close-only', session?.closeAfterAt], ['สิ้นสุด session', session?.endAt],
+          ].map(([label, value]) => <div key={label}>{label}: {value ? new Date(value).toLocaleString() : 'UNKNOWN'}</div>)}
+        </div>
+        <p className="mt-2 text-amber-200">ไม่มี entry ก่อน cutoff = NO_ENTRY; ยังพิสูจน์เงินจริงไม่สำเร็จ หากยังไม่ flat ต้องเฝ้าต่อ</p>
+      </div>
+
+      <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100">
+        Readiness: {readiness?.status || 'NOT_RUN'} · {readiness?.blockers?.join(', ') || 'ยังไม่มีหลักฐาน'}
+        <div className="mt-1">Prepare: {preparation?.status || 'NOT_RUN'} · Worker: {runtime && runtime !== 'UNKNOWN'
+          ? `${runtime.executionMode || 'UNKNOWN'}/${runtime.engineState || 'UNKNOWN'} · MAINNET_LIVE_APPROVED=${runtime.mainnetLiveApproved === true ? 'true' : 'UNKNOWN'}`
+          : 'UNKNOWN'}</div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+        <label className="text-xs text-zinc-300">
+          กลยุทธ์ที่ผูกกับแคมเปญ (เปลี่ยนภายหลังไม่ได้)
+          <select value={strategyId} disabled={busy || Boolean(campaign)} onChange={(event) => setStrategyId(event.target.value as LocalLivePilotStrategyId)}
+            className="mt-1 block w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100">
+            {STRATEGIES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
+        </label>
+        <button type="button" disabled={busy || Boolean(campaign)} onClick={() => void runAction('request', { strategyId })}
+          className="self-end rounded-md bg-cyan-700 px-4 py-2 text-xs font-semibold text-white disabled:opacity-50">
+          สร้างคำขออนุมัติ
+        </button>
+      </div>
+
+      {campaign && <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-xs">
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div><span className="text-zinc-500">Campaign</span><div className="mt-0.5 break-all font-mono text-zinc-200">{campaign.campaignId}</div></div>
+          <div><span className="text-zinc-500">สถานะ</span><div className="mt-0.5 text-zinc-200">{campaign.status}</div></div>
+          <div><span className="text-zinc-500">กลยุทธ์</span><div className="mt-0.5 text-zinc-200">{campaign.strategyId.toUpperCase()}</div></div>
+          <div><span className="text-zinc-500">หมดอายุ</span><div className="mt-0.5 text-zinc-200">{campaign.campaignExpiresAt ? new Date(campaign.campaignExpiresAt).toLocaleString() : 'UNKNOWN'}</div></div>
+        </div>
+        <div className="mt-3 grid gap-2 border-t border-zinc-800 pt-3 sm:grid-cols-3">
+          {[
+            ['Net PnL', accounting?.netPnlUsdc],
+            ['Peak PnL', accounting?.peakNetPnlUsdc],
+            ['Drawdown', accounting?.drawdownUsdc],
+            ['Realized / unrealized', accounting?.realizedPnlUsdc && accounting?.unrealizedPnlUsdc
+              ? `${accounting.realizedPnlUsdc} / ${accounting.unrealizedPnlUsdc}` : undefined],
+            ['Fees / funding', accounting?.feesUsdc && accounting?.fundingUsdc
+              ? `${accounting.feesUsdc} / ${accounting.fundingUsdc}` : undefined],
+            ['Slippage', accounting?.slippageUsdc],
+          ].map(([label, value]) => <div key={label}>
+            <div className="text-zinc-500">{label} (USDC)</div>
+            <div className={`mt-0.5 ${accounting?.status === 'VERIFIED' ? 'text-emerald-300' : 'text-amber-300'}`}>
+              {accounting?.status === 'VERIFIED' && value && value !== 'UNKNOWN'
+                ? value
+                : `UNKNOWN — ${accounting?.reason || accounting?.status || 'ยังไม่มีหลักฐานบัญชีที่อ่านกลับ'}`}
+            </div>
+          </div>)}
+        </div>
+        {accounting?.lastEventAt && <p className="mt-2 text-[11px] text-zinc-500">ข้อมูลบัญชีล่าสุด: {new Date(accounting.lastEventAt).toLocaleString()}</p>}
+      </div>}
+
+      <div className="flex flex-wrap gap-2">
+        {campaign?.status === 'PENDING_APPROVAL' && <button type="button" disabled={busy || readiness?.canApprove !== true || !papiProtectionRiskAcknowledged}
+          onClick={() => void runAction('approve', { campaignId: campaign.campaignId, papiProtectionRiskAcknowledged })}
+          className="rounded-md bg-amber-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">อนุมัติแคมเปญ</button>}
+        {campaign && ['APPROVED', 'ACTIVE'].includes(campaign.status) && <button type="button" disabled={busy || readiness?.canApprove !== true || preparation?.status === 'PASS'}
+          onClick={() => void runAction('prepare', { campaignId: campaign.campaignId })}
+          className="rounded-md bg-cyan-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">เตรียม LIVE/DISARMED</button>}
+        {campaign && ['APPROVED', 'ACTIVE'].includes(campaign.status) && <button type="button"
+          disabled={busy || readiness?.canStart !== true || preparation?.status !== 'PASS' || !papiProtectionRiskAcknowledged}
+          onClick={() => void runAction('start', { campaignId: campaign.campaignId, papiProtectionRiskAcknowledged })}
+          className="rounded-md bg-red-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">เริ่ม Live Pilot (ARM)</button>}
+        {campaign && <button type="button" disabled={busy} onClick={() => void refresh()}
+          className="rounded-md border border-zinc-700 px-3 py-2 text-xs text-zinc-200 disabled:opacity-50"><Activity className="mr-1 inline h-3.5 w-3.5" />อ่านสถานะ</button>}
+        {campaign && ['APPROVED', 'ACTIVE'].includes(campaign.status) && <button type="button" disabled={busy} onClick={() => void runAction('close-only', { campaignId: campaign.campaignId })}
+          className="rounded-md border border-amber-500/50 px-3 py-2 text-xs text-amber-200 disabled:opacity-50">หยุดเพิ่มความเสี่ยง</button>}
+        {campaign && !['COMPLETED', 'REVOKED'].includes(campaign.status) && <button type="button" disabled={busy} onClick={() => void runAction('revoke', { campaignId: campaign.campaignId })}
+          className="rounded-md border border-red-500/50 px-3 py-2 text-xs text-red-200 disabled:opacity-50">เพิกถอน</button>}
+      </div>
+
+      <LocalPilotStatusMessage busy={busy} evidence={evidence} message={message} />
+    </section>
+  );
+};

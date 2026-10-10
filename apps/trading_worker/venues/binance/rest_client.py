@@ -6,7 +6,7 @@ import math
 import os
 import aiohttp
 import logging
-from typing import Dict, Any, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urlencode
 
 from .config import BinanceEnvironment, get_rest_url, PAPI_REST_URL, is_portfolio_margin_enabled
@@ -71,9 +71,18 @@ _ALLOWED_REQUEST_METHODS: dict[str, frozenset[str]] = {
     "/fapi/v2/account": frozenset({"GET"}),
     "/fapi/v2/positionRisk": frozenset({"GET"}),
     "/fapi/v1/openOrders": frozenset({"GET"}),
+    "/fapi/v1/allOrders": frozenset({"GET"}),
+    "/fapi/v1/algoOrder": frozenset({"GET", "POST", "DELETE"}),
+    "/fapi/v1/openAlgoOrders": frozenset({"GET"}),
+    "/fapi/v1/allAlgoOrders": frozenset({"GET"}),
     "/fapi/v1/userTrades": frozenset({"GET"}),
     "/fapi/v1/income": frozenset({"GET"}),
     "/fapi/v1/premiumIndex": frozenset({"GET"}),
+    "/fapi/v1/commissionRate": frozenset({"GET"}),
+    "/fapi/v1/leverageBracket": frozenset({"GET"}),
+    "/fapi/v1/depth": frozenset({"GET"}),
+    "/fapi/v1/fundingRate": frozenset({"GET"}),
+    "/fapi/v1/fundingInfo": frozenset({"GET"}),
     "/fapi/v1/ticker/bookTicker": frozenset({"GET"}),
     "/fapi/v1/order": frozenset({"GET", "POST", "PUT", "DELETE"}),
     "/fapi/v1/listenKey": frozenset({"POST", "PUT", "DELETE"}),
@@ -81,14 +90,21 @@ _ALLOWED_REQUEST_METHODS: dict[str, frozenset[str]] = {
     "/papi/v1/account": frozenset({"GET"}),
     "/papi/v1/balance": frozenset({"GET"}),
     "/papi/v1/um/account": frozenset({"GET"}),
+    "/papi/v1/um/accountConfig": frozenset({"GET"}),
     "/papi/v1/um/positionSide/dual": frozenset({"GET"}),
     "/papi/v1/um/positionRisk": frozenset({"GET"}),
     "/papi/v1/um/openOrders": frozenset({"GET"}),
+    "/papi/v1/um/allOrders": frozenset({"GET"}),
     "/papi/v1/um/userTrades": frozenset({"GET"}),
+    "/papi/v1/um/algo/algoOrder": frozenset({"GET"}),
+    "/papi/v1/um/algo/order": frozenset({"POST", "DELETE"}),
+    "/papi/v1/um/algo/openAlgoOrders": frozenset({"GET"}),
+    "/papi/v1/um/algo/allAlgoOrders": frozenset({"GET"}),
     "/papi/v1/um/income": frozenset({"GET"}),
     "/papi/v1/um/order": frozenset({"GET", "POST", "PUT", "DELETE"}),
     "/papi/v1/um/leverage": frozenset({"POST"}),
     "/papi/v1/um/leverageBracket": frozenset({"GET"}),
+    "/papi/v1/um/commissionRate": frozenset({"GET"}),
     "/papi/v1/listenKey": frozenset({"POST", "PUT", "DELETE"}),
 }
 
@@ -109,7 +125,7 @@ class BinanceAPIError(Exception):
         message: str,
         raw_data: Any,
         headers: Optional[Dict[str, str]] = None,
-    ):
+    ) -> None:
         super().__init__(f"Binance API Error {status} (code {code}): {message}")
         self.status = status
         self.code = code
@@ -126,19 +142,21 @@ class BinanceRestClient:
         *,
         read_only: bool = False,
         portfolio_margin: Optional[bool] = None,
-    ):
+    ) -> None:
         if not isinstance(env, BinanceEnvironment):
             raise ValueError("Binance REST execution client requires TESTNET or MAINNET")
-        self.api_key = "".join(str(api_key or "").split())
-        self.api_secret = "".join(str(api_secret or "").split())
+        self.api_key = "".join((api_key or "").split())
+        self.api_secret = "".join((api_secret or "").split())
         self.env = env
         if portfolio_margin is None:
             portfolio_margin = is_portfolio_margin_enabled()
         self.portfolio_margin = bool(portfolio_margin)
+        if self.portfolio_margin and self.env == BinanceEnvironment.TESTNET:
+            raise ValueError("Portfolio Margin is not supported in Binance TESTNET environment")
         # A preflight adapter gets a transport-level read-only boundary in
         # addition to the adapter method guards.  This prevents a future
         # preflight code path from reaching the order endpoint accidentally.
-        self.read_only = bool(read_only)
+        self.read_only = read_only
         self.order_endpoint_attempts = 0
         self.base_url = get_rest_url(env)
         self.clock = BinanceClock(self.base_url)
@@ -178,7 +196,7 @@ class BinanceRestClient:
         )
         self._throttle_until = max(self._throttle_until, time.monotonic() + delay)
 
-    async def init_session(self):
+    async def init_session(self) -> None:
         if not self.session:
             headers = {}
             if self.api_key:
@@ -190,7 +208,7 @@ class BinanceRestClient:
         if not await self.clock.synchronize(self.session):
             raise BinanceTransportAmbiguity("Unable to synchronize Binance server clock")
 
-    async def close(self):
+    async def close(self) -> None:
         if self.session:
             await self.session.close()
 
@@ -208,7 +226,9 @@ class BinanceRestClient:
         method: str,
         path: str,
         signed: bool = False,
-        **kwargs,
+        *,
+        before_mutation: Optional[Callable[[], Awaitable[None]]] = None,
+        **kwargs: Any,
     ) -> Any:
         method_upper = method.upper()
         allowed_methods = _ALLOWED_REQUEST_METHODS.get(path)
@@ -217,11 +237,18 @@ class BinanceRestClient:
                 "Binance request is outside the fixed USDⓈ-M endpoint allowlist: "
                 f"{method_upper} {path}"
             )
-        if path in ("/fapi/v1/order", "/papi/v1/um/order") and method_upper in ("POST", "PUT", "DELETE"):
-            self.order_endpoint_attempts += 1
+        is_order_mutation = (
+            path in (
+                "/fapi/v1/order", "/papi/v1/um/order",
+                "/fapi/v1/algoOrder", "/papi/v1/um/algo/order",
+            )
+            and method_upper in ("POST", "PUT", "DELETE")
+        )
+        if is_order_mutation:
             if self.read_only:
+                self.order_endpoint_attempts += 1
                 raise PermissionError(
-                    "Read-only Binance client cannot call the order endpoint"
+                    "Read-only Binance client cannot mutate an order endpoint"
                 )
         if not self.session:
             await self.init_session()
@@ -238,6 +265,12 @@ class BinanceRestClient:
 
         while True:
             await self._respect_rate_limit()
+            # Invoke the final authority/risk fence after throttle waits but
+            # before creating signed timestamps. The callback may itself make
+            # a read-only position check; signing afterward avoids aging the
+            # mutation request while that check runs.
+            if is_order_mutation and before_mutation is not None:
+                await before_mutation()
             params = dict(base_params)
             if signed:
                 params["timestamp"] = self.clock.get_signed_timestamp()
@@ -246,7 +279,10 @@ class BinanceRestClient:
 
             request_kwargs = dict(kwargs)
             request_kwargs["params"] = params
+            if is_order_mutation:
+                self.order_endpoint_attempts += 1
             try:
+                assert self.session is not None
                 async with self.session.request(method_upper, url, **request_kwargs) as resp:
                     try:
                         data = await resp.json()

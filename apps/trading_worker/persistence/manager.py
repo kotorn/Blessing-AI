@@ -154,6 +154,10 @@ def _event_id(event_type: str, idempotency_key: str) -> str:
     return f"{event_type}-{digest[:32]}"
 
 
+def _environment_flag(name: str) -> bool:
+    return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
 class PersistenceManager:
     """Coordinates durable writes without blocking the execution path.
 
@@ -198,6 +202,7 @@ class PersistenceManager:
         self._unflushed_writes = 0
         self._pending_outbox: Optional[int] = None
         self._mainnet_launch_session: Optional[dict[str, Any]] = None
+        self._schema_verified = False
 
     @property
     def mode(self) -> PersistenceMode:
@@ -251,23 +256,45 @@ class PersistenceManager:
         self,
         *,
         approval_id: str,
-        image_digest: str,
+        image_digest: Optional[str] = None,
         symbol: str = "ETHUSDC",
+        runtime_target: str = "CLOUD_RUN",
+        runtime_fingerprint: Optional[str] = None,
+        policy: str = "STAGED_FIRST_ORDER",
+        max_risk_increasing_orders: Optional[int] = 1,
+        pilot_binding: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
         repository = self._require_durable_launch_repository()
+        local_only = _environment_flag("LOCAL_ONLY")
+        local_target = str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+        if local_only != local_target:
+            raise RuntimeError("Local runtime target and LOCAL_ONLY settings do not match")
+        configured_target = str(getattr(self.db, "runtime_target", "CLOUD")).upper()
+        expected_target = "LOCAL" if configured_target == "LOCAL" else "CLOUD_RUN"
+        if str(runtime_target).strip().upper() != expected_target:
+            raise RuntimeError("Launch runtime target does not match the connected database runtime")
         launch_id = f"launch-{approval_id}"
         session = await repository.create_mainnet_launch_session(
             launch_id=launch_id,
             approval_id=approval_id,
             image_digest=image_digest,
             symbol=symbol,
+            policy=policy,
+            max_risk_increasing_orders=max_risk_increasing_orders,
+            runtime_target=runtime_target,
+            runtime_fingerprint=runtime_fingerprint,
+            pilot_binding=pilot_binding,
         )
         self._mainnet_launch_session = dict(session)
         return dict(session)
 
-    async def reserve_mainnet_risk_order(self, launch_id: str) -> bool:
+    async def reserve_mainnet_risk_order(
+        self, launch_id: str, client_order_id: str, basket_id: str | None = None
+    ) -> bool:
         repository = self._require_durable_launch_repository()
-        reserved = await repository.reserve_mainnet_risk_order(launch_id)
+        reserved = await repository.reserve_mainnet_risk_order(
+            launch_id, client_order_id, basket_id
+        )
         if reserved:
             self._mainnet_launch_session = dict(
                 await repository.get_active_mainnet_launch("ETHUSDC") or {}
@@ -276,17 +303,26 @@ class PersistenceManager:
             self._record_error("staged Mainnet risk-order reservation was unavailable")
         return reserved
 
-    async def release_mainnet_risk_order_reservation(self, launch_id: str) -> bool:
+    async def bind_mainnet_launch_basket(self, launch_id: str, basket_id: str) -> bool:
         repository = self._require_durable_launch_repository()
-        released = await repository.release_mainnet_risk_order_reservation(launch_id)
+        bound = await repository.bind_mainnet_launch_basket(launch_id, basket_id)
+        if bound:
+            self._mainnet_launch_session = dict(
+                await repository.get_mainnet_launch(launch_id) or {}
+            ) or None
+        return bound
+
+    async def release_mainnet_risk_order_reservation(self, launch_id: str, client_order_id: str) -> bool:
+        repository = self._require_durable_launch_repository()
+        released = await repository.release_mainnet_risk_order_reservation(launch_id, client_order_id)
         self._mainnet_launch_session = dict(
             await repository.get_active_mainnet_launch("ETHUSDC") or {}
         )
         return released
 
-    async def mark_mainnet_risk_order_submitted(self, launch_id: str) -> bool:
+    async def mark_mainnet_risk_order_submitted(self, launch_id: str, client_order_id: str) -> bool:
         repository = self._require_durable_launch_repository()
-        marked = await repository.mark_mainnet_risk_order_submitted(launch_id)
+        marked = await repository.mark_mainnet_risk_order_submitted(launch_id, client_order_id)
         if not marked:
             self._record_error("staged Mainnet submission could not be durably marked")
             return False
@@ -312,6 +348,139 @@ class PersistenceManager:
         ) or None
         return marked
 
+    async def append_local_live_pilot_event(
+        self,
+        *,
+        campaign_id: str,
+        launch_id: str,
+        run_id: str,
+        symbol: str,
+        event_key: str,
+        event_type: str,
+        source: str,
+        observed_at: datetime,
+        payload: Mapping[str, Any],
+        net_pnl_delta_usdc: Decimal | str | int | None = None,
+    ) -> Optional[dict[str, Any]]:
+        """Append one immutable, idempotent pilot event and atomically update PnL."""
+        repository = self._require_durable_launch_repository()
+        updated = await repository.append_local_live_pilot_event(
+            campaign_id=campaign_id,
+            launch_id=launch_id,
+            run_id=run_id,
+            symbol=symbol,
+            event_key=event_key,
+            event_type=event_type,
+            source=source,
+            observed_at=observed_at,
+            payload=payload,
+            net_pnl_delta_usdc=net_pnl_delta_usdc,
+        )
+        if updated:
+            self._mainnet_launch_session = dict(updated)
+        return dict(updated) if updated else None
+
+    async def record_local_live_pilot_session_armed(
+        self,
+        launch_id: str,
+        *,
+        armed_at: datetime,
+        entry_cutoff_seconds: int,
+        close_after_seconds: int,
+        end_seconds: int,
+    ) -> dict[str, Any]:
+        """Durably acknowledge the immutable T0 before the Worker reaches ARMED."""
+        repository = self._require_durable_launch_repository()
+        record = await repository.record_local_live_pilot_session_armed(
+            launch_id,
+            armed_at=armed_at,
+            entry_cutoff_seconds=entry_cutoff_seconds,
+            close_after_seconds=close_after_seconds,
+            end_seconds=end_seconds,
+        )
+        self._mainnet_launch_session = dict(record)
+        return dict(record)
+
+    async def record_local_live_pilot_session_close_claim(
+        self,
+        launch_id: str,
+        *,
+        client_order_id: str,
+        side: str,
+        position_side: str,
+        quantity: Decimal,
+        claimed_at: datetime,
+    ) -> dict[str, Any]:
+        repository = self._require_durable_launch_repository()
+        record = await repository.record_local_live_pilot_session_close_claim(
+            launch_id,
+            client_order_id=client_order_id,
+            side=side,
+            position_side=position_side,
+            quantity=quantity,
+            claimed_at=claimed_at,
+        )
+        self._mainnet_launch_session = dict(record)
+        return dict(record)
+
+    async def record_local_live_pilot_session_close_attempt(
+        self,
+        launch_id: str,
+        *,
+        client_order_id: str,
+        attempt: int,
+        attempted_at: datetime,
+    ) -> dict[str, Any]:
+        repository = self._require_durable_launch_repository()
+        record = await repository.record_local_live_pilot_session_close_attempt(
+            launch_id,
+            client_order_id=client_order_id,
+            attempt=attempt,
+            attempted_at=attempted_at,
+        )
+        self._mainnet_launch_session = dict(record)
+        return dict(record)
+
+    async def get_local_live_pilot_accounting(
+        self, launch_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Read verified accounting inputs for the exact durable Local campaign."""
+        repository = self._require_durable_launch_repository()
+        snapshot = await repository.get_local_live_pilot_accounting(launch_id)
+        return dict(snapshot) if snapshot else None
+
+    async def resume_mainnet_pilot_campaign(
+        self, launch_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Resume an active pilot campaign after restart if exchange state is reconciled."""
+        repository = self._require_durable_launch_repository()
+        resumed = await repository.resume_mainnet_pilot_campaign(launch_id)
+        if resumed:
+            self._mainnet_launch_session = dict(resumed)
+        return dict(resumed) if resumed else None
+
+    async def trigger_pilot_drawdown(
+        self, launch_id: str, reason: str = "PILOT_DRAWDOWN_LIMIT_REACHED"
+    ) -> Optional[dict[str, Any]]:
+        """Explicitly trigger drawdown circuit breaker and transition to CLOSE_ONLY."""
+        repository = self._require_durable_launch_repository()
+        triggered = await repository.trigger_pilot_drawdown(launch_id, reason=reason)
+        if triggered:
+            self._mainnet_launch_session = dict(triggered)
+        return dict(triggered) if triggered else None
+
+    async def enter_local_live_pilot_close_only(
+        self, launch_id: str, *, reason: str, drawdown: bool = False
+    ) -> Optional[dict[str, Any]]:
+        """Persist a close-only transition and retain the complete launch binding."""
+        repository = self._require_durable_launch_repository()
+        transitioned = await repository.enter_local_live_pilot_close_only(
+            launch_id, reason=reason, drawdown=drawdown
+        )
+        if transitioned:
+            self._mainnet_launch_session = dict(transitioned)
+        return dict(transitioned) if transitioned else None
+
     async def get_mainnet_launch_session(
         self, launch_id: Optional[str] = None
     ) -> Optional[dict[str, Any]]:
@@ -332,7 +501,9 @@ class PersistenceManager:
         launch_id: str,
         continuation_approval_id: str,
         first_order_verified_at: Optional[datetime] = None,
-        image_digest: str,
+        image_digest: Optional[str] = None,
+        runtime_target: str = "CLOUD_RUN",
+        runtime_fingerprint: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """Atomically consume the staged session for autonomous continuation."""
 
@@ -342,6 +513,8 @@ class PersistenceManager:
             continuation_approval_id=continuation_approval_id,
             first_order_verified_at=first_order_verified_at,
             image_digest=image_digest,
+            runtime_target=runtime_target,
+            runtime_fingerprint=runtime_fingerprint,
         )
         self._mainnet_launch_session = dict(session) if session else None
         if session is None:
@@ -395,8 +568,20 @@ class PersistenceManager:
 
         self._stop_event = asyncio.Event()
         self._stop_deadline = None
+        self._schema_verified = False
         try:
+            local_only = _environment_flag("LOCAL_ONLY")
+            local_target = str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+            if local_only != local_target:
+                raise RuntimeError("Local runtime requires LOCAL_ONLY=true and LOCAL_RUNTIME_TARGET=LOCAL")
+            if local_target and str(getattr(self.db, "runtime_target", "")).upper() != "LOCAL":
+                raise RuntimeError("Local runtime database connection is not configured as POSTGRES_LOCAL")
             await self.db.connect()
+            if local_target:
+                identity = self.db.readiness_identity()
+                if identity.get("database_identity_verified") is not True:
+                    raise RuntimeError("Local PostgreSQL server identity read-back failed")
+            await self._verify_postgres_schema(require_local_ledger=local_target)
             self.repository = PersistenceRepository(
                 self.db,
                 instrument_rules_provider=self.instrument_rules_provider,
@@ -442,6 +627,30 @@ class PersistenceManager:
                 raise
             return False
 
+    async def _verify_postgres_schema(self, *, require_local_ledger: bool) -> None:
+        """Verify the runtime schema before declaring persistence ready."""
+        from scripts.apply_local_postgres_migrations import (
+            discover_migrations,
+            validate_migration_ledger,
+            verify_schema,
+        )
+
+        migrations = discover_migrations()
+        if require_local_ledger:
+            ledger_exists = await self.db.fetchval(
+                "SELECT to_regclass('public.local_schema_migrations') IS NOT NULL"
+            )
+            if ledger_exists is not True:
+                raise RuntimeError("Local PostgreSQL migration ledger is missing")
+            rows = await self.db.fetch(
+                "SELECT version, checksum FROM public.local_schema_migrations ORDER BY version"
+            )
+            recorded = validate_migration_ledger(rows, migrations)
+            if list(recorded) != [migration.name for migration in migrations]:
+                raise RuntimeError("Local PostgreSQL migration ledger is incomplete")
+        await verify_schema(self.db)
+        self._schema_verified = True
+
     async def stop(self) -> None:
         if self.mode is PersistenceMode.DISABLED:
             self._accepting = False
@@ -467,6 +676,7 @@ class PersistenceManager:
         self._unflushed_writes += queued
         await self._refresh_pending_count()
         self.is_connected = False
+        self._schema_verified = False
         await self.db.disconnect()
         self._writer_task = None
         self._dispatcher_task = None
@@ -479,12 +689,50 @@ class PersistenceManager:
 
     def readiness(self) -> dict[str, Any]:
         durable = self.is_connected and self._state == "READY"
+        identity_method = getattr(self.db, "readiness_identity", None)
+        identity = (
+            identity_method()
+            if callable(identity_method)
+            else {
+                "runtime_target": "UNKNOWN",
+                "database_provider": "UNKNOWN",
+                "database_host": None,
+                "database_port": None,
+            }
+        )
+        local_requested = (
+            _environment_flag("LOCAL_ONLY")
+            or str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+            or identity.get("runtime_target") == "LOCAL"
+        )
+        database_host = identity.get("database_host")
+        container_runtime = identity.get("database_container_runtime") is True
+        local_endpoint_valid = (
+            database_host == "127.0.0.1" and not container_runtime
+        ) or (
+            database_host == "host.docker.internal" and container_runtime
+        )
+        local_identity_valid = not local_requested or (
+            identity.get("runtime_target") == "LOCAL"
+            and identity.get("database_provider") == "POSTGRES_LOCAL"
+            and local_endpoint_valid
+            and identity.get("database_port") == 5433
+            and identity.get("database_identity_verified") is True
+            and self._schema_verified
+            and not self.db.config_error
+        )
         return {
             "mode": self.mode.value,
             "state": self._state,
             "connected": self.is_connected,
-            "ready": self.mode is PersistenceMode.DISABLED or durable,
-            "durable": durable,
+            "ready": (
+                local_identity_valid
+                and (self.mode is PersistenceMode.DISABLED or durable)
+            ),
+            "durable": durable and local_identity_valid,
+            **identity,
+            "database_identity_verified": local_identity_valid,
+            "schema_verified": self._schema_verified,
             "queue_size": self._write_queue.qsize(),
             "queue_capacity": self.config.queue_capacity,
             "pending_outbox": self._pending_outbox,
@@ -644,6 +892,38 @@ class PersistenceManager:
             self._record_error(exc)
             self._state = "DEGRADED"
             return False
+
+    async def wait_until_idle(self, timeout_seconds: float = 2.0) -> bool:
+        """Drain the outbox and write queue so readiness can report zero pending.
+
+        The pre-send fence requires pending_outbox == 0 and queue_size == 0,
+        but the order barrier has just added an outbox row that the background
+        dispatcher only picks up on its next poll. dispatch_one() claims rows
+        with FOR UPDATE SKIP LOCKED, so draining here is safe alongside it.
+        """
+        if self.repository is None:
+            return False
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            try:
+                for _ in range(100):
+                    if not await self.repository.dispatch_one():
+                        break
+                await self._refresh_pending_count()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._record_failure(exc)
+                return False
+            if (
+                self._write_queue.empty()
+                and self._inflight is None
+                and self._pending_outbox == 0
+            ):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.02)
 
     def enqueue_order(self, order: ExecutionOrder) -> bool:
         event = self._order_event(order)

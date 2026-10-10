@@ -18,10 +18,22 @@ except ImportError:
         def __init__(self, **kwargs):
             for k, v in kwargs.items():
                 setattr(self, k, v)
+        @classmethod
+        def model_validate(cls, obj: Any) -> Any:
+            if isinstance(obj, dict):
+                return cls(**obj)
+            return obj
         def model_dump(self):
             return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
         def dict(self):
             return self.model_dump()
+        def model_copy(self, *, update=None, deep=False):
+            data = {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
+            if update:
+                data.update(update)
+            return self.__class__(**data)
+        def copy(self, *, update=None, deep=False):
+            return self.model_copy(update=update, deep=deep)
         def __repr__(self):
             return f"{self.__class__.__name__}({self.__dict__})"
 
@@ -267,6 +279,7 @@ class OrderIntent(BaseModel):
         model_config = ConfigDict(frozen=True)
     client_order_id: str
     symbol: str
+    basket_id: Optional[str] = None
     market_type: MarketType
     side: OrderSide
     position_side: PositionSide         # Required for Binance Hedge Mode
@@ -274,6 +287,13 @@ class OrderIntent(BaseModel):
     time_in_force: TimeInForce
     quantity: Decimal
     price: Optional[Decimal] = None
+    stop_loss_price: Optional[Decimal] = None
+    take_profit_price: Optional[Decimal] = None
+    # Locked into the durable owner at entry for Local Mainnet pilot positions.
+    management_mode: Optional[str] = None
+    estimated_fees_usdc: Optional[Decimal] = None
+    estimated_funding_usdc: Optional[Decimal] = None
+    estimated_slippage_usdc: Optional[Decimal] = None
     reduce_only: bool = False
     post_only: bool = False
     strategy_id: str = "portfolio"
@@ -325,6 +345,9 @@ class ExecutionOrder(BaseModel):
     price: Decimal
     order_type: str = "LIMIT"
     client_order_id: str
+    # Local Mainnet binds an exchange order to one durable, never-reused basket.
+    # Other venues may leave this unset when their lifecycle has no such gate.
+    basket_id: Optional[str] = None
     status: str
     exchange_order_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=utc_now)
@@ -401,4 +424,3 @@ class ExchangePosition(BaseModel):
         if hasattr(self, snake):
             return getattr(self, snake)
         raise KeyError(item)
-

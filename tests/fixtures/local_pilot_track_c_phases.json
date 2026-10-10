@@ -1,0 +1,9 @@
+[
+  {"name":"no-attestation","sourceClean":true,"passClasses":[],"ready":false},
+  {"name":"checks-only-cannot-authorize","sourceClean":true,"passClasses":["CHECKS"],"ready":false},
+  {"name":"ci-only-replay","sourceClean":true,"passClasses":["LOCAL_PILOT_CI"],"ready":false},
+  {"name":"review-class-missing","sourceClean":true,"passClasses":["CHECKS","REVIEW_AUTH_RELEASE","REVIEW_ORDER_RISK","TESTNET_ETHUSDC"],"ready":false},
+  {"name":"testnet-missing","sourceClean":true,"passClasses":["CHECKS","REVIEW_AUTH_RELEASE","REVIEW_ORDER_RISK","REVIEW_PERSISTENCE"],"ready":false},
+  {"name":"all-verified","sourceClean":true,"passClasses":["CHECKS","REVIEW_AUTH_RELEASE","REVIEW_ORDER_RISK","REVIEW_PERSISTENCE","TESTNET_ETHUSDC"],"ready":true},
+  {"name":"dirty-source","sourceClean":false,"passClasses":["CHECKS","REVIEW_AUTH_RELEASE","REVIEW_ORDER_RISK","REVIEW_PERSISTENCE","TESTNET_ETHUSDC"],"ready":false}
+]

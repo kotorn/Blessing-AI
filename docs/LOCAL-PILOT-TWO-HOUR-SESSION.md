@@ -1,0 +1,32 @@
+# ETHUSDC two-hour plumbing session
+
+This document supersedes conflicting pilot-size, evidence, database, and session instructions in `LOCAL-PILOT-DAY-OF-CHECKLIST.md` for this release plan. The current release state remains **NOT ARMABLE** until every gate below has fresh evidence for the reviewed release SHA. No agent performs ARM or sends exchange orders.
+
+The session tests one real entry through verified protection, exit, and ledger reconciliation. One trade does not establish profitability. The server-controlled target is 40 USDC with a 0.20 USDC execution-risk reserve. Hard limits remain 50 USDC notional/exposure, 2 USDC planned stop risk, 5 USDC campaign drawdown, leverage at most 10x, and collateral/equity at most 250 USDC. The campaign allows one BUY entry. Stop, take-profit, and payoff policy remain plumbing-trial settings; realized outcome comes from exchange fills, fees, and funding. The 2 and 5 USDC limits guide planning and shutdown and cannot guarantee realized loss during gaps, slippage, or outages.
+
+The session uses a durable server timestamp. `T0` is the first successful ARM, persisted with the original campaign and launch before entry permission is available. Reloads and restarts do not reset it and never ARM automatically.
+
+| Time from T0 | Required behavior |
+| --- | --- |
+| 0–90 minutes | Wait for a natural grid signal. Permit at most one durable entry reservation. Do not manufacture a trade. |
+| 90 minutes | Block further entries. If no entry occurred, close the session as `NO_ENTRY`; this does not pass the plumbing trial. |
+| Within 5 seconds of first fill | Read back fill-sized stop and target, ownership, and exchange status. If any protection is missing or unclear, enter close-only and use the break-glass procedure. |
+| 110 minutes | Start close-only and reduce-only flatten if a position remains. Cancel only owned sibling algos after the position is closed. |
+| 110–120 minutes | Verify flat, no regular or algo orders, and exchange-to-ledger reconciliation with no differences. |
+| 120 minutes | Leave only after flat and reconciliation are confirmed. If not confirmed, remain attended and continue manual emergency handling until verified flat. |
+
+The kill switch blocks additional risk; it does not flatten an exchange position. Keep the Binance session open on a second device and `docs/LOCAL-PILOT-BREAK-GLASS.md` available throughout the session.
+
+## Human release gates
+
+1. Install the PSF-signed Python 3.13 build at `C:\Python313`. From a normal, non-elevated shell, verify the executable signature and protected install ACL, and confirm the locked Windows Worker dependencies. Do not use an unsigned or user-writable interpreter for Track C.
+2. Back up the existing local Postgres volume and verify the backup checksum. Restore it into a separate PostgreSQL 17 instance and verify the restore before touching a new pilot volume. Keep the original volume intact. Never run migrations 020–022 against a volume holding trading history; never delete that volume to clear a migration error.
+3. Run the complete lint, build, Vitest, and Python suites against the final SHA, including PostgreSQL 17 fresh schema, populated restore, migrations 020–022, NULL-cap rejection, concurrent reservation, lease fencing, process kill, and emergency-close recovery. Mandatory acceptance cases must have zero skips.
+4. Configure Testnet secrets yourself and run the approved protected lifecycle trial. It must show entry, fill-sized protection, exit, sibling cancellation, and final ledger reconciliation. Read-only contract tests do not satisfy this gate.
+5. Have an eligible human reviewer inspect and merge through the existing branch protection. Recreate all release evidence for the resulting merge SHA `S`; evidence from `7841ec7` or another SHA cannot substitute.
+6. For `S`, create fresh signed Track C CHECKS, all three required REVIEW attestations, and `TESTNET_ETHUSDC`. Verify each signature and require each evidence timestamp to be less than 24 hours old. Keep the current `SOLO_OPERATOR` policy and its real approval; do not bypass the policy.
+7. From the clean reviewed checkout, run the signed read-only probe with operator-supplied `BINANCE_MAINNET_API_KEY` and `BINANCE_MAINNET_API_SECRET` environment variables. Invoke the pinned interpreter directly: `C:\Python313\python.exe -I scripts\probe_papi_readonly.py --operator-readonly-approved --output artifacts\papi-readonly-probe.json`. Protect and redact the output, record its checksum, SHA, and UTC timestamp. Confirm `accountConfig/canTrade`, one-way mode, ETHUSDC symbol/leverage settings, commissions, collateral/equity, UM and CM positions, and regular/algo open orders. Record the exact flat `positionRisk` response shape; an empty list is valid while flat. The probe uses the current [Portfolio Margin Trade API routes](https://developers.binance.com/en/docs/catalog/advanced-trading-derivatives-trading-portfolio-margin/api/rest-api/trade), including `GET /papi/v1/um/algo/openAlgoOrders`; it does not call the deprecated UM conditional-order routes. The probe is signed GET only, remains diagnostic, and always reports `ready_for_pilot: false`. Do not paste credentials or raw key material into logs or the evidence packet.
+8. The human reviews key restrictions (read and futures only, no withdrawal/transfer/spot permissions), IP allow-list, PSF signature/ACL, backup/restore, probe output and checksum, and remaining PAPI order risks. The GET probe does not test order acceptance. The first-order review must explicitly show `reduceOnly=true`, `closePosition=false`, fill-sized SL/TP, and protection latency as **NOT_RUN** until an actual exchange read-back proves them.
+9. Verify destination read-back for the same SHA: clean verifier checkout; launcher, control plane, and Worker image ID/labels/source hash all match the attested commit; readiness `READY`; Prepare `LIVE/DISARMED`; zero entry attempts; PostgreSQL cap exactly one; and reconciliation `IN_SYNC`. Only after every item is evidenced may the result be labeled `READY_FOR_OPERATOR_APPROVAL — NOT ARMED`.
+
+The operator alone decides whether to approve and ARM after reviewing this evidence. Any `FAIL`, `UNKNOWN`, mandatory `NOT_RUN`, stale or mismatched binding, protection ambiguity, or accounting difference means no new campaign: retain close-only, resolve the condition, and do not auto-rearm. Keep profitability evaluation, additional entries, SELL strategy, and reduced verifier dependencies out of this plumbing trial.

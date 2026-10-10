@@ -30,7 +30,9 @@ async function handleResponse<T>(res: Response): Promise<T> {
         // ignore parse error
       }
     }
-    const msg = errorData?.error || errorData?.message || `API error ${res.status}: ${res.statusText}`;
+    const msg = errorData?.reason && errorData?.error
+      ? `${errorData.error}: ${errorData.reason}`
+      : errorData?.reason || errorData?.error || errorData?.message || `API error ${res.status}: ${res.statusText}`;
     throw new ApiClientError(msg, res.status, errorData);
   }
 

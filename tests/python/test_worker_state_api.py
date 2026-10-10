@@ -1,5 +1,8 @@
 import asyncio
-from datetime import datetime, timedelta, timezone, UTC
+import importlib
+import os
+import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -7,10 +10,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.trading_worker.main import (
+    LOCAL_SUPERVISOR_HEARTBEAT_TTL_SECONDS,
     TradingWorkerApp,
     WorkerEngineState,
     WorkerExecutionMode,
     WorkerRuntimeState,
+    local_mainnet_preflight_lifecycle_status,
+    local_mainnet_risk_lifecycle_status,
     _global_heartbeat_loop,
     app,
     get_default_state,
@@ -25,6 +31,7 @@ from apps.trading_worker.venues.binance.config import BinanceEnvironment, enviro
 from apps.trading_worker.venues.binance.models import ConnectionState
 
 client = TestClient(app)
+worker_main = importlib.import_module("apps.trading_worker.main")
 
 def test_default_worker_state_endpoint():
     """Verify /state returns a valid WorkerRuntimeState even before worker app attachment."""
@@ -233,6 +240,250 @@ async def test_mainnet_preflight_rejects_unknown_persistence_counters(monkeypatc
         if check["id"] == "CHK-PREFLIGHT-PERSISTENCE"
     )
     assert persistence_check["status"] == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_local_mainnet_readiness_fails_before_secrets_without_risk_lifecycle(monkeypatch):
+    monkeypatch.setenv("LOCAL_ONLY", "true")
+    monkeypatch.setenv("LOCAL_RUNTIME_TARGET", "LOCAL")
+    monkeypatch.delenv("BINANCE_MAINNET_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_MAINNET_API_SECRET", raising=False)
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.persistence = SimpleNamespace(
+        readiness=lambda: {
+            "mode": "REQUIRED",
+            "durable": True,
+            "pending_outbox": 0,
+            "failed_writes": 0,
+        },
+    )
+
+    ready, missing = local_mainnet_risk_lifecycle_status()
+    result = await worker.run_mainnet_read_only_preflight()
+    lifecycle_check = next(
+        check
+        for check in result["checks"]
+        if check["id"] == "CHK-PREFLIGHT-LOCAL-RISK-LIFECYCLE"
+    )
+
+    assert ready is False
+    assert set(missing) == {
+        "get_local_mainnet_risk_context",
+        "verify_local_mainnet_protection",
+    }
+    assert lifecycle_check["status"] == "FAIL"
+    assert result["preflightPassed"] is False
+    assert result["orderSubmissionAttempts"] == 0
+    assert result["orderEndpointAttempts"] == 0
+
+
+def test_local_mainnet_preflight_uses_fresh_readonly_evidence_without_prior_trade():
+    check_ids = (
+        "CHK-PREFLIGHT-PERSISTENCE",
+        "CHK-PREFLIGHT-DURABLE-LEDGER",
+        "CHK-PREFLIGHT-KILL-SWITCH",
+        "CHK-PREFLIGHT-PILOT-MONITOR",
+        "CHK-PREFLIGHT-PILOT-FLAT-ACCOUNT",
+        "CHK-PREFLIGHT-CONNECTION",
+        "CHK-PREFLIGHT-AUTH",
+        "CHK-PREFLIGHT-CAN-TRADE",
+        "CHK-PREFLIGHT-POSITION-MODE",
+        "CHK-PREFLIGHT-RULES",
+        "CHK-PREFLIGHT-RECONCILIATION",
+        "CHK-PREFLIGHT-PRIVATE-STREAM",
+        "CHK-PREFLIGHT-ACCOUNT-RISK",
+        "CHK-PREFLIGHT-MARKET",
+    )
+    result = {
+        "checks": [{"id": check_id, "status": "PASS"} for check_id in check_ids],
+        "orderSubmissionAttempts": 0,
+        "orderEndpointAttempts": 0,
+    }
+    persistence = SimpleNamespace(
+        readiness=lambda: {
+            "mode": "REQUIRED",
+            "durable": True,
+            "runtime_target": "LOCAL",
+            "database_provider": "POSTGRES_LOCAL",
+            "database_host": "127.0.0.1",
+            "database_port": 5433,
+            "database_identity_verified": True,
+            "schema_verified": True,
+        }
+    )
+
+    ready, missing = local_mainnet_preflight_lifecycle_status(result, persistence)
+
+    assert ready is True
+    assert missing == []
+
+
+def test_local_mainnet_preflight_fails_closed_when_any_fresh_readonly_check_is_missing():
+    result = {
+        "checks": [{"id": "CHK-PREFLIGHT-RECONCILIATION", "status": "FAIL"}],
+        "orderSubmissionAttempts": 0,
+        "orderEndpointAttempts": 0,
+    }
+    persistence = SimpleNamespace(readiness=lambda: {})
+
+    ready, missing = local_mainnet_preflight_lifecycle_status(result, persistence)
+
+    assert ready is False
+    assert "CHK-PREFLIGHT-RECONCILIATION" in missing
+    assert "verified_local_postgres_identity" in missing
+
+
+def test_local_supervisor_heartbeat_freshness_is_required_for_approved_live(monkeypatch):
+    monkeypatch.setenv("LOCAL_ONLY", "true")
+    monkeypatch.setenv("LOCAL_RUNTIME_TARGET", "LOCAL")
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+
+    assert worker.local_supervisor_heartbeat_is_fresh() is False
+    worker.record_local_supervisor_heartbeat()
+    assert worker.local_supervisor_heartbeat_is_fresh() is True
+    worker._local_supervisor_heartbeat_monotonic = (
+        time.monotonic() - LOCAL_SUPERVISOR_HEARTBEAT_TTL_SECONDS - 1
+    )
+    assert worker.local_supervisor_heartbeat_is_fresh() is False
+
+
+@pytest.mark.asyncio
+async def test_local_supervisor_watchdog_disarms_clears_credentials_and_exits(monkeypatch):
+    monkeypatch.setenv("LOCAL_ONLY", "true")
+    monkeypatch.setenv("LOCAL_RUNTIME_TARGET", "LOCAL")
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")
+    monkeypatch.setenv("BINANCE_MAINNET_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_MAINNET_API_SECRET", "test-secret")
+    monkeypatch.setenv("MAINNET_RELEASE_APPROVAL_ID", "test-approval")
+    monkeypatch.setenv("LOCAL_SOURCE_FINGERPRINT", "a" * 64)
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    server = SimpleNamespace(should_exit=False)
+    monkeypatch.setattr("apps.trading_worker.main._ACTIVE_UVICORN_SERVER", server)
+
+    async def fake_disarm():
+        assert worker.pause_new_risk is True
+        assert worker.engine_state == WorkerEngineState.DISARMED
+        assert os.environ["MAINNET_LIVE_APPROVED"] == "false"
+
+    worker.disarm = fake_disarm
+    await worker.enforce_local_supervisor_liveness()
+
+    assert worker._local_supervisor_shutdown_started is True
+    assert worker.execution_mode == WorkerExecutionMode.PAPER
+    assert worker.is_running is False
+    assert server.should_exit is True
+    assert os.environ["MAINNET_LIVE_APPROVED"] == "false"
+    assert os.environ["BINANCE_MAINNET_API_KEY"] == ""
+    assert os.environ["BINANCE_MAINNET_API_SECRET"] == ""
+    assert os.environ["MAINNET_RELEASE_APPROVAL_ID"] == ""
+    assert os.environ["LOCAL_SOURCE_FINGERPRINT"] == ""
+
+
+def test_local_supervisor_heartbeat_endpoint_requires_identity_and_records_pulse(monkeypatch):
+    monkeypatch.setenv("LOCAL_ONLY", "true")
+    monkeypatch.setenv("LOCAL_RUNTIME_TARGET", "LOCAL")
+    monkeypatch.setenv("LOCAL_WORKER_AUTH_REQUIRED", "true")
+    monkeypatch.setenv("WORKER_IDENTITY_TOKEN", "test-local-worker-token")
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    set_worker_engine(worker)
+    try:
+        assert worker.local_supervisor_heartbeat_is_fresh() is False
+        unauthorized = client.post("/supervisor/heartbeat")
+        authorized = client.post(
+            "/supervisor/heartbeat",
+            headers={"Authorization": "Bearer test-local-worker-token"},
+        )
+        assert unauthorized.status_code == 401
+        assert authorized.status_code == 200
+        assert authorized.json()["runtimeTarget"] == "LOCAL"
+        assert worker.local_supervisor_heartbeat_is_fresh() is True
+    finally:
+        set_worker_engine(None)
+
+
+@pytest.mark.asyncio
+async def test_local_worker_graceful_shutdown_disarms_and_scrubs_mainnet_secrets(monkeypatch):
+    monkeypatch.setenv("LOCAL_ONLY", "true")
+    monkeypatch.setenv("LOCAL_RUNTIME_TARGET", "LOCAL")
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("BINANCE_MAINNET_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_MAINNET_API_SECRET", "test-secret")
+    monkeypatch.setenv("MAINNET_RELEASE_APPROVAL_ID", "test-approval")
+    monkeypatch.setenv("MAINNET_CONTINUATION_APPROVAL_ID", "test-continuation")
+    monkeypatch.setenv("LOCAL_SOURCE_FINGERPRINT", "b" * 64)
+    calls = {"disarm": 0, "stop": 0}
+
+    class FakeWorker:
+        execution_mode = WorkerExecutionMode.LIVE
+        engine_state = WorkerEngineState.ARMED
+        pause_new_risk = False
+
+        async def start(self):
+            pass
+
+        async def disarm(self):
+            calls["disarm"] += 1
+            assert os.environ["MAINNET_LIVE_APPROVED"] == "false"
+
+        async def stop(self):
+            calls["stop"] += 1
+
+    fake_worker = FakeWorker()
+
+    async def fake_serve_api(_worker):
+        pass
+
+    monkeypatch.setattr(worker_main, "TradingWorkerApp", lambda: fake_worker)
+    monkeypatch.setattr(worker_main, "serve_api", fake_serve_api)
+    await worker_main.main()
+
+    assert calls == {"disarm": 1, "stop": 1}
+    assert os.environ["MAINNET_LIVE_APPROVED"] == "false"
+    assert os.environ["EXECUTION_MODE"] == "PAPER"
+    assert os.environ["BINANCE_MAINNET_API_KEY"] == ""
+    assert os.environ["BINANCE_MAINNET_API_SECRET"] == ""
+    assert os.environ["MAINNET_RELEASE_APPROVAL_ID"] == ""
+    assert os.environ["MAINNET_CONTINUATION_APPROVAL_ID"] == ""
+    assert os.environ["LOCAL_SOURCE_FINGERPRINT"] == ""
+
+
+@pytest.mark.asyncio
+async def test_local_live_stop_disarms_adapter_before_persistence_shutdown(monkeypatch):
+    monkeypatch.setenv("LOCAL_ONLY", "true")
+    monkeypatch.setenv("LOCAL_RUNTIME_TARGET", "LOCAL")
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("BINANCE_MAINNET_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_MAINNET_API_SECRET", "test-secret")
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    calls = []
+
+    class FakeAdapter:
+        async def close(self):
+            calls.append("adapter_closed")
+
+    async def stop_persistence():
+        calls.append("persistence_stopped")
+
+    worker.execution_adapter = FakeAdapter()
+    worker.persistence.stop = stop_persistence
+    await worker.stop()
+
+    assert calls == ["adapter_closed", "persistence_stopped"]
+    assert worker.execution_mode == WorkerExecutionMode.PAPER
+    assert worker.engine_state == WorkerEngineState.DISARMED
+    assert worker.pause_new_risk is True
+    assert os.environ["MAINNET_LIVE_APPROVED"] == "false"
+    assert os.environ["BINANCE_MAINNET_API_KEY"] == ""
+    assert os.environ["BINANCE_MAINNET_API_SECRET"] == ""
 
 
 @pytest.mark.asyncio
@@ -555,5 +806,3 @@ def test_reconcile_endpoint_integration():
     assert state_resp.json()["account_synchronized"] is False
 
     set_worker_engine(None)
-
-

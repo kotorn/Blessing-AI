@@ -137,7 +137,7 @@ class PostgresExecutionLedger(InMemoryLedger):
 
         orders = await db.fetch(
             """
-            SELECT client_order_id, exchange_order_id, symbol, venue, side,
+            SELECT client_order_id, exchange_order_id, basket_id, symbol, venue, side,
                    order_type, price, quantity, status, time_in_force,
                    position_side, created_at, updated_at
             FROM orders
@@ -239,6 +239,11 @@ class PostgresExecutionLedger(InMemoryLedger):
             price=price,
             order_type=order_type,
             client_order_id=_required_text(row, "client_order_id"),
+            basket_id=(
+                str(row["basket_id"]).strip()
+                if row.get("basket_id") not in (None, "")
+                else None
+            ),
             status=status,
             exchange_order_id=(
                 str(row["exchange_order_id"]).strip()

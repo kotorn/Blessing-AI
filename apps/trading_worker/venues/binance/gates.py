@@ -6,12 +6,21 @@ from decimal import Decimal, InvalidOperation
 import logging
 import math
 import os
-from typing import Any, Optional
+import re
+import time
+from typing import Any, Mapping, Optional, cast
 
 from domain.enums import EconomicRiskClass, MarketType, OrderSide, OrderType, PositionSide, TimeInForce
 from domain.models import ExecutionDecision, OrderIntent
 
 from .config import BinanceEnvironment, environment_label
+from .mainnet_risk import (
+    LOCAL_LIVE_PILOT_POLICY,
+    LOCAL_LIVE_PILOT_POLICY_SHA256,
+    MAINNET_RISK_POLICY,
+    MAINNET_RISK_POLICY_SHA256,
+    validate_risk_increasing_order,
+)
 from .models import ConnectionState
 
 logger = logging.getLogger("blessing.binance.gates")
@@ -57,6 +66,419 @@ def _is_risk_reducing(value: Any) -> bool:
     }
 
 
+async def _local_mainnet_risk_gate(
+    adapter: Any,
+    intent: OrderIntent,
+    *,
+    entry_price: Decimal,
+    quantity: Decimal,
+) -> Optional[GateResult]:
+    """Validate pre-entry risk and bracket intent without requiring live algos.
+
+    Confirmed exchange protection is necessarily a post-fill condition. This
+    gate only validates the planned stop/target geometry; it must never query
+    for Algo orders that cannot exist until after the entry fills.
+    """
+
+    if getattr(adapter, 'env', None) != BinanceEnvironment.MAINNET:
+        return None
+    local_only = _env_flag('LOCAL_ONLY', False)
+    runtime_target = os.getenv('LOCAL_RUNTIME_TARGET', '').strip().upper()
+    if not local_only and runtime_target != 'LOCAL':
+        return None
+    if runtime_target == 'LOCAL' and not local_only:
+        return GateResult(False, 'Local Mainnet runtime requires LOCAL_ONLY=true')
+    if not entry_price.is_finite() or entry_price <= 0 or not quantity.is_finite() or quantity <= 0:
+        return GateResult(False, 'Local Mainnet final price or normalized quantity is invalid')
+    validated_intent = intent.model_copy(update={'quantity': quantity})
+
+
+    # Validate the intended protection before entry. The post-fill lifecycle
+    # separately submits and verifies fill-sized Algo orders within 5 seconds.
+    try:
+        stop_price = Decimal(str(intent.stop_loss_price))
+        target_price = Decimal(str(intent.take_profit_price))
+        side = str(getattr(intent.side, 'value', intent.side)).upper()
+        if (
+            not stop_price.is_finite()
+            or not target_price.is_finite()
+            or stop_price <= 0
+            or target_price <= 0
+            or (side == 'BUY' and not stop_price < entry_price < target_price)
+            or (side == 'SELL' and not target_price < entry_price < stop_price)
+            or side not in {'BUY', 'SELL'}
+        ):
+            raise ValueError('invalid bracket geometry')
+        rules = getattr(adapter, 'symbol_rules', {}).get(MAINNET_RISK_POLICY.symbol)
+        if (
+            rules is None
+            or rules.normalize_price(stop_price) != stop_price
+            or rules.normalize_price(target_price) != target_price
+            or rules.normalize_quantity(quantity) != quantity
+        ):
+            raise ValueError('bracket or quantity is not exchange-normalized')
+        if str(getattr(intent.position_side, 'value', intent.position_side)).upper() != 'BOTH':
+            raise ValueError('Local post-fill close-only lifecycle supports one-way position mode only')
+    except (AttributeError, InvalidOperation, TypeError, ValueError):
+        return GateResult(False, 'Local Mainnet pre-entry stop/target plan is invalid or not exchange-normalized')
+
+    management_mode = str(getattr(intent, 'management_mode', '') or '').strip().upper()
+    if management_mode not in {'QUICK', 'HOLD'}:
+        return GateResult(False, 'Local Mainnet entry requires a strategy-selected, predeclared management mode')
+    if management_mode == 'HOLD':
+        return GateResult(False, 'HOLD management is blocked until no-fixed-target trailing and signal-exit lifecycle is implemented')
+
+    context_provider: Any = getattr(adapter, 'get_local_mainnet_risk_context', None)
+    if not callable(context_provider):
+        return GateResult(False, 'Local Mainnet durable basket-risk context is unavailable')
+
+    context_input = {
+        'runtime_target': 'LOCAL',
+        'validated_entry_price': entry_price,
+        'validated_quantity': quantity,
+        'validated_notional_usdc': quantity * entry_price,
+    }
+    try:
+        context = await cast(Any, context_provider(validated_intent, context_input))
+    except Exception:
+        return GateResult(False, 'Local Mainnet durable basket-risk context could not be verified')
+    if not isinstance(context, Mapping):
+        return GateResult(False, 'Local Mainnet durable basket-risk context is invalid')
+
+    observed = context.get('observed_at')
+    try:
+        observed_at = observed if isinstance(observed, datetime) else datetime.fromisoformat(str(observed))
+        if observed_at.tzinfo is None:
+            return GateResult(False, 'Local Mainnet risk context timestamp is not timezone-aware')
+        age = (datetime.now(timezone.utc) - observed_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return GateResult(False, 'Local Mainnet risk context timestamp is invalid')
+    if age < 0 or age > 5:
+        return GateResult(False, 'Local Mainnet risk context is stale')
+
+    pilot = context.get('live_research_pilot')
+    if not isinstance(pilot, Mapping):
+        return GateResult(False, 'Verified durable Live Research Pilot approval context is unavailable')
+    pilot_binding = {
+        'approval_verified': True,
+        'approval_role': 'trading_admin',
+        'binding_verified': True,
+        'runtime_target': 'LOCAL',
+        'symbol': MAINNET_RISK_POLICY.symbol,
+        'status': 'ACTIVE',
+        'management_mode': management_mode,
+        'drawdown_triggered': False,
+    }
+    if any(pilot.get(key) != expected for key, expected in pilot_binding.items()):
+        return GateResult(False, 'Live Research Pilot approval, status, or management binding is invalid')
+    for key in ('source_hash', 'dependency_hash', 'migration_hash', 'strategy_hash', 'risk_policy_hash'):
+        if not re.fullmatch(r'[0-9a-f]{64}', str(pilot.get(key) or '')):
+            return GateResult(False, 'Live Research Pilot runtime or strategy fingerprint is incomplete')
+    if (
+        pilot.get('risk_policy_hash') != LOCAL_LIVE_PILOT_POLICY_SHA256
+        or any(pilot.get(key) != context.get(key) for key in ('source_hash', 'dependency_hash', 'migration_hash'))
+    ):
+        return GateResult(False, 'Live Research Pilot binding differs from the verified runtime fingerprint')
+    expires_at = pilot.get('campaign_expires_at')
+    try:
+        pilot_expiry = expires_at if isinstance(expires_at, datetime) else datetime.fromisoformat(str(expires_at))
+        if pilot_expiry.tzinfo is None or pilot_expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+            return GateResult(False, 'Live Research Pilot approval is expired or timezone-invalid')
+    except (TypeError, ValueError):
+        return GateResult(False, 'Live Research Pilot expiry is invalid')
+    expected_pilot_limits = {
+        'max_position_notional_usdc': Decimal('50'),
+        'max_order_notional_usdc': Decimal('50'),
+        'max_total_exposure_usdc': Decimal('50'),
+        'max_position_stop_risk_usdc': Decimal('2'),
+        'campaign_drawdown_usdc': Decimal('5'),
+        'max_leverage': Decimal('10'),
+    }
+    limits = pilot.get('limits')
+    if not isinstance(limits, Mapping):
+        return GateResult(False, 'Live Research Pilot risk limits are unavailable')
+    try:
+        if any(Decimal(str(limits.get(key))) != value for key, value in expected_pilot_limits.items()):
+            return GateResult(False, 'Live Research Pilot limits differ from the approved policy')
+        pilot_numeric = {
+            key: Decimal(str(pilot.get(key)))
+            for key in (
+                'current_position_notional_usdc', 'current_total_exposure_usdc',
+                'current_net_pnl_usdc', 'peak_net_pnl_usdc', 'configured_leverage',
+                'effective_leverage',
+            )
+        }
+        if any(not value.is_finite() for value in pilot_numeric.values()):
+            raise ValueError('non-finite pilot context')
+        current_position = pilot_numeric['current_position_notional_usdc']
+        current_exposure = pilot_numeric['current_total_exposure_usdc']
+        campaign_dd = pilot_numeric['peak_net_pnl_usdc'] - pilot_numeric['current_net_pnl_usdc']
+        if (
+            current_position < 0
+            or current_exposure < 0
+            or campaign_dd < 0
+            or campaign_dd >= expected_pilot_limits['campaign_drawdown_usdc']
+            or pilot_numeric['configured_leverage'] > expected_pilot_limits['max_leverage']
+            or pilot_numeric['effective_leverage'] > expected_pilot_limits['max_leverage']
+        ):
+            return GateResult(False, 'Live Research Pilot exposure, drawdown, or leverage cap is reached')
+        if pilot.get('active_exposure_chains') != 0 or pilot.get('active_position_count') != 0:
+            return GateResult(False, 'Live Research Pilot permits no additional exposure while a position is active')
+    except (InvalidOperation, TypeError, ValueError):
+        return GateResult(False, 'Live Research Pilot numeric risk context is incomplete')
+
+    required_context = {
+        'runtime_target': 'LOCAL',
+        'database_provider': 'POSTGRES_LOCAL',
+        'database_identity_verified': True,
+        'persistence_durable': True,
+        'lease_held': True,
+        'kill_switch_active': False,
+        'market_data_fresh': True,
+        'account_snapshot_fresh': True,
+        'reconciliation_status': 'IN_SYNC',
+    }
+    if any(context.get(key) != expected for key, expected in required_context.items()):
+        return GateResult(False, 'Local Mainnet risk context failed a runtime, persistence, or safety identity check')
+    # Caller/strategy estimates, even when echoed by the adapter, are not
+    # authoritative commission, funding, or executable-depth evidence. No
+    # Local Mainnet cost evidence provider is implemented yet, so fail closed.
+    cost_provider: Any = getattr(adapter, 'get_local_mainnet_cost_evidence', None)
+    if not callable(cost_provider):
+        return GateResult(
+            False,
+            'Local Mainnet commission/funding/depth cost evidence is unavailable; caller estimates cannot authorize risk',
+        )
+    try:
+        cost_evidence = await cast(
+            Any, cost_provider(validated_intent, {**context, **context_input})
+        )
+    except Exception:
+        return GateResult(False, 'Local Mainnet exchange-derived cost evidence could not be verified')
+    if not isinstance(cost_evidence, Mapping):
+        return GateResult(False, 'Local Mainnet exchange-derived cost evidence is unavailable')
+    observed_costs = cost_evidence.get('observed_at')
+    try:
+        costs_at = (
+            observed_costs
+            if isinstance(observed_costs, datetime)
+            else datetime.fromisoformat(str(observed_costs))
+        )
+        if costs_at.tzinfo is None:
+            raise ValueError('cost evidence timestamp is not timezone-aware')
+        costs_age = (datetime.now(timezone.utc) - costs_at.astimezone(timezone.utc)).total_seconds()
+        if costs_age < 0 or costs_age > 5:
+            raise ValueError('cost evidence is stale')
+        is_pm = bool(getattr(adapter, "portfolio_margin", False))
+        expected_source = (
+            'BINANCE_PAPI_COMMISSION_FUNDING_DEPTH'
+            if is_pm
+            else 'BINANCE_FAPI_COMMISSION_FUNDING_DEPTH'
+        )
+        if (
+            cost_evidence.get('source') != expected_source
+            or cost_evidence.get('symbol') != MAINNET_RISK_POLICY.symbol
+            or cost_evidence.get('client_order_id') != intent.client_order_id
+            or Decimal(str(cost_evidence.get('quantity'))) != quantity
+            or str(cost_evidence.get('side', '')).upper() != side
+        ):
+            raise ValueError('cost evidence identity mismatch')
+        observations = cost_evidence.get('request_observations')
+        required_observations = {
+            'commission', 'depth', 'funding', 'funding_info', 'leverage_brackets'
+        }
+        expected_routes = {
+            'commission': '/papi/v1/um/commissionRate' if is_pm else '/fapi/v1/commissionRate',
+            'depth': '/fapi/v1/depth',
+            'funding': '/fapi/v1/fundingRate',
+            'funding_info': '/fapi/v1/fundingInfo',
+            'leverage_brackets': '/papi/v1/um/leverageBracket' if is_pm else '/fapi/v1/leverageBracket',
+        }
+        expected_params: dict[str, dict[str, Any]] = {
+            'commission': {'symbol': MAINNET_RISK_POLICY.symbol},
+            'depth': {'symbol': MAINNET_RISK_POLICY.symbol, 'limit': 1000},
+            'funding': {'symbol': MAINNET_RISK_POLICY.symbol, 'limit': 3},
+            'funding_info': {},
+            'leverage_brackets': {'symbol': MAINNET_RISK_POLICY.symbol},
+        }
+        expected_signed = {'commission': True, 'depth': False, 'funding': False,
+                           'funding_info': False, 'leverage_brackets': True}
+        if not isinstance(observations, Mapping) or set(observations) != required_observations:
+            raise ValueError('per-endpoint retrieval evidence is incomplete')
+        monotonic_now = time.monotonic()
+        for name, observation in observations.items():
+            if not isinstance(observation, Mapping):
+                raise ValueError('per-endpoint retrieval evidence is invalid')
+            completed = observation.get('completed_at')
+            completed_monotonic = observation.get('completed_monotonic')
+            started_monotonic = observation.get('started_monotonic')
+            duration_ms = observation.get('duration_ms')
+            elapsed_ms = (
+                (completed_monotonic - started_monotonic) * 1000
+                if isinstance(completed_monotonic, (int, float))
+                and isinstance(started_monotonic, (int, float))
+                else math.inf
+            )
+            if not isinstance(completed, datetime) or completed.tzinfo is None:
+                raise ValueError('endpoint retrieval completion time is invalid')
+            started = observation.get('started_at')
+            if not isinstance(started, datetime) or started.tzinfo is None:
+                raise ValueError('endpoint retrieval start time is invalid')
+            age = (datetime.now(timezone.utc) - completed.astimezone(timezone.utc)).total_seconds()
+            wall_duration_ms = (
+                completed.astimezone(timezone.utc) - started.astimezone(timezone.utc)
+            ).total_seconds() * 1000
+            if (
+                not isinstance(completed_monotonic, (int, float))
+                or isinstance(completed_monotonic, bool)
+                or monotonic_now - completed_monotonic < 0
+                or monotonic_now - completed_monotonic > 5
+                or not isinstance(started_monotonic, (int, float))
+                or isinstance(started_monotonic, bool)
+                or completed_monotonic < started_monotonic
+                or monotonic_now - started_monotonic < 0
+                or monotonic_now - started_monotonic > 5
+                or age < 0
+                or age > 5
+                or not isinstance(duration_ms, (int, float))
+                or isinstance(duration_ms, bool)
+                or not math.isfinite(duration_ms)
+                or duration_ms < 0
+                or duration_ms > 5000
+                or abs(duration_ms - elapsed_ms) > max(1.0, elapsed_ms * 0.01)
+                or wall_duration_ms < 0
+                or abs(duration_ms - wall_duration_ms) > max(100.0, wall_duration_ms * 0.25)
+                or observation.get('source_timestamp') is not None
+                or observation.get('evidence_key') != name
+                or observation.get('route') != expected_routes[name]
+                or observation.get('method') != 'GET'
+                or observation.get('signed') is not expected_signed[name]
+                or observation.get('params') != expected_params[name]
+            ):
+                raise ValueError('per-endpoint cost retrieval is stale or falsely attributes source time')
+        if (
+            cost_evidence.get('depth_levels_requested') != 1000
+            or type(cost_evidence.get('depth_bid_levels_received')) is not int
+            or type(cost_evidence.get('depth_ask_levels_received')) is not int
+            or not 1 <= cost_evidence.get('depth_bid_levels_received', 0) <= 1000
+            or not 1 <= cost_evidence.get('depth_ask_levels_received', 0) <= 1000
+        ):
+            raise ValueError('depth coverage evidence is incomplete')
+        horizon_seconds = LOCAL_LIVE_PILOT_POLICY['quick_max_hold_seconds']
+        try:
+            interval_hours = Decimal(str(cost_evidence['funding_interval_hours']))
+            funding_events = cost_evidence['funding_events_assumed']
+        except (KeyError, TypeError, InvalidOperation, ValueError) as exc:
+            raise ValueError('cost horizon is incomplete') from exc
+        expected_events = math.ceil(
+            Decimal(horizon_seconds) / (interval_hours * Decimal(3600))
+        ) + 1 if interval_hours.is_finite() and interval_hours > 0 else -1
+        if (
+            cost_evidence.get('cost_horizon_seconds') != horizon_seconds
+            or cost_evidence.get('cost_horizon_source') != 'LOCAL_LIVE_PILOT_POLICY'
+            or cost_evidence.get('runtime_target') != 'LOCAL'
+            or cost_evidence.get('venue') != 'BINANCE_MAINNET'
+            or not interval_hours.is_finite()
+            or interval_hours <= 0
+            or interval_hours > 24
+            or type(funding_events) is not int
+            or funding_events != expected_events
+        ):
+            raise ValueError('cost horizon or provenance does not match the approved pilot')
+        fees = Decimal(str(cost_evidence['fees_upper_bound_usdc']))
+        funding = Decimal(str(cost_evidence['funding_upper_bound_usdc']))
+        slippage = Decimal(str(cost_evidence['slippage_upper_bound_usdc']))
+        if any(not value.is_finite() or value < 0 for value in (fees, funding, slippage)):
+            raise ValueError('cost bounds are invalid')
+    except (KeyError, TypeError, ValueError, InvalidOperation, AttributeError):
+        return GateResult(False, 'Local Mainnet exchange-derived cost evidence is stale, incomplete, or mismatched')
+    raw_pilot_reward_to_risk = LOCAL_LIVE_PILOT_POLICY.get('min_reward_to_risk')
+    if isinstance(raw_pilot_reward_to_risk, bool) or raw_pilot_reward_to_risk is None:
+        return GateResult(
+            False,
+            'Live Research Pilot reward-risk exception is absent from its hashed policy; new risk remains blocked',
+        )
+    try:
+        pilot_min_reward_to_risk = Decimal(str(raw_pilot_reward_to_risk))
+        if not pilot_min_reward_to_risk.is_finite() or pilot_min_reward_to_risk < 0:
+            raise ValueError('unsafe pilot reward-risk exception')
+    except (InvalidOperation, TypeError, ValueError):
+        return GateResult(
+            False,
+            'Live Research Pilot reward-risk exception is invalid in its hashed policy; new risk remains blocked',
+        )
+    validated_intent = intent.model_copy(
+        update={
+            'quantity': quantity,
+            'estimated_fees_usdc': fees,
+            'estimated_funding_usdc': funding,
+            'estimated_slippage_usdc': slippage,
+        }
+    )
+    if str(context.get('basket_id') or '').strip() != str(intent.basket_id or '').strip():
+        return GateResult(False, 'Local Mainnet basket identity does not match the order intent')
+    if type(context.get('is_first_risk_increasing_order')) is not bool:
+        return GateResult(False, 'Local Mainnet first-order state is unknown')
+    same_active_basket = context.get('same_active_basket')
+    active_exposure_chains = context.get('active_exposure_chains')
+    if type(same_active_basket) is not bool:
+        return GateResult(False, 'Local Mainnet active basket identity is unknown')
+    if isinstance(active_exposure_chains, bool) or not isinstance(active_exposure_chains, int):
+        return GateResult(False, 'Local Mainnet active exposure chain count is unknown')
+
+    raw_basket_headroom = context.get('basket_headroom_usdc')
+    raw_daily_loss_headroom = context.get('daily_loss_headroom_usdc')
+    if raw_basket_headroom is None or raw_daily_loss_headroom is None:
+        return GateResult(False, 'Local Mainnet risk headroom is unavailable')
+
+    def _to_optional_decimal(v: Any) -> Decimal | None:
+        if v is None:
+            return None
+        return v if isinstance(v, Decimal) else Decimal(str(v))
+
+    try:
+        basket_headroom_usdc = Decimal(str(raw_basket_headroom))
+        daily_loss_headroom_usdc = Decimal(str(raw_daily_loss_headroom))
+        validation = validate_risk_increasing_order(
+            validated_intent,
+            entry_price=entry_price,
+            basket_headroom_usdc=basket_headroom_usdc,
+            daily_loss_headroom_usdc=daily_loss_headroom_usdc,
+            current_gross_exposure_usdc=_to_optional_decimal(context.get('current_gross_exposure_usdc')),
+            current_basket_exposure_usdc=_to_optional_decimal(context.get('current_basket_exposure_usdc')),
+            collateral_usdc=_to_optional_decimal(context.get('collateral_usdc')),
+            available_balance_usdc=_to_optional_decimal(context.get('available_balance_usdc')),
+            configured_leverage=_to_optional_decimal(context.get('configured_leverage')),
+            effective_leverage=_to_optional_decimal(context.get('effective_leverage')),
+            active_exposure_chains=active_exposure_chains,
+            same_active_basket=same_active_basket,
+            is_first_risk_increasing_order=context['is_first_risk_increasing_order'],
+            policy=MAINNET_RISK_POLICY,
+            min_net_reward_usdc=Decimal('0.25'),
+            min_reward_to_risk=pilot_min_reward_to_risk,
+        )
+    except Exception:
+        return GateResult(False, 'Local Mainnet risk calculation could not be verified')
+    if not validation.allowed:
+        return GateResult(False, f'Local Mainnet risk policy blocked order: {validation.reason}')
+    if (
+        validation.notional_usdc > expected_pilot_limits['max_order_notional_usdc']
+        or validation.notional_usdc + pilot_numeric['current_position_notional_usdc']
+        > expected_pilot_limits['max_position_notional_usdc']
+        or validation.notional_usdc + pilot_numeric['current_total_exposure_usdc']
+        > expected_pilot_limits['max_total_exposure_usdc']
+        or validation.stop_loss_risk_usdc > expected_pilot_limits['max_position_stop_risk_usdc']
+    ):
+        return GateResult(False, 'Live Research Pilot notional or planned stop-risk cap is exceeded')
+    # Stop-out realises stop distance plus fees, slippage and funding, so the cap must use total risk.
+    if campaign_dd + validation.total_risk_usdc > expected_pilot_limits['campaign_drawdown_usdc']:
+        return GateResult(False, 'Live Research Pilot planned stop loss and costs would exceed the campaign drawdown cap')
+    if management_mode == 'QUICK' and validation.net_reward_usdc < Decimal('0.25'):
+        return GateResult(False, 'QUICK management target must net at least 0.25 USDC after costs')
+
+    return None
+
+
 _KNOWN_ALPHA_STRATEGIES = frozenset({"grid", "trend", "shock", "carry"})
 _SYSTEM_STRATEGIES = frozenset(
     {"meta_allocator", "portfolio", "recovery", "manual_testnet_trial"}
@@ -95,10 +517,11 @@ def _disabled_strategy_reason(worker: Any, decision: ExecutionDecision) -> Optio
 
     if not _is_risk_increasing(getattr(decision, "risk_class", None)):
         return None
-    enabled_getter = getattr(worker, "_enabled_strategies", None)
+    enabled_getter: Any = getattr(worker, "_enabled_strategies", None)
+    strategies_iterable: Any = enabled_getter() if callable(enabled_getter) else set()
     enabled = {
         strategy
-        for strategy in (enabled_getter() if callable(enabled_getter) else set())
+        for strategy in (strategies_iterable or set())
         if strategy in _KNOWN_ALPHA_STRATEGIES
     }
     for intent in getattr(decision, "orders", []) or []:
@@ -210,7 +633,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 class DecisionExecutionGate:
     """Checks worker-wide conditions before any decision reaches the adapter."""
 
-    def __init__(self, worker: Any):
+    def __init__(self, worker: Any) -> None:
         self.worker = worker
 
     def check(self, decision: ExecutionDecision) -> GateResult:
@@ -278,6 +701,23 @@ class DecisionExecutionGate:
         if disabled_strategy_reason:
             return GateResult(False, disabled_strategy_reason)
 
+        if (
+            (
+                _is_risk_reducing(risk_class)
+                or str(getattr(decision, "action", "")).upper() in {"REDUCE_POSITION", "CLOSE"}
+                or any(getattr(o, "reduce_only", False) for o in getattr(decision, "orders", []))
+            )
+            and risk_class != EconomicRiskClass.EMERGENCY
+        ):
+            has_bracket_fn = getattr(self.worker, "has_open_quick_bracket", None) or getattr(
+                adapter, "has_open_quick_bracket", None
+            )
+            decision_symbol = getattr(decision, "symbol", "ETHUSDC")
+            if callable(has_bracket_fn) and has_bracket_fn(decision_symbol):
+                return GateResult(
+                    False, "Strategy REDUCE/CLOSE is fenced while QUICK bracket is open"
+                )
+
         if _is_risk_increasing(risk_class):
             # Treat canonical engine state as a safety input as well as the
             # compatibility flags. Any disagreement fails closed instead of
@@ -341,7 +781,7 @@ class DecisionExecutionGate:
 class OrderExecutionGate:
     """Validates and prepares each individual OrderIntent at the last boundary."""
 
-    def __init__(self, adapter: Any):
+    def __init__(self, adapter: Any) -> None:
         self.adapter = adapter
 
     async def check(
@@ -396,6 +836,13 @@ class OrderExecutionGate:
             EconomicRiskClass.NEW_RISK,
             EconomicRiskClass.INCREASE_RISK,
         }
+        local_mainnet_target = (
+            self.adapter.env == BinanceEnvironment.MAINNET
+            and (
+                _env_flag('LOCAL_ONLY', False)
+                or os.getenv('LOCAL_RUNTIME_TARGET', '').strip().upper() == 'LOCAL'
+            )
+        )
         snapshot_checker = getattr(self.adapter, "is_account_snapshot_fresh", None)
         if (
             risk_increasing
@@ -581,24 +1028,30 @@ class OrderExecutionGate:
                 )
             except (InvalidOperation, TypeError, ValueError):
                 return GateResult(False, "Invalid limit price")
-            if not price.is_finite() or price <= 0:
+            if price is None or not price.is_finite() or price <= 0:
                 return GateResult(False, "Limit price must be positive and finite")
             if rules.parsed_from_exchange_info and (
                 price < rules.min_price or price > rules.max_price
             ):
                 return GateResult(False, "Limit price is outside the exchange price bounds")
-            estimated_price = price
+            if price is None:
+                return GateResult(False, "Limit price is invalid")
+            estimated_price: Decimal = price
         else:
             if time_in_force != TimeInForce.GTC:
                 return GateResult(False, "MARKET orders do not support this timeInForce")
             if intent.price is not None:
                 return GateResult(False, "MARKET order must not provide a limit price")
-            estimated_price = await self.adapter.get_fresh_market_price(
+            market_price = await self.adapter.get_fresh_market_price(
                 symbol,
                 getattr(intent.side, "value", intent.side),
             )
-            if estimated_price is None:
+            if market_price is None:
                 return GateResult(False, f"Fresh market price unavailable for {symbol}")
+            estimated_price = market_price
+
+        if not isinstance(estimated_price, Decimal):
+            return GateResult(False, "Estimated price is unavailable")
 
         if order_type == OrderType.LIMIT.value:
             # Binance's percent-price filters apply to submitted limit prices.
@@ -618,9 +1071,9 @@ class OrderExecutionGate:
                 # Binance evaluates PERCENT_PRICE against mark price. A recent
                 # book-ticker midpoint is not a valid substitute, so obtain a
                 # fresh mark sample before rejecting the order.
-                mark_getter = getattr(self.adapter, "get_fresh_market_price", None)
+                mark_getter: Any = getattr(self.adapter, "get_fresh_market_price", None)
                 if callable(mark_getter):
-                    reference_price = await mark_getter(symbol)
+                    reference_price = await cast(Any, mark_getter(symbol))
             percent_allowed, percent_reason = rules.validate_percent_price(
                 estimated_price,
                 getattr(side, "value", side),
@@ -670,6 +1123,15 @@ class OrderExecutionGate:
         max_notional = rules.max_notional_for(order_type)
         if max_notional > 0 and notional > max_notional:
             return GateResult(False, f"Notional {notional} exceeds maximum {max_notional}")
+        if risk_increasing and local_mainnet_target:
+            local_gate = await _local_mainnet_risk_gate(
+                self.adapter,
+                intent,
+                entry_price=estimated_price,
+                quantity=quantity,
+            )
+            if local_gate is not None:
+                return local_gate
         if intent.reduce_only and risk in {
             EconomicRiskClass.NEW_RISK,
             EconomicRiskClass.INCREASE_RISK,
@@ -723,7 +1185,7 @@ class OrderExecutionGate:
 
             existing_notional = Decimal("0")
             for order in current_open_orders:
-                if order.price <= 0:
+                if order.price is None or not order.price.is_finite() or order.price <= 0:
                     return GateResult(False, "Existing open-order notional is unknown")
                 existing_notional += abs(order.quantity * order.price)
             for position in await self.adapter.ledger.get_positions():

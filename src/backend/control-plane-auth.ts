@@ -23,13 +23,7 @@ function normalizeRole(value: unknown): ControlPlaneRole | null {
     return 'viewer';
   }
   if (normalized === 'operator') return 'operator';
-  if (
-    normalized === 'trading_admin' ||
-    normalized === 'admin' ||
-    normalized === 'trader'
-  ) {
-    return 'trading_admin';
-  }
+  if (normalized === 'trading_admin') return 'trading_admin';
   return null;
 }
 
@@ -49,13 +43,11 @@ export function controlPlaneRoles(claims: Record<string, unknown>): ControlPlane
     }
   }
 
-  // Legacy boolean claims remain accepted only as trusted, server-verified
-  // custom claims while deployments migrate to the explicit role names.
+  // Only the trading-specific claim grants release and Mainnet authority.
+  // General-purpose admin/trader claims must never imply trading_admin.
   if (claims.viewer === true) roles.add('viewer');
   if (claims.operator === true) roles.add('operator');
-  if (claims.trading_admin === true || claims.tradingAdmin === true || claims.admin === true) {
-    roles.add('trading_admin');
-  }
+  if (claims.trading_admin === true) roles.add('trading_admin');
 
   return [...roles].sort((left, right) => ROLE_RANK[left] - ROLE_RANK[right]);
 }
@@ -199,11 +191,25 @@ export async function authorizeInternalServiceRequest(
  * control mutations require operator or better, and reads require viewer.
  */
 export function requiredControlPlaneRole(req: ControlPlaneRequestLike): ControlPlaneRole {
-  const route = (req.originalUrl || req.path || '').split('?')[0].toLowerCase();
+  const route = (req.originalUrl || req.path || '').split('?')[0].toLowerCase().replace(/\/+$/, '');
   const method = String(req.method || 'GET').toUpperCase();
+  if (route.endsWith('/local/pilot/acceptance')) return 'trading_admin';
+  if (/\/local\/pilot\/acceptance\/[a-zA-Z0-9_-]+$/.test(route)) return 'trading_admin';
   if (method === 'GET' || method === 'HEAD') return 'viewer';
 
   if (route.endsWith('/release/mainnet/approve')) return 'trading_admin';
+
+  if (route.endsWith('/local/mainnet/candidate')) return 'trading_admin';
+  if (route.endsWith('/local/mainnet/approve')) return 'trading_admin';
+  if (route.endsWith('/local/mainnet/continuation/request')) return 'trading_admin';
+  if (route.endsWith('/local/mainnet/continuation/approve')) return 'trading_admin';
+  if (route.endsWith('/local/pilot/request')) return 'trading_admin';
+  if (route.endsWith('/local/pilot/acceptance')) return 'trading_admin';
+  if (route.endsWith('/local/pilot/approve')) return 'trading_admin';
+  if (route.endsWith('/local/pilot/prepare')) return 'trading_admin';
+  if (route.endsWith('/local/pilot/start')) return 'trading_admin';
+  if (route.endsWith('/local/pilot/close-only')) return 'trading_admin';
+  if (route.endsWith('/local/pilot/revoke')) return 'trading_admin';
 
   if (route.endsWith('/release/mainnet/continuation/approve')) return 'trading_admin';
 
@@ -216,6 +222,13 @@ export function requiredControlPlaneRole(req: ControlPlaneRequestLike): ControlP
       .trim()
       .toUpperCase();
     return mode === 'LIVE' ? 'trading_admin' : 'operator';
+  }
+
+  if (route.endsWith('/system/recovery-only')) {
+    const active = (req.body as { active?: unknown } | undefined)?.active;
+    // Entering recovery-only is risk-reducing (operator); any other body, including a
+    // missing/non-true active flag, is a release and strictly requires trading_admin.
+    return active === true ? 'operator' : 'trading_admin';
   }
 
   if (route.endsWith('/kill-switch') || route.endsWith('/killswitch')) {

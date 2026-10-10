@@ -6,13 +6,39 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 jobs:
   build_and_test:
     runs-on: ubuntu-latest
+    services:
+      pilot_postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: pilot_ci
+          POSTGRES_PASSWORD: fixture-ci-only
+          POSTGRES_DB: blessing_migration_test_ci
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U pilot_ci -d blessing_migration_test_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     
     steps:
     - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
     
+    - name: Tracked text files must be LF (git ls-files --eol)
+      run: |
+        if git ls-files --eol | grep -E '(^|[[:space:]])(i|w)/(crlf|mixed)[[:space:]]'; then
+          echo "::error::Tracked text files with CRLF/mixed line endings found; Track C hashes raw bytes."
+          exit 1
+        fi
+
     - name: Setup Node.js
       uses: actions/setup-node@v7
       with:
@@ -57,7 +83,47 @@ jobs:
         --cov=apps --cov=domain --cov=venues --cov=data --cov=ai --cov=infrastructure
         --cov-report=term-missing:skip-covered
         --cov-fail-under=65
-      
+
+    - name: PostgreSQL 17 migration, crash and Worker startup acceptance (no skips)
+      env:
+        BLESSING_MIGRATION_TEST_DSN: postgresql://pilot_ci:fixture-ci-only@127.0.0.1:55433/blessing_migration_test_ci
+        BLESSING_MIGRATION_TEST_PORT: '55433'
+        BLESSING_DISABLE_TEST_DOTENV: '1'
+        MAINNET_LIVE_APPROVED: 'false'
+        EXECUTION_MODE: PAPER
+      run: |
+        python - <<'PY'
+        import re
+        import subprocess
+        import sys
+
+        result = subprocess.run([
+            sys.executable, '-I', '-m', 'pytest', '-q', '--color=no',
+            '-p', 'no:cacheprovider', '--basetemp=/tmp/blessing-pilot-ci-acceptance',
+            'tests/python/test_local_postgres_migrations.py::test_populated_migration_upgrade_through_020_survives_reconnect',
+            'tests/python/test_local_pilot_process_kill.py',
+            'tests/python/test_pilot_session_pg_acceptance.py',
+            'tests/python/test_pg_pilot_launch_lifecycle.py',
+        ], capture_output=True, text=True, timeout=180, shell=False)
+        lines = result.stdout.strip().splitlines()
+        summary = lines[-1] if lines else ''
+        if result.returncode != 0 or not re.fullmatch(
+            r'5 passed(?:, \d+ warnings?)? in \d+(?:\.\d+)?s(?: \([^\r\n]*\))?', summary,
+        ):
+            print(result.stdout[-6000:])
+            print(result.stderr[-2000:], file=sys.stderr)
+            raise SystemExit('PostgreSQL acceptance failed or did not execute all five tests')
+        print(summary)
+        PY
+
+    - name: Pilot lease and protection regression (no skips)
+      run: python -m scripts.run_local_pilot_ci_regressions
+
+    - name: Docker worker build and import smoke test
+      run: |
+        docker build -f Dockerfile.worker -t blessing-worker:ci-smoke .
+        docker run --rm blessing-worker:ci-smoke python -c "import apps.trading_worker.main; print('WORKER_IMAGE_SMOKE_PASS')"
+
     - name: Hygiene Check
       run: |
         # Tests and package installs create ignored caches in the checkout.
@@ -66,3 +132,143 @@ jobs:
           echo "Hygiene failure: tracked patch scripts or cache artifacts found in source."
           exit 1
         fi
+
+  local_pilot_ci_attestation:
+    name: Attest exact-SHA Local Pilot CI evidence
+    needs: [build_and_test]
+    if: github.repository == 'kotorn/Blessing-AI' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+
+    steps:
+    - name: Checkout exact tested source for Track C provenance
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+
+    - name: Setup Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.13'
+
+    - name: Create CI evidence subject
+      env:
+        REPOSITORY: ${{ github.repository }}
+        REPOSITORY_ID: ${{ github.repository_id }}
+        COMMIT_SHA: ${{ github.sha }}
+        EVENT_NAME: ${{ github.event_name }}
+        REF_NAME: ${{ github.ref }}
+        WORKFLOW_REF: ${{ github.workflow_ref }}
+        WORKFLOW_SHA: ${{ github.workflow_sha }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        python - <<'PY'
+        import json
+        import os
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        if os.environ["EVENT_NAME"] != "push" or os.environ["REF_NAME"] != "refs/heads/main":
+            raise SystemExit("CI attestation is restricted to pushes on main")
+        if os.environ["REPOSITORY"] != "kotorn/Blessing-AI" or os.environ["REPOSITORY_ID"] != "1366161771":
+            raise SystemExit("CI attestation is restricted to the canonical repository identity")
+        sha = os.environ["COMMIT_SHA"]
+        if len(sha) != 40 or any(character not in "0123456789abcdef" for character in sha):
+            raise SystemExit("GitHub did not provide a full commit SHA")
+        if os.environ["WORKFLOW_SHA"] != sha:
+            raise SystemExit("CI workflow identity does not match the tested commit")
+        if os.environ["WORKFLOW_REF"] != "kotorn/Blessing-AI/.github/workflows/ci.yml@refs/heads/main":
+            raise SystemExit("CI attestation requires the canonical main workflow identity")
+        evidence = {
+            "schemaVersion": 1,
+            "evidenceType": "LOCAL_PILOT_CI",
+            "repository": os.environ["REPOSITORY"],
+            "repositoryId": os.environ["REPOSITORY_ID"],
+            "commitSha": sha,
+            "workflowRef": os.environ["WORKFLOW_REF"],
+            "workflowSha": os.environ["WORKFLOW_SHA"],
+            "runId": os.environ["RUN_ID"],
+            "runAttempt": int(os.environ["RUN_ATTEMPT"]),
+            "eventName": os.environ["EVENT_NAME"],
+            "ref": os.environ["REF_NAME"],
+            "checks": [{"id": "build_and_test", "conclusion": "success"}],
+            "observedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        path = Path("artifacts/local-pilot-ci-evidence.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(evidence, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        PY
+
+    - name: Generate GitHub-signed attestation
+      id: attest
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+      with:
+        subject-path: artifacts/local-pilot-ci-evidence.json
+
+    - name: Retain the offline-verifiable attestation bundle
+      env:
+        BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+      run: |
+        python - <<'PY'
+        import os
+        from pathlib import Path
+        from shutil import copyfile
+
+        source = Path(os.environ["BUNDLE_PATH"])
+        destination = Path("artifacts/local-pilot-ci-attestation.bundle.json")
+        if not source.is_file() or source.stat().st_size == 0:
+            raise SystemExit("GitHub attestation bundle was not produced")
+        copyfile(source, destination)
+        PY
+
+    - name: Retain subject and signed bundle
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: local-pilot-ci-evidence-${{ github.sha }}
+        path: |
+          artifacts/local-pilot-ci-evidence.json
+          artifacts/local-pilot-ci-attestation.bundle.json
+        if-no-files-found: error
+        retention-days: 30
+
+    - name: Create authenticated Track C CHECKS subject
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: python -m scripts.produce_local_pilot_track_c --root . --class CHECKS
+
+    - name: Generate signed Track C CHECKS attestation
+      id: attest_track_c
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+      with:
+        subject-path: artifacts/local-pilot-attestations/CHECKS.json
+
+    - name: Retain Track C CHECKS bundle
+      env:
+        BUNDLE_PATH: ${{ steps.attest_track_c.outputs.bundle-path }}
+      run: |
+        python - <<'PY'
+        import os
+        from pathlib import Path
+        from shutil import copyfile
+
+        source = Path(os.environ["BUNDLE_PATH"])
+        destination = Path("artifacts/local-pilot-attestations/CHECKS.bundle.json")
+        if not source.is_file() or source.stat().st_size == 0:
+            raise SystemExit("Track C CHECKS bundle was not produced")
+        copyfile(source, destination)
+        PY
+
+    - name: Retain signed Track C CHECKS evidence
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: local-pilot-track-c-checks-${{ github.sha }}
+        path: artifacts/local-pilot-attestations/CHECKS*.json
+        if-no-files-found: error
+        retention-days: 30

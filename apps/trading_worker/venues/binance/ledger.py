@@ -1,5 +1,6 @@
+import asyncio
 from decimal import Decimal, InvalidOperation
-from typing import Protocol, List, Optional, Union
+from typing import Any, Callable, List, Optional, Protocol, Sequence, Union
 from domain.enums import EconomicRiskClass
 from domain.models import (
     ExecutionOrder,
@@ -37,7 +38,7 @@ class ExecutionLedger(Protocol):
     async def get_order_by_exchange_id(self, exchange_order_id: str) -> Optional[ExecutionOrder]: ...
     async def replace_positions(
         self,
-        raw_positions: List[Union[dict, ExchangePosition]],
+        raw_positions: Sequence[Union[dict, ExchangePosition]],
         *,
         mark_initialized: bool = True,
     ) -> None: ...
@@ -56,6 +57,10 @@ class ExecutionLedger(Protocol):
         self, snapshot: Optional[ExchangeAccountSnapshot]
     ) -> None: ...
     async def get_account_snapshot(self) -> Optional[ExchangeAccountSnapshot]: ...
+    on_order_update: Optional[Callable[[ExecutionOrder], Any]]
+    on_fill_update: Optional[Callable[[ExchangeFill], Any]]
+    on_position_update: Optional[Callable[[ExchangePosition], Any]]
+    on_account_snapshot_update: Optional[Callable[[Any], Any]]
 
 class InMemoryLedger:
     def __init__(self):
@@ -70,12 +75,19 @@ class InMemoryLedger:
         self.wallet_balance: Decimal = Decimal("0")
         self.margin_balance: Decimal = Decimal("0")
         self.account_snapshot: Optional[ExchangeAccountSnapshot] = None
-        self.on_order_update = None
-        self.on_fill_update = None
-        self.on_position_update = None
+        self.on_order_update: Optional[Callable[[ExecutionOrder], Any]] = None
+        self.on_fill_update: Optional[Callable[[ExchangeFill], Any]] = None
+        self.on_position_update: Optional[Callable[[ExchangePosition], Any]] = None
+        self.on_account_snapshot_update: Optional[Callable[[Any], Any]] = None
 
     async def set_account_snapshot(self, snapshot: Optional[ExchangeAccountSnapshot]) -> None:
         self.account_snapshot = snapshot
+        if self.on_account_snapshot_update is not None and snapshot is not None:
+            callback = self.on_account_snapshot_update
+            if asyncio.iscoroutinefunction(callback):
+                await callback(snapshot)
+            else:
+                callback(snapshot)
 
     async def get_account_snapshot(self) -> Optional[ExchangeAccountSnapshot]:
         return self.account_snapshot
@@ -111,6 +123,7 @@ class InMemoryLedger:
             if raw_time_in_force == "GTX"
             else TimeInForce(raw_time_in_force)
         )
+        existing = self.orders.get(client_oid)
         order = ExecutionOrder(
             symbol=str(raw_order["symbol"]).upper(),
             side=side,
@@ -125,23 +138,11 @@ class InMemoryLedger:
             position_side=PositionSide(str(raw_order.get("positionSide", "BOTH")).upper()),
             reduce_only=_exchange_bool(raw_order.get("reduceOnly", False)),
             time_in_force=time_in_force,
-            strategy_id=(self.orders.get(client_oid).strategy_id if client_oid in self.orders else "portfolio"),
-            decision_id=(self.orders.get(client_oid).decision_id if client_oid in self.orders else None),
-            target_exposure_id=(
-                self.orders.get(client_oid).target_exposure_id
-                if client_oid in self.orders
-                else None
-            ),
-            source_intent_ids=(
-                list(self.orders[client_oid].source_intent_ids)
-                if client_oid in self.orders
-                else []
-            ),
-            risk_class=(
-                self.orders[client_oid].risk_class
-                if client_oid in self.orders
-                else EconomicRiskClass.NOOP
-            ),
+            strategy_id=(existing.strategy_id if existing else "portfolio"),
+            decision_id=(existing.decision_id if existing else None),
+            target_exposure_id=(existing.target_exposure_id if existing else None),
+            source_intent_ids=(list(existing.source_intent_ids) if existing else []),
+            risk_class=(existing.risk_class if existing else EconomicRiskClass.NOOP),
         )
         self.orders[client_oid] = order
         self.version += 1
@@ -326,7 +327,7 @@ class InMemoryLedger:
 
     async def replace_positions(
         self,
-        raw_positions: List[Union[dict, ExchangePosition]],
+        raw_positions: Sequence[Union[dict, ExchangePosition]],
         *,
         mark_initialized: bool = True,
     ) -> None:

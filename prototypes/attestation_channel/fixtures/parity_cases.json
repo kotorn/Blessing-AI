@@ -1,0 +1,1508 @@
+{
+  "base": {
+    "evidence": {
+      "attestations": {
+        "CHECKS": {
+          "artifact_b64": "ZmFrZSBhcnRpZmFjdCBieXRlcyBmb3IgQ0hFQ0tT",
+          "bundle": "fake-bundle-CHECKS",
+          "subject": {
+            "dependency_sha256": "f93464a48a2b9281080b555fac1081b1852154552800cbc6a2440ad1e3629033",
+            "evidence_type": "CHECKS",
+            "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "migration_sha256": "c16b187c67b20b6b2fd297273f6b0e53f3230d2edd1bf944bfa4b3827cf87d28",
+            "observed_at": "2026-10-02T11:00:00+00:00",
+            "policy_sha256": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+            "repository_id": "1366161771",
+            "run_id": "9000",
+            "source_sha256": "25a6634263c1b1f6fc4697a04e2b9904ea4b042a89af59dc93ec1f5d44848a26",
+            "subject_sha256": "9fb2ccfe6f48f5bea469760860d60d849d4dd88c45f7754a6fe324975fe7831c",
+            "workflow_ref": "kotorn/Blessing-AI/.github/workflows/ci.yml@refs/heads/main"
+          }
+        },
+        "REVIEW_AUTH_RELEASE": {
+          "artifact_b64": "ZmFrZSBhcnRpZmFjdCBieXRlcyBmb3IgUkVWSUVXX0FVVEhfUkVMRUFTRQ==",
+          "bundle": "fake-bundle-REVIEW_AUTH_RELEASE",
+          "subject": {
+            "dependency_sha256": "f93464a48a2b9281080b555fac1081b1852154552800cbc6a2440ad1e3629033",
+            "evidence_type": "REVIEW_AUTH_RELEASE",
+            "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "migration_sha256": "c16b187c67b20b6b2fd297273f6b0e53f3230d2edd1bf944bfa4b3827cf87d28",
+            "observed_at": "2026-10-02T11:00:00+00:00",
+            "policy_sha256": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+            "repository_id": "1366161771",
+            "run_id": "9001",
+            "source_sha256": "25a6634263c1b1f6fc4697a04e2b9904ea4b042a89af59dc93ec1f5d44848a26",
+            "subject_sha256": "9b38c9ed93e8c77712cb1bb32fc222ce3df6db0ec9656ae553cc2d5e7d5bd4d6",
+            "workflow_ref": "kotorn/Blessing-AI/.github/workflows/attest-review.yml@refs/heads/main"
+          }
+        },
+        "REVIEW_ORDER_RISK": {
+          "artifact_b64": "ZmFrZSBhcnRpZmFjdCBieXRlcyBmb3IgUkVWSUVXX09SREVSX1JJU0s=",
+          "bundle": "fake-bundle-REVIEW_ORDER_RISK",
+          "subject": {
+            "dependency_sha256": "f93464a48a2b9281080b555fac1081b1852154552800cbc6a2440ad1e3629033",
+            "evidence_type": "REVIEW_ORDER_RISK",
+            "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "migration_sha256": "c16b187c67b20b6b2fd297273f6b0e53f3230d2edd1bf944bfa4b3827cf87d28",
+            "observed_at": "2026-10-02T11:00:00+00:00",
+            "policy_sha256": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+            "repository_id": "1366161771",
+            "run_id": "9002",
+            "source_sha256": "25a6634263c1b1f6fc4697a04e2b9904ea4b042a89af59dc93ec1f5d44848a26",
+            "subject_sha256": "95b8446c2c89e6dde891e5d4995371b08a51666ecdbe437fe665e59880638515",
+            "workflow_ref": "kotorn/Blessing-AI/.github/workflows/attest-review.yml@refs/heads/main"
+          }
+        },
+        "REVIEW_PERSISTENCE": {
+          "artifact_b64": "ZmFrZSBhcnRpZmFjdCBieXRlcyBmb3IgUkVWSUVXX1BFUlNJU1RFTkNF",
+          "bundle": "fake-bundle-REVIEW_PERSISTENCE",
+          "subject": {
+            "dependency_sha256": "f93464a48a2b9281080b555fac1081b1852154552800cbc6a2440ad1e3629033",
+            "evidence_type": "REVIEW_PERSISTENCE",
+            "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "migration_sha256": "c16b187c67b20b6b2fd297273f6b0e53f3230d2edd1bf944bfa4b3827cf87d28",
+            "observed_at": "2026-10-02T11:00:00+00:00",
+            "policy_sha256": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+            "repository_id": "1366161771",
+            "run_id": "9003",
+            "source_sha256": "25a6634263c1b1f6fc4697a04e2b9904ea4b042a89af59dc93ec1f5d44848a26",
+            "subject_sha256": "0902bba2607b8e03c8470216a0f65bc2efcdc929cd02b32a67d0930822e2b2dd",
+            "workflow_ref": "kotorn/Blessing-AI/.github/workflows/attest-review.yml@refs/heads/main"
+          }
+        },
+        "TESTNET_ETHUSDC": {
+          "artifact_b64": "ZmFrZSBhcnRpZmFjdCBieXRlcyBmb3IgVEVTVE5FVF9FVEhVU0RD",
+          "bundle": "fake-bundle-TESTNET_ETHUSDC",
+          "subject": {
+            "dependency_sha256": "f93464a48a2b9281080b555fac1081b1852154552800cbc6a2440ad1e3629033",
+            "evidence_type": "TESTNET_ETHUSDC",
+            "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "migration_sha256": "c16b187c67b20b6b2fd297273f6b0e53f3230d2edd1bf944bfa4b3827cf87d28",
+            "observed_at": "2026-10-02T11:00:00+00:00",
+            "policy_sha256": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+            "repository_id": "1366161771",
+            "run_id": "9004",
+            "source_sha256": "25a6634263c1b1f6fc4697a04e2b9904ea4b042a89af59dc93ec1f5d44848a26",
+            "subject_sha256": "9d67a1d4a82f1889705be8d4c6c18766c9189d77d25f530516318139983a7b27",
+            "workflow_ref": "kotorn/Blessing-AI/.github/workflows/attest-testnet.yml@refs/heads/main"
+          }
+        }
+      }
+    },
+    "trusted": {
+      "commit_authors": [
+        "fake-author-dave"
+      ],
+      "dependency_sha256": "f93464a48a2b9281080b555fac1081b1852154552800cbc6a2440ad1e3629033",
+      "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "migration_sha256": "c16b187c67b20b6b2fd297273f6b0e53f3230d2edd1bf944bfa4b3827cf87d28",
+      "pinned_run_ids": {
+        "CHECKS": "9000",
+        "REVIEW_AUTH_RELEASE": "9001",
+        "REVIEW_ORDER_RISK": "9002",
+        "REVIEW_PERSISTENCE": "9003",
+        "TESTNET_ETHUSDC": "9004"
+      },
+      "policy_sha256": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+      "reviewer_allowlist": [
+        "fake-reviewer-alice",
+        "fake-reviewer-bob",
+        "fake-reviewer-carol",
+        "fake-reviewer-erin"
+      ],
+      "source_sha256": "25a6634263c1b1f6fc4697a04e2b9904ea4b042a89af59dc93ec1f5d44848a26",
+      "tree_dirty": false
+    }
+  },
+  "cases": [
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "name": "positive_full_fake_set"
+    },
+    {
+      "drop": [
+        "CHECKS",
+        "REVIEW_AUTH_RELEASE",
+        "REVIEW_ORDER_RISK",
+        "REVIEW_PERSISTENCE",
+        "TESTNET_ETHUSDC"
+      ],
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "no_attestations_at_all"
+    },
+    {
+      "drop": [
+        "REVIEW_AUTH_RELEASE",
+        "REVIEW_ORDER_RISK",
+        "REVIEW_PERSISTENCE",
+        "TESTNET_ETHUSDC"
+      ],
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "ci_only_attestation"
+    },
+    {
+      "drop": [
+        "TESTNET_ETHUSDC"
+      ],
+      "expect_blockers": [
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "missing_testnet_only"
+    },
+    {
+      "drop": [
+        "REVIEW_ORDER_RISK"
+      ],
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "missing_one_review"
+    },
+    {
+      "drop": [
+        "CHECKS"
+      ],
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "missing_checks_only"
+    },
+    {
+      "alias_bundle": [
+        {
+          "from": "CHECKS",
+          "to": "TESTNET_ETHUSDC"
+        }
+      ],
+      "expect_blockers": [
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "cross_class_replay_checks_bundle_in_testnet_slot"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.TESTNET_ETHUSDC.subject.evidence_type",
+          "set": "CHECKS"
+        }
+      ],
+      "name": "cross_class_replay_resigned_checks_type_in_testnet_slot",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.REVIEW_ORDER_RISK.subject.evidence_type",
+          "set": "REVIEW_AUTH_RELEASE"
+        }
+      ],
+      "name": "review_type_swapped_resigned",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.artifact_b64",
+          "set": "c3dhcHBlZA=="
+        }
+      ],
+      "name": "swapped_artifact_bytes"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.artifact_b64",
+          "set": "!!not-base64!!"
+        }
+      ],
+      "name": "malformed_artifact_base64_blocks_class_only"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.subject_sha256",
+          "set": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "name": "swapped_subject_sha_without_resign"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.subject_sha256",
+          "set": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "name": "swapped_subject_sha_resigned",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.TESTNET_ETHUSDC.subject.git_sha",
+          "set": "cccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "name": "swapped_git_sha_resigned",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.source_sha256",
+          "set": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "name": "swapped_source_sha_resigned",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.repository_id",
+          "set": "1"
+        }
+      ],
+      "name": "swapped_repo_id_resigned",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.workflow_ref",
+          "set": "evil/fork/.github/workflows/ci.yml@refs/heads/main"
+        }
+      ],
+      "name": "swapped_workflow_ref_resigned",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.TESTNET_ETHUSDC.subject.run_id",
+          "set": "1"
+        }
+      ],
+      "name": "swapped_run_id_resigned",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.evidence_type",
+          "set": "TESTNET_ETHUSDC"
+        }
+      ],
+      "name": "swapped_evidence_type_resigned",
+      "resign": true
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-01T12:00:00+00:00"
+        }
+      ],
+      "name": "fresh_at_86400s",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-01T11:59:59+00:00"
+        }
+      ],
+      "name": "stale_at_86401s",
+      "resign": true
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T12:00:02+00:00"
+        }
+      ],
+      "name": "future_plus_2s_allowed",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T12:00:03+00:00"
+        }
+      ],
+      "name": "future_plus_3s_rejected",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.TESTNET_ETHUSDC.subject.observed_at",
+          "set": "2026-10-02T11:00:00"
+        }
+      ],
+      "name": "naive_timestamp_rejected",
+      "resign": true
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00Z"
+        }
+      ],
+      "name": "time_accepts_z_suffix",
+      "resign": true
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00.123456Z"
+        }
+      ],
+      "name": "time_accepts_fraction_z",
+      "resign": true
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00.123456789Z"
+        }
+      ],
+      "name": "time_accepts_nine_digit_fraction",
+      "resign": true
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T18:00:00+07:00"
+        }
+      ],
+      "name": "time_accepts_positive_offset",
+      "resign": true
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T06:00:00-05:00"
+        }
+      ],
+      "name": "time_accepts_negative_offset",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "20261002T110000Z"
+        }
+      ],
+      "name": "time_rejects_compact_form",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00+0000"
+        }
+      ],
+      "name": "time_rejects_compact_offset",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00+00"
+        }
+      ],
+      "name": "time_rejects_hour_only_offset",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00z"
+        }
+      ],
+      "name": "time_rejects_lowercase_z",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02t11:00:00Z"
+        }
+      ],
+      "name": "time_rejects_lowercase_t",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02 11:00:00Z"
+        }
+      ],
+      "name": "time_rejects_space_separator",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00Z"
+        }
+      ],
+      "name": "time_rejects_missing_seconds",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02"
+        }
+      ],
+      "name": "time_rejects_date_only",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00.Z"
+        }
+      ],
+      "name": "time_rejects_empty_fraction",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00.1234567890Z"
+        }
+      ],
+      "name": "time_rejects_ten_digit_fraction",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:60Z"
+        }
+      ],
+      "name": "time_rejects_leap_second",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00+24:00"
+        }
+      ],
+      "name": "time_rejects_offset_hour_24",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-02-30T11:00:00Z"
+        }
+      ],
+      "name": "time_rejects_impossible_date",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00Z "
+        }
+      ],
+      "name": "time_rejects_trailing_space",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "2026-10-02T11:00:00Z\n"
+        }
+      ],
+      "name": "time_rejects_trailing_newline",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": "\uff12\uff10\uff12\uff16-10-02T11:00:00Z"
+        }
+      ],
+      "name": "time_rejects_fullwidth_digits",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "evidence.attestations.CHECKS.subject.observed_at",
+          "set": 1790938800
+        }
+      ],
+      "name": "time_rejects_non_string",
+      "resign": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_WORKING_TREE_DIRTY"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.tree_dirty",
+          "set": true
+        }
+      ],
+      "name": "dirty_tree"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_WORKING_TREE_DIRTY"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.tree_dirty",
+          "set": "false"
+        }
+      ],
+      "name": "dirty_tree_non_boolean_value"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "duplicate_reviewer_identity",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_PERSISTENCE": "fake-reviewer-alice"
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "duplicate_reviewer_identity_case_and_whitespace",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_PERSISTENCE": "  Fake-Reviewer-ALICE \t"
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "duplicate_reviewer_identity_fullwidth_nfkc",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_PERSISTENCE": "\uff46\uff41\uff4b\uff45-reviewer-alice"
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "Fake-Reviewer-Bob"
+          ]
+        }
+      ],
+      "name": "reviewer_is_commit_author_case_insensitive"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "fake-reviewer-bob "
+          ]
+        }
+      ],
+      "name": "commit_author_trailing_space_does_not_bypass"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "\nfake-reviewer-bob"
+          ]
+        }
+      ],
+      "name": "commit_author_leading_newline_does_not_bypass"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "fake-author-dave",
+            "fake-author-zed",
+            "fake-reviewer-carol"
+          ]
+        }
+      ],
+      "name": "any_listed_commit_author_blocks_reviewer"
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "fake-author-dave",
+            "dependabot[bot]",
+            "fake-author-zed"
+          ]
+        }
+      ],
+      "name": "co_author_bot_and_unrelated_authors_do_not_block"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "fake-reviewer-bob"
+          ]
+        }
+      ],
+      "name": "signed_reviewer_trailing_space_equals_author",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": "fake-reviewer-bob "
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "fake-reviewer-bob"
+          ]
+        }
+      ],
+      "name": "signed_reviewer_nbsp_equals_author",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": "fake-reviewer-bob\u00a0"
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "signed_reviewer_zero_width_char_rejected",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": "fake-reviewer-bob\u200b"
+      }
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "trusted.reviewer_allowlist",
+          "set": [
+            "  FAKE-reviewer-alice ",
+            "fake-reviewer-bob\t",
+            "Fake-Reviewer-Carol"
+          ]
+        }
+      ],
+      "name": "allowlist_entries_are_normalized"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.reviewer_allowlist",
+          "set": [
+            "fake-reviewer-alice",
+            "fake-reviewer-bob"
+          ]
+        }
+      ],
+      "name": "reviewer_not_allowlisted"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "empty_signer_identity",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": ""
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "whitespace_only_signer_identity",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": " \t "
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "non_string_signer_identity_int",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": 7
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "non_string_signer_identity_null",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": null
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "non_string_signer_identity_list",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": [
+          "fake-reviewer-bob"
+        ]
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "empty_signer_identity_on_checks_blocks_checks",
+      "resign": true,
+      "signer_override": {
+        "CHECKS": ""
+      }
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "evidence.attestations.REVIEW_ORDER_RISK.reviewer",
+          "set": "fake-author-dave"
+        }
+      ],
+      "name": "free_string_reviewer_in_evidence_is_ignored"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.reviewer_allowlist",
+          "set": [
+            "fake-reviewer-alice",
+            "fake-reviewer-bob"
+          ]
+        },
+        {
+          "path": "evidence.reviewer_allowlist",
+          "set": [
+            "fake-reviewer-carol",
+            "fake-reviewer-bob"
+          ]
+        }
+      ],
+      "name": "smuggled_allowlist_in_evidence_ignored"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "fake-reviewer-bob"
+          ]
+        },
+        {
+          "path": "evidence.local",
+          "set": {
+            "commit_author": "someone-else"
+          }
+        },
+        {
+          "path": "evidence.commit_author",
+          "set": "someone-else"
+        }
+      ],
+      "name": "smuggled_commit_author_in_evidence_ignored"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_WORKING_TREE_DIRTY"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.tree_dirty",
+          "set": true
+        },
+        {
+          "path": "evidence.local",
+          "set": {
+            "tree_dirty": false
+          }
+        },
+        {
+          "path": "evidence.tree_dirty",
+          "set": false
+        }
+      ],
+      "name": "smuggled_clean_tree_in_evidence_ignored"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.pinned_run_ids.TESTNET_ETHUSDC",
+          "set": "1"
+        },
+        {
+          "path": "evidence.local",
+          "set": {
+            "pinned_run_ids": {
+              "TESTNET_ETHUSDC": "9004"
+            }
+          }
+        },
+        {
+          "path": "evidence.pinned_run_ids",
+          "set": {
+            "TESTNET_ETHUSDC": "9004"
+          }
+        }
+      ],
+      "name": "smuggled_run_ids_in_evidence_ignored"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.git_sha",
+          "set": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        {
+          "path": "evidence.local",
+          "set": {
+            "git_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        {
+          "path": "evidence.git_sha",
+          "set": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "name": "smuggled_git_sha_in_evidence_ignored"
+    },
+    {
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "mutations": [
+        {
+          "path": "evidence.local",
+          "set": {
+            "commit_author": "x",
+            "tree_dirty": true
+          }
+        },
+        {
+          "path": "evidence.reviewer_allowlist",
+          "set": []
+        },
+        {
+          "path": "evidence.tree_dirty",
+          "set": true
+        }
+      ],
+      "name": "smuggled_extras_alone_change_nothing"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.reviewer_allowlist",
+          "set": "fake-reviewer-alice fake-reviewer-bob fake-reviewer-carol"
+        }
+      ],
+      "name": "allowlist_bare_string_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.reviewer_allowlist",
+          "set": [
+            "fake-reviewer-alice",
+            "fake-reviewer-bob",
+            "fake-reviewer-carol",
+            5
+          ]
+        }
+      ],
+      "name": "allowlist_contains_non_string_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.reviewer_allowlist",
+          "set": [
+            "fake-reviewer-alice",
+            "fake-reviewer-bob",
+            "fake-reviewer-carol",
+            "  "
+          ]
+        }
+      ],
+      "name": "allowlist_contains_empty_string_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.reviewer_allowlist",
+          "set": null
+        }
+      ],
+      "name": "allowlist_none_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.reviewer_allowlist",
+          "set": {
+            "fake-reviewer-alice": true
+          }
+        }
+      ],
+      "name": "allowlist_dict_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "fake-author-dave",
+            " "
+          ]
+        }
+      ],
+      "name": "commit_authors_empty_string_entry_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": null
+        }
+      ],
+      "name": "commit_authors_none_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": []
+        }
+      ],
+      "name": "commit_authors_empty_list_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": "fake-author-dave"
+        }
+      ],
+      "name": "commit_authors_bare_string_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "Kan Chang"
+          ]
+        }
+      ],
+      "name": "commit_authors_git_name_not_a_login_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "kan@example.com"
+          ]
+        }
+      ],
+      "name": "commit_authors_email_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": [
+            "kotorn\u0301"
+          ]
+        }
+      ],
+      "name": "commit_authors_combining_mark_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.commit_authors",
+          "set": null
+        },
+        {
+          "path": "trusted.commit_author",
+          "set": "fake-author-dave"
+        }
+      ],
+      "name": "legacy_single_commit_author_key_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "mutations": [
+        {
+          "path": "trusted.reviewer_allowlist",
+          "set": [
+            "fake-reviewer-alice",
+            "k\u043etorn"
+          ]
+        }
+      ],
+      "name": "allowlist_homoglyph_entry_rejected"
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "signer_combining_mark_blocks_review",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": "fake-reviewer-bob\u0301"
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "signer_homoglyph_blocks_review",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": "fake-reviewer-b\u043eb"
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "signer_line_separator_blocks_review",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": "fake-reviewer-bob\u2028"
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "signer_underscore_blocks_review",
+      "resign": true,
+      "signer_override": {
+        "REVIEW_ORDER_RISK": "fake_reviewer_bob"
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "signer_login_too_long_blocks_checks",
+      "resign": true,
+      "signer_override": {
+        "CHECKS": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "verifier_raises",
+      "verifier_raises": true
+    },
+    {
+      "expect_blockers": [
+        "LOCAL_PILOT_CHECK_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED",
+        "LOCAL_PILOT_RUNTIME_EVIDENCE_NOT_VERIFIED",
+        "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED"
+      ],
+      "expect_can_approve": false,
+      "name": "verifier_raises_after_checks_verified",
+      "verifier_raises": true,
+      "verifier_raises_after": 1
+    },
+    {
+      "environ": {
+        "BINANCE_API_SECRET": "s3cret",
+        "GITHUB_TOKEN": "tok",
+        "PATH": "/fake",
+        "TEMP": "/t"
+      },
+      "expect_blockers": [],
+      "expect_can_approve": true,
+      "name": "verifier_env_has_no_secrets"
+    }
+  ],
+  "now": "2026-10-02T12:00:00+00:00"
+}

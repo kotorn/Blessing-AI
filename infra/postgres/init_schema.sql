@@ -422,7 +422,7 @@ CREATE INDEX IF NOT EXISTS idx_execution_leases_expiry
 CREATE TABLE IF NOT EXISTS mainnet_launch_sessions (
     launch_id VARCHAR(128) PRIMARY KEY,
     approval_id VARCHAR(128) NOT NULL UNIQUE,
-    image_digest VARCHAR(256) NOT NULL,
+    image_digest VARCHAR(256),
     symbol VARCHAR(32) NOT NULL,
     policy VARCHAR(32) NOT NULL,
     max_risk_increasing_orders INTEGER DEFAULT 1,
@@ -433,6 +433,11 @@ CREATE TABLE IF NOT EXISTS mainnet_launch_sessions (
     first_order_verified_at TIMESTAMPTZ,
     autonomous_approved_at TIMESTAMPTZ,
     last_restart_at TIMESTAMPTZ,
+    pending_order_client_order_id VARCHAR(64),
+    first_order_client_order_id VARCHAR(64),
+    basket_id VARCHAR(128),
+    runtime_target VARCHAR(32) NOT NULL DEFAULT 'CLOUD_RUN',
+    runtime_fingerprint VARCHAR(64),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT mainnet_launch_policy_check
@@ -447,7 +452,30 @@ CREATE TABLE IF NOT EXISTS mainnet_launch_sessions (
     CONSTRAINT mainnet_launch_submitted_check
         CHECK (submitted_orders >= 0 AND (max_risk_increasing_orders IS NULL OR submitted_orders <= max_risk_increasing_orders)),
     CONSTRAINT mainnet_launch_state_check
-        CHECK (state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED', 'AUTONOMOUS_ACTIVE', 'REAUTH_REQUIRED', 'CLOSED'))
+        CHECK (state IN ('ACTIVE', 'PAUSED_NEW_RISK', 'RECONCILIATION_REQUIRED', 'AUTONOMOUS_ACTIVE', 'REAUTH_REQUIRED', 'CLOSED')),
+    CONSTRAINT mainnet_launch_runtime_identity_check
+        CHECK (
+            (
+                runtime_target = 'LOCAL'
+                AND image_digest IS NULL
+                AND runtime_fingerprint IS NOT NULL
+                AND runtime_fingerprint ~* '^[0-9a-f]{64}$'
+            )
+            OR
+            (
+                runtime_target = 'CLOUD_RUN'
+                AND image_digest IS NOT NULL
+                AND image_digest ~* '^.+@sha256:[0-9a-f]{64}$'
+            )
+        ),
+    CONSTRAINT mainnet_launch_order_identity_check
+        CHECK (
+            (pending_order_client_order_id IS NULL OR
+                pending_order_client_order_id ~ '^[A-Za-z0-9_-]{1,64}$')
+            AND
+            (first_order_client_order_id IS NULL OR
+                first_order_client_order_id ~ '^[A-Za-z0-9_-]{1,64}$')
+        )
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mainnet_launch_one_active
     ON mainnet_launch_sessions(symbol)
@@ -455,5 +483,367 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mainnet_launch_one_active
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mainnet_launch_continuation_approval
     ON mainnet_launch_sessions(continuation_approval_id)
     WHERE continuation_approval_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mainnet_launch_basket_unique
+    ON mainnet_launch_sessions(basket_id)
+    WHERE basket_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_mainnet_launch_updated
     ON mainnet_launch_sessions(updated_at);
+
+-- 26. Durable ownership of Binance USDⓈ-M conditional protection orders.
+-- Testnet and Mainnet are distinct venues and are also recorded explicitly so
+-- the same symbol/client ID can never alias across environments.
+CREATE TABLE IF NOT EXISTS binance_algo_protections (
+    environment VARCHAR(8) NOT NULL,
+    venue VARCHAR(32) NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    entry_client_order_id VARCHAR(64) NOT NULL,
+    entry_side VARCHAR(8) NOT NULL,
+    position_side VARCHAR(8) NOT NULL,
+    requested_quantity NUMERIC(28, 10) NOT NULL,
+    filled_quantity NUMERIC(28, 10) NOT NULL DEFAULT 0,
+    entry_average_price NUMERIC(28, 10),
+    stop_trigger_price NUMERIC(28, 10) NOT NULL,
+    take_profit_trigger_price NUMERIC(28, 10) NOT NULL,
+    stop_algo_id VARCHAR(64),
+    take_profit_algo_id VARCHAR(64),
+    stop_client_algo_id VARCHAR(64) NOT NULL,
+    take_profit_client_algo_id VARCHAR(64) NOT NULL,
+    state VARCHAR(24) NOT NULL DEFAULT 'PENDING',
+    state_reason VARCHAR(256),
+    first_fill_at TIMESTAMPTZ,
+    protection_verified_at TIMESTAMPTZ,
+    last_reconciled_at TIMESTAMPTZ,
+    closed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (venue, symbol, entry_client_order_id),
+    CONSTRAINT binance_algo_protection_environment_check
+        CHECK (
+            (venue = 'binance_testnet' AND environment = 'TESTNET')
+            OR (venue = 'binance_mainnet' AND environment = 'MAINNET')
+        ),
+    CONSTRAINT binance_algo_protection_entry_identity_check
+        CHECK (
+            symbol ~ '^[A-Z0-9]{2,32}$'
+            AND entry_client_order_id ~ '^[A-Za-z0-9_-]{1,64}$'
+            AND entry_side IN ('BUY', 'SELL')
+            AND position_side IN ('BOTH', 'LONG', 'SHORT')
+            AND (
+                (entry_side = 'BUY' AND position_side IN ('BOTH', 'LONG'))
+                OR (entry_side = 'SELL' AND position_side IN ('BOTH', 'SHORT'))
+            )
+        ),
+    CONSTRAINT binance_algo_protection_quantity_check
+        CHECK (
+            requested_quantity > 0
+            AND filled_quantity >= 0
+            AND filled_quantity <= requested_quantity
+            AND (
+                (filled_quantity = 0 AND entry_average_price IS NULL AND first_fill_at IS NULL)
+                OR (
+                    filled_quantity > 0
+                    AND entry_average_price IS NOT NULL
+                    AND entry_average_price > 0
+                    AND first_fill_at IS NOT NULL
+                )
+            )
+        ),
+    CONSTRAINT binance_algo_protection_trigger_check
+        CHECK (
+            stop_trigger_price > 0
+            AND take_profit_trigger_price > 0
+            AND stop_trigger_price <> take_profit_trigger_price
+            AND (
+                entry_average_price IS NULL
+                OR (
+                    entry_side = 'BUY'
+                    AND stop_trigger_price < entry_average_price
+                    AND entry_average_price < take_profit_trigger_price
+                )
+                OR (
+                    entry_side = 'SELL'
+                    AND take_profit_trigger_price < entry_average_price
+                    AND entry_average_price < stop_trigger_price
+                )
+            )
+        ),
+    CONSTRAINT binance_algo_protection_algo_identity_check
+        CHECK (
+            stop_client_algo_id ~ '^[A-Za-z0-9_-]{1,64}$'
+            AND take_profit_client_algo_id ~ '^[A-Za-z0-9_-]{1,64}$'
+            AND stop_client_algo_id <> take_profit_client_algo_id
+            AND (stop_algo_id IS NULL OR stop_algo_id ~ '^[0-9]{1,64}$')
+            AND (take_profit_algo_id IS NULL OR take_profit_algo_id ~ '^[0-9]{1,64}$')
+            AND (stop_algo_id IS NULL OR take_profit_algo_id IS NULL OR stop_algo_id <> take_profit_algo_id)
+        ),
+    CONSTRAINT binance_algo_protection_state_check
+        CHECK (
+            state IN ('PENDING', 'PROTECTED', 'CLOSE_PENDING', 'CLOSED', 'DEGRADED', 'UNKNOWN')
+            AND (
+                state <> 'PROTECTED'
+                OR (
+                    filled_quantity > 0
+                    AND stop_algo_id IS NOT NULL
+                    AND take_profit_algo_id IS NOT NULL
+                    AND protection_verified_at IS NOT NULL
+                )
+            )
+            AND (state <> 'CLOSED' OR closed_at IS NOT NULL)
+        )
+);
+CREATE INDEX IF NOT EXISTS idx_binance_algo_protections_nonterminal
+    ON binance_algo_protections(venue, symbol, created_at)
+    WHERE state <> 'CLOSED';
+ALTER TABLE binance_algo_protections
+    ADD COLUMN IF NOT EXISTS basket_id VARCHAR(128);
+ALTER TABLE binance_algo_protections
+    ADD COLUMN IF NOT EXISTS mainnet_launch_id VARCHAR(128);
+DO $$ BEGIN
+    ALTER TABLE mainnet_launch_sessions
+        ADD CONSTRAINT mainnet_launch_basket_identity_unique
+        UNIQUE (launch_id, basket_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE binance_algo_protections
+        ADD CONSTRAINT binance_algo_protection_launch_basket_fk
+        FOREIGN KEY (mainnet_launch_id, basket_id)
+        REFERENCES mainnet_launch_sessions(launch_id, basket_id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+DO $$ BEGIN
+    ALTER TABLE binance_algo_protections
+        ADD CONSTRAINT binance_algo_protection_launch_identity_check
+        CHECK (mainnet_launch_id IS NULL OR (environment = 'MAINNET' AND basket_id IS NOT NULL));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+ALTER TABLE binance_algo_protections
+    ADD COLUMN IF NOT EXISTS closure_evidence JSONB;
+UPDATE binance_algo_protections
+SET closure_evidence = '{"kind":"LEGACY_UNVERIFIED"}'::jsonb
+WHERE environment = 'MAINNET'
+  AND state = 'CLOSED'
+  AND closure_evidence IS NULL;
+DO $$ BEGIN
+    ALTER TABLE binance_algo_protections
+        ADD CONSTRAINT binance_algo_protection_closure_evidence_check
+        CHECK (
+            (
+                environment = 'MAINNET'
+                AND state = 'CLOSED'
+                AND jsonb_typeof(closure_evidence) = 'object'
+                AND closure_evidence->>'kind' IN (
+                    'LEGACY_UNVERIFIED',
+                    'BINANCE_ALGO_CLOSE_VERIFIED',
+                    'UNFILLED_ENTRY_TERMINAL'
+                )
+            )
+            OR (
+                (state <> 'CLOSED' OR environment = 'TESTNET')
+                AND closure_evidence IS NULL
+            )
+        );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- 27. Durable Binance launch-history coverage and proof-backed Testnet baselines.
+CREATE TABLE IF NOT EXISTS binance_history_anchors (
+    runtime_target VARCHAR(16) NOT NULL,
+    run_id VARCHAR(128) NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    anchor_at TIMESTAMPTZ NOT NULL,
+    anchor_source VARCHAR(32) NOT NULL,
+    mainnet_launch_id VARCHAR(128),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (runtime_target, run_id, symbol),
+    CONSTRAINT binance_history_anchor_identity_check
+        CHECK (
+            symbol ~ '^[A-Z0-9]{2,32}$'
+            AND run_id ~ '^[A-Za-z0-9_.:-]{1,128}$'
+            AND (
+                (runtime_target IN ('LOCAL', 'CLOUD_RUN')
+                 AND anchor_source = 'MAINNET_LAUNCH_SESSION'
+                 AND mainnet_launch_id = run_id)
+                OR
+                (runtime_target = 'TESTNET'
+                 AND anchor_source = 'TESTNET_READONLY_START'
+                 AND mainnet_launch_id IS NULL)
+            )
+        ),
+    CONSTRAINT binance_history_anchor_launch_fk
+        FOREIGN KEY (mainnet_launch_id)
+        REFERENCES mainnet_launch_sessions(launch_id)
+);
+
+CREATE TABLE IF NOT EXISTS binance_history_checkpoints (
+    runtime_target VARCHAR(16) NOT NULL,
+    run_id VARCHAR(128) NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    history_kind VARCHAR(24) NOT NULL,
+    cursor_id BIGINT NOT NULL DEFAULT 0,
+    coverage_status VARCHAR(16) NOT NULL DEFAULT 'NOT_STARTED',
+    covered_through TIMESTAMPTZ,
+    scan_started_at TIMESTAMPTZ,
+    scan_from_at TIMESTAMPTZ,
+    scan_to_at TIMESTAMPTZ,
+    last_page_at TIMESTAMPTZ,
+    failure_code VARCHAR(64),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (runtime_target, run_id, symbol, history_kind),
+    CONSTRAINT binance_history_checkpoint_anchor_fk
+        FOREIGN KEY (runtime_target, run_id, symbol)
+        REFERENCES binance_history_anchors(runtime_target, run_id, symbol),
+    CONSTRAINT binance_history_checkpoint_shape_check
+        CHECK (
+            history_kind IN ('ALL_ORDERS', 'USER_TRADES', 'ALL_ALGO_ORDERS')
+            AND cursor_id >= 0
+            AND coverage_status IN ('NOT_STARTED', 'SCANNING', 'COVERED', 'GAP', 'UNKNOWN')
+            AND (coverage_status <> 'COVERED' OR (covered_through IS NOT NULL AND last_page_at IS NOT NULL))
+            AND (coverage_status <> 'SCANNING' OR (scan_started_at IS NOT NULL AND scan_from_at IS NOT NULL AND scan_to_at IS NOT NULL AND scan_to_at > scan_from_at))
+            AND (coverage_status NOT IN ('GAP', 'UNKNOWN') OR failure_code IS NOT NULL)
+        )
+);
+
+CREATE TABLE IF NOT EXISTS binance_history_items (
+    runtime_target VARCHAR(16) NOT NULL,
+    run_id VARCHAR(128) NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    history_kind VARCHAR(24) NOT NULL,
+    item_id BIGINT NOT NULL,
+    client_id VARCHAR(128),
+    event_at TIMESTAMPTZ NOT NULL,
+    payload_sha256 VARCHAR(64) NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (runtime_target, run_id, symbol, history_kind, item_id),
+    CONSTRAINT binance_history_item_checkpoint_fk
+        FOREIGN KEY (runtime_target, run_id, symbol, history_kind)
+        REFERENCES binance_history_checkpoints(runtime_target, run_id, symbol, history_kind),
+    CONSTRAINT binance_history_item_shape_check
+        CHECK (
+            history_kind IN ('ALL_ORDERS', 'USER_TRADES', 'ALL_ALGO_ORDERS')
+            AND item_id > 0
+            AND payload_sha256 ~ '^[0-9a-f]{64}$'
+        )
+);
+
+CREATE INDEX IF NOT EXISTS idx_binance_history_items_client
+    ON binance_history_items(runtime_target, run_id, symbol, history_kind, client_id)
+    WHERE client_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS binance_algo_history_observations (
+    observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    runtime_target VARCHAR(16) NOT NULL,
+    run_id VARCHAR(128) NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    history_kind VARCHAR(24) NOT NULL DEFAULT 'ALL_ALGO_ORDERS',
+    item_id BIGINT NOT NULL,
+    client_id VARCHAR(128),
+    event_at TIMESTAMPTZ NOT NULL,
+    payload_sha256 VARCHAR(64) NOT NULL,
+    payload JSONB NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    CONSTRAINT binance_algo_history_observation_scope_fk
+        FOREIGN KEY (runtime_target, run_id, symbol, history_kind)
+        REFERENCES binance_history_checkpoints(runtime_target, run_id, symbol, history_kind),
+    CONSTRAINT binance_algo_history_observation_identity_unique
+        UNIQUE (runtime_target, run_id, symbol, item_id, payload_sha256),
+    CONSTRAINT binance_algo_history_observation_shape_check
+        CHECK (
+            item_id > 0
+            AND history_kind = 'ALL_ALGO_ORDERS'
+            AND payload_sha256 ~ '^[0-9a-f]{64}$'
+            AND jsonb_typeof(payload) = 'object'
+        )
+);
+CREATE INDEX IF NOT EXISTS idx_binance_algo_history_observation_latest
+    ON binance_algo_history_observations(runtime_target, run_id, symbol, item_id,
+                                         observed_at DESC, observation_id DESC);
+
+CREATE TABLE IF NOT EXISTS binance_preexisting_algo_baselines (
+    runtime_target VARCHAR(16) NOT NULL DEFAULT 'TESTNET',
+    run_id VARCHAR(128) NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    algo_id BIGINT NOT NULL,
+    client_algo_id VARCHAR(128) NOT NULL,
+    algo_created_at TIMESTAMPTZ NOT NULL,
+    anchor_at TIMESTAMPTZ NOT NULL,
+    terminal_status VARCHAR(24) NOT NULL,
+    snapshot_observed_at TIMESTAMPTZ NOT NULL,
+    position_snapshot JSONB NOT NULL,
+    open_orders_snapshot JSONB NOT NULL,
+    open_algo_orders_snapshot JSONB NOT NULL,
+    proof_sha256 VARCHAR(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (runtime_target, run_id, symbol, algo_id),
+    CONSTRAINT binance_preexisting_algo_anchor_fk
+        FOREIGN KEY (runtime_target, run_id, symbol)
+        REFERENCES binance_history_anchors(runtime_target, run_id, symbol),
+    CONSTRAINT binance_preexisting_algo_proof_check
+        CHECK (
+            runtime_target = 'TESTNET'
+            AND symbol ~ '^[A-Z0-9]{2,32}$'
+            AND run_id ~ '^[A-Za-z0-9_.:-]{1,128}$'
+            AND algo_id > 0
+            AND client_algo_id ~ '^[A-Za-z0-9_-]{1,128}$'
+            AND algo_created_at < anchor_at
+            AND snapshot_observed_at >= anchor_at
+            AND terminal_status IN ('CANCELED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'FINISHED')
+            AND jsonb_typeof(position_snapshot) = 'array'
+            AND jsonb_typeof(open_orders_snapshot) = 'array'
+            AND jsonb_typeof(open_algo_orders_snapshot) = 'array'
+            AND proof_sha256 ~ '^[0-9a-f]{64}$'
+        )
+);
+
+CREATE OR REPLACE FUNCTION reject_binance_history_immutable_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'Binance history evidence is immutable';
+END;
+$$;
+
+CREATE TRIGGER binance_history_anchor_immutable
+    BEFORE UPDATE OR DELETE ON binance_history_anchors
+    FOR EACH ROW EXECUTE FUNCTION reject_binance_history_immutable_mutation();
+
+CREATE TRIGGER binance_history_item_immutable
+    BEFORE UPDATE OR DELETE ON binance_history_items
+    FOR EACH ROW EXECUTE FUNCTION reject_binance_history_immutable_mutation();
+
+CREATE TRIGGER binance_preexisting_algo_baseline_immutable
+    BEFORE UPDATE OR DELETE ON binance_preexisting_algo_baselines
+    FOR EACH ROW EXECUTE FUNCTION reject_binance_history_immutable_mutation();
+
+DO $$ BEGIN
+    CREATE TRIGGER binance_algo_history_observation_immutable
+        BEFORE UPDATE OR DELETE ON binance_algo_history_observations
+        FOR EACH ROW EXECUTE FUNCTION reject_binance_history_immutable_mutation();
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- A fresh volume starts from this complete base schema. Record the migrations it
+-- already contains so apply_local_postgres_migrations.py applies only 013+ instead of
+-- re-running 001-012 (which fail on objects that already exist, e.g. migration 010's
+-- trigger). tests/python/test_init_schema_ledger.py pins these checksums.
+CREATE TABLE IF NOT EXISTS public.local_schema_migrations (
+    version VARCHAR(128) PRIMARY KEY,
+    checksum CHAR(64) NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO public.local_schema_migrations (version, checksum) VALUES
+    ('001_persistence_outbox_and_hedge_identity.sql', 'c7259ab9fdd4f9f186d2ecab9027a7b7971d85080dce19dab5d5eb81b6ea462f'),
+    ('002_execution_leases.sql', 'd99a267a1a5a158366756fb45c62f399a494e56866144ab81eb2ed8b31de3185'),
+    ('003_mainnet_launch_sessions.sql', '8e644963e3c5009cfe13d6c809a04076f2e163b1d33e503016a521a569eb5a89'),
+    ('004_environment_scoped_fill_identity.sql', '3126168d425e169b059f0a6f1aa064f03598458540591c20f305ea781b01a2b2'),
+    ('005_mainnet_autonomous_continuation.sql', '689ac5d9d3a6554251876db02eefa5854e83dfc6a55602dbd60419ccffc3c419'),
+    ('006_backfill_environment_scoped_venue.sql', '7c319518050cd5acf899c7879dbb30540b69410ece3a667a910aa998c12efbe3'),
+    ('007_mainnet_launch_runtime_identity.sql', '4df64f954486eabf118fb36044dfe875aebf7f467b503eeadf99ffd7d6e9cc13'),
+    ('008_mainnet_launch_order_identity.sql', '6a73a7bd9620c3c6a297fcc1173701ed1b8b8ee5785b7f6a04918a2829a84d50'),
+    ('009_binance_algo_protection_ownership.sql', 'ae93d7c03c0954f72057a05ee7072bf3c370379ccc8dff40a730e579e28310c8'),
+    ('010_binance_history_checkpoints.sql', '7a644ce9a2b32733518b89ccbe42aae1ba480868f30d24b1124a9c79f4a219c3'),
+    ('011_local_mainnet_basket_identity.sql', '29eb75acdc445433517be032a7230f0729ea9a01b95d37fefb70069788a4a9a2'),
+    ('012_mainnet_basket_owner_link.sql', '0511b2549641736a26ebc815aea5e5a7440e1cb29661c9d5f9a2ac9ba4326f14')
+ON CONFLICT (version) DO NOTHING;

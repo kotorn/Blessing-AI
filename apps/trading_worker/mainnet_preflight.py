@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Any, Callable, List, Optional
 
 from domain.models import utc_now
+from apps.trading_worker.local_runtime import mainnet_secret_value
 
 from apps.trading_worker.venues.binance.config import (
     BinanceEnvironment,
@@ -40,6 +41,47 @@ from apps.trading_worker.venues.binance.config import (
 from apps.trading_worker.venues.binance.models import ConnectionState
 
 logger = logging.getLogger("blessing.worker.mainnet_preflight")
+
+
+async def local_pilot_flat_account_verified(worker: Any, adapter: Any) -> bool:
+    """Prove the approved pilot starts flat without attaching a trading adapter."""
+    try:
+        snapshot = getattr(adapter, "account_snapshot", None)
+        ledger = getattr(adapter, "ledger", None)
+        reconciliation = getattr(adapter, "reconciliation", None)
+        if (
+            not getattr(adapter, "preflight_only", False)
+            or snapshot is None
+            or snapshot.valid is not True
+            or snapshot.exchange_environment != "BINANCE_MAINNET"
+            or snapshot.total_position_notional != 0
+            or reconciliation is None
+            or reconciliation.last_status != "IN_SYNC"
+            or worker.engine_state.value != "DISARMED"
+            or worker.execution_adapter is not None
+        ):
+            return False
+        get_positions = getattr(ledger, "get_positions", None)
+        get_open_orders = getattr(ledger, "get_open_orders", None)
+        if not callable(get_positions) or not callable(get_open_orders):
+            return False
+        positions = await get_positions()
+        open_orders = await get_open_orders()
+        if any(getattr(position, "quantity", None) != 0 for position in positions):
+            return False
+        if open_orders:
+            return False
+        repository = getattr(getattr(worker.persistence, "repository", None), "algo_protections", None)
+        list_active = getattr(repository, "list_active_protections", None)
+        if not callable(list_active):
+            return False
+        active_protections = await list_active("binance_mainnet", "ETHUSDC")
+        return not active_protections
+    except Exception as exc:
+        logger.warning(
+            "Local pilot flat-account evidence unavailable: %s", type(exc).__name__
+        )
+        return False
 
 
 @dataclass(frozen=True)
@@ -129,6 +171,64 @@ async def run_mainnet_read_only_preflight(context: MainnetPreflightContext) -> d
         order_submission_attempts = 0
         order_endpoint_attempts = 0
         credentials_configured = context.is_mainnet_configured()
+        is_local_pilot = False
+        monitor_state: Mapping[str, Any] = {}
+        local_target = (
+            str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+            or context.env_flag("LOCAL_ONLY", False)
+        )
+        if local_target:
+            local_runtime_identity = (
+                str(os.getenv("LOCAL_RUNTIME_TARGET", "")).strip().upper() == "LOCAL"
+                and context.env_flag("LOCAL_ONLY", False)
+            )
+            missing_methods = [
+                name
+                for name in (
+                    "get_local_mainnet_risk_context",
+                    "verify_local_mainnet_protection",
+                )
+                if not callable(getattr(adapter_factory, name, None))
+            ]
+            lifecycle_ready = local_runtime_identity and not missing_methods
+            add_check(
+                "CHK-PREFLIGHT-LOCAL-RISK-LIFECYCLE",
+                "Local Basket Risk and Protection Lifecycle",
+                lifecycle_ready,
+                "Durable Local basket risk context and confirmed stop/target lifecycle are implemented"
+                if lifecycle_ready
+                else "Local Mainnet remains blocked; runtime identity or adapter methods are unavailable: "
+                + ", ".join(missing_methods),
+            )
+            launch_session = getattr(worker, "_mainnet_launch_session", None)
+            is_local_pilot = (
+                getattr(getattr(worker, "execution_mode", None), "value", None) == "LIVE"
+                and (
+                    (
+                        isinstance(launch_session, Mapping)
+                        and launch_session.get("policy") == "LIVE_RESEARCH_PILOT"
+                    )
+                    or bool(str(os.getenv("LOCAL_LIVE_PILOT_CAMPAIGN_ID", "")).strip())
+                )
+            )
+            get_monitor_state = getattr(worker, "_local_pilot_lifecycle_monitor_state", None)
+            monitor_state = get_monitor_state() if callable(get_monitor_state) else {}
+            add_check(
+                "CHK-PREFLIGHT-PILOT-MONITOR",
+                "Local Pilot Lifecycle Monitor Readiness",
+                monitor_state.get("status") == "HEALTHY",
+                "The Worker lifecycle monitor completed successfully within its freshness window"
+                if monitor_state.get("status") == "HEALTHY"
+                else "The disarmed Worker requires signed flat-account preflight before its execution monitor starts",
+                required=is_local_pilot,
+            )
+            if is_local_pilot:
+                add_check(
+                    "CHK-PREFLIGHT-PILOT-FLAT-ACCOUNT",
+                    "Local Pilot Flat Account and Ownership",
+                    False,
+                    "Signed account, ledger, open-order, and protection ownership evidence is pending",
+                )
         add_check(
             "CHK-PREFLIGHT-CREDENTIALS",
             "Mainnet Credentials",
@@ -201,9 +301,9 @@ async def run_mainnet_read_only_preflight(context: MainnetPreflightContext) -> d
                     "CHK-PREFLIGHT-DURABLE-LEDGER",
                     "Durable Mainnet Ledger Snapshot",
                     durable_ledger is not None and not durable_ledger_error,
-                    "Cloud SQL Mainnet ledger scope was loaded before reconciliation"
+                    "Durable PostgreSQL Mainnet ledger scope was loaded before reconciliation"
                     if durable_ledger is not None and not durable_ledger_error
-                    else "Cloud SQL Mainnet ledger scope could not be loaded safely",
+                    else "Durable PostgreSQL Mainnet ledger scope could not be loaded safely",
                 )
             add_check(
                 "CHK-PREFLIGHT-KILL-SWITCH",
@@ -216,13 +316,23 @@ async def run_mainnet_read_only_preflight(context: MainnetPreflightContext) -> d
 
             if credentials_configured and not durable_ledger_error:
                 adapter = adapter_factory(
-                    api_key="".join(str(os.getenv("BINANCE_MAINNET_API_KEY", "")).split()),
-                    api_secret="".join(str(os.getenv("BINANCE_MAINNET_API_SECRET", "")).split()),
+                    api_key="".join(mainnet_secret_value("BINANCE_MAINNET_API_KEY").split()),
+                    api_secret="".join(mainnet_secret_value("BINANCE_MAINNET_API_SECRET").split()),
                     env=BinanceEnvironment.MAINNET,
                     ledger=durable_ledger,
                     preflight_only=True,
                     portfolio_margin=is_portfolio_margin_enabled(),
                 )
+                if local_target:
+                    repository = getattr(worker.persistence, "repository", None)
+                    reconciliation = getattr(adapter, "reconciliation", None)
+                    if reconciliation is not None:
+                        reconciliation.algo_protection_repository = getattr(
+                            repository, "algo_protections", None
+                        )
+                        reconciliation.history_repository = getattr(
+                            repository, "binance_history", None
+                        )
                 connected = await adapter.connect()
                 try:
                     market_fresh = await adapter.refresh_market_data(["ETHUSDC"])
@@ -311,6 +421,48 @@ async def run_mainnet_read_only_preflight(context: MainnetPreflightContext) -> d
                     if account_ready
                     else "USDC collateral, mode, leverage, exposure, liquidation, or complete daily PnL evidence is unsafe or unavailable",
                 )
+                if is_local_pilot:
+                    flat_account = await local_pilot_flat_account_verified(worker, adapter)
+                    flat_check = next(
+                        (
+                            check
+                            for check in checks
+                            if check["id"] == "CHK-PREFLIGHT-PILOT-FLAT-ACCOUNT"
+                        ),
+                        None,
+                    )
+                    if flat_check is not None:
+                        flat_check["status"] = "PASS" if flat_account else "FAIL"
+                        flat_check["message"] = (
+                            "Signed Mainnet account is flat, reconciled to an empty durable ledger, and has no open protection owners"
+                            if flat_account
+                            else "Mainnet account flatness, durable ledger, open-order, Algo ownership, or disarmed Worker evidence is incomplete"
+                        )
+                    monitor_check = next(
+                        (
+                            check
+                            for check in checks
+                            if check["id"] == "CHK-PREFLIGHT-PILOT-MONITOR"
+                        ),
+                        None,
+                    )
+                    monitor_is_fresh = monitor_state.get("status") == "HEALTHY"
+                    disarmed_monitor_not_started = (
+                        monitor_state.get("status") == "NOT_RUN"
+                        and worker.engine_state.value == "DISARMED"
+                        and worker.execution_adapter is None
+                    )
+                    monitor_ready = bool(
+                        flat_account
+                        and (monitor_is_fresh or disarmed_monitor_not_started)
+                    )
+                    if monitor_check is not None:
+                        monitor_check["status"] = "PASS" if monitor_ready else "FAIL"
+                        monitor_check["message"] = (
+                            "Monitor is fresh, or is correctly not started while DISARMED after signed flat-account verification"
+                            if monitor_ready
+                            else "Monitor is not healthy and the signed disarmed flat-account preconditions are not proven"
+                        )
                 market_timestamp = adapter.last_market_event_at.get("ETHUSDC")
                 if market_timestamp is not None and market_timestamp.tzinfo is not None:
                     market_age = (utc_now() - market_timestamp).total_seconds()

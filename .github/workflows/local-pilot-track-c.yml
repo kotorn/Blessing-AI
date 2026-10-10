@@ -1,0 +1,219 @@
+name: Local Pilot Track C evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      evidence_class:
+        description: Select one protected evidence class for this run
+        required: true
+        type: choice
+        options:
+          - REVIEW_AUTH_RELEASE
+          - REVIEW_ORDER_RISK
+          - REVIEW_PERSISTENCE
+          - TESTNET_ETHUSDC
+
+permissions: {}
+
+concurrency:
+  group: local-pilot-track-c-${{ github.ref }}-${{ inputs.evidence_class }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'kotorn/Blessing-AI' &&
+      github.repository_id == '1366161771' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Verify the protected Environment before any Environment job is requested
+        env:
+          EVIDENCE_CLASS: ${{ inputs.evidence_class }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "$EVIDENCE_CLASS" in
+            REVIEW_AUTH_RELEASE|REVIEW_ORDER_RISK|REVIEW_PERSISTENCE) environment=pilot-review ;;
+            TESTNET_ETHUSDC) environment=testnet ;;
+            *) echo "TRACK_C_EVIDENCE_CLASS_INVALID" >&2; exit 1 ;;
+          esac
+          python -m scripts.produce_local_pilot_track_c --root . --preflight-environment "$environment"
+
+  reviews:
+    needs: preflight
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'kotorn/Blessing-AI' &&
+      github.repository_id == '1366161771' &&
+      github.ref == 'refs/heads/main' &&
+      (inputs.evidence_class == 'REVIEW_AUTH_RELEASE' ||
+       inputs.evidence_class == 'REVIEW_ORDER_RISK' ||
+       inputs.evidence_class == 'REVIEW_PERSISTENCE')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pilot-review
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Create subject from GitHub run, commit and Environment approval records
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVIDENCE_CLASS: ${{ inputs.evidence_class }}
+        run: python -m scripts.produce_local_pilot_track_c --root . --class "$EVIDENCE_CLASS"
+      - name: Generate signed review attestation
+        id: attest_review
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: artifacts/local-pilot-attestations/${{ inputs.evidence_class }}.json
+      - name: Retain review attestation bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest_review.outputs.bundle-path }}
+          EVIDENCE_CLASS: ${{ inputs.evidence_class }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from shutil import copyfile
+
+          evidence_class = os.environ["EVIDENCE_CLASS"]
+          if evidence_class not in {"REVIEW_AUTH_RELEASE", "REVIEW_ORDER_RISK", "REVIEW_PERSISTENCE"}:
+              raise SystemExit("TRACK_C_EVIDENCE_CLASS_INVALID")
+          source = Path(os.environ["BUNDLE_PATH"])
+          destination = Path(f"artifacts/local-pilot-attestations/{evidence_class}.bundle.json")
+          if not source.is_file() or source.stat().st_size == 0:
+              raise SystemExit("Track C review bundle was not produced")
+          copyfile(source, destination)
+          PY
+      - name: Retain signed review evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: local-pilot-track-c-review-${{ inputs.evidence_class }}-${{ github.sha }}
+          path: artifacts/local-pilot-attestations/${{ inputs.evidence_class }}*.json
+          if-no-files-found: error
+          retention-days: 30
+
+  testnet_trial:
+    needs: preflight
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'kotorn/Blessing-AI' &&
+      github.repository_id == '1366161771' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.evidence_class == 'TESTNET_ETHUSDC'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: testnet
+    services:
+      pilot_postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: pilot_testnet
+          POSTGRES_PASSWORD: fixture-ci-only
+          POSTGRES_DB: blessing_testnet_trial_ci_${{ github.run_id }}
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U pilot_testnet -d blessing_testnet_trial_ci_${{ github.run_id }}"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install Worker and migration dependencies
+        run: python -m pip install --require-hashes -r requirements-worker.lock
+      - name: Migrate the dedicated ephemeral PostgreSQL 17 database
+        env:
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: '5433'
+          POSTGRES_DB: blessing_testnet_trial_ci_${{ github.run_id }}
+          POSTGRES_USER: pilot_testnet
+          POSTGRES_PASSWORD: fixture-ci-only
+        run: python -m scripts.apply_local_postgres_migrations
+      - name: Ensure this fresh checkout has no supplied Testnet trial artifact
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          if list(Path("artifacts").glob("testnet-trial-*.json")):
+              raise SystemExit("Unexpected pre-existing Testnet trial artifact")
+          PY
+      - name: Run the protected ETHUSDC Testnet lifecycle with Testnet-only keys
+        env:
+          TESTNET_PROTECTED_ETHUSDC_TRIAL_APPROVED: 'true'
+          BINANCE_TESTNET: 'true'
+          BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
+          BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
+          BINANCE_MAINNET_API_KEY: ''
+          BINANCE_MAINNET_API_SECRET: ''
+          MAINNET_LIVE_APPROVED: 'false'
+          EXECUTION_MODE: PAPER
+          PERSISTENCE_MODE: REQUIRED
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: '5433'
+          POSTGRES_DB: blessing_testnet_trial_ci_${{ github.run_id }}
+          POSTGRES_USER: pilot_testnet
+          POSTGRES_PASSWORD: fixture-ci-only
+        run: python -m apps.trading_worker.venues.binance.protected_ethusdc_testnet_runner
+      - name: Create subject from the Testnet runner artifact and GitHub approvals
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m scripts.produce_local_pilot_track_c --root . --class TESTNET_ETHUSDC
+      - name: Generate signed Testnet attestation
+        id: attest_testnet
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: artifacts/local-pilot-attestations/TESTNET_ETHUSDC.json
+      - name: Retain Testnet attestation bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest_testnet.outputs.bundle-path }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from shutil import copyfile
+
+          source = Path(os.environ["BUNDLE_PATH"])
+          destination = Path("artifacts/local-pilot-attestations/TESTNET_ETHUSDC.bundle.json")
+          if not source.is_file() or source.stat().st_size == 0:
+              raise SystemExit("Track C Testnet bundle was not produced")
+          copyfile(source, destination)
+          PY
+      - name: Retain signed Testnet lifecycle evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: local-pilot-track-c-testnet-${{ github.sha }}
+          path: |
+            artifacts/testnet-trial-*.json
+            artifacts/local-pilot-attestations/TESTNET_ETHUSDC*.json
+          if-no-files-found: error
+          retention-days: 30

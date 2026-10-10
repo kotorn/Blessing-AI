@@ -13,7 +13,7 @@ function normalizeRole(value: unknown): Exclude<ControlPlaneRole, 'unknown'> | n
   const normalized = value.trim().toLowerCase().replace(/[-\s]+/g, '_');
   if (normalized === 'viewer' || normalized === 'read_only' || normalized === 'readonly') return 'viewer';
   if (normalized === 'operator') return 'operator';
-  if (normalized === 'trading_admin' || normalized === 'admin' || normalized === 'trader') return 'trading_admin';
+  if (normalized === 'trading_admin') return 'trading_admin';
   return null;
 }
 
@@ -32,7 +32,7 @@ export function highestControlPlaneRoleFromClaims(claims: Record<string, unknown
   }
   if (claims.viewer === true) roles.add('viewer');
   if (claims.operator === true) roles.add('operator');
-  if (claims.trading_admin === true || claims.tradingAdmin === true || claims.admin === true) {
+  if (claims.trading_admin === true) {
     roles.add('trading_admin');
   }
 

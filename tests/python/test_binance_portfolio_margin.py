@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -44,6 +45,8 @@ def test_rest_client_routes_papi_urls():
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/account", set())
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/balance", set())
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/account", set())
+    # canTrade is only returned by accountConfig, not by um/account.
+    assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/accountConfig", set())
     assert "POST" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/order", set())
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/openOrders", set())
     assert "GET" in _ALLOWED_REQUEST_METHODS.get("/papi/v1/um/positionRisk", set())
@@ -56,7 +59,7 @@ async def test_rest_client_read_only_blocks_papi_order():
     client = BinanceRestClient(
         "key", "secret", BinanceEnvironment.MAINNET, read_only=True, portfolio_margin=True
     )
-    with pytest.raises(PermissionError, match="Read-only Binance client cannot call the order endpoint"):
+    with pytest.raises(PermissionError, match="Read-only Binance client cannot mutate an order endpoint"):
         await client.request("POST", "/papi/v1/um/order", signed=True)
     assert client.order_endpoint_attempts == 1
 
@@ -88,6 +91,17 @@ async def test_rest_client_read_only_allows_get_order_query():
     assert client.order_endpoint_attempts == 0
 
 
+def test_rest_client_rejects_portfolio_margin_on_testnet():
+    with pytest.raises(ValueError, match="Portfolio Margin is not supported in Binance TESTNET environment"):
+        BinanceRestClient("key", "secret", BinanceEnvironment.TESTNET, portfolio_margin=True)
+
+    client_futures = BinanceRestClient("key", "secret", BinanceEnvironment.TESTNET, portfolio_margin=False)
+    assert client_futures.portfolio_margin is False
+
+    client_pm = BinanceRestClient("key", "secret", BinanceEnvironment.MAINNET, portfolio_margin=True)
+    assert client_pm.portfolio_margin is True
+
+
 @pytest.mark.asyncio
 async def test_portfolio_margin_capability_discovery():
     class FakePapiRestClient:
@@ -97,6 +111,8 @@ async def test_portfolio_margin_capability_discovery():
         async def request(self, method, path, **kwargs):
             if path == "/papi/v1/account":
                 return {"accountStatus": "NORMAL"}
+            if path == "/papi/v1/um/accountConfig":
+                return {"canTrade": True, "dualSidePosition": False}
             if path == "/papi/v1/um/positionSide/dual":
                 return {"dualSidePosition": False}
             if path == "/fapi/v1/exchangeInfo":
@@ -125,6 +141,70 @@ async def test_portfolio_margin_capability_discovery():
     assert capabilities.hedge_mode is False
     assert capabilities.position_mode_known is True
     assert "ETHUSDC" in capabilities.symbol_rules
+
+
+@pytest.mark.asyncio
+async def test_portfolio_margin_capability_discovery_can_trade_false():
+    class FakePapiRestClient:
+        env = BinanceEnvironment.MAINNET
+        portfolio_margin = True
+
+        async def request(self, method, path, **kwargs):
+            if path == "/papi/v1/account":
+                return {"accountStatus": "NORMAL"}
+            if path == "/papi/v1/um/accountConfig":
+                return {"canTrade": False, "dualSidePosition": False}
+            if path == "/papi/v1/um/positionSide/dual":
+                return {"dualSidePosition": False}
+            if path == "/fapi/v1/exchangeInfo":
+                return {
+                    "symbols": [
+                        {
+                            "symbol": "ETHUSDC",
+                            "status": "TRADING",
+                            "orderTypes": ["LIMIT", "MARKET"],
+                            "filters": [
+                                {"filterType": "PRICE_FILTER", "minPrice": "0.1", "maxPrice": "100000", "tickSize": "0.1"},
+                                {"filterType": "LOT_SIZE", "minQty": "0.001", "maxQty": "100", "stepSize": "0.001"},
+                                {"filterType": "MIN_NOTIONAL", "minNotional": "5"},
+                            ],
+                        }
+                    ]
+                }
+            raise AssertionError(f"unexpected capability request: {method} {path}")
+
+    capabilities = BinanceCapabilities()
+    success = await capabilities.discover(FakePapiRestClient())
+    assert success is False
+    assert capabilities.authenticated is True
+    assert capabilities.account_request_succeeded is True
+    assert capabilities.trade_authorized is False
+    assert capabilities.hedge_mode is False
+    assert capabilities.position_mode_known is True
+
+
+@pytest.mark.asyncio
+async def test_portfolio_margin_capability_discovery_missing_can_trade_fails():
+    class FakePapiRestClient:
+        env = BinanceEnvironment.MAINNET
+        portfolio_margin = True
+
+        async def request(self, method, path, **kwargs):
+            if path == "/papi/v1/account":
+                return {"accountStatus": "NORMAL"}
+            if path == "/papi/v1/um/accountConfig":
+                return {"dualSidePosition": False}
+            if path == "/papi/v1/um/positionSide/dual":
+                return {"dualSidePosition": False}
+            if path == "/fapi/v1/exchangeInfo":
+                return {"symbols": []}
+            raise AssertionError(f"unexpected capability request: {method} {path}")
+
+    capabilities = BinanceCapabilities()
+    success = await capabilities.discover(FakePapiRestClient())
+    assert success is False
+    assert capabilities.account_request_succeeded is False
+    assert capabilities.trade_authorized is False
 
 
 def test_user_stream_uses_papi_urls():
@@ -207,6 +287,7 @@ async def test_reconciliation_snapshot_portfolio_margin():
     assert positions[0]["symbol"] == "ETHUSDC"
     assert positions[0]["leverage"] == "2"
 
+    observed_at = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
     snapshot = build_account_snapshot(
         account,
         positions,
@@ -216,7 +297,9 @@ async def test_reconciliation_snapshot_portfolio_margin():
         daily_loss_asset="USDC",
         daily_pnl_includes_fees=True,
         daily_pnl_includes_funding=True,
+        observed_at=observed_at,
     )
+    assert snapshot.timestamp == observed_at
     assert snapshot.margin_mode == "CROSS"
     assert snapshot.margin_mode_known is True
     assert snapshot.collateral_asset == "USDC"
@@ -372,4 +455,159 @@ async def test_portfolio_margin_synthesizes_margin_balance_with_unrealized_pnl()
     assert usdc_asset["marginBalance"] == "84.5"
     assert usdc_asset["unrealizedProfit"] == "-15.5"
 
+
+@pytest.mark.parametrize("portfolio_margin", [False, True])
+@pytest.mark.asyncio
+async def test_cost_evidence_routes_for_portfolio_margin(portfolio_margin, monkeypatch):
+    monkeypatch.setenv("MAINNET_LIVE_APPROVED", "true")
+    adapter = BinanceExecutionAdapter(
+        api_key="key",
+        api_secret="secret",
+        env=BinanceEnvironment.MAINNET,
+        portfolio_margin=portfolio_margin,
+    )
+    adapter.preflight_only = False
+
+    requested_routes = []
+
+    async def mock_request(method, path, *, signed=False, params=None):
+        requested_routes.append((method, path, signed, params or {}))
+        if path in ("/papi/v1/um/commissionRate", "/fapi/v1/commissionRate"):
+            return {"symbol": "ETHUSDC", "takerCommissionRate": "0.0004"}
+        if path == "/fapi/v1/depth":
+            return {"bids": [["2400.0", "10.0"]], "asks": [["2401.0", "10.0"]]}
+        if path == "/fapi/v1/fundingRate":
+            return [{"symbol": "ETHUSDC", "fundingRate": "0.0001"}]
+        if path == "/fapi/v1/fundingInfo":
+            return []
+        if path in ("/papi/v1/um/leverageBracket", "/fapi/v1/leverageBracket"):
+            return [
+                {
+                    "symbol": "ETHUSDC",
+                    "brackets": [
+                        {
+                            "bracket": 1,
+                            "initialLeverage": 10,
+                            "notionalCap": "50000",
+                            "notionalFloor": "0",
+                            "maintMarginRatio": "0.005",
+                            "cum": "0.0",
+                        }
+                    ],
+                }
+            ]
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    adapter.rest_client.request = AsyncMock(side_effect=mock_request)
+
+    intent = MagicMock()
+    intent.symbol = "ETHUSDC"
+    intent.management_mode = "QUICK"
+    intent.side = "BUY"
+    intent.client_order_id = "cid-pm-cost-test"
+
+    context = {
+        "runtime_target": "LOCAL",
+        "validated_quantity": Decimal("0.01"),
+        "validated_entry_price": Decimal("2400.0"),
+    }
+
+    cost_evidence = await adapter.get_local_mainnet_cost_evidence(intent, context)
+    assert cost_evidence is not None
+
+    expected_source = (
+        "BINANCE_PAPI_COMMISSION_FUNDING_DEPTH"
+        if portfolio_margin
+        else "BINANCE_FAPI_COMMISSION_FUNDING_DEPTH"
+    )
+    expected_commission_route = (
+        "/papi/v1/um/commissionRate" if portfolio_margin else "/fapi/v1/commissionRate"
+    )
+    expected_bracket_route = (
+        "/papi/v1/um/leverageBracket" if portfolio_margin else "/fapi/v1/leverageBracket"
+    )
+
+    assert cost_evidence["source"] == expected_source
+    obs = cost_evidence["request_observations"]
+    assert obs["commission"]["route"] == expected_commission_route
+    assert obs["leverage_brackets"]["route"] == expected_bracket_route
+    assert obs["depth"]["route"] == "/fapi/v1/depth"
+    assert obs["funding"]["route"] == "/fapi/v1/fundingRate"
+    assert obs["funding_info"]["route"] == "/fapi/v1/fundingInfo"
+
+    routes_called = [r[1] for r in requested_routes]
+    assert expected_commission_route in routes_called
+    assert expected_bracket_route in routes_called
+    assert "/fapi/v1/depth" in routes_called
+    assert "/fapi/v1/fundingRate" in routes_called
+    assert "/fapi/v1/fundingInfo" in routes_called
+
+
+@pytest.mark.parametrize("portfolio_margin", [False, True])
+@pytest.mark.asyncio
+async def test_kill_switch_release_checks_open_orders_and_algos(portfolio_margin):
+    from apps.trading_worker.main import TradingWorkerApp, WorkerExecutionMode
+
+    worker = TradingWorkerApp(symbols=["ETHUSDC"])
+    worker.execution_mode = WorkerExecutionMode.LIVE
+    worker.kill_switch_active = True
+
+    adapter = MagicMock()
+    adapter.portfolio_margin = portfolio_margin
+    adapter._open_orders_path = (
+        "/papi/v1/um/openOrders" if portfolio_margin else "/fapi/v1/openOrders"
+    )
+    adapter._open_algo_orders_path = (
+        "/papi/v1/um/algo/openAlgoOrders" if portfolio_margin else "/fapi/v1/openAlgoOrders"
+    )
+    adapter.private_stream_healthy = True
+    adapter.authenticated = True
+
+    rest_client = MagicMock()
+    adapter.rest_client = rest_client
+    worker.execution_adapter = adapter
+    worker.trigger_reconciliation = AsyncMock(return_value="IN_SYNC")
+
+    # Case 1: normal open orders exist -> blocked
+    async def mock_request_orders_exist(method, path, signed=False, params=None):
+        if path == adapter._open_orders_path:
+            return [{"orderId": 123}]
+        if path == adapter._open_algo_orders_path:
+            return []
+        raise AssertionError(f"unexpected request: {path}")
+
+    rest_client.request = AsyncMock(side_effect=mock_request_orders_exist)
+    res = await worker.set_kill_switch(False)
+    assert res["status"] == "PARTIAL"
+    assert res["remaining_orders"] == 1
+    assert worker.kill_switch_active is True
+
+    # Case 2: normal open orders are empty, but algo orders exist -> blocked
+    async def mock_request_algo(method, path, signed=False, params=None):
+        if path == adapter._open_orders_path:
+            return []
+        if path == adapter._open_algo_orders_path:
+            return [{"algoId": 456}]
+        raise AssertionError(f"unexpected request: {path}")
+
+    rest_client.request = AsyncMock(side_effect=mock_request_algo)
+    res = await worker.set_kill_switch(False)
+    assert res["status"] == "PARTIAL"
+    assert res["remaining_orders"] == 1
+    assert worker.kill_switch_active is True
+
+    # Case 3: both normal and algo orders are empty -> released
+    async def mock_request_clean(method, path, signed=False, params=None):
+        if path == adapter._open_orders_path:
+            return []
+        if path == adapter._open_algo_orders_path:
+            return []
+        raise AssertionError(f"unexpected request: {path}")
+
+    rest_client.request = AsyncMock(side_effect=mock_request_clean)
+    res = await worker.set_kill_switch(False)
+    assert res["status"] == "CONFIRMED"
+    assert res["remaining_orders"] == 0
+    assert worker.kill_switch_active is False
+    worker.trigger_reconciliation.assert_called_once()
 

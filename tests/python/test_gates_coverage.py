@@ -198,7 +198,10 @@ def make_worker_stub(**overrides) -> _WorkerStub:
 async def make_gate_adapter(
     env: BinanceEnvironment = BinanceEnvironment.TESTNET,
     snapshot: ExchangeAccountSnapshot | None = None,
+    portfolio_margin: bool = False,
 ):
+    if portfolio_margin and env == BinanceEnvironment.TESTNET:
+        env = BinanceEnvironment.MAINNET
     symbols = ("ETHUSDC",) if env == BinanceEnvironment.MAINNET else ("BTCUSDT",)
     ledger = InMemoryLedger()
     adapter = BinanceExecutionAdapter(
@@ -206,6 +209,8 @@ async def make_gate_adapter(
         api_secret="unit-test-secret",
         env=env,
         ledger=ledger,
+        preflight_only=True,
+        portfolio_margin=portfolio_margin,
     )
     adapter.state = ConnectionState.READY
     adapter.capabilities.account_request_succeeded = True
@@ -601,3 +606,58 @@ async def test_decision_gate_unknown_strategy_id_and_alias_resolution():
         make_executable_decision(make_limit_intent(strategy_id="Funding Carry"))
     )
     assert alias_result.allowed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("portfolio_margin", [False, True])
+@pytest.mark.parametrize(
+    "decision_kwargs",
+    [
+        {"risk_class": EconomicRiskClass.REDUCE_RISK},
+        {"risk_class": EconomicRiskClass.CLOSE},
+        {"action": "REDUCE_POSITION"},
+        {"action": "CLOSE"},
+        {"orders": [make_limit_intent(symbol="ETHUSDC", reduce_only=True)]},
+    ],
+)
+async def test_decision_gate_fences_strategy_reduce_and_close_when_quick_bracket_open(
+    portfolio_margin, decision_kwargs
+):
+    adapter = await make_gate_adapter(portfolio_margin=portfolio_margin)
+    worker = make_worker_stub(execution_adapter=adapter)
+    worker.last_market_event_at["ETHUSDC"] = utc_now()
+    worker._enabled_strategies = lambda: {"grid"}
+
+    # Simulate open quick bracket
+    adapter.last_local_mainnet_protection = {"status": "PROTECTED"}
+
+    decision_args = {
+        "decision_id": "UNIT-FENCE-DECISION",
+        "symbol": "ETHUSDC",
+        "action": "SUBMIT_ORDER",
+        "risk_class": EconomicRiskClass.REDUCE_RISK,
+        "orders": [make_limit_intent(symbol="ETHUSDC", strategy_id="grid")],
+    }
+    decision_args.update(decision_kwargs)
+    decision = ExecutionDecision(**decision_args)
+
+    result = DecisionExecutionGate(worker).check(decision)
+    assert result.allowed is False
+    assert result.reason == "Strategy REDUCE/CLOSE is fenced while QUICK bracket is open"
+
+    # Emergency risk class MUST NOT be blocked by this bracket fence
+    emergency_decision = ExecutionDecision(
+        decision_id="UNIT-EMERGENCY-DECISION",
+        symbol="ETHUSDC",
+        action="CLOSE",
+        risk_class=EconomicRiskClass.EMERGENCY,
+        orders=[make_limit_intent(symbol="ETHUSDC", strategy_id="grid", reduce_only=True)],
+    )
+    emergency_result = DecisionExecutionGate(worker).check(emergency_decision)
+    assert emergency_result.reason != "Strategy REDUCE/CLOSE is fenced while QUICK bracket is open"
+
+    # When bracket is NOT open, reduction is not blocked by this fence
+    adapter.last_local_mainnet_protection = {"status": "NOT_RUN"}
+    unfenced_result = DecisionExecutionGate(worker).check(decision)
+    assert unfenced_result.reason != "Strategy REDUCE/CLOSE is fenced while QUICK bracket is open"
+

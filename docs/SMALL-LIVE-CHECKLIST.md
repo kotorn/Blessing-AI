@@ -1,3 +1,13 @@
+> **SUPERSEDED.** This checklist predates the Local ETHUSDC pilot, the Track C
+> signed-attestation readiness gate and the Docker Worker runtime. It is kept
+> unchanged below for history only and must not be used to decide readiness or
+> to start trading. Use instead:
+>
+> - `docs/LOCAL-PILOT-DAY-OF-CHECKLIST.md` (account, host and go/no-go checks)
+> - `docs/LOCAL-PILOT-TRACK-C.md` (what the attestations prove and do not prove)
+> - `docs/LOCAL-PILOT-BREAK-GLASS.md` (manual recovery)
+> - `docs/MAINNET-RELEASE-RUNBOOK.md` (release and Local runtime gates)
+
 # Small-Live Mainnet checklist
 
 Status for this sprint: `DISABLED_BY_DEFAULT` / `NOT_OPERATIONAL`. The
