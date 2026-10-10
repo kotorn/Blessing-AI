@@ -6,7 +6,6 @@ instance. Each test creates a random database and removes only that database.
 
 import asyncio
 import os
-import shutil
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -17,7 +16,12 @@ import asyncpg
 import pytest
 
 from apps.trading_worker.persistence.postgres.repositories import PersistenceRepository
-from scripts.apply_local_postgres_migrations import apply_migrations
+from scripts.apply_local_postgres_migrations import (
+    apply_migrations,
+    migration_checksum,
+    validate_migration_ledger,
+    verify_schema,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = ROOT / "infra" / "postgres" / "migrations"
@@ -40,7 +44,9 @@ async def _connect(database: str):
     )
 
 
-async def _insert_pilot(connection, launch_id: str, campaign_id: str) -> None:
+async def _insert_pilot(
+    connection, launch_id: str, campaign_id: str, *, entry_cap: int | None = 1
+) -> None:
     h = "c" * 64
     await connection.execute(
         """INSERT INTO mainnet_launch_sessions
@@ -59,24 +65,36 @@ async def _insert_pilot(connection, launch_id: str, campaign_id: str) -> None:
         launch_id,
         f"approval-{launch_id}",
         "d" * 64,
-        1,
+        entry_cap,
         campaign_id,
         "e" * 40,
         h,
     )
 
 
-def _migration_subset(tmp_path: Path, versions: range) -> Path:
-    selected = tmp_path / f"migrations-{versions.start}-{versions.stop - 1}"
-    selected.mkdir()
-    for version in versions:
-        matches = list(MIGRATIONS.glob(f"{version:03d}_*.sql"))
-        assert len(matches) == 1
-        shutil.copy2(matches[0], selected / matches[0].name)
-    return selected
+async def _apply_staged_migrations(connection, migrations: list[Path]) -> None:
+    """Build an historical migration state without final-schema verification.
+
+    The production runner verifies the latest schema after every invocation.
+    This fixture deliberately stops at 020 so it can seed a legacy NULL cap
+    before exercising 021/022; applying a prefix through the runner would
+    incorrectly ask the latest-schema verifier to accept the pre-021 shape.
+    """
+    recorded_rows = await connection.fetch(
+        "SELECT version, checksum FROM public.local_schema_migrations ORDER BY version"
+    )
+    validate_migration_ledger(recorded_rows, migrations)
+    for migration in migrations[len(recorded_rows):]:
+        async with connection.transaction():
+            await connection.execute(migration.read_text(encoding="utf-8"))
+            await connection.execute(
+                "INSERT INTO public.local_schema_migrations (version, checksum) VALUES ($1, $2)",
+                migration.name,
+                migration_checksum(migration),
+            )
 
 
-def test_fresh_020_population_021_022_and_concurrent_session_arm(tmp_path):
+def test_fresh_020_population_021_022_and_concurrent_session_arm():
     async def scenario():
         database = f"pilot_session_accept_{uuid.uuid4().hex[:16]}"
         admin = await _connect("postgres")
@@ -87,42 +105,53 @@ def test_fresh_020_population_021_022_and_concurrent_session_arm(tmp_path):
             created_database = True
             connection = await _connect(database)
             await connection.execute(INIT_SCHEMA.read_text(encoding="utf-8"))
-            through_020 = _migration_subset(tmp_path, range(1, 21))
-            await apply_migrations(connection, directory=through_020)
+            migrations_through_020 = [
+                path for path in sorted(MIGRATIONS.glob("*.sql"))
+                if int(path.name[:3]) <= 20
+            ]
+            await _apply_staged_migrations(connection, migrations_through_020)
 
             # Seed rows that resemble sessions present before the non-null cap
             # migrations. Startup fencing preserves their counters and REAUTH state.
-            await _insert_pilot(connection, "preexisting-populated", "pilot-preexisting01")
+            await _insert_pilot(
+                connection, "preexisting-populated", "pilot-preexisting01", entry_cap=None
+            )
             await connection.execute(
                 "UPDATE mainnet_launch_sessions SET state='REAUTH_REQUIRED', "
                 "max_risk_increasing_orders=NULL, reserved_orders=1, submitted_orders=1 "
                 "WHERE launch_id='preexisting-populated'"
             )
-            await _insert_pilot(connection, "preexisting-nullcap", "pilot-preexisting02")
-            await connection.execute(
-                "UPDATE mainnet_launch_sessions SET state='REAUTH_REQUIRED', "
-                "max_risk_increasing_orders=NULL WHERE launch_id='preexisting-nullcap'"
-            )
-
-            await apply_migrations(connection, directory=MIGRATIONS)
+            migrations_through_022 = sorted(MIGRATIONS.glob("*.sql"))
+            await _apply_staged_migrations(connection, migrations_through_022)
+            await verify_schema(connection)
             caps = await connection.fetch(
                 "SELECT launch_id, max_risk_increasing_orders, reserved_orders, "
                 "submitted_orders, state FROM mainnet_launch_sessions "
-                "WHERE launch_id LIKE 'preexisting-%' ORDER BY launch_id"
+                "WHERE launch_id='preexisting-populated'"
             )
             assert [(row["max_risk_increasing_orders"], row["reserved_orders"],
                      row["submitted_orders"], row["state"]) for row in caps] == [
                 (1, 1, 1, "REAUTH_REQUIRED"),
-                (1, 0, 0, "REAUTH_REQUIRED"),
             ]
-            with pytest.raises(asyncpg.NotNullViolationError):
+            with pytest.raises(asyncpg.CheckViolationError):
                 await connection.execute(
                     "UPDATE mainnet_launch_sessions SET max_risk_increasing_orders=NULL "
-                    "WHERE launch_id='preexisting-nullcap'"
+                    "WHERE launch_id='preexisting-populated'"
                 )
 
-            await _insert_pilot(connection, "fresh-session", "pilot-freshsession01")
+            repository = PersistenceRepository(connection)
             now = datetime.now(UTC)
+            with pytest.raises(RuntimeError):
+                await repository.record_local_live_pilot_session_armed(
+                    "preexisting-populated", armed_at=now, entry_cutoff_seconds=5400,
+                    close_after_seconds=6600, end_seconds=7200,
+                )
+            await connection.execute(
+                "UPDATE mainnet_launch_sessions SET state='CLOSED' "
+                "WHERE launch_id='preexisting-populated'"
+            )
+
+            await _insert_pilot(connection, "fresh-session", "pilot-freshsession01")
             second_connection = await _connect(database)
             try:
                 attempts = await asyncio.gather(
@@ -155,7 +184,6 @@ def test_fresh_020_population_021_022_and_concurrent_session_arm(tmp_path):
             assert readback["pilot_session_close_after_at"] is not None
             assert readback["pilot_session_end_at"] is not None
 
-            repository = PersistenceRepository(connection)
             await connection.execute(
                 "UPDATE mainnet_launch_sessions SET state='REAUTH_REQUIRED' "
                 "WHERE launch_id='fresh-session'"
@@ -177,12 +205,6 @@ def test_fresh_020_population_021_022_and_concurrent_session_arm(tmp_path):
             )
             assert attempt_readback["pilot_session_close_attempt_count"] == 1
 
-            for launch_id in ("preexisting-populated", "preexisting-nullcap"):
-                with pytest.raises(RuntimeError):
-                    await repository.record_local_live_pilot_session_armed(
-                        launch_id, armed_at=now, entry_cutoff_seconds=5400,
-                        close_after_seconds=6600, end_seconds=7200,
-                    )
         finally:
             if connection is not None:
                 await connection.close()

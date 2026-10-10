@@ -1,12 +1,15 @@
--- Cap Live Research Pilot to exactly one entry order (max_risk_increasing_orders = 1).
-UPDATE mainnet_launch_sessions
-    SET max_risk_increasing_orders = 1
-    WHERE policy = 'LIVE_RESEARCH_PILOT' AND max_risk_increasing_orders IS NULL;
-
+-- Remove the historical NULL-cap checks before backfilling existing pilot
+-- rows. The 016/018 checks require NULL for pilot rows, so updating first
+-- would reject the safety migration on every populated pilot database.
 ALTER TABLE mainnet_launch_sessions
     DROP CONSTRAINT IF EXISTS mainnet_launch_limit_check,
     DROP CONSTRAINT IF EXISTS mainnet_launch_pilot_policy_check,
     DROP CONSTRAINT IF EXISTS mainnet_launch_pilot_binding_check;
+
+-- Cap Live Research Pilot to exactly one entry order (max_risk_increasing_orders = 1).
+UPDATE mainnet_launch_sessions
+    SET max_risk_increasing_orders = 1
+    WHERE policy = 'LIVE_RESEARCH_PILOT' AND max_risk_increasing_orders IS NULL;
 
 ALTER TABLE mainnet_launch_sessions
     ADD CONSTRAINT mainnet_launch_limit_check
