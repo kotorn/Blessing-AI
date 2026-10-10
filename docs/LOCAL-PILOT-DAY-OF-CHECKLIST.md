@@ -19,7 +19,7 @@ seven days from approval.
 
 | # | Check | How the code treats it |
 |---|-------|------------------------|
-| A1 | Account type matches `BINANCE_PORTFOLIO_MARGIN`. A classic USD-M Futures account needs `false`; a Portfolio Margin account needs `true`. | `scripts/start-local.ps1` strictly validates that `BINANCE_PORTFOLIO_MARGIN` is explicitly set to `'true'` or `'false'`. When `true` the adapter uses Binance PAPI endpoints (`/papi/v1/um/*`). Operator may run read-only probe script `artifacts/gemini-progress/probe_papi_readonly.py` to confirm PAPI permissions, ONE_WAY position mode, and equity cap. |
+| A1 | Account type matches `BINANCE_PORTFOLIO_MARGIN`. A classic USD-M Futures account needs `false`; a Portfolio Margin account needs `true`. | `scripts/start-local.ps1` strictly validates that `BINANCE_PORTFOLIO_MARGIN` is explicitly set to `'true'` or `'false'`. When `true` the adapter uses Binance PAPI endpoints (`/papi/v1/um/*`). An operator may run `scripts/probe_papi_readonly.py` with explicit human authorization for GET-only PAPI diagnostics. Its passing report is diagnostic only; it does not establish readiness, protection acceptance, or permission to ARM. |
 | A2 | Position mode is **one-way** (not hedge). | The Local Mainnet protection path only handles `positionSide=BOTH`. Hedge mode is expected to block (**UNVERIFIED** exact gate). |
 | A3 | **Multi-Assets mode is off.** | The gate accepts only `CROSS`, `ISOLATED` or `SINGLE_ASSET_CROSS`; `MULTI_ASSET_CROSS` is derived from `multiAssetsMargin` and is not accepted (`reconciliation.py`, `gates.py`). |
 | A4 | Collateral is **USDC** and wallet balance is **at most 250 USDC**. | `mainnet_risk.py` rejects other collateral assets and any wallet or collateral above 250 USDC. |

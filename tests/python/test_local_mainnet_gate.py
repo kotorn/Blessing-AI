@@ -177,6 +177,24 @@ def test_worker_readiness_rechecks_artifact_hashes_and_accepts_complete_fixture(
     assert "LOCAL_PILOT_REVIEW_PROVENANCE_UNVERIFIED" in readiness["blockers"]
     assert "LOCAL_PILOT_TESTNET_PROVENANCE_UNVERIFIED" in readiness["blockers"]
 
+    capability_path = artifacts / "local-pilot-capability.json"
+    capability = json.loads(capability_path.read_text(encoding="utf-8"))
+    for collection, field, invalid in (("checks", "id", []), ("reviews", "reviewerId", {})):
+        original = capability[collection][0][field]
+        capability[collection][0][field] = invalid
+        capability_path.write_text(json.dumps(capability, separators=(",", ":")), encoding="utf-8")
+        blocked = local_live_pilot_readiness(root, now=now)
+        expected_blocker = (
+            "LOCAL_PILOT_CAPABILITY_TESTS_NOT_VERIFIED" if collection == "checks"
+            else "LOCAL_PILOT_INDEPENDENT_REVIEWS_NOT_VERIFIED"
+        )
+        assert blocked["status"] == "BLOCKED"
+        assert blocked["can_start"] is False
+        assert expected_blocker in blocked["blockers"]
+        capability[collection][0][field] = original
+
+    capability_path.write_text(json.dumps(capability, separators=(",", ":")), encoding="utf-8")
+
     (reviews_dir / "ORDER_RISK.json").write_text("tampered", encoding="utf-8")
     blocked = local_live_pilot_readiness(root, now=now)
     assert blocked["status"] == "BLOCKED"

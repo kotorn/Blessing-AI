@@ -185,7 +185,9 @@ def _verify(root: Path, now: datetime) -> list[str]:
 
     checks = evidence.get("checks")
     check_ids: list[Any] = [check.get("id") for check in checks if isinstance(check, dict)] if isinstance(checks, list) else []
-    if not isinstance(checks, list) or len(checks) != len(REQUIRED_CHECKS) or len(set(check_ids)) != len(check_ids):
+    if (not isinstance(checks, list) or len(checks) != len(REQUIRED_CHECKS)
+            or any(not isinstance(check_id, str) for check_id in check_ids)
+            or len(set(check_ids)) != len(checks)):
         blockers.append("LOCAL_PILOT_CAPABILITY_TESTS_NOT_VERIFIED")
     else:
         for check_id in REQUIRED_CHECKS:
@@ -208,7 +210,9 @@ def _verify(root: Path, now: datetime) -> list[str]:
 
     reviews = evidence.get("reviews")
     review_ids: list[Any] = [item.get("reviewerId") for item in reviews if isinstance(item, dict)] if isinstance(reviews, list) else []
-    if not isinstance(reviews, list) or len(reviews) != len(REQUIRED_REVIEW_DOMAINS) or len(set(review_ids)) != len(review_ids):
+    if (not isinstance(reviews, list) or len(reviews) != len(REQUIRED_REVIEW_DOMAINS)
+            or any(not isinstance(reviewer_id, str) for reviewer_id in review_ids)
+            or len(set(review_ids)) != len(reviews)):
         blockers.append("LOCAL_PILOT_INDEPENDENT_REVIEWS_NOT_VERIFIED")
     else:
         for domain in REQUIRED_REVIEW_DOMAINS:
